@@ -1385,6 +1385,14 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("function g(): number {\n  let n = 1;\n  n = 2;\n  const o = { a: { a: 1 } };\n  o.a.a = 3;\n  return n;\n}")),
     },
     .{
+        .key = "A call in an assignment target, such as `mk().n = 2` and `mk().a.n = 2`",
+        .refused = &.{
+            r("mk().n = 2", top("function mk(): { n: number } {\n  return { n: 1 };\n}\nfunction g(): number {\n  mk().n = 2;\n  return 1;\n}")),
+            r("mk().a.n = 2", top("function mk(): { a: { n: number } } {\n  return { a: { n: 1 } };\n}\nfunction g(): number {\n  mk().a.n = 2;\n  return 1;\n}")),
+        },
+        .clean = c(top("function mk(): { n: number } {\n  return { n: 1 };\n}\nfunction g(): number {\n  const m = mk();\n  m.n = 2;\n  return m.n;\n}")),
+    },
+    .{
         .key = "A bigint literal, such as `10n`",
         .refused = &.{r("10n", body("  const a = 10n;"))},
         .clean = c(body("  const a = 10;")),
@@ -1483,10 +1491,6 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "`DictKey` with no import, such as `<K extends DictKey>`",
         .sources = &.{c(top("function f<K extends DictKey>(k: K): K {\n  return k;\n}"))},
-    },
-    .{
-        .key = "A call in an assignment target, such as `mk().n = 2`",
-        .sources = &.{c(top("function mk(): { n: number } {\n  return { n: 1 };\n}\nfunction g(): number {\n  mk().n = 2;\n  return 1;\n}"))},
     },
     .{
         .key = "A higher-order callback that calls `push`, or that assigns a captured binding",

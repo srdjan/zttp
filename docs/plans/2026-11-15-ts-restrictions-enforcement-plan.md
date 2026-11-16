@@ -790,3 +790,18 @@ later.
   row for the refused `{ ...b }` is deleted. This finding stays open:
   - `zttp describe-rule ZTS614` does not name the `{ ...o }` case. U6
     updates the registry text when it moves the hashes.
+- U4b-6 refuses a call anywhere in the receiver chain of an assignment
+  target, such as `mk().n = 2` and `mk().a.n = 2`, with ZTS016 at the
+  callee. The help is to bind the call result to a `const` first. In the
+  same commit, the spec grammar and `grammar_registry.zig` drop the call
+  from `AssignableSuffix` (N16). The grammar hash moves, so the meta drift
+  pin, seven contract `json_hash` pins, two receipt pins, and the contract
+  and certificate pins in `build_command.zig` move with it. The policy hash
+  does not move. U4b-6 deletes `compoundMemberProbe` from the feature-probes
+  example and one `handler_verifier.zig` test of `getBox().n = 5`. These
+  findings stay open:
+  - `handler_verifier.zig` still treats an untracked assignment root as a
+    write that can reach any route table. No parsed input reaches that code
+    now.
+  - `docs/coverage.json` and `docs/convergence.json` still carry the old
+    grammar hash. They move with the U7 re-record.

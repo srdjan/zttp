@@ -3269,17 +3269,6 @@ test "a stable table with only reads stays resolved" {
     try std.testing.expectEqual(@as(u32, 1), counts.unchecked_result);
 }
 
-test "an untracked assignment root unresolves every table in the file" {
-    // Documented precision cost: `getBox().n = 5` may alias any table, so the
-    // unrelated assignment makes the table look mutated.
-    const counts = try routeVerifierCounts(route_table_prelude ++
-        \\const routes = { "GET /": getHome };
-        \\function handler(req) {
-        \\  getBox().n = 5;
-    ++ "\n" ++ route_table_dispatch);
-    try std.testing.expect(counts.unresolved_dispatch);
-}
-
 test "an assignment to a plain local object leaves the table stable" {
     const counts = try routeVerifierCounts(route_table_prelude ++
         \\const routes = { "GET /": getHome };

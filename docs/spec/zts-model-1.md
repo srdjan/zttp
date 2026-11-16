@@ -1768,7 +1768,6 @@ LValue       ::= Ident
 AssignableExpr ::= PrimaryExpr AssignableSuffix*
 AssignableSuffix ::= "." Ident
                    | "[" Expr "]"
-                   | TypeArgs? "(" [Args] ")"
 
 Expr         ::= ArrowExpr | ConditionalExpr
 ConditionalExpr ::= BinaryExpr ["?" BinaryExpr ":" BinaryExpr]

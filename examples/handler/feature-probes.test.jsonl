@@ -33,7 +33,3 @@
 {"type":"test","name":"for-of closures capture per-iteration bindings"}
 {"type":"request","method":"GET","url":"/for-of-closure","headers":{},"body":null}
 {"type":"expect","status":200,"body":"{\"captured\":[0,1,2]}"}
-
-{"type":"test","name":"compound member assignment evaluates the receiver once"}
-{"type":"request","method":"GET","url":"/compound-member","headers":{},"body":null}
-{"type":"expect","status":200,"body":"{\"n\":15,\"calls\":1}"}

@@ -160,7 +160,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "AssignableSuffix",
-        .rhs = "\".\" Ident | \"[\" Expr \"]\" | TypeArgs? \"(\" [Args] \")\"",
+        .rhs = "\".\" Ident | \"[\" Expr \"]\"",
     },
     .{
         .name = "Expr",

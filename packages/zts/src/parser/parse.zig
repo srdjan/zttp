@@ -4984,11 +4984,33 @@ pub const Parser = struct {
             self.errors.addErrorAt(.invalid_assignment_target, op_tok, "an assignment target must be a name, a member path, or an index; write `x = value`, `o.a = value`, or `xs[i] = value`, with no parentheses or `?.`");
             return error.ParseError;
         }
+        if (self.assignmentTargetCall(target)) |call| {
+            const callee = if (self.nodes.getCallData(call)) |data| data.callee else call;
+            self.errors.addError(.invalid_assignment_target, self.nodes.getLoc(callee), "a call in an assignment target is not supported; bind the call result to a `const` first");
+            return error.ParseError;
+        }
         if (self.nodes.getTag(target) != .identifier) return;
         const binding = ir.IrView.fromIRStore(&self.nodes, &self.constants).getBinding(target) orelse return;
         if (self.scopes.isConstBinding(binding.name_atom)) {
             self.errors.addError(.const_assignment, self.nodes.getLoc(target), "this name is declared `const` and cannot be assigned");
             return error.ParseError;
+        }
+    }
+
+    /// The first call in the receiver chain of an assignment target, such as
+    /// `mk()` in `mk().a.n = 2`, or null.
+    fn assignmentTargetCall(self: *Parser, target: NodeIndex) ?NodeIndex {
+        const view = ir.IrView.fromIRStore(&self.nodes, &self.constants);
+        var current = target;
+        while (true) {
+            switch (self.nodes.getTag(current)) {
+                .member_access, .computed_access => {
+                    const member = view.getMember(current) orelse return null;
+                    current = member.object;
+                },
+                .call => return current,
+                else => return null,
+            }
         }
     }
 

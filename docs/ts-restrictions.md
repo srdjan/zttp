@@ -192,6 +192,7 @@ no user-defined iterator protocol.
 | A boolean compared to a boolean literal, such as `x === true` | ZTS620 | `x`, or `!x` for `=== false` |
 | Assignment in expression position, such as `const m = (n = 2);`, `a = b = 3;`, and `(a = 2);` | ZTS001 | Write the assignment as its own statement |
 | An assignment target that is not a name, a member path, or an index, such as `(n) = 2;` and `o.a?.a = 1;` | ZTS016 | Assign to a name, a member path, or an index |
+| A call in an assignment target, such as `mk().n = 2` and `mk().a.n = 2` | ZTS016 | Bind the call result to a `const` first |
 
 There is no truthiness conversion. A value of type `unknown` cannot enter a
 boolean context. `String(value)` is the only conversion from a number or a
@@ -410,7 +411,6 @@ against the compiler.
 | A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | Accepted, exit 0 | ZTS209. Pass a type argument that satisfies the constraint |
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |
-| A call in an assignment target, such as `mk().n = 2` | Accepted, exit 0 | A targeted refusal. Bind the call result to a `const` first |
 | A higher-order callback that calls `push`, or that assigns a captured binding | Accepted, exit 0 | A targeted refusal. Build the result with `for...of` |
 | A top-level statement other than a registration call, such as `f();` and `if (c) { f(); }` | Accepted, exit 0 | A targeted refusal. Move the statement into a function. A bare `schemaCompile(...)` or `sql(...)` call with literal arguments stays admitted |
 | An arrow outside a callback argument: a `const`-bound arrow, a returned arrow, an arrow in a record field, an immediately called arrow, and an arrow as a `?:` arm | Accepted, exit 0. ZTS608 refuses only a reused helper | A targeted refusal. Write a module-level `function` |

@@ -104,19 +104,6 @@ function forOfClosureProbe() {
   return Response.json({ captured: [fns[0](), fns[1](), fns[2]()] });
 }
 
-function compoundMemberProbe() {
-  // A compound assignment to a member target evaluates the receiver exactly
-  // once: getBox() runs a single time, and box.n becomes 15.
-  let calls = 0;
-  const box = { n: 10 };
-  const getBox = () => {
-    calls = calls + 1;
-    return box;
-  };
-  getBox().n += 5;
-  return Response.json({ n: box.n, calls: calls });
-}
-
 function handler(req) {
   if (req.url === "/spread") return spreadProbe();
   if (req.url === "/range") return rangeProbe();
@@ -126,7 +113,6 @@ function handler(req) {
   if (req.url === "/tail") return tailProbe();
   if (req.url === "/helpers") return helpersProbe();
   if (req.url === "/for-of-closure") return forOfClosureProbe();
-  if (req.url === "/compound-member") return compoundMemberProbe();
 
   return Response.json({ error: "not found" }, { status: 404 });
 }
