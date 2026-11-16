@@ -390,7 +390,7 @@ const Lowerer = struct {
         const facts = self.facts orelse return null;
         if (self.view.getTag(identifier) != .identifier) return null;
         const binding = self.view.getBinding(identifier) orelse return null;
-        const record = facts.importForReference(binding, .module_reference, .builtin, .first) orelse return null;
+        const record = facts.importForReference(binding, .module_reference, .builtin) orelse return null;
         const found = builtin_modules.findExport(record.module_specifier, record.imported_name) orelse return null;
         return found.func;
     }

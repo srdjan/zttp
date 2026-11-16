@@ -2287,7 +2287,6 @@ pub const Analyzer = struct {
             binding,
             .module_reference,
             .any,
-            .last,
         ) orelse return null;
         return .{
             .slot = record.slot,

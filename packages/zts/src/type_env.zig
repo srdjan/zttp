@@ -2480,7 +2480,6 @@ const ParsedGenericApiCase = enum {
     scope_name_storage,
     original_constraint_index,
     forward_constraint,
-    duplicate_constraint_selection,
     compact_capacity,
     empty_name_consumes_capacity,
     null_body_publication,
@@ -2579,21 +2578,6 @@ test "parsed generic API census observes every case" {
                             .{ .name = "U" },
                         });
                         try std.testing.expectEqual(owner.params[1].idx, owner.params[0].constraint);
-                        try env.endParsedGenerics(&owner);
-                    },
-                    .duplicate_constraint_selection => {
-                        var owner = try env.beginParsedGenerics(&.{
-                            .{ .name = "T" },
-                            .{ .name = "T" },
-                        });
-                        try env.installParsedConstraints(&owner, &.{
-                            .{ .name = "T", .constraint = pool.idx_string },
-                            .{ .name = "T", .constraint = pool.idx_number },
-                        });
-                        const scope = env.generic_scopes.items[owner.prior_depth];
-                        try std.testing.expectEqual(pool.idx_number, owner.params[1].constraint);
-                        try std.testing.expectEqual(pool.idx_number, scope.params[0].constraint);
-                        try std.testing.expectEqual(null_type_idx, scope.params[1].constraint);
                         try env.endParsedGenerics(&owner);
                     },
                     .compact_capacity => {
@@ -2827,7 +2811,7 @@ test "captured generic set rejects invalid owners and environments before mutati
     );
 }
 
-test "captured generic set preserves duplicate and long-name lookup behavior" {
+test "captured generic set preserves long-name lookup behavior" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -2838,26 +2822,21 @@ test "captured generic set preserves duplicate and long-name lookup behavior" {
     const name33 = name32 ++ "b";
     var owner = try env.beginParsedGenerics(&.{
         .{ .name = "T" },
-        .{ .name = "T" },
         .{ .name = name33 },
     });
     try env.installParsedConstraints(&owner, &.{
         .{ .name = "T", .constraint = pool.idx_string },
-        .{ .name = "T", .constraint = pool.idx_number },
         .{ .name = name33, .constraint = pool.idx_boolean },
     });
     const set = try env.captureParsedGenericSet(&owner);
     try env.endParsedGenerics(&owner);
 
-    try std.testing.expectEqual(@as(u8, 3), set.count);
+    try std.testing.expectEqual(@as(u8, 2), set.count);
     try std.testing.expectEqualStrings("T", set.params[0].name);
-    try std.testing.expectEqualStrings("T", set.params[1].name);
-    try std.testing.expectEqualStrings(name33, set.params[2].name);
+    try std.testing.expectEqualStrings(name33, set.params[1].name);
     try std.testing.expect(set.params[0].idx != set.params[1].idx);
-    try std.testing.expect(set.params[1].idx != set.params[2].idx);
     try std.testing.expectEqual(pool.idx_string, set.params[0].constraint);
-    try std.testing.expectEqual(pool.idx_number, set.params[1].constraint);
-    try std.testing.expectEqual(pool.idx_boolean, set.params[2].constraint);
+    try std.testing.expectEqual(pool.idx_boolean, set.params[1].constraint);
 
     const stable_node_count = pool.nodes.items.len;
     const stable_name_count = env.name_storage.items.len;
@@ -2869,10 +2848,9 @@ test "captured generic set preserves duplicate and long-name lookup behavior" {
     try std.testing.expect((try env.resolveParsedGenericParam(&use, name33)) == null);
     const active_scope = env.generic_scopes.items[use.prior_depth];
     try std.testing.expectEqual(pool.idx_string, active_scope.params[0].constraint);
-    try std.testing.expectEqual(pool.idx_number, active_scope.params[1].constraint);
-    try std.testing.expectEqual(pool.idx_boolean, active_scope.params[2].constraint);
-    try std.testing.expectEqualStrings(name33, use.params[2].name);
-    try std.testing.expectEqual(pool.idx_boolean, use.params[2].constraint);
+    try std.testing.expectEqual(pool.idx_boolean, active_scope.params[1].constraint);
+    try std.testing.expectEqualStrings(name33, use.params[1].name);
+    try std.testing.expectEqual(pool.idx_boolean, use.params[1].constraint);
     try env.endParsedGenerics(&use);
     try std.testing.expectEqual(stable_depth, env.generic_scopes.items.len);
     try std.testing.expectEqual(stable_node_count, pool.nodes.items.len);

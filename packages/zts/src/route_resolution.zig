@@ -384,7 +384,6 @@ pub const Resolver = struct {
             binding,
             .module_reference,
             .builtin,
-            .first,
         ) orelse return false;
         return std.mem.eql(u8, record.module_specifier, "zttp:router") and
             std.mem.eql(u8, record.imported_name, "routerMatch");

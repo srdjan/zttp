@@ -164,10 +164,12 @@ machinery.
 
 U4b-3 refuses a second declaration of a name in one scope. After that
 refusal, no parsed input reaches the code that handles a duplicate. That
-code merges a name imported twice in `module_facts.zig` and selects the
-first or last import record for one slot. It also resolves a module-level
-function only when one declaration exists in `flow_interp.zig`, and it tracks
-repeated declaration owners in the typed frontend. The owner chose option (a)
+code selects the first or last import record for one slot in
+`module_facts.zig`, and it counts the declarations of a module name in
+`flow_interp.zig`. Two sites first listed here serve legal input and stay.
+One is the merge of an imported name, which one name imported under two
+aliases reaches. The other is the declaration-owner keys of the typed
+frontend, which every typed declaration uses. The owner chose option (a)
 on 2026-11-16. U4b-3 deletes the test cases whose subject is a duplicate and
 moves each outcome pin to the ZTS018 or ZTS019 refusal. A separate unit,
 U4b-3b, deletes the code with its own gate.
@@ -759,3 +761,12 @@ later.
     twice, such as `import { sha256 as a, sha256 as b } from "zttp:crypto";`,
     and no earlier entry exists for the module, the new entry keeps both
     names. This needs a test to confirm. The defect is older than U4b-3.
+- U4b-3b deletes the code that handled a second declaration of one name
+  (Decision 11). In `module_facts.zig` it removes `MatchOrder` with its
+  `.last` scan, the any-record loop in `referenceHasCategory`, and the skip in
+  `builtinDescriptorForNamedReference`. In `flow_interp.zig` it removes the
+  declaration count from `buildModuleNames`. In `type_env.zig` it removes the
+  census case `.duplicate_constraint_selection` and the `T, T` part of one
+  test. The dedup of an imported name stays, because one name imported under
+  two aliases still reaches it. The `ImportResolutionFilter` stays, because a
+  single unresolved import still needs it.

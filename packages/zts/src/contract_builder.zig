@@ -1389,7 +1389,7 @@ pub const ContractBuilder = struct {
                 // first such call is the export cause. The snippet is the export name, a static
                 // string of the binding.
                 if (self.export_cause == null) {
-                    if (self.factsRef().importForReference(binding, .module_reference, .builtin, .first)) |record| {
+                    if (self.factsRef().importForReference(binding, .module_reference, .builtin)) |record| {
                         if (builtin_modules.findExport(record.module_specifier, record.imported_name)) |found| {
                             if (module_binding.exportVaries(found.binding, found.func)) {
                                 if (self.ir_view.getLoc(call.callee)) |l| {

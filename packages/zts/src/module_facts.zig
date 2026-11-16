@@ -96,11 +96,6 @@ pub const ImportResolutionFilter = enum {
     unresolved,
 };
 
-pub const MatchOrder = enum {
-    first,
-    last,
-};
-
 /// The immutable import index. All strings in `modules` and `functions` are
 /// owned; both binding lists hold borrowed extraction rules.
 pub const ModuleFacts = struct {
@@ -313,8 +308,9 @@ pub const ModuleFacts = struct {
     }
 
     /// Preserve the type checker's named-import policy: slot and binding kind
-    /// match, while scope/name do not participate. A missing export must not
-    /// hide a later matching declaration that does name a builtin export.
+    /// match, while scope/name do not participate. The first matching record
+    /// decides the answer: the parser refuses a second declaration of one
+    /// name (ZTS019), so no later record shares its slot.
     pub fn builtinDescriptorForNamedReference(
         self: *const ModuleFacts,
         binding: ir.BindingRef,
@@ -323,7 +319,7 @@ pub const ModuleFacts = struct {
             if (record.import_kind != .named or
                 record.slot != binding.slot or
                 record.binding_kind != binding.kind) continue;
-            if (builtin_modules.findDescriptor(record.module_specifier, record.imported_name)) |entry| return entry;
+            return builtin_modules.findDescriptor(record.module_specifier, record.imported_name);
         }
         return null;
     }
@@ -333,21 +329,9 @@ pub const ModuleFacts = struct {
         binding: ir.BindingRef,
         eligibility: ReferenceEligibility,
         resolution_filter: ImportResolutionFilter,
-        match_order: MatchOrder,
     ) ?*const ImportRecord {
         if (!referenceEligible(binding, eligibility)) return null;
-        if (match_order == .first) {
-            for (self.imports.items) |*record| {
-                if (record.slot != binding.slot or
-                    !resolutionMatches(record.resolution, resolution_filter)) continue;
-                return record;
-            }
-            return null;
-        }
-        var index = self.imports.items.len;
-        while (index > 0) {
-            index -= 1;
-            const record = &self.imports.items[index];
+        for (self.imports.items) |*record| {
             if (record.slot != binding.slot or
                 !resolutionMatches(record.resolution, resolution_filter)) continue;
             return record;
@@ -385,12 +369,9 @@ pub const ModuleFacts = struct {
         eligibility: ReferenceEligibility,
         category: module_binding.ContractCategory,
     ) bool {
-        if (!referenceEligible(binding, eligibility)) return false;
-        for (self.generic_bindings.items) |record| {
-            if (record.slot != binding.slot) continue;
-            for (record.extractions) |extraction| {
-                if (extraction.category == category) return true;
-            }
+        const record = self.genericBindingForReference(binding, eligibility) orelse return false;
+        for (record.extractions) |extraction| {
+            if (extraction.category == category) return true;
         }
         return false;
     }

@@ -1358,10 +1358,11 @@ pub const FlowInterp = struct {
     // --- module-level functions (P4) ---
 
     /// The function a module-level name resolves to, or null. A name resolves
-    /// when exactly one declaration in the program binds it, that declaration
-    /// is a function declaration or a `const` arrow function at the top level
-    /// (so module initialization runs it before any request), and no
-    /// assignment targets the name. Anything else stays module state.
+    /// when a declaration in the program binds it (the parser refuses a second
+    /// one, ZTS019), that declaration is a function declaration or a `const`
+    /// arrow function at the top level (so module initialization runs it before
+    /// any request), and no assignment targets the name. Anything else stays
+    /// module state.
     fn moduleFunction(self: *FlowInterp, atom: u16) Error!?NodeIndex {
         const names = try self.moduleNames();
         return names.functions.get(atom);
@@ -1375,11 +1376,11 @@ pub const FlowInterp = struct {
     }
 
     /// The virtual-module export that a module-level name resolves to, or
-    /// null. A name resolves when exactly one declaration binds it, that
-    /// declaration is an import specifier from a `zttp:` path whose module
-    /// exports the imported name, and no assignment targets the name. An
-    /// import from a user module, or of a name with no export, stays module
-    /// state.
+    /// null. A name resolves when a declaration binds it (the parser refuses a
+    /// second one, ZTS019), that declaration is an import specifier from a
+    /// `zttp:` path whose module exports the imported name, and no assignment
+    /// targets the name. An import from a user module, or of a name with no
+    /// export, stays module state.
     fn moduleExport(self: *FlowInterp, atom: u16) Error!?ModuleExport {
         const names = try self.moduleNames();
         return names.exports.get(atom);
@@ -1392,26 +1393,21 @@ pub const FlowInterp = struct {
         return built;
     }
 
-    const Declared = struct { count: u32, decl: NodeIndex };
-
-    fn countDeclaration(
+    /// Record the declaration node of a module name. The parser refuses a second
+    /// declaration of one module name (ZTS019), so each atom has one node.
+    fn recordDeclaration(
         self: *FlowInterp,
-        declared: *std.AutoHashMapUnmanaged(u16, Declared),
+        declared: *std.AutoHashMapUnmanaged(u16, NodeIndex),
         atom: u16,
         decl: NodeIndex,
     ) Error!void {
-        const slot = try declared.getOrPut(self.mem(), atom);
-        if (slot.found_existing) {
-            slot.value_ptr.count += 1;
-        } else {
-            slot.value_ptr.* = .{ .count = 1, .decl = decl };
-        }
+        try declared.put(self.mem(), atom, decl);
     }
 
     fn buildModuleNames(self: *FlowInterp) Error!ModuleNames {
         const arena = self.mem();
         const view = self.ir_view;
-        var declared: std.AutoHashMapUnmanaged(u16, Declared) = .empty;
+        var declared: std.AutoHashMapUnmanaged(u16, NodeIndex) = .empty;
         var assigned: std.AutoHashMapUnmanaged(u16, void) = .empty;
         var direct: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
         const Imported = struct { module: []const u8, atom: u16 };
@@ -1424,11 +1420,11 @@ pub const FlowInterp = struct {
             switch (tag) {
                 .var_decl, .function_decl => {
                     const vd = view.getVarDecl(idx) orelse continue;
-                    if (vd.binding.kind == .global) try self.countDeclaration(&declared, vd.binding.name_atom, idx);
+                    if (vd.binding.kind == .global) try self.recordDeclaration(&declared, vd.binding.name_atom, idx);
                 },
                 // A named specifier maps its local name to the module path and
-                // the exported name. The declaration count below decides
-                // whether the local name still resolves to that export.
+                // the exported name. An assignment to the local name decides
+                // whether it still resolves to that export.
                 .import_decl => {
                     const decl = view.getImportDecl(idx) orelse continue;
                     const module = view.getString(decl.module_idx) orelse continue;
@@ -1441,17 +1437,17 @@ pub const FlowInterp = struct {
                     }
                 },
                 // An import or a pattern binding that binds a module name
-                // counts as a declaration and is never a function.
+                // is a declaration and is never a function.
                 .import_specifier => {
                     const spec = view.getImportSpec(idx) orelse continue;
                     if (spec.local_binding.kind == .global) {
-                        try self.countDeclaration(&declared, spec.local_binding.name_atom, null_node);
+                        try self.recordDeclaration(&declared, spec.local_binding.name_atom, null_node);
                     }
                 },
                 .pattern_element => {
                     const elem = view.getPatternElem(idx) orelse continue;
                     if (elem.binding.kind == .global) {
-                        try self.countDeclaration(&declared, elem.binding.name_atom, null_node);
+                        try self.recordDeclaration(&declared, elem.binding.name_atom, null_node);
                     }
                 },
                 .assignment => {
@@ -1483,16 +1479,16 @@ pub const FlowInterp = struct {
         var it = declared.iterator();
         while (it.next()) |entry| {
             const atom = entry.key_ptr.*;
-            const found = entry.value_ptr.*;
-            if (found.count != 1 or found.decl == null_node) continue;
-            if (assigned.contains(atom) or !direct.contains(found.decl)) continue;
-            const vd = view.getVarDecl(found.decl) orelse continue;
+            const decl = entry.value_ptr.*;
+            if (decl == null_node) continue;
+            if (assigned.contains(atom) or !direct.contains(decl)) continue;
+            const vd = view.getVarDecl(decl) orelse continue;
             const init_tag = view.getTag(vd.init) orelse continue;
-            const is_function = switch ((view.getTag(found.decl) orelse continue)) {
+            const is_function = switch ((view.getTag(decl) orelse continue)) {
                 .function_decl => init_tag == .function_expr or init_tag == .arrow_function,
                 .var_decl => vd.kind == .@"const" and init_tag == .arrow_function,
                 // exhaustive: only a function declaration and a `const` arrow
-                // are counted as declarations above, so no other tag arrives.
+                // are recorded as declarations above, so no other tag arrives.
                 else => false,
             };
             if (is_function) try resolved.put(arena, atom, vd.init);
@@ -1502,8 +1498,7 @@ pub const FlowInterp = struct {
         var import_it = imported.iterator();
         while (import_it.next()) |entry| {
             const atom = entry.key_ptr.*;
-            const found = declared.get(atom) orelse continue;
-            if (found.count != 1 or assigned.contains(atom)) continue;
+            if (!declared.contains(atom) or assigned.contains(atom)) continue;
             const resolved_export = self.importedExport(entry.value_ptr.module, entry.value_ptr.atom) orelse continue;
             try exports.put(arena, atom, resolved_export);
         }
