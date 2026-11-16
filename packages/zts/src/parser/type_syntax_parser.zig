@@ -2234,12 +2234,13 @@ const SyntaxParser = struct {
 
     fn parseNumberLiteral(self: *SyntaxParser, start: u32) !ParsedChild {
         // Section 5.7 admits number literal types. A decimal and a `0x` literal
-        // read in full. The store holds an integer literal only, so a fraction
-        // or an exponent is refused at the first byte of the literal: reading
-        // it as `number` would admit values that the type excludes. A literal
-        // outside `i16` reads as `number`. A numeric separator, a bigint
-        // suffix, or a `0b` or `0o` prefix follows the literal bytes, so the
-        // type is refused at the first byte of the literal.
+        // read in full. The store holds an integer literal in `i16` only, so a
+        // fraction, an exponent, or an integer outside -32768..32767 is
+        // refused at the first byte of the literal: reading it as `number`
+        // would admit values that the type excludes. A numeric
+        // separator, a bigint suffix, or a `0b` or `0o` prefix follows the
+        // literal bytes, so the type is refused at the first byte of the
+        // literal.
         if (self.source[self.pos] == '-') self.pos += 1;
         const digits_start = self.pos;
         const hex = self.pos + 1 < self.end and self.source[self.pos] == '0' and
@@ -2267,14 +2268,10 @@ const SyntaxParser = struct {
             }
         }
         if (self.pos < self.end and isIdentifierContinue(self.source[self.pos])) self.flag(.unsupported, start);
-        if (!integral) {
-            self.flag(.unsupported, start);
-            return self.makeNode(start, self.pos, .primitive, .{ .primitive = .number });
-        }
-        const value = std.fmt.parseInt(i16, self.source[start..self.pos], if (hex) 0 else 10) catch {
-            return self.makeNode(start, self.pos, .primitive, .{ .primitive = .number });
-        };
-        return self.makeNode(start, self.pos, .literal_number, .{ .literal_number = value });
+        const value = if (integral) std.fmt.parseInt(i16, self.source[start..self.pos], if (hex) 0 else 10) catch null else null;
+        if (value) |v| return self.makeNode(start, self.pos, .literal_number, .{ .literal_number = v });
+        self.flag(.unsupported, start);
+        return self.makeNode(start, self.pos, .primitive, .{ .primitive = .number });
     }
 
     fn makeNode(

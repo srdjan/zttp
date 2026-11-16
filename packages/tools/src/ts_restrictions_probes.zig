@@ -1249,6 +1249,17 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("structural R = { a: number };")),
     },
     .{
+        .key = "A number literal type that is not an integer in -32768..32767, such as `1.5`, `1e3`, and `40000`",
+        .refused = &.{
+            r("1.5", paramText("string | 1.5")),
+            r("1e3", paramText("string | 1e3")),
+            r("40000", paramText("string | 40000")),
+            r("40000", paramText("string | -32769")),
+            r("40000", paramText("string | 0x8000")),
+        },
+        .clean = c(paramText("string | 32767 | -32768 | 0x7FFF")),
+    },
+    .{
         .key = "A type form outside the admitted grammar, such as `new () => T`, `unique symbol`, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, a call signature such as `{ (): number }`, and an empty parenthesized type with no arrow, such as `Outer<()>` and `structural E = ();`",
         .refused = &.{
             r("new () => T", paramText("new () => string")),

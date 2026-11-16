@@ -370,6 +370,8 @@ const bad: number = "oops"; // ERROR: string not assignable to number
 
 For union annotations, the declared type is preserved to support exhaustiveness checking in `match` expressions.
 
+A number literal type is an integer in -32768..32767, such as `404` or `"a" | -1`. A fraction, an exponent, or a larger integer in a type, such as `1.5`, `1e3`, or `40000`, gets ZTS001: write `number`. A number literal value that is not an integer in that range has the type `number`.
+
 ### Generic Type Aliases
 
 Generic type aliases (`structural Result<T> = { ok: boolean; value: T }`) are instantiated when used in annotations. `Result<string>` resolves to `{ ok: boolean; value: string }` for structural checking. Up to 8 type parameters per alias.

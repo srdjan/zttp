@@ -688,3 +688,10 @@ later.
     read as `number | undefined`, which is the rule for any union with a
     record, so `v.length ?? 0` passes and `v.length` as a `number` gets
     ZTS204.
+- U4a-5 refuses an integer literal type outside -32768..32767, such as
+  `40000`, `-32769`, and `0x8000`, with ZTS001 at the first byte of the
+  literal (Decision 10 a). Before U4a-5, the type parser read it as
+  `number`, so `x: string | 40000` admitted `5`. docs/ts-restrictions.md
+  now lists the fraction and exponent refusal of U3b in the same row.
+  A number literal value outside the range keeps the type `number`, which
+  is sound for a value.

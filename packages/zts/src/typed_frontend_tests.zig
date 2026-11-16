@@ -5517,6 +5517,20 @@ test "an exponent literal type is refused at the literal" {
     );
 }
 
+test "an integer literal type outside the 16-bit range is refused at the literal" {
+    // The type store holds a 16-bit integer literal. Reading 40000 as number
+    // would admit 5 for the type string | 40000.
+    const message = "this type syntax is not supported; write an admitted type from section 5.7 of the specification";
+    try expectRefusedAt("function f(): number { const v: string | 40000 = \"a\"; return 1; }\n", 41, message);
+    try expectRefusedAt("function f(): number { const v: string | 32768 = \"a\"; return 1; }\n", 41, message);
+    try expectRefusedAt("function f(): number { const v: string | -32769 = \"a\"; return 1; }\n", 41, message);
+    try expectRefusedAt("function f(): number { const v: string | 0x8000 = \"a\"; return 1; }\n", 41, message);
+}
+
+test "an integer literal type at the ends of the 16-bit range is admitted" {
+    try expectParsesClean("function f(): number { const v: string | 32767 | -32768 | 0x7FFF = \"a\"; return 1; }\n");
+}
+
 test "a comment between a predicate target and is is admitted" {
     try expectParsesClean("function isText(v: string | number): v /* c */ is string { return typeof v === \"string\"; }\n");
     try expectParsesClean("function isText(v: string | number): v is /* c */ string { return typeof v === \"string\"; }\n");
