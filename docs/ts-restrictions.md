@@ -216,6 +216,7 @@ boolean to text.
 | An index read or a `length` read on `Bytes`, such as `b[0]` and `b.length` | ZTS201 | `byteAt(b, i)` or `bytesLength(b)` from `zttp:bytes` |
 | A member call on `unknown` or on a value with no known type | ZTS201 | Narrow with `typeof` or `isDict` first |
 | A container write whose value does not fit the slot type | ZTS200 | A value of the slot type |
+| A write to a field that the type does not declare, such as `o.z = 1` | ZTS201 | Declare the field in the record type, or build a new record with spread |
 | `push` on a tuple | ZTS200 | Annotate the binding as an array |
 | A write to the `length` of a string, an array, or a tuple | ZTS200 | A new array, built with `slice` or spread |
 | A mutating method on a `readonly` array | ZTS215 | A new array, or remove `readonly` from the type |
@@ -402,7 +403,6 @@ against the compiler.
 | A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
-| A write to a field that the record type does not declare, such as `o.z = 1` | Accepted, exit 0. The read `o.z` reports ZTS201 | ZTS201. Declare the field in the record type, or build a new record with spread |
 | A second `const` of the same name in one scope | Accepted, exit 0 | ZTS019. Write a different name |
 | A duplicate parameter name, such as `function f(a: number, a: number)` | Accepted, exit 0 | ZTS018. Write a different name |
 | A duplicate type parameter, such as `function f<T, T>(a: T): T` | Refused with ZTS208, "no argument determines type parameter" | A targeted refusal. Write a different name |

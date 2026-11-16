@@ -8720,6 +8720,16 @@ pub const TypeChecker = struct {
             });
             return;
         }
+        if (slot == .field and self.lacksField(receiver, slot.field)) {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .missing_field,
+                .node = node,
+                .message = "a write to a field that the type does not declare is not supported; a record keeps the fields of its type",
+                .help = "declare the field in the record type, or build a new record with spread",
+            });
+            return;
+        }
         // A fresh array literal has no other holder, so a write to it breaks no type.
         if (self.ir_view.getTag(member.object) == .array_literal) return;
 
@@ -8790,6 +8800,19 @@ pub const TypeChecker = struct {
         if (pool.getTag(t) != .t_union) return self.primitiveMemberPresence(t, "length") == .present;
         for (pool.getUnionMembers(t)) |m| {
             if (self.primitiveMemberPresence(m, "length") == .present) return true;
+        }
+        return false;
+    }
+
+    /// Whether a value of `raw`, or a member of the union `raw`, lacks the
+    /// field `name`. A write there adds the field at run time, and the type
+    /// no longer describes the value.
+    fn lacksField(self: *const TypeChecker, raw: TypeIndex, name: []const u8) bool {
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(raw));
+        if (pool.getTag(t) != .t_union) return self.memberPresence(t, name) == .absent;
+        for (pool.getUnionMembers(t)) |m| {
+            if (self.memberPresence(m, name) == .absent) return true;
         }
         return false;
     }

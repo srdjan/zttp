@@ -718,3 +718,9 @@ later.
   for the `catch` in `reportArrayCall`. Commit 29c1c9ce adds the allowlist
   row. Each later gate compares the failed step count with the baseline of
   218/221.
+- U4b-2 refuses a write to a field that the type does not declare, such as
+  `o.z = 1` on `{ a: number }`, with ZTS201. On a union, the write is
+  refused when one member lacks the field. Before U4b-2, the write added the
+  field at run time: `Object.keys(o)` gave `["a","z"]`, and the response
+  carried a field that the type does not name. No existing test or example
+  wrote such a field.

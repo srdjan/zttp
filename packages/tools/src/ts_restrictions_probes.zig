@@ -878,6 +878,16 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(body("  const xs: number[] = [1];\n  xs.push(2);")),
     },
     .{
+        .key = "A write to a field that the type does not declare, such as `o.z = 1`",
+        .refused = &.{
+            r("o.z = 1", top("function g(): number {\n  const o = { a: 1 };\n  o.z = 1;\n  return o.a;\n}")),
+            r("o.z = 1", top("structural P = { a: number };\nfunction g(o: P): number {\n  o.z = 1;\n  return o.a;\n}")),
+            r("o.z = 1", top("structural P = { a: number; z: number };\nstructural Q = { a: number };\nfunction g(o: P | Q): number {\n  o.z = 1;\n  return o.a;\n}")),
+            r("o.z = 1", top("function g(xs: number[]): number {\n  xs.z = 1;\n  return 1;\n}")),
+        },
+        .clean = c(top("structural P = { a: number; z: number };\nfunction g(o: P): number {\n  o.z = 1;\n  return o.a;\n}")),
+    },
+    .{
         .key = "`push` on a tuple",
         .refused = &.{r("push", body("  const t: [number, number] = [1, 2];\n  t.push(3);"))},
         .clean = c(body("  const t: number[] = [1, 2];\n  t.push(3);")),
@@ -1426,10 +1436,6 @@ pub const gap_rows = [_]GapRow{
             c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) {\n    return 1;\n  } else g();\n  return 2;\n}")),
             c(top(g_fn ++ "function h(xs: number[]): number {\n  for (const k of xs) g();\n  return 2;\n}")),
         },
-    },
-    .{
-        .key = "A write to a field that the record type does not declare, such as `o.z = 1`",
-        .sources = &.{c(top("function g(): number {\n  const o = { a: 1 };\n  o.z = 1;\n  return o.a;\n}"))},
     },
     .{
         .key = "A second `const` of the same name in one scope",
