@@ -141,7 +141,7 @@ pub const fixtures = [_]Fixture{
     \\function handler(req: Request): Proof<Response, "injection_safe"> {
     \\  const parts: string[] = [escapeHtml(req.url), escapeHtml(req.url)];
     \\  const acc: string[] = [];
-    \\  parts.forEach((v: string): number => { parts[1] = req.url; acc.push(v); return 0; });
+    \\  parts.map((v: string): string => { parts[1] = req.url; acc.push(v); return v; });
     \\  return Response.html(acc.join(""));
     \\}
     },
@@ -162,7 +162,7 @@ pub const fixtures = [_]Fixture{
     \\function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const secret: string = env("SECRET_KEY") ?? "";
     \\  const parts: string[] = ["a", "b"];
-    \\  parts.forEach((v: string): number => { parts[1] = secret; logInfo("m", { v: v }); return 0; });
+    \\  parts.map((v: string): string => { parts[1] = secret; logInfo("m", { v: v }); return v; });
     \\  return Response.json({ ok: true });
     \\}
     },
@@ -172,7 +172,7 @@ pub const fixtures = [_]Fixture{
     \\import { logInfo } from "zttp:log";
     \\function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const secret: string = env("SECRET_KEY") ?? "";
-    \\  ["a", "b"].forEach((v: string, i: number, all: string[]): number => { if (i === 0) { all[1] = secret; } logInfo("value", { value: v }); return 0; });
+    \\  ["a", "b"].map((v: string, i: number, all: string[]): string => { if (i === 0) { all[1] = secret; } logInfo("value", { value: v }); return v; });
     \\  return Response.json({ ok: true });
     \\}
     },
@@ -241,7 +241,7 @@ pub const fixtures = [_]Fixture{
     .{ .name = "request_popped_from_array_credential", .property = .no_credential_leakage, .source =
     \\import { logInfo } from "zttp:log";
     \\export function handler(req: Request): Proof<Response, "no_credential_leakage"> {
-    \\  const picked: Request | undefined = [req].pop();
+    \\  const picked: Request | undefined = [req][0];
     \\  if (picked !== undefined) { logInfo("h", { k: picked.headers.authorization ?? "" }); }
     \\  return Response.json({ ok: true });
     \\}
@@ -272,7 +272,7 @@ pub const fixtures = [_]Fixture{
     \\  return true;
     \\}
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
-    \\  [env("SECRET_KEY") ?? ""].forEach(req.url.length > 3 ? leaks : leaks);
+    \\  [env("SECRET_KEY") ?? ""].map(req.url.length > 3 ? leaks : leaks);
     \\  return Response.text("ok");
     \\}
     },

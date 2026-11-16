@@ -8680,30 +8680,6 @@ const io_map_b =
     \\}
 ;
 
-const io_each_a =
-    \\import { cacheSet } from "zttp:cache";
-    \\export function handler(req: Request): Response {
-    \\  cacheSet("items", "k", "v", 60);
-    \\  const xs = ["a", "b"];
-    \\  xs.forEach((x) => {
-    \\    cacheSet("items", x, "v", 60);
-    \\  });
-    \\  return Response.text("ok");
-    \\}
-;
-
-const io_each_b =
-    \\import { cacheSet } from "zttp:cache";
-    \\export function handler(req: Request): Response {
-    \\  cacheSet("items", "k", "v", 60);
-    \\  const xs = ["a", "b"];
-    \\  xs.forEach((x) => {
-    \\    String(x);
-    \\  });
-    \\  return Response.text("ok");
-    \\}
-;
-
 const nested_call_pairs = [_]NestedCallPair{
     .{ .name = "if condition, then-branch returns", .before = io_if_a, .after = io_if_b },
     .{ .name = "else-if condition", .before = io_ife_a, .after = io_ife_b },
@@ -8711,7 +8687,6 @@ const nested_call_pairs = [_]NestedCallPair{
     .{ .name = "for...of iterable", .before = io_for_a, .after = io_for_b },
     .{ .name = "match discriminant", .before = io_match_a, .after = io_match_b },
     .{ .name = "inline map callback", .before = io_map_a, .after = io_map_b },
-    .{ .name = "inline forEach callback", .before = io_each_a, .after = io_each_b },
 };
 
 test "prove-behavior: a module call removed from a condition, iterable, discriminant, or inline callback is breaking" {
@@ -12248,48 +12223,6 @@ const container_writes = [_]AbsentReadCase{
     \\  return Response.text("x");
     \\}
     },
-    .{ .name = "w1_tuple_pop", .expect = "ZTS200@3", .source =
-    \\function handler(req: Request): Proof<Response, "read_only"> {
-    \\  const t: [string, string] = ["a", "b"];
-    \\  t.pop();
-    \\  return Response.text("x");
-    \\}
-    },
-    .{ .name = "w1_tuple_shift", .expect = "ZTS200@3", .source =
-    \\function handler(req: Request): Proof<Response, "read_only"> {
-    \\  const t: [string, string] = ["a", "b"];
-    \\  t.shift();
-    \\  return Response.text("x");
-    \\}
-    },
-    .{ .name = "w1_tuple_unshift", .expect = "ZTS200@3", .source =
-    \\function handler(req: Request): Proof<Response, "read_only"> {
-    \\  const t: [string, string] = ["a", "b"];
-    \\  t.unshift("c");
-    \\  return Response.text("x");
-    \\}
-    },
-    .{ .name = "w1_tuple_splice", .expect = "ZTS200@3", .source =
-    \\function handler(req: Request): Proof<Response, "read_only"> {
-    \\  const t: [string, string] = ["a", "b"];
-    \\  t.splice(0, 1);
-    \\  return Response.text("x");
-    \\}
-    },
-    .{ .name = "w1_array_unshift_wrong_element", .expect = "ZTS203@3", .source =
-    \\function handler(req: Request): Proof<Response, "read_only"> {
-    \\  const xs: number[] = [1];
-    \\  xs.unshift("a");
-    \\  return Response.text("x");
-    \\}
-    },
-    .{ .name = "w1_array_splice_wrong_inserted_element", .expect = "ZTS203@3", .source =
-    \\function handler(req: Request): Proof<Response, "read_only"> {
-    \\  const xs: number[] = [1];
-    \\  xs.splice(0, 1, "a");
-    \\  return Response.text("x");
-    \\}
-    },
     .{ .name = "w1_union_receiver_member_refuses_the_value", .expect = "ZTS200@5", .source =
     \\structural A = { v: number };
     \\structural B = { v: string };
@@ -12377,13 +12310,6 @@ const container_writes = [_]AbsentReadCase{
     \\  return Response.text("x");
     \\}
     },
-    .{ .name = "w1_splice_start_and_count_are_not_checked_against_the_element", .expect = "clean", .source =
-    \\function handler(req: Request): Proof<Response, "read_only"> {
-    \\  const ws: string[] = ["a", "b"];
-    \\  ws.splice(0, 1);
-    \\  return Response.text(String(ws.length));
-    \\}
-    },
     .{ .name = "w1_readonly_array_push_reports_only_the_readonly_mutation", .expect = "ZTS215@3", .source =
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const ro: readonly string[] = ["a"];
@@ -12422,7 +12348,7 @@ const container_writes = [_]AbsentReadCase{
     },
     .{ .name = "w1_mutation_and_write_on_a_fresh_array_literal_are_clean", .expect = "clean", .source =
     \\function handler(req: Request): Proof<Response, "read_only"> {
-    \\  const last = [1, 2].pop();
+    \\  const last = [1, 2][1];
     \\  const n = ["a", 1].push(2);
     \\  [1, 2][0] = 5;
     \\  return Response.json({ last: last, n: n });
@@ -12580,7 +12506,7 @@ const absent_read_untyped_receiver = [_]AbsentReadCase{
     },
     .{ .name = "n1_member_call_on_an_empty_array_literal_is_clean", .expect = "clean", .source =
     \\function handler(req: Request): Proof<Response, "read_only"> {
-    \\  return Response.text(String([].pop()));
+    \\  return Response.text(String([].slice(0, 1)));
     \\}
     },
     .{ .name = "n1_range_has_no_array_members", .expect = "ZTS201@2", .source =
@@ -15199,7 +15125,7 @@ test "each control decision of the flow interpreter marks a branch on a varying 
         .{ .name = "d_andthen", .source = "import { andThen, ok, err } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = andThen(ok(1), (n: number) => t % 2 === 0 ? ok(n) : err(\"odd\"));\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:55 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "d_andthen2", .source = "import { andThen, ok, err } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = andThen(ok(t), (n: number) => ok(n + 1));\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:20 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "d_andthen3", .source = "import { andThen, ok } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const base = ok(1);\n  const r = andThen(base, (n: number) => ok(t));\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:20 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
-        .{ .name = "d_foreach_range", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const h = { v: \"\" };\n  const xs: number[] = range(t % 3);\n  xs.forEach((i: number): undefined => {\n    h.v = \"x\";\n  });\n  return Response.text(h.v);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:13 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "d_some_range", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const h = { v: \"\" };\n  const xs: number[] = range(t % 3);\n  xs.some((i: number): boolean => {\n    h.v = \"x\";\n    return false;\n  });\n  return Response.text(h.v);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:10 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "d_reduce_noinit", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs: number[] = range(t % 3);\n  const n = xs.reduce((acc: number, x: number): number => 1);\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:22 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "e_find", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [\"a\", \"b\"].find((x: string): boolean => x.length > t % 3);\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:28 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "e_some", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [\"a\", \"b\"].some((x: string): boolean => x.length > t % 3);\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:28 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
@@ -15237,14 +15163,13 @@ test "a branch on request data, a constant, or an unused clock read keeps determ
         .{ .name = "d_map_data", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = [\"a\", \"b\"].map((x: string): string => \"k\");\n  return Response.text(xs.join(\",\"));\n}\n" },
         .{ .name = "d_map_data2", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = [\"a\", \"b\"].map((x: string): number => t);\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "d_arrayfrom", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = Array.from([\"a\", \"b\"], (x: string): number => t);\n  return Response.text(\"x\");\n}\n" },
-        .{ .name = "d_foreach_data", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  [\"a\"].forEach((x: string): number => t);\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "d_dictmapvalues", .source = "import { dictMapValues, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), \"a\", 1);\n  const f = dictMapValues(d, (v: number, k: string): number => v + t);\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "e_reduce_cb", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [1, 2].reduce((acc: number, x: number): number => acc + t, 0);\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "e_dictfold", .source = "import { dictFold, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), \"a\", 1);\n  const r = dictFold(d, (acc: number, v: number, k: string): number => acc + t, 0);\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "e_dictfold_clean", .source = "import { dictFold, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), \"a\", 1);\n  const r = dictFold(d, (acc: number, v: number, k: string): number => acc + v, 0);\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "d_andthen_clean", .source = "import { andThen, ok } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = andThen(ok(1), (n: number) => ok(n));\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "d_dictfilter_clean", .source = "import { dictFilter, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), \"a\", 1);\n  const f = dictFilter(d, (v: number, k: string): boolean => v > 0);\n  return Response.text(\"x\");\n}\n" },
-        .{ .name = "d_foreach_range_clean", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const h = { v: \"\" };\n  const xs: number[] = range(3);\n  xs.forEach((i: number): undefined => {\n    h.v = \"x\";\n  });\n  return Response.text(h.v);\n}\n" },
+        .{ .name = "d_some_range_clean", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const h = { v: \"\" };\n  const xs: number[] = range(3);\n  xs.some((i: number): boolean => {\n    h.v = \"x\";\n    return false;\n  });\n  return Response.text(h.v);\n}\n" },
         .{ .name = "d_reduce_clean", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs: number[] = range(3);\n  const n = xs.reduce((acc: string, x: number): string => \"y\", \"init\");\n  return Response.text(n);\n}\n" },
         .{ .name = "d_opt_call_clean", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { f: (): string => \"a\" };\n  const os = [o];\n  const m = os[0];\n  const s = m?.f();\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "d_opt_call3_clean", .source = "import { dictGet, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { f: (): string => \"a\" };\n  const d: Dict<string, { f: () => string }> = dictSet(dictEmpty(), \"a\", o);\n  const m = dictGet(d, \"a\");\n  const s = m?.f();\n  return Response.text(\"x\");\n}\n" },
@@ -15622,11 +15547,10 @@ const clock_suggestion = "remove Date.now(), Math.random(), and performance.now(
 
 test "a loop over an array whose length a varying value set is not deterministic" {
     try expectDeterministicRefused(std.testing.allocator, .{
-        .name = "c1_splice_forof",
+        .name = "c1_slice_forof",
         .source =
         \\export function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const xs = ["a", "b", "c"];
-        \\  xs.splice(0, Date.now() % 3);
+        \\  const xs = ["a", "b", "c"].slice(0, Date.now() % 3);
         \\  const out: string[] = [];
         \\  for (const x of xs) {
         \\    out.push("y");
@@ -15637,7 +15561,7 @@ test "a loop over an array whose length a varying value set is not deterministic
         ,
         .line = 1,
         .column = 24,
-        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)",
+        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:3 by `a branch on a value that varies between requests`)",
         .suggestion = branch_suggestion,
     });
 }

@@ -1090,7 +1090,7 @@ test "value combinations cannot borrow validation from another contributor" {
         "({ safe: b, raw: a }).raw",
         "({ ...{ safe: b }, ...{ raw: a } }).raw",
         "({ ...{ raw: a }, ...{ safe: b } }).raw",
-        "[b].concat([a]).join(\"\")",
+        "[...[b], ...[a]].join(\"\")",
         "[b, b].join(a)",
         "[a].filter((v) => escapeHtml(v)).join(\"\")",
         "a ?? b",
@@ -1179,7 +1179,7 @@ test "escaped assembly with static markup still proves injection_safe" {
         "[\"<p>\", b, \"</p>\"].join(\"\")",
         "[b, b].join(\"\")",
         "({ ...{ safe: b }, markup: \"<p>\" }).safe",
-        "[b].concat([\"<p>\"]).join(\"\")",
+        "[...[b], ...[\"<p>\"]].join(\"\")",
         "[a].map((v) => escapeHtml(v)).join(\"\")",
         "escapeHtml([a, b].join(\"\"))",
         "req.method === \"GET\" ? b : escapeHtml(a)",
@@ -1255,10 +1255,10 @@ test "selection callbacks carry writes into selected elements" {
         .{ .callback = "(v) => { parts[1] = req.url; return true; }", .safe = false },
         .{ .setup = "const alias = parts;", .callback = "(v) => { alias[1] = req.url; return true; }", .safe = false },
         .{ .setup = "const holder = { items: parts };", .callback = "(v) => { holder.items[1] = req.url; return true; }", .safe = false },
-        .{ .setup = "const holder = [parts];", .callback = "(v) => { holder[0].splice(1, 0, req.url); return true; }", .safe = false },
+        .{ .setup = "const holder = [parts];", .callback = "(v) => { holder[0].push(req.url); return true; }", .safe = false },
         .{ .callback = "(v, i, all) => { all[1] = req.url; return true; }", .safe = false },
         .{ .setup = "function replace(xs) { xs[1] = req.url; }", .callback = "(v) => { replace(parts); return true; }", .safe = false },
-        .{ .callback = "(v) => { parts.splice(1, 0, req.url); return true; }", .safe = false },
+        .{ .callback = "(v) => { parts.push(req.url); return true; }", .safe = false },
         .{ .callback = "(v) => { [\"x\"].filter((x) => { parts[1] = req.url; return true; }); return true; }", .safe = false },
         .{ .callback = "(v) => { parts[1] = escapeHtml(req.url); return req.url !== \"\"; }", .safe = false },
         .{ .setup = "const other = {};", .callback = "(v) => { other.raw = req.url; return req.url !== \"\"; }", .safe = false },
@@ -3901,7 +3901,7 @@ test "FlowChecker resolves finite callees and keeps unknown calls unproven" {
         \\function handler(req) { return Response.json({ value: JSON.parse("{}").run() }); }
         ,
         // Array methods that return elements or accumulator values are not arrays.
-        \\function handler(req) { return Response.json({ value: [{ run: () => "ok" }].pop().run() }); }
+        \\function handler(req) { return Response.json({ value: [{ run: () => "ok" }].find((x) => true).run() }); }
         ,
         \\function handler(req) { return Response.json({ value: [{ run: () => "ok" }].reduce((a, x) => x).run() }); }
         ,
@@ -5198,7 +5198,7 @@ test "mask holds for a plain copy of a source value (D-015)" {
         .{ "", "mask(helper(s), 4)" },
         .{ "const o = { v: s };", "mask(o.v, 4)" },
         .{ "", "mask(cond ? s : \"\", 4)" },
-        .{ "", "mask([s].pop(), 4)" },
+        .{ "", "mask([s].find((x) => true), 4)" },
         .{ "", "mask([s][0], 4)" },
         .{ "const a = [s, s];", "mask(a[1], 4)" },
         .{ "let x = s; let y = x;", "mask(y, 4)" },

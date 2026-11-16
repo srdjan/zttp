@@ -107,7 +107,7 @@ const command_type = "structural Cmd = { kind: \"a\"; text: string } | { kind: \
 // Refusal rows
 // ---------------------------------------------------------------------------
 
-pub const refusal_rows = [_]RefusalRow{
+const refusal_rows_a = [_]RefusalRow{
     // ----- Source Files And Modules -----
     .{
         .key = "A `.js`, `.jsx`, `.tsx`, or unknown file extension",
@@ -733,7 +733,9 @@ pub const refusal_rows = [_]RefusalRow{
         .refused = &.{r("x === true", top("function g(x: boolean): boolean {\n  return x === true;\n}"))},
         .clean = c(top("function g(x: boolean): boolean {\n  return x;\n}")),
     },
+};
 
+const refusal_rows_b = [_]RefusalRow{
     // ----- Records, Arrays, And Strings -----
     .{
         .key = "Object literal shorthand `{ value }`",
@@ -790,6 +792,20 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(body("  const n = 1;\n  const s = String(n);")),
     },
     .{
+        .key = "The array members `forEach`, `pop`, `shift`, `unshift`, `splice`, `toReversed`, and `concat`, and the string member `substring`",
+        .refused = &.{
+            r("forEach", body("  const xs: number[] = [1, 2];\n  xs.forEach((x: number): undefined => undefined);")),
+            r("pop", body("  const xs: number[] = [1, 2];\n  const a = xs.pop();")),
+            r("shift", body("  const xs: number[] = [1, 2];\n  const a = xs.shift();")),
+            r("unshift", body("  const xs: number[] = [1, 2];\n  const a = xs.unshift(0);")),
+            r("splice", body("  const xs: number[] = [1, 2];\n  const a = xs.splice(0, 1);")),
+            r("toReversed", body("  const xs: number[] = [1, 2];\n  const a = xs.toReversed();")),
+            r("concat", body("  const xs: number[] = [1, 2];\n  const a = xs.concat([3]);")),
+            r("substring", body("  const s = \"abc\";\n  const a = s.substring(1);")),
+        },
+        .clean = c(body("  const xs: number[] = [1, 2];\n  const a = [...xs, 3];\n  const s = \"abc\";\n  const b = s.slice(1);")),
+    },
+    .{
         .key = "A numeric index read on a string, such as `s[0]`",
         .refused = &.{r("s[0]", body("  const s = \"abc\";\n  const c = s[0];"))},
         .clean = c(body("  const s = \"abc\";\n  const c = s.charAt(0);")),
@@ -805,13 +821,9 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(body("  const xs: number[] = [1];\n  xs.push(2);")),
     },
     .{
-        .key = "`push`, `pop`, `shift`, `unshift`, `splice`, or a `length` write on a tuple",
+        .key = "`push` or a `length` write on a tuple",
         .refused = &.{
             r("push", body("  const t: [number, number] = [1, 2];\n  t.push(3);")),
-            r("pop", body("  const t: [number, number] = [1, 2];\n  t.pop();")),
-            r("shift", body("  const t: [number, number] = [1, 2];\n  t.shift();")),
-            r("unshift", body("  const t: [number, number] = [1, 2];\n  t.unshift(3);")),
-            r("splice", body("  const t: [number, number] = [1, 2];\n  t.splice(0, 1);")),
             r("length", body("  const t: [number, number] = [1, 2];\n  t.length = 1;")),
         },
         .clean = c(body("  const t: number[] = [1, 2];\n  t.push(3);")),
@@ -1260,6 +1272,8 @@ pub const refusal_rows = [_]RefusalRow{
     },
 };
 
+pub const refusal_rows = refusal_rows_a ++ refusal_rows_b;
+
 // ---------------------------------------------------------------------------
 // Gap rows
 // ---------------------------------------------------------------------------
@@ -1279,16 +1293,6 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "`for...of` over a fixed record",
         .sources = &.{c(body("  const o = { a: 1 };\n  for (const v of o) {\n    const y = v;\n  }"))},
-    },
-    .{
-        .key = "Array members `forEach`, `pop`, `shift`, `unshift`, `splice`",
-        .sources = &.{
-            c(body("  const xs: number[] = [1, 2];\n  xs.forEach((x: number): undefined => undefined);")),
-            c(body("  const xs: number[] = [1, 2];\n  const a = xs.pop();")),
-            c(body("  const xs: number[] = [1, 2];\n  const a = xs.shift();")),
-            c(body("  const xs: number[] = [1, 2];\n  const a = xs.unshift(0);")),
-            c(body("  const xs: number[] = [1, 2];\n  const a = xs.splice(0, 1);")),
-        },
     },
     .{
         .key = "`import { ... } from \"zttp:types\"`",
@@ -1350,9 +1354,8 @@ pub const gap_rows = [_]GapRow{
         },
     },
     .{
-        .key = "`toReversed`, `Array.from`, `Array.of`, and a write to `xs.length`",
+        .key = "`Array.from`, `Array.of`, and a write to `xs.length`",
         .sources = &.{
-            c(top("function g(xs: number[]): number[] {\n  return xs.toReversed();\n}")),
             c(top("function g(xs: number[]): number[] {\n  return Array.from(xs);\n}")),
             c(top("function g(): number[] {\n  return Array.of(1);\n}")),
             c(top("function g(xs: number[]): number {\n  xs.length = 0;\n  return 1;\n}")),

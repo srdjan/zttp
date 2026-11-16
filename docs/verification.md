@@ -208,7 +208,7 @@ A Dict member or index read is refused as ZTS201: use `dictGet`. The `.value` of
 
 The verifier detects module-scope variable mutations inside the handler body. Since handlers are re-invoked per request with fresh scope, mutating a module-level `let` binding would leak state between requests.
 
-The check walks all assignment nodes in the handler body, and all calls to a mutating array method: `push`, `pop`, `shift`, `unshift`, and `splice`. If the target is an identifier whose binding has a scope_id less than the handler's scope_id (meaning it's declared at module level), the verifier emits a `module_scope_mutation` error.
+The check walks all assignment nodes in the handler body, and all calls to `push`, the one mutating array method of the profile. If the target is an identifier whose binding has a scope_id less than the handler's scope_id (meaning it's declared at module level), the verifier emits a `module_scope_mutation` error.
 
 ```typescript
 // ERROR: handler mutates module-scope variable

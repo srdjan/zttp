@@ -206,10 +206,11 @@ boolean to text.
 | Dynamic property access `obj[key]` | ZTS605 | A typed field, such as `obj.a`, or a `Dict` read with `dictGet` |
 | `Object.assign`, `Object.freeze`, and `Object.isFrozen` | ZTS001 | Object spread |
 | A member that the runtime does not hold, such as `n.toFixed(2)` or `n.toString()` | ZTS201 | `String(n)` |
+| The array members `forEach`, `pop`, `shift`, `unshift`, `splice`, `toReversed`, and `concat`, and the string member `substring` | ZTS201 | `for...of`, `slice`, or spread `[...a, ...b]` for an array, and `slice` for a string |
 | A numeric index read on a string, such as `s[0]` | ZTS201 | `s.charAt(i)` or `s.slice(i, i + 1)` |
 | A member call on `unknown` or on a value with no known type | ZTS201 | Narrow with `typeof` or `isDict` first |
 | A container write whose value does not fit the slot type | ZTS200 | A value of the slot type |
-| `push`, `pop`, `shift`, `unshift`, `splice`, or a `length` write on a tuple | ZTS200 | Annotate the binding as an array |
+| `push` or a `length` write on a tuple | ZTS200 | Annotate the binding as an array |
 | A mutating method on a `readonly` array | ZTS215 | A new array, or remove `readonly` from the type |
 | A `dictEntries` round trip through `dictFromEntries` that changes only values or drops entries | ZTS627 (advisory) | `dictMapValues(d, f)` or `dictFilter(d, p)` |
 | A `reduce` over `dictEntries(d)` | ZTS628 (advisory) | `dictFold(d, f, init)` |
@@ -296,11 +297,11 @@ diagnostic. The gap section below gives the observed behavior.
 
 ## Admitted Members
 
-The type checker admits these members on an array and on a string. Each line names one scope. The members are in sorted order. The members `forEach`, `pop`, `shift`, `unshift`, `splice`, and `toReversed` are also admitted, but the specification excludes them. The gap table lists them.
+The type checker admits these members on an array and on a string. Each line names one scope. The members are in sorted order.
 
-`Array.prototype`: `concat`, `every`, `filter`, `find`, `findIndex`, `includes`, `indexOf`, `join`, `length`, `map`, `push`, `reduce`, `slice`, `some`, `toSorted`
+`Array.prototype`: `every`, `filter`, `find`, `findIndex`, `includes`, `indexOf`, `join`, `length`, `map`, `push`, `reduce`, `slice`, `some`, `toSorted`
 
-`String.prototype`: `charAt`, `charCodeAt`, `concat`, `endsWith`, `includes`, `indexOf`, `lastIndexOf`, `length`, `padEnd`, `padStart`, `repeat`, `replace`, `replaceAll`, `slice`, `split`, `startsWith`, `substring`, `toLowerCase`, `toUpperCase`, `trim`, `trimEnd`, `trimStart`
+`String.prototype`: `charAt`, `charCodeAt`, `concat`, `endsWith`, `includes`, `indexOf`, `lastIndexOf`, `length`, `padEnd`, `padStart`, `repeat`, `replace`, `replaceAll`, `slice`, `split`, `startsWith`, `toLowerCase`, `toUpperCase`, `trim`, `trimEnd`, `trimStart`
 
 ## Ambient Names And Effects
 
@@ -368,7 +369,6 @@ against the compiler.
 | `JSON.parse` and `JSON.stringify` | Accepted | ZTS629. Use `parseJson` or `stringifyJson` from `zttp:json`, or `decodeJson` from `zttp:decode` |
 | `match` on a call, such as `match (g()) { ... }` | Accepted, exit 0. The specification requires an identifier or a member path | A targeted refusal. Bind the value to a `const` first |
 | `for...of` over a fixed record | Accepted by the type and strict checks | A targeted refusal. Iterate an array, such as `Object.keys(r)` |
-| Array members `forEach`, `pop`, `shift`, `unshift`, `splice` | Accepted | ZTS201. Write `for...of`, `slice`, or spread |
 | `import { ... } from "zttp:types"` | Refused with ZTS206 for a value import, and with ZTS053 for `import type` | ZTS053 for both. Write `Proof<T, P>` or `Effects<T, R>` directly. Both are ambient |
 | C-style `for (;;)` | Refused with ZTS001 and ZTS002 | ZTS001 only. Write `for (const i of range(n))` |
 | Labeled `break` and `continue` | Refused with ZTS001 and ZTS047 | ZTS001 only. Write a conditional |
@@ -378,7 +378,7 @@ against the compiler.
 | A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
-| `toReversed`, `Array.from`, `Array.of`, and a write to `xs.length` | Accepted, exit 0 | ZTS201 for the members and ZTS200 for the `length` write. Build a new array with `for...of` |
+| `Array.from`, `Array.of`, and a write to `xs.length` | Accepted, exit 0 | ZTS201 for the members and ZTS200 for the `length` write. Build a new array with `for...of` |
 | An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, `xs.indexOf(v, i)`, and a three-parameter `map` callback | Accepted, exit 0. A four-parameter callback reports ZTS203 | ZTS202. Pass the arguments that the specification gives |
 | `join` on an array of non-strings, such as `[1, 2].join("")` | Accepted, exit 0 | ZTS203. Convert each element with `String` first |
 | An index read or a `length` read on `Bytes` | Accepted, exit 0 | ZTS201. Write `byteAt(value, index)` or `bytesLength(value)` from `zttp:bytes` |

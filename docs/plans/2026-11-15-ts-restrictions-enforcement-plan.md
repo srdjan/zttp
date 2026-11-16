@@ -312,6 +312,17 @@ dispatches. Bulk rewrite scripts are not allowed.
 | U5 | G4 |
 | U6 | The spec text for Decisions 3, 4, 6, and 7, and for N1 to N16 |
 
+U4a runs as four commits, one for each rule. U4a-1 refuses the array members
+`forEach`, `pop`, `shift`, `unshift`, `splice`, `toReversed`, and `concat`,
+and the string member `substring`. The checker already refused `reverse`
+because the runtime does not install it, so U4a-1 deletes the eight methods
+from the runtime, the result table, and the flow rules, and ZTS201 follows.
+U4a-2 refuses each member of an ambient namespace that the runtime does not
+install, such as `Math.nope` and `Object.create`. It deletes `Array.from`,
+`Array.of`, and `Object.hasOwn`, refuses a `length` write on an array or a
+string with ZTS200, and extends the member census of the gate to the
+namespaces. U4a-3 takes X24 and X25. U4a-4 takes X31.
+
 ### U2: parser refusals that move no hash (Sonnet, 3 sequential parts)
 
 The parts touch `packages/zts/src/parser/parse.zig`, so they run in order.
@@ -619,3 +630,20 @@ later.
     walk, so a stray `T` outside its function passes the walk. The checker
     then reads it as an opaque type, which fails closed.
   - `any` in a generic bound gets ZTS065, not ZTS041.
+- U4a-1 refuses the array members `forEach`, `pop`, `shift`, `unshift`,
+  `splice`, `toReversed`, and `concat`, and the string member `substring`,
+  with ZTS201. It deletes them from the runtime, the result table, and the
+  flow rules, with the type and flow code that only they used. These
+  findings stay open:
+  - A `map` call whose result is discarded, over `range(Date.now() % 3)`,
+    with a callback that writes a local record, leaves `no_secret_leakage`
+    undischarged. The same loop with `some` discharges it. This fails
+    closed. The cause is not known. A flow probe of the two forms can
+    locate it.
+  - Five fixtures in `flow_false_proofs.zig` keep their names, such as
+    `request_popped_from_array_credential`, because
+    `docs/plans/2026-10-20-flow-interp-difference-dispositions.md` cites
+    them. Their sources now use `map` and an index read.
+  - `docs/proofs-and-receipts.md` keeps `forEach` and `[req].pop()` in its
+    table of shapes that v0.22.3 proved falsely. The table records that
+    release, so it stays as written.

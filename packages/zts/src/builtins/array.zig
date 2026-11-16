@@ -160,123 +160,6 @@ pub fn arrayPush(ctx: *context.Context, this: value.JSValue, args: []const value
     return value.JSValue.fromInt(@intCast(obj.getArrayLength()));
 }
 
-/// Array.prototype.pop() - Remove and return last element
-pub fn arrayPop(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = args;
-    const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    if (obj.class_id != .array) return value.JSValue.undefined_val;
-
-    const len = obj.getArrayLength();
-    if (len == 0) return value.JSValue.undefined_val;
-
-    const last = obj.getIndex(len - 1) orelse value.JSValue.undefined_val;
-    obj.setArrayLength(len - 1);
-    return last;
-}
-
-/// Array.prototype.shift() - Remove and return first element
-pub fn arrayShift(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = args;
-    const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    if (obj.class_id != .array) return value.JSValue.undefined_val;
-
-    const len = obj.getArrayLength();
-    if (len == 0) return value.JSValue.undefined_val;
-
-    const first = obj.getIndex(0) orelse value.JSValue.undefined_val;
-
-    // Shift all elements down by 1
-    var i: u32 = 1;
-    while (i < len) : (i += 1) {
-        const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        ctx.setIndexChecked(obj, i - 1, val) catch return first;
-    }
-    obj.setArrayLength(len - 1);
-    return first;
-}
-
-/// Array.prototype.unshift(...items) - Insert elements at front, return new length
-pub fn arrayUnshift(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    if (obj.class_id != .array) return value.JSValue.undefined_val;
-    if (args.len == 0) return value.JSValue.fromInt(@intCast(obj.getArrayLength()));
-
-    const len = obj.getArrayLength();
-    const shift: u32 = @intCast(args.len);
-
-    // Shift existing elements up by args.len (iterate from end to avoid overwriting)
-    var i: u32 = len;
-    while (i > 0) {
-        i -= 1;
-        const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        ctx.setIndexChecked(obj, i + shift, val) catch return value.JSValue.undefined_val;
-    }
-
-    // Insert new elements at the front
-    for (args, 0..) |arg, idx| {
-        ctx.setIndexChecked(obj, @intCast(idx), arg) catch return value.JSValue.undefined_val;
-    }
-
-    return value.JSValue.fromInt(@intCast(obj.getArrayLength()));
-}
-
-/// Array.prototype.splice(start, deleteCount?, ...items) - Remove/insert elements, return deleted
-pub fn arraySplice(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    if (obj.class_id != .array) return value.JSValue.undefined_val;
-
-    const len: i32 = @intCast(obj.getArrayLength());
-
-    // Parse start index
-    var start: i32 = if (args.len > 0 and args[0].isInt()) args[0].getInt() else 0;
-    if (start < 0) start = @max(len + start, 0);
-    if (start > len) start = len;
-
-    // Parse delete count
-    var delete_count: i32 = if (args.len > 1 and args[1].isInt()) args[1].getInt() else len - start;
-    if (delete_count < 0) delete_count = 0;
-    if (delete_count > len - start) delete_count = len - start;
-
-    // Build array of deleted elements
-    const deleted = ctx.createArray() catch return value.JSValue.undefined_val;
-    deleted.prototype = ctx.array_prototype;
-    var d: i32 = 0;
-    while (d < delete_count) : (d += 1) {
-        const val = obj.getIndex(@intCast(start + d)) orelse value.JSValue.undefined_val;
-        ctx.setIndexChecked(deleted, @intCast(d), val) catch return value.JSValue.undefined_val;
-    }
-
-    const insert_items = if (args.len > 2) args[2..] else &[_]value.JSValue{};
-    const insert_count: i32 = @intCast(insert_items.len);
-    const shift_amount = insert_count - delete_count;
-
-    if (shift_amount > 0) {
-        // Inserting more than deleting: shift tail elements right (from end)
-        var j: i32 = len - 1;
-        while (j >= start + delete_count) : (j -= 1) {
-            const val = obj.getIndex(@intCast(j)) orelse value.JSValue.undefined_val;
-            ctx.setIndexChecked(obj, @intCast(j + shift_amount), val) catch return deleted.toValue();
-        }
-    } else if (shift_amount < 0) {
-        // Deleting more than inserting: shift tail elements left
-        var j: i32 = start + delete_count;
-        while (j < len) : (j += 1) {
-            const val = obj.getIndex(@intCast(j)) orelse value.JSValue.undefined_val;
-            ctx.setIndexChecked(obj, @intCast(j + shift_amount), val) catch return deleted.toValue();
-        }
-    }
-
-    // Insert new items at start position
-    for (insert_items, 0..) |item, idx| {
-        ctx.setIndexChecked(obj, @intCast(start + @as(i32, @intCast(idx))), item) catch return deleted.toValue();
-    }
-
-    // Update length
-    obj.setArrayLength(@intCast(len + shift_amount));
-    return deleted.toValue();
-}
-
 /// Array.prototype.indexOf(searchElement, fromIndex?) - Find first index of element
 /// Optimized: scans inline_slots and overflow_slots directly as contiguous u64
 /// arrays, avoiding per-element getIndex overhead (class_id check, length check,
@@ -545,26 +428,6 @@ fn createStringForJoin(ctx: *context.Context, data: []const u8) ?*string.JSStrin
     return ctx.createStringPtr(data) catch null;
 }
 
-/// Array.prototype.toReversed() - Return new reversed array (non-mutating)
-pub fn arrayToReversed(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = args;
-    const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    if (obj.class_id != .array) return value.JSValue.undefined_val;
-
-    const len = obj.getArrayLength();
-    const result = ctx.createArray() catch return value.JSValue.undefined_val;
-    result.prototype = ctx.array_prototype;
-
-    // Copy elements in reverse order
-    var i: u32 = 0;
-    while (i < len) : (i += 1) {
-        const val = obj.getIndex(len - 1 - i) orelse value.JSValue.undefined_val;
-        ctx.setIndexChecked(result, i, val) catch return value.JSValue.undefined_val;
-    }
-    result.setArrayLength(len);
-    return result.toValue();
-}
-
 /// Array.prototype.slice(start?, end?) - Return shallow copy of portion
 pub fn arraySlice(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
@@ -633,29 +496,6 @@ fn appendArrayElements(ctx: *context.Context, dst: *object.JSObject, src: *objec
         const elem = src.getIndex(i) orelse value.JSValue.undefined_val;
         try dst.arrayPush(ctx.allocator, elem);
     }
-}
-
-pub fn arrayConcat(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const result = try ctx.createArray();
-    result.prototype = ctx.array_prototype;
-
-    // Copy the receiver's elements first.
-    if (getObject(this)) |obj| {
-        try appendArrayElements(ctx, result, obj);
-    }
-
-    // Per spec: array arguments are flattened one level; every other value is
-    // appended as a single element.
-    for (args) |arg| {
-        const maybe_arr = getObject(arg);
-        if (maybe_arr != null and maybe_arr.?.class_id == .array) {
-            try appendArrayElements(ctx, result, maybe_arr.?);
-        } else {
-            try result.arrayPush(ctx.allocator, arg);
-        }
-    }
-
-    return result.toValue();
 }
 
 /// Array.prototype.map(callback, thisArg?) - Map to new array
@@ -728,22 +568,6 @@ pub fn arrayReduce(ctx: *context.Context, this: value.JSValue, args: []const val
         accumulator = try invokeCallback(ctx, call_fn, callback, &call_args);
     }
     return accumulator;
-}
-
-/// Array.prototype.forEach(callback, thisArg?) - Execute callback for each element
-pub fn arrayForEach(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
-    const call_fn = getCallFn(ctx) orelse return value.JSValue.undefined_val;
-    const len = getArrayLength(obj, ctx.hidden_class_pool);
-
-    var i: u32 = 0;
-    while (i < @as(u32, @intCast(len))) : (i += 1) {
-        const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        _ = try invokeCallback(ctx, call_fn, callback, &call_args);
-    }
-    return value.JSValue.undefined_val;
 }
 
 /// Array.prototype.every(callback, thisArg?) - Test if all elements pass
@@ -991,27 +815,6 @@ const OneShotFailAllocator = struct {
         self.child.rawFree(memory, alignment, return_address);
     }
 };
-
-test "arrayConcat reports allocation failure while copying elements" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const gc_mod = @import("../gc.zig");
-
-    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const arr = try ctx.createArray();
-    for (0..object.JSObject.INLINE_SLOT_COUNT) |index| {
-        try ctx.setIndexChecked(arr, @intCast(index), value.JSValue.fromInt(@intCast(index)));
-    }
-    var failing = OneShotFailAllocator{ .child = allocator, .remaining_successes = 1 };
-    ctx.allocator = failing.asAllocator();
-
-    try std.testing.expectError(error.OutOfMemory, arrayConcat(ctx, arr.toValue(), &.{}));
-}
 
 test "arrayToSorted default comparator reports allocation failure" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

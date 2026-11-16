@@ -62,11 +62,6 @@ pub const Result = enum {
     json_result,
     /// `T[]` for the element type `T` of the receiver.
     receiver_array,
-    /// `T | undefined` for the element type `T` of the receiver.
-    receiver_element_or_undefined,
-    /// The array of the union of the receiver's element type and what each
-    /// argument adds.
-    concat_array,
     /// The array of the callback's return type.
     map_array,
     /// The join of the initial value type (or the element type) and the
@@ -199,7 +194,7 @@ pub const rows =
     calls("String.prototype", 0, any_one, .number, &.{"charCodeAt"}) ++
     calls("String.prototype", 0, any_two, .number, &.{ "indexOf", "lastIndexOf" }) ++
     calls("String.prototype", 0, any_two, .boolean, &.{ "startsWith", "endsWith", "includes" }) ++
-    calls("String.prototype", 0, any_two, .string, &.{ "slice", "substring", "padStart", "padEnd", "replace", "replaceAll" }) ++
+    calls("String.prototype", 0, any_two, .string, &.{ "slice", "padStart", "padEnd", "replace", "replaceAll" }) ++
     calls("String.prototype", 0, any_one, .optional_string, &.{"repeat"}) ++
     // `split` returns `undefined` when the separator is neither a string nor
     // undefined, so its separator is `string`. With no argument, it returns
@@ -223,17 +218,9 @@ pub const rows =
     // result for any argument. Allocation failure and an arena escape install
     // an exception instead of returning, so they are not a result.
     //
-    // `push` and `unshift` return the new length. `pop` and `shift` return
-    // `undefined` on an empty array. They read no argument, so a call with an
-    // argument stays untyped.
+    // `push` returns the new length.
     [_]Row{
         .{ .scope = "Array.prototype", .name = "push", .rest = .any, .result = .number },
-        .{ .scope = "Array.prototype", .name = "unshift", .rest = .any, .result = .number },
-        .{ .scope = "Array.prototype", .name = "pop", .result = .receiver_element_or_undefined },
-        .{ .scope = "Array.prototype", .name = "shift", .result = .receiver_element_or_undefined },
-        // `splice` reads a start and a count only when they are integers, else
-        // it deletes from 0 to the end. It always returns the deleted elements.
-        .{ .scope = "Array.prototype", .name = "splice", .rest = .any, .result = .receiver_array },
         // `slice` converts a non-integer bound, and always returns an array.
         .{ .scope = "Array.prototype", .name = "slice", .params = any_two, .result = .receiver_array },
         // `indexOf` and `includes` return -1 or false for a missing element or
@@ -244,9 +231,6 @@ pub const rows =
         // (`valueToStringSimple`), and an undefined separator is a comma, so
         // the separator is `any`.
         .{ .scope = "Array.prototype", .name = "join", .params = any_one, .result = .string },
-        // `concat` flattens an argument that is an array one level and appends
-        // any other argument as one element.
-        .{ .scope = "Array.prototype", .name = "concat", .rest = .any, .result = .concat_array },
         // `map` returns `undefined` for a callback that is not callable. A
         // second argument is ignored.
         .{ .scope = "Array.prototype", .name = "map", .min_args = 1, .params = &.{ .function, .any }, .result = .map_array },
@@ -255,8 +239,6 @@ pub const rows =
         // array returns its element, a longer array the last callback result,
         // and an empty array throws.
         .{ .scope = "Array.prototype", .name = "reduce", .min_args = 1, .params = &.{ .function, .any }, .result = .reduce_value },
-        // `forEach` returns `undefined`, with or without a callback.
-        .{ .scope = "Array.prototype", .name = "forEach", .rest = .any, .result = .undefined_value },
     } ++
     // JSON. `parse` returns the parsed value, or `undefined` for text that is
     // not valid JSON, for a value that is not a string, and for JSON `null`.
@@ -343,7 +325,7 @@ fn skipsOf(
 
 pub const skips =
     // Array.prototype: the seven methods that the checker already types.
-    skipsOf("Array.prototype", typed_elsewhere_array, &.{ "filter", "every", "some", "find", "findIndex", "toSorted", "toReversed" }) ++
+    skipsOf("Array.prototype", typed_elsewhere_array, &.{ "filter", "every", "some", "find", "findIndex", "toSorted" }) ++
     skipsOf("Response", typed_elsewhere_response, &.{ "json", "text", "html", "redirect", "rawJson" }) ++
     skipsOf("Result.prototype", result_unmodeled, &.{
         "isOk", "isErr", "unwrap", "unwrapOr", "unwrapErr", "map", "mapErr", "andThen", "match",
@@ -508,7 +490,7 @@ test "census: every installed builtin has a result row or a stated reason" {
         .{ counts.members, counts.rows, counts.skips, counts.u1b_skips },
     );
     // A floor on the input: a census that enumerated nothing would pass.
-    try std.testing.expect(counts.members >= 130);
+    try std.testing.expect(counts.members >= 122);
     // Each member has a row or a skip, never both.
     try std.testing.expectEqual(counts.members, counts.rows + counts.skips);
 

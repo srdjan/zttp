@@ -1934,9 +1934,7 @@ pub const FlowInterp = struct {
         const reached = try self.deepFlow(st, args);
         const arg_flow = row.defense.apply(reached);
         const flow = row.defense.apply(combineFlows(r.flow(), reached));
-        // `pop` and `shift` write nothing in the abstract heap, and they are
-        // program writes all the same.
-        if ((row.rule == .array_push or row.rule == .array_pop or row.rule == .array_splice) and isMutatingArrayMethod(row.name)) {
+        if (row.rule == .array_push) {
             try self.notePersistentWrite(node, r);
         }
         switch (row.rule) {
@@ -1946,19 +1944,6 @@ pub const FlowInterp = struct {
                 try self.recordSharedWrite(node, r);
                 for (args) |arg| try self.writeValue(st, r, .{ .dynamic = Value.clean }, arg);
                 return Value.flowing(combineFlows(flow, try self.deepFlow(st, &.{r})));
-            },
-            .array_pop => return self.readAll(st.*, r),
-            .array_splice => {
-                const removed = try self.readAll(st.*, r);
-                try self.recordSharedWrite(node, r);
-                // The selectors decide which elements go, so their flow
-                // reaches what stays, and the items from argument 2 are pushed.
-                const selectors = combineFlows(argAt(args, 0).flow(), argAt(args, 1).flow());
-                try self.writeValue(st, r, .{ .dynamic = Value.clean }, Value.flowing(selectors));
-                if (args.len > 2) {
-                    for (args[2..]) |item| try self.writeValue(st, r, .{ .dynamic = Value.clean }, item);
-                }
-                return self.allocate(st, .allocated_array, node, &.{removed}, flow);
             },
             .array_scalar => return Value.flowing(combineFlows(flow, try self.deepFlow(st, &.{r}))),
             .array_copy => return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, r)}, flow),
@@ -1992,10 +1977,6 @@ pub const FlowInterp = struct {
                 const kept = withFlow(try self.readAll(st.*, r), resultFlow(results));
                 return withFlow(kept, flow);
             },
-            .array_for_each => {
-                _ = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .{ .structure = r }, .{ .itself = r } }, st);
-                return Value.flowing(flow);
-            },
             .array_test => {
                 const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .{ .structure = r }, .{ .itself = r } }, st);
                 self.markControlOpt(st, node, results);
@@ -2017,15 +1998,6 @@ pub const FlowInterp = struct {
                 if (args.len < 2) return self.allocate(st, .allocated_array, node, &.{try self.paramValue(st, source, null)}, flow);
                 const results = try self.runCallback(node, args[1], &.{ source, .{ .structure = argAt(args, 0) } }, st);
                 return self.allocate(st, .allocated_array, node, &.{results orelse Value.clean}, flow);
-            },
-            .array_concat => {
-                var contents: std.ArrayList(Value) = .empty;
-                try contents.append(self.mem(), try self.readAll(st.*, r));
-                for (args) |arg| {
-                    try contents.append(self.mem(), arg);
-                    try contents.append(self.mem(), try self.readAll(st.*, arg));
-                }
-                return self.allocate(st, .allocated_array, node, contents.items, flow);
             },
             .deep_scalar => return Value.flowing(arg_flow),
             .nondeterministic => return Value.labelled(.{ .nondeterministic = true }),
@@ -5901,30 +5873,6 @@ test "split makes an array of labelled pieces" {
 test "push writes its argument into the receiver" {
     try expectSecret("function f(s) { const xs = []; xs.push(s); return xs[0]; }", &.{secret_value}, true);
     try expectSecret("function f(s) { const xs = []; xs.push(\"c\"); return xs[0]; }", &.{secret_value}, false);
-    try expectSecret("function f(s) { const xs = []; xs.unshift(s); return xs[0]; }", &.{secret_value}, true);
-}
-
-// P5 specification test 6.
-test "pop returns an element of the receiver" {
-    try expectSecret("function f(s) { return [s].pop(); }", &.{secret_value}, true);
-    try expectSecret("function f(s) { return [\"c\"].pop(); }", &.{secret_value}, false);
-    try expectSecret("function f(s) { return [s].shift(); }", &.{secret_value}, true);
-    // An element in a named cell is not in the summary that a read of `pop`
-    // itself sees, so only the rule can return it.
-    try expectSecret("function f(s) { const a = []; a[\"0\"] = s; return a.pop(); }", &.{secret_value}, true);
-    try expectSecret("function f(s) { const a = []; a[\"0\"] = \"c\"; return a.pop(); }", &.{secret_value}, false);
-}
-
-// P5 specification test 7.
-test "splice writes its selectors and its items and returns the removed elements" {
-    // The labelled selector decides which element stays at index 0.
-    try expectSecret("function f(s) { const a = [\"A\", \"B\"]; a.splice(s, 1); return a[0]; }", &.{secret_value}, true);
-    try expectSecret("function f(s) { const a = [\"A\", \"B\"]; a.splice(0, 1); return a[0]; }", &.{secret_value}, false);
-    // An item from argument 2 on is written.
-    try expectSecret("function f(s) { const a = [\"A\", \"B\"]; a.splice(0, 1, s); return a[0]; }", &.{secret_value}, true);
-    try expectSecret("function f(s) { const a = [\"A\", \"B\"]; a.splice(0, 1, \"C\"); return a[0]; }", &.{secret_value}, false);
-    // The removed elements come back in a fresh array.
-    try expectSecret("function f(s) { return [s].splice(0, 1)[0]; }", &.{secret_value}, true);
 }
 
 // P5 specification test 8.
@@ -5939,14 +5887,6 @@ test "join, indexOf, and includes read the elements of the receiver" {
     try expectSecret("function f(s) { const a = []; a[\"0\"] = s; return a.join(\",\"); }", &.{secret_value}, true);
     try expectSecret("function f(s) { const a = []; a[\"0\"] = s; return a.indexOf(\"x\"); }", &.{secret_value}, true);
     try expectSecret("function f(s) { const a = []; a[\"0\"] = \"c\"; return a.join(\",\"); }", &.{secret_value}, false);
-}
-
-// P5 specification test 9.
-test "concat copies the elements of an array argument" {
-    const source = "function f(s) { const g = () => s; const a = [].concat([g]); const h = a[\"0\"]; return h(); }";
-    try expectSecret(source, &.{secret_value}, true);
-    const clean = "function f(s) { const g = () => \"c\"; const a = [].concat([g]); const h = a[\"0\"]; return h(); }";
-    try expectSecret(clean, &.{secret_value}, false);
 }
 
 // P5 specification test 10.
@@ -6298,7 +6238,7 @@ test "census C1: every registered builtin has a row and every row names a builti
     );
     // A floor on the input: a census that enumerated nothing would pass.
     try testing.expect(counts.globals >= 19);
-    try testing.expect(counts.properties >= 87);
+    try testing.expect(counts.properties >= 79);
     try testing.expectEqual(operation_rows.len, counts.rows);
     // Every property belongs to one row, and a global function has a row of
     // its own, so the rows cover the properties and the global functions.
@@ -6678,16 +6618,16 @@ test "filter labels its elements with the predicate" {
     try expectSecret(held_clean ++ "return a.filter((x) => true)[0]; }", &.{secret_value}, false);
 }
 
-test "find, forEach, every, some, and findIndex carry what their callback sees" {
+test "find, map, every, some, and findIndex carry what their callback sees" {
     try expectSecret("function f(s) { return [\"c\"].find(() => s); }", &.{secret_value}, true);
     try expectSecret("function f(s) { return [\"c\"].find(() => \"c\"); }", &.{secret_value}, false);
     try expectSecret(held_secret ++ "return a.find((x) => true); }", &.{secret_value}, true);
     try expectSecret(held_clean ++ "return a.find((x) => true); }", &.{secret_value}, false);
 
-    // `forEach` runs for its writes.
+    // `map` runs its callback for its writes.
     const each = "function f(s) { const o = { x: \"c\" }; ";
-    try expectSecret(each ++ "[s].forEach((x) => { o.x = x; }); return o.x; }", &.{secret_value}, true);
-    try expectSecret(each ++ "[\"c\"].forEach((x) => { o.x = x; }); return o.x; }", &.{secret_value}, false);
+    try expectSecret(each ++ "[s].map((x) => { o.x = x; return x; }); return o.x; }", &.{secret_value}, true);
+    try expectSecret(each ++ "[\"c\"].map((x) => { o.x = x; return x; }); return o.x; }", &.{secret_value}, false);
 
     inline for (.{ "every", "some", "findIndex" }) |method| {
         try expectSecret("function f(s) { return [\"c\"]." ++ method ++ "(() => s); }", &.{secret_value}, true);
@@ -7147,9 +7087,7 @@ test "operations with the edge keep carry the defenses of their flow" {
         "[e, \"<b>\"].join(\"\")",
         "[e, \"<b>\"][0]",
         "[e, \"<img>\"].toSorted()[0]",
-        "[e, \"<img>\"].pop()",
         "[e, \"<b>\"].filter((x) => true).join(\"\")",
-        "[e, \"<b>\"].splice(0, 1).join(\"\")",
     };
     inline for (escaped_forms) |form| {
         try expectDefenses(text_import ++ "function f(u) { const e = escapeHtml(u); return " ++ form ++ "; }", &params, html_only);
@@ -7218,7 +7156,6 @@ test "the callback index carries the structure of the receiver" {
         "a.map((x, i) => { " ++ write ++ " return x; })",
         "a.filter((x, i) => { " ++ write ++ " return true; })",
         "a.find((x, i) => { " ++ write ++ " return true; })",
-        "a.forEach((x, i) => { " ++ write ++ " })",
         "a.every((x, i) => { " ++ write ++ " return true; })",
         "a.some((x, i) => { " ++ write ++ " return true; })",
         "a.findIndex((x, i) => { " ++ write ++ " return true; })",
@@ -7502,7 +7439,7 @@ test "a loop that makes a value exposed converges" {
     try expectDefenses(head ++ "x = x + y; } return x; }", &params, no_defenses);
     // The same through a callback loop.
     try expectDefenses(
-        text_import ++ "function f(u) { let x = escapeHtml(\"c\"); [u].forEach((y) => { x = x + escapeHtml(y); }); return x; }",
+        text_import ++ "function f(u) { let x = escapeHtml(\"c\"); [u].map((y) => { x = x + escapeHtml(y); return y; }); return x; }",
         &params,
         html_only,
     );
@@ -8063,7 +8000,6 @@ test "request identity follows joins cells returns and callbacks" {
     try expectHandlerInput("function handler(req) { const r = req.url ? req : { headers: { authorization: \"public\" } }; return r.headers.authorization; }", true);
     try expectHandlerInput("function handler(req) { const box = { nested: [req] }; return box.nested[0].headers.authorization; }", true);
     try expectHandlerInput("function identity(r) { return r; } function handler(req) { return identity(req).headers.authorization; }", true);
-    try expectHandlerInput("function handler(req) { return [req].pop().headers.authorization; }", true);
     try expectHandlerInput("function handler(req) { return [req].map((r) => r.headers.authorization).join(\",\"); }", true);
     try expectHandlerInput("function handler(req) { return [req].map((r) => r.headers.accept).join(\",\"); }", false);
     try expectHandlerInput("function handler(req) { const box = { h: req.headers }; return box.h.authorization; }", true);
@@ -8367,7 +8303,7 @@ test "log sink observations occur during conditions and callbacks" {
     const in_condition = try probeReport("function f(r) { console.log(r.headers.authorization); return true; } function handler(req) { if (f(req)) { return \"a\"; } return \"b\"; }");
     try testing.expect(!in_condition.cleared);
     try testing.expect(!in_condition.properties.no_credential_leakage);
-    const callback = try probeReport("function handler(req) { [req].forEach((r) => console.log(r.headers.authorization)); return \"public\"; }");
+    const callback = try probeReport("function handler(req) { [req].map((r) => { console.log(r.headers.authorization); return r; }); return \"public\"; }");
     try testing.expect(!callback.cleared);
     try testing.expect(!callback.properties.no_credential_leakage);
     const virtual_log = try probeReport("import { logInfo } from \"zttp:log\"; function handler(req) { logInfo(\"audit\", { value: req.headers.authorization }); return \"public\"; }");
@@ -8667,52 +8603,17 @@ test "a closure counter made during initialization is a persistent write" {
     try testing.expectEqualSlices(u32, &.{4}, found.lines);
 }
 
-test "pop and shift on a module array are persistent writes though they write no cell" {
-    const popped = try persistentWriteLines(
-        \\const seen = [1, 2];
-        \\function handler(req) {
-        \\  const last = seen.pop();
-        \\  return Response.text(String(last));
-        \\}
-    );
-    defer popped.deinit();
-    try testing.expect(!popped.cleared);
-    try testing.expectEqualSlices(u32, &.{3}, popped.lines);
-
-    const shifted = try persistentWriteLines(
-        \\const seen = [1, 2];
-        \\function handler(req) {
-        \\  const first = seen.shift();
-        \\  return Response.text(String(first));
-        \\}
-    );
-    defer shifted.deinit();
-    try testing.expect(!shifted.cleared);
-    try testing.expectEqualSlices(u32, &.{3}, shifted.lines);
-}
-
-test "unshift, splice, field assignment, and module binding assignment are persistent writes" {
-    const unshifted = try persistentWriteLines(
+test "push, field assignment, and module binding assignment are persistent writes" {
+    const pushed = try persistentWriteLines(
         \\const seen = [1];
         \\function handler(req) {
-        \\  seen.unshift(0);
+        \\  seen.push(0);
         \\  return Response.text("ok");
         \\}
     );
-    defer unshifted.deinit();
-    try testing.expect(!unshifted.cleared);
-    try testing.expectEqualSlices(u32, &.{3}, unshifted.lines);
-
-    const spliced = try persistentWriteLines(
-        \\const seen = [1, 2];
-        \\function handler(req) {
-        \\  seen.splice(0, 1);
-        \\  return Response.text("ok");
-        \\}
-    );
-    defer spliced.deinit();
-    try testing.expect(!spliced.cleared);
-    try testing.expectEqualSlices(u32, &.{3}, spliced.lines);
+    defer pushed.deinit();
+    try testing.expect(!pushed.cleared);
+    try testing.expectEqualSlices(u32, &.{3}, pushed.lines);
 
     const field = try persistentWriteLines(
         \\const store = { n: 0 };
@@ -8933,15 +8834,15 @@ test "an initializer that never returns ends the analysis with no completion" {
 
 test "every mutating array method has a row whose rule makes a persistent write" {
     const methods = @import("mutating_methods.zig").mutating_array_methods;
-    try testing.expect(methods.len >= 5);
+    try testing.expect(methods.len >= 1);
     for (methods) |name| {
         const row = findRow(&operation_rows, "Array.prototype", name) orelse return error.MutatingMethodWithoutRow;
-        try testing.expect(row.rule == .array_push or row.rule == .array_pop or row.rule == .array_splice);
+        try testing.expect(row.rule == .array_push);
     }
     var rows_with_write_rule: usize = 0;
     for (operation_rows) |row| {
         if (!std.mem.eql(u8, row.scope, "Array.prototype")) continue;
-        if (row.rule != .array_push and row.rule != .array_pop and row.rule != .array_splice) continue;
+        if (row.rule != .array_push) continue;
         rows_with_write_rule += 1;
         try testing.expect(isMutatingArrayMethod(row.name));
     }

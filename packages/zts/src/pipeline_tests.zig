@@ -4208,80 +4208,11 @@ test "builtin result: slice on an array is the receiver array" {
     , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
 }
 
-test "builtin result: splice on an array is the receiver array" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: string[]): number { const p: Nope = xs.splice(0, 1); return 0; }
-    , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: pop on an array is the element or undefined" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[]): number { const p: Nope = xs.pop(); return 0; }
-    , "type 'number | undefined' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: shift on an array is the element or undefined" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: string[]): number { const p: Nope = xs.shift(); return 0; }
-    , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "false proof: the last element of an array may be undefined" {
-    try expectOneMismatch(
-        \\function f(xs: number[]): number { const last: number = xs.pop(); return last; }
-    , "type 'number | undefined' is not assignable to type 'number'");
-}
-
 test "builtin result: push on an array is number" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
         \\function f(xs: number[]): number { const p: Nope = xs.push(1, 2); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: unshift on an array is number" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[]): number { const p: Nope = xs.unshift(1); return 0; }
-    , "type 'number' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: forEach on an array is undefined" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[], cb: (n: number) => number): number { const p: Nope = xs.forEach(cb); return 0; }
-    , "type 'undefined' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: concat of two number arrays is a number array" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[], ys: number[]): number { const p: Nope = xs.concat(ys); return 0; }
-    , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: concat of a number array and a string array has both element types" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[], ys: string[]): number { const p: Nope = xs.concat(ys); return 0; }
-    , "type 'number | string[]' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: concat of a string onto a number array has both element types" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[], s: string): number { const p: Nope = xs.concat(s); return 0; }
-    , "type 'number | string[]' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: concat of an argument with no type stays untyped" {
-    try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[], ys: number[] | undefined): number { const p: Nope = xs.concat(ys); return 0; }
-    );
 }
 
 test "builtin result: map is the array of the callback return type" {
@@ -4919,28 +4850,14 @@ test "dict callbacks: a callback over a union of Dict types keeps today's behavi
 test "builtin result: an array method on a receiver that may be undefined stays untyped" {
     try expectNoTypeDiagnostic(
         \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[] | undefined): number { const p: Nope = xs.pop(); return 0; }
+        \\function f(xs: number[] | undefined): number { const p: Nope = xs.slice(0, 1); return 0; }
     );
 }
 
 test "builtin result: an array method through an optional chain stays untyped" {
     try expectNoTypeDiagnostic(
         \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[]): number { const p: Nope = xs?.pop(); return 0; }
-    );
-}
-
-test "builtin result: pop on an array literal widens the element type" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(): number { const p: Nope = [1, 2].pop(); return 0; }
-    , "type 'number | undefined' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: pop on an empty array literal stays untyped" {
-    try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
-        \\function f(): number { const p: Nope = [].pop(); return 0; }
+        \\function f(xs: number[]): number { const p: Nope = xs?.slice(0, 1); return 0; }
     );
 }
 
@@ -5556,12 +5473,6 @@ test "builtin result: a parameter named Array keeps its own type" {
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
-test "builtin result: concat of a number array and a string array is assignable to the array of the union" {
-    try expectNoTypeDiagnostic(
-        \\function f(xs: number[], ys: string[]): number { const p: (number | string)[] = xs.concat(ys); return 0; }
-    );
-}
-
 test "callback parameter: the index of a map callback is number" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
@@ -5580,13 +5491,6 @@ test "callback parameter: the index of a filter callback is number" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
         \\function f(xs: string[]): number { xs.filter((v, i) => { const p: Nope = i; return true; }); return 0; }
-    , "type 'number' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "callback parameter: the index of a forEach callback is number" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: string[]): number { xs.forEach((v, i) => { const p: Nope = i; }); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
@@ -6541,18 +6445,6 @@ test "callback acceptance: an annotated index parameter that refuses number is Z
     try expectOneArgMismatch(
         \\function f(xs: number[]): number { xs.map((v: number, i: string) => v); return 0; }
     , "callback parameter 'i' is 'string', but map passes 'number'");
-}
-
-test "callback acceptance: a forEach parameter past the passed values is ZTS203" {
-    try expectOneArgMismatch(
-        \\function f(xs: number[]): number { xs.forEach((v: number, i: number, a: number[], extra: number) => v); return 0; }
-    , "callback parameter 'extra' is 'number', but forEach passes 'undefined'");
-}
-
-test "callback acceptance: a forEach parameter past the passed values that admits undefined is accepted" {
-    try expectNoTypeDiagnostic(
-        \\function f(xs: number[]): number { xs.forEach((v: number, i: number, a: number[], extra: number | undefined) => v); return 0; }
-    );
 }
 
 test "callback acceptance: a reduce accumulator that refuses the seed is ZTS203" {

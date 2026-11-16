@@ -341,90 +341,6 @@ pub fn stringSlice(ctx: *context.Context, this: value.JSValue, args: []const val
     return value.JSValue.fromPtr(result);
 }
 
-/// String.prototype.substring(start, end?) - Extract substring
-/// Uses zero-copy SliceString for substrings >= 16 bytes
-pub fn stringSubstring(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    // Get data from any string type
-    const data = getStringDataCtx(this, ctx) orelse return value.JSValue.undefined_val;
-
-    // Indices are UTF-16 code units. For ASCII the count equals the byte length
-    // and unit index equals byte offset, so the conversions below are no-ops.
-    const is_ascii = stringIsAscii(this);
-    const len_units: u32 = if (is_ascii) @intCast(data.len) else string.utf16Length(data);
-
-    var start: i32 = 0;
-    var end: i32 = @intCast(len_units);
-
-    if (args.len > 0) {
-        if (args[0].isInt()) {
-            start = args[0].getInt();
-        } else if (args[0].toNumber()) |n| {
-            if (std.math.isFinite(n)) {
-                start = std.math.lossyCast(i32, @trunc(n));
-            } else if (n > 0) { // +Infinity → len
-                start = @intCast(len_units);
-            } // NaN / -Infinity → start stays 0
-        }
-    }
-    if (args.len > 1) {
-        if (args[1].isInt()) {
-            end = args[1].getInt();
-        } else if (args[1].toNumber()) |n| {
-            if (std.math.isFinite(n)) {
-                end = std.math.lossyCast(i32, @trunc(n));
-            } else if (n > 0) { // +Infinity → len
-                end = @intCast(len_units);
-            } else { // NaN / -Infinity → 0 per spec
-                end = 0;
-            }
-        }
-    }
-
-    if (start < 0) start = 0;
-    if (end < 0) end = 0;
-    if (start > @as(i32, @intCast(len_units))) start = @intCast(len_units);
-    if (end > @as(i32, @intCast(len_units))) end = @intCast(len_units);
-    if (start > end) {
-        const tmp = start;
-        start = end;
-        end = tmp;
-    }
-
-    // Map UTF-16 code-unit indices to UTF-8 byte offsets at codepoint
-    // boundaries (start <= end here, so the end map continues from start).
-    const offsets = utf16SliceByteOffsets(data, is_ascii, @intCast(start), @intCast(end));
-    const byte_start = offsets.start;
-    const byte_end = offsets.end;
-    const slice_len = byte_end - byte_start;
-
-    // Fast path: copy if slice < 16 bytes (SliceString overhead exceeds copy cost)
-    if (slice_len < string.SliceString.MIN_SLICE_LEN) {
-        const slice = data[byte_start..byte_end];
-        const result = ctx.createStringPtr(slice) catch return value.JSValue.undefined_val;
-        return value.JSValue.fromPtr(result);
-    }
-
-    // Zero-copy slice for larger substrings - need the flat parent string
-    if (this.isString()) {
-        const str = this.toPtr(string.JSString);
-        const slice_str = ctx.createSlicePtr(str, byte_start, slice_len) catch return value.JSValue.undefined_val;
-        return value.JSValue.fromPtr(slice_str);
-    }
-
-    // For SliceString: adjust offset relative to parent
-    if (this.isStringSlice()) {
-        const existing_slice = this.toPtr(string.SliceString);
-        const new_offset = existing_slice.offset + byte_start;
-        const slice_str = ctx.createSlicePtr(existing_slice.parent, new_offset, slice_len) catch return value.JSValue.undefined_val;
-        return value.JSValue.fromPtr(slice_str);
-    }
-
-    // For other string types, copy
-    const slice = data[byte_start..byte_end];
-    const result = ctx.createStringPtr(slice) catch return value.JSValue.undefined_val;
-    return value.JSValue.fromPtr(result);
-}
-
 /// String.prototype.toLowerCase() - Convert to lowercase
 pub fn stringToLowerCase(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = args;
@@ -1006,10 +922,9 @@ test "string length/charAt/slice index by UTF-16 code units ENG-utf16" {
     try std.testing.expectEqualStrings("é", getStringData(stringCharAt(ctx, hello, &.{value.JSValue.fromInt(1)})) orelse return error.TestUnexpectedResult);
     try std.testing.expectEqualStrings("o", getStringData(stringCharAt(ctx, hello, &.{value.JSValue.fromInt(4)})) orelse return error.TestUnexpectedResult);
 
-    // slice / substring clamp by code units and cut on codepoint boundaries.
+    // slice clamps by code units and cut on codepoint boundaries.
     try std.testing.expectEqualStrings("hé", getStringData(stringSlice(ctx, hello, &.{ value.JSValue.fromInt(0), value.JSValue.fromInt(2) })) orelse return error.TestUnexpectedResult);
     try std.testing.expectEqualStrings("éllo", getStringData(stringSlice(ctx, hello, &.{value.JSValue.fromInt(1)})) orelse return error.TestUnexpectedResult);
-    try std.testing.expectEqualStrings("é", getStringData(stringSubstring(ctx, hello, &.{ value.JSValue.fromInt(1), value.JSValue.fromInt(2) })) orelse return error.TestUnexpectedResult);
 
     // Astral charAt: a lone surrogate cannot be represented in UTF-8, so the
     // whole codepoint is returned for either unit index (documented limitation).

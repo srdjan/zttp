@@ -247,14 +247,11 @@ const Rule = enum {
     string_scalar,
     /// `split`: a fresh array of pieces.
     string_split,
-    /// `push` and `unshift`: write each argument into the receiver.
+    /// `push`: write each argument into the receiver.
     array_push,
-    /// `pop` and `shift`: an element of the receiver.
-    array_pop,
-    array_splice,
     /// `indexOf`, `includes`, and `join`: a primitive that reads the elements.
     array_scalar,
-    /// `slice` and `toReversed`: a fresh array of the elements.
+    /// `slice`: a fresh array of the elements.
     array_copy,
     /// `toSorted`: a copy, and a comparator is a callback.
     array_to_sorted,
@@ -264,8 +261,6 @@ const Rule = enum {
     array_filter,
     /// `find`: an element, labelled by the predicate.
     array_find,
-    /// `forEach`: the callback runs for its writes.
-    array_for_each,
     /// `every`, `some`, and `findIndex`: a primitive that the predicate decides.
     array_test,
     /// `reduce`: the accumulator.
@@ -277,7 +272,6 @@ const Rule = enum {
     /// `renderToString`: runs no component, so it has a rule only for a vnode
     /// that holds none.
     render,
-    array_concat,
     /// A primitive computed from the arguments alone.
     deep_scalar,
     /// A primitive that differs between runs (a clock or random read).
@@ -357,24 +351,20 @@ fn rowsOf(
 /// - The request readers return fresh request data, so they remove both.
 pub const operation_rows =
     rowsOf("String.prototype", .string_scalar, .keep, "", &.{
-        "charAt",      "charCodeAt", "indexOf",   "lastIndexOf", "startsWith",
-        "endsWith",    "includes",   "slice",     "substring",   "toLowerCase",
-        "toUpperCase", "trim",       "trimStart", "trimEnd",     "repeat",
-        "padStart",    "padEnd",     "concat",
+        "charAt",   "charCodeAt", "indexOf", "lastIndexOf", "startsWith",
+        "endsWith", "includes",   "slice",   "toLowerCase", "toUpperCase",
+        "trim",     "trimStart",  "trimEnd", "repeat",      "padStart",
+        "padEnd",   "concat",
     }) ++
     rowsOf("String.prototype", .string_scalar, .drop_all, "", &.{ "replace", "replaceAll" }) ++
     rowsOf("String.prototype", .string_split, .keep, "", &.{"split"}) ++
-    rowsOf("Array.prototype", .array_push, .keep, "", &.{ "push", "unshift" }) ++
-    rowsOf("Array.prototype", .array_pop, .keep, "", &.{ "pop", "shift" }) ++
-    rowsOf("Array.prototype", .array_splice, .keep, "", &.{"splice"}) ++
+    rowsOf("Array.prototype", .array_push, .keep, "", &.{"push"}) ++
     rowsOf("Array.prototype", .array_scalar, .keep, "", &.{ "indexOf", "includes", "join" }) ++
-    rowsOf("Array.prototype", .array_copy, .keep, "", &.{ "slice", "toReversed" }) ++
+    rowsOf("Array.prototype", .array_copy, .keep, "", &.{"slice"}) ++
     rowsOf("Array.prototype", .array_to_sorted, .keep, "", &.{"toSorted"}) ++
-    rowsOf("Array.prototype", .array_concat, .keep, "", &.{"concat"}) ++
     rowsOf("Array.prototype", .array_map, .keep, "", &.{"map"}) ++
     rowsOf("Array.prototype", .array_filter, .keep, "", &.{"filter"}) ++
     rowsOf("Array.prototype", .array_find, .keep, "", &.{"find"}) ++
-    rowsOf("Array.prototype", .array_for_each, .keep, "", &.{"forEach"}) ++
     rowsOf("Array.prototype", .array_test, .keep, "", &.{ "every", "some", "findIndex" }) ++
     rowsOf("Array.prototype", .array_reduce, .keep, "", &.{"reduce"}) ++
     rowsOf("Result.prototype", .no_rule, .keep, result_reason, &.{

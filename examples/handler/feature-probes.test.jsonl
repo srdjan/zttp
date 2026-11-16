@@ -28,7 +28,7 @@
 
 {"type":"test","name":"object math and array helper results"}
 {"type":"request","method":"GET","url":"/helpers","headers":{},"body":null}
-{"type":"expect","status":200,"body":"{\"values\":[1,2],\"entries\":[[\"a\",1],[\"b\",2]],\"floors\":[-2,-2,3],\"rounded\":[-2,-1,4],\"abs\":1.8,\"min\":4,\"max\":9,\"forEachTotal\":6}"}
+{"type":"expect","status":200,"body":"{\"values\":[1,2],\"entries\":[[\"a\",1],[\"b\",2]],\"floors\":[-2,-2,3],\"rounded\":[-2,-1,4],\"abs\":1.8,\"min\":4,\"max\":9,\"reduceTotal\":6}"}
 
 {"type":"test","name":"for-of closures capture per-iteration bindings"}
 {"type":"request","method":"GET","url":"/for-of-closure","headers":{},"body":null}

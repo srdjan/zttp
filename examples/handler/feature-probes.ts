@@ -80,10 +80,7 @@ function helpersProbe() {
   const min = Math.min(4, 9);
   const max = Math.max(4, 9);
 
-  const forEachBox = { total: 0 };
-  [1, 2, 3].forEach((n) => {
-    forEachBox.total = forEachBox.total + n;
-  });
+  const total = [1, 2, 3].reduce((acc, n) => acc + n, 0);
 
   return Response.json({
     values: values,
@@ -93,7 +90,7 @@ function helpersProbe() {
     abs: abs,
     min: min,
     max: max,
-    forEachTotal: forEachBox.total,
+    reduceTotal: total,
   });
 }
 

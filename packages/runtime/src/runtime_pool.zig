@@ -1797,8 +1797,9 @@ const lifetime_guard_cases = [_]LifetimeGuardCase{
         \\  const base = req.url;
         \\  let last = "";
         \\  for (const i of range(2000)) {
-        \\    [1, 2].forEach((x) => {
+        \\    [1, 2].map((x) => {
         \\      last = [base, String(x)].join("");
+        \\      return x;
         \\    });
         \\  }
         \\  return Response.text(last);

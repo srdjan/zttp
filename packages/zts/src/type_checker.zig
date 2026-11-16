@@ -4255,9 +4255,6 @@ pub const TypeChecker = struct {
             }};
             return self.env.pool.addFunction(self.allocator, &params, array_type);
         }
-        if (std.mem.eql(u8, prop_name, "toReversed")) {
-            return self.env.pool.addFunction(self.allocator, &.{}, array_type);
-        }
         return null_type_idx;
     }
 
@@ -4328,8 +4325,6 @@ pub const TypeChecker = struct {
             .json_result => self.typedResultType(pool.idx_unknown, pool.idx_string, pool.idx_never),
             // These take their type from the receiver or the arguments.
             .receiver_array,
-            .receiver_element_or_undefined,
-            .concat_array,
             .map_array,
             .reduce_value,
             .json_text,
@@ -4449,34 +4444,6 @@ pub const TypeChecker = struct {
         return true;
     }
 
-    /// What one `concat` argument of type `arg_type` adds to the result's
-    /// element type: the elements of an array or a tuple, which the runtime
-    /// flattens one level, and the type itself for a scalar. Any other type
-    /// could be an array at runtime, so it adds nothing known (null).
-    fn concatContribution(self: *const TypeChecker, arg_type: TypeIndex) TypeIndex {
-        if (arg_type == null_type_idx) return null_type_idx;
-        const pool = self.env.pool;
-        const resolved = pool.widenLiteral(self.resolvedType(arg_type));
-        const tag = pool.getTag(resolved) orelse return null_type_idx;
-        switch (tag) {
-            .t_array => {
-                const element = pool.getArrayElement(resolved);
-                if (element == null_type_idx) return null_type_idx;
-                return pool.widenLiteral(element);
-            },
-            .t_tuple => {
-                // An empty tuple adds no element.
-                if (pool.getTupleElements(resolved).len == 0) return pool.idx_never;
-                return pool.getArrayElement(self.tupleToArrayType(resolved));
-            },
-            .t_number, .t_string, .t_boolean => return resolved,
-            // exhaustive: a record, a union, `unknown`, and every other type
-            // might be an array at runtime, and the runtime would then add its
-            // elements and not the value.
-            else => return null_type_idx,
-        }
-    }
-
     /// How deep the values of a type can nest, for `JSON.stringify`, which
     /// gives up at 512 levels (`JSON_MAX_DEPTH` in http.zig).
     const JsonDepth = enum {
@@ -4570,26 +4537,6 @@ pub const TypeChecker = struct {
             .receiver_array => {
                 if (element == null_type_idx) return null_type_idx;
                 return pool.addArray(self.allocator, element);
-            },
-            .receiver_element_or_undefined => {
-                if (!self.isDefiniteType(element, 0)) return null_type_idx;
-                if (pool.getTag(element) == .t_nullable) return element;
-                return pool.addNullable(self.allocator, element);
-            },
-            .concat_array => {
-                if (element == null_type_idx) return null_type_idx;
-                var members: [MAX_UNION_MEMBERS]TypeIndex = undefined;
-                if (call.args_count + 1 > members.len) return null_type_idx;
-                members[0] = element;
-                for (0..call.args_count) |position| {
-                    const arg = self.ir_view.getListIndex(call.args_start, @intCast(position));
-                    const added = self.concatContribution(self.inferType(arg));
-                    if (added == null_type_idx) return null_type_idx;
-                    members[position + 1] = added;
-                }
-                const joined = pool.addUnion(self.allocator, members[0 .. call.args_count + 1]);
-                if (joined == null_type_idx) return null_type_idx;
-                return pool.addArray(self.allocator, joined);
             },
             .map_array => {
                 if (element == null_type_idx) return null_type_idx;
@@ -4781,8 +4728,6 @@ pub const TypeChecker = struct {
         }
         return switch (row.result) {
             .receiver_array,
-            .receiver_element_or_undefined,
-            .concat_array,
             .map_array,
             .reduce_value,
             .json_text,
@@ -5287,7 +5232,7 @@ pub const TypeChecker = struct {
     };
 
     fn callbackShape(name: []const u8) ?CallbackShape {
-        const element_index_array = [_][]const u8{ "map", "filter", "find", "findIndex", "forEach", "some", "every" };
+        const element_index_array = [_][]const u8{ "map", "filter", "find", "findIndex", "some", "every" };
         for (element_index_array) |m| {
             if (std.mem.eql(u8, m, name)) return .element_index_array;
         }
@@ -8744,10 +8689,9 @@ pub const TypeChecker = struct {
             self.addTupleLengthChange(node, false);
             return;
         }
-        const first_value: usize = if (std.mem.eql(u8, method, "push") or std.mem.eql(u8, method, "unshift")) 0 else if (std.mem.eql(u8, method, "splice")) 2 else return;
         if (slots.items.len == 0) return;
         const widen = self.writeRootIsUnannotated(member.object);
-        var arg: usize = first_value;
+        var arg: usize = 0;
         while (arg < call.args_count) : (arg += 1) {
             const value_type = self.inferType(self.ir_view.getListIndex(call.args_start, @intCast(arg)));
             if (value_type == null_type_idx) continue;
@@ -10815,34 +10759,26 @@ test "TypeChecker: a readonly array refuses a mutating method" {
     // in place. `ro.push("y")` checked clean and appended at runtime, which
     // made the modifier decorative wherever the value never crossed a call
     // boundary.
-    for ([_][]const u8{ "push", "pop", "shift", "unshift", "splice" }) |method| {
-        const source = try std.testing.allocator.print(
-            \\function handler(req: Request): Response {{
-            \\  const ro: readonly string[] = ["x"];
-            \\  ro.{s}();
-            \\  return Response.json({{ n: ro.length }});
-            \\}}
-        , .{method});
-        defer std.testing.allocator.free(source);
-        try checkTypedSourceSaying(source, 1, "readonly");
-    }
+    try checkTypedSourceSaying(
+        \\function handler(req: Request): Response {
+        \\  const ro: readonly string[] = ["x"];
+        \\  ro.push();
+        \\  return Response.json({ n: ro.length });
+        \\}
+    , 1, "readonly");
 }
 
-test "TypeChecker: a mutable array still takes every method" {
-    // The companion direction. Dropping `readonly` must leave every one of
-    // those calls alone, or the rule is refusing arrays rather than refusing
+test "TypeChecker: a mutable array still takes push" {
+    // The companion direction. Dropping `readonly` must leave the mutating
+    // call alone, or the rule is refusing arrays rather than refusing
     // mutation.
-    for ([_][]const u8{ "push", "pop", "shift", "unshift", "splice" }) |method| {
-        const source = try std.testing.allocator.print(
-            \\function handler(req: Request): Response {{
-            \\  const xs: string[] = ["x"];
-            \\  xs.{s}();
-            \\  return Response.json({{ n: xs.length }});
-            \\}}
-        , .{method});
-        defer std.testing.allocator.free(source);
-        try checkTypedSource(source, 0, null);
-    }
+    try checkTypedSource(
+        \\function handler(req: Request): Response {
+        \\  const xs: string[] = ["x"];
+        \\  xs.push();
+        \\  return Response.json({ n: xs.length });
+        \\}
+    , 0, null);
 }
 
 test "TypeChecker: a readonly array still takes a non-mutating method" {
@@ -10864,7 +10800,7 @@ test "TypeChecker: a readonly parameter refuses mutation in the body" {
     // write.
     try checkTypedSourceSaying(
         \\function drain(xs: readonly string[]): number {
-        \\  xs.pop();
+        \\  xs.push("b");
         \\  return xs.length;
         \\}
         \\function handler(req: Request): Response {
@@ -11186,13 +11122,6 @@ test "TypeChecker: toSorted with no comparator type-checks clean" {
     try checkTypedSource(
         \\const nums = [3, 1, 2];
         \\const sorted = nums.toSorted();
-    , 0, 0);
-}
-
-test "TypeChecker: toReversed type-checks clean" {
-    try checkTypedSource(
-        \\const nums = [3, 1, 2];
-        \\const rev = nums.toReversed();
     , 0, 0);
 }
 

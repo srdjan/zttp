@@ -388,8 +388,7 @@ A result has a type only when each argument has the type that the runtime reads.
 | `String(x)`, `s.toUpperCase()`, `s.slice(1)`, `xs.join(",")` | `string` |
 | `s.split(",")` with a string separator | `string[]` |
 | `s.repeat(n)`, `req.headers.get("x")` | `string \| undefined` |
-| `xs.pop()`, `xs.shift()` | the element type or `undefined` |
-| `xs.slice(0, 1)`, `xs.concat(ys)`, `xs.map(f)` | an array |
+| `xs.slice(0, 1)`, `xs.map(f)` | an array |
 | `xs.reduce(f, seed)` | the seed type or the callback's return type |
 | `JSON.parse(s)` | `unknown` |
 | `JSON.tryParse(s)` | a Result with an `unknown` value and a `string` error |
@@ -402,7 +401,7 @@ An unannotated parameter of an inline array callback takes the type of the value
 
 An unannotated `const` or `let` binding of an array literal widens each element type. `const ys = [4, 5]` is `number[]`, `const t = ["a", 1]` is `[string, number]`, and `const out = []` is `unknown[]`. The loop variable of `for...of` over a tuple is the union of the widened element types: over `[1, 2, 3]` it is a `number`, and over `["a", 1]` it is `string | number`. Over a union of arrays and tuples, it is the union of the element types of each member.
 
-An annotated or named callback of `map`, `filter`, `find`, `findIndex`, `forEach`, `some`, `every`, `toSorted`, or `reduce` must accept the value that the method passes in each position. A parameter past those values must accept `undefined`. Otherwise the call gets ZTS203:
+An annotated or named callback of `map`, `filter`, `find`, `findIndex`, `some`, `every`, `toSorted`, or `reduce` must accept the value that the method passes in each position. A parameter past those values must accept `undefined`. Otherwise the call gets ZTS203:
 
 ```javascript
 [1, 2].map((s: string) => s.toUpperCase());      // ZTS203: callback parameter 's' is 'string', but map passes 'number'
@@ -418,7 +417,6 @@ These programs are now refused, because the value can be `undefined`:
 
 ```javascript
 const first: string = s.split(",")[0];          // write s.split(",")[0] ?? ""
-const last: number = xs.pop();                   // write xs.pop() ?? 0, or check for undefined in an if
 const token: string = req.headers.get("x");     // write req.headers.get("x") ?? ""
 const r: string = s.repeat(n);                  // write s.repeat(n) ?? ""
 return xs.map(f)[0];                            // in a number function: write xs.map(f)[0] ?? 0
@@ -477,9 +475,9 @@ In a union, a member that one union member does not hold adds `undefined` to the
 
 ### Writes Into Containers
 
-A write into a record field, an array element, or a tuple element must fit the type of that slot. `p.name = 5` and `p["name"] = 5` with `p: { name: string }`, and `xs[0] = "a"` with `xs: number[]`, get ZTS200. Each argument of `push` and `unshift`, and each argument of `splice` after the second, must fit the element type (ZTS203). On a union receiver, the value must fit the slot of each member that has one.
+A write into a record field, an array element, or a tuple element must fit the type of that slot. `p.name = 5` and `p["name"] = 5` with `p: { name: string }`, and `xs[0] = "a"` with `xs: number[]`, get ZTS200. Each argument of `push` must fit the element type (ZTS203). On a union receiver, the value must fit the slot of each member that has one.
 
-A tuple type names its length. So `push`, `pop`, `shift`, `unshift`, `splice`, and a write to `length` on a tuple get ZTS200. Annotate the binding as an array, such as `string[]`, when the length must change.
+A tuple type names its length. So `push` and a write to `length` on a tuple get ZTS200. Annotate the binding as an array, such as `string[]`, when the length must change.
 
 A `const` or `let` with no annotation widens the literal types of the slot when its initializer is an object or array literal, or a name bound to one. So `const o = { n: 0 }; o.n = 1;` is accepted. A write through any other binding keeps the declared type. `alias.kind = "c"` with `const alias = s` and `s: { kind: "a" | "b" }` gets ZTS200. A write of a value with no type passes, and a fresh array literal such as `[1, 2].pop()` is not checked.
 
