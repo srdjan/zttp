@@ -4572,12 +4572,12 @@ test "direct signature replay preserves capacity and bucket order at two growth 
     try std.testing.expectEqual([2]usize{ 11, 23 }, same_line);
 }
 
-test "direct signature replay retains exact nested generic arrow and same-line owners" {
+test "direct signature replay retains exact nested generic function and same-line owners" {
     const allocator = std.testing.allocator;
     const source = "function outer<T extends number>(value: T): T { " ++
         "function same(value: number): number { return value; } return value; } " ++
         "function same(value: string): string { return value; } " ++
-        "const arrow = <U extends string>(value: U): U => value;";
+        "function second<U extends string>(value: U): U { return value; }";
     var direct_count = GrowthCountingAllocator.init(allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
@@ -4586,7 +4586,7 @@ test "direct signature replay retains exact nested generic arrow and same-line o
     direct_parser.setAtomTable(&direct_atoms);
     const direct_root = try direct_parser.parse();
     try growthExpectRuntime(&direct_parser, direct_root);
-    try std.testing.expectEqual([5]usize{ 21, 0, 0, 2, 4963 }, direct_count.shape());
+    try std.testing.expectEqual([5]usize{ 21, 0, 0, 2, 5045 }, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);
     var direct_pool = TypePool.init(allocator);
     defer direct_pool.deinit(allocator);
@@ -4598,16 +4598,15 @@ test "direct signature replay retains exact nested generic arrow and same-line o
         .atoms = &direct_atoms,
     } });
     try std.testing.expectEqual(@as(usize, 4), direct_env.direct_fn_signatures.count());
-    try std.testing.expectEqual(@as(usize, 2), direct_env.fn_sigs_by_name.count());
-    try std.testing.expectEqual(@as(usize, 2), direct_env.source_fn_sigs_by_name.count());
+    try std.testing.expectEqual(@as(usize, 3), direct_env.fn_sigs_by_name.count());
+    try std.testing.expectEqual(@as(usize, 3), direct_env.source_fn_sigs_by_name.count());
     try std.testing.expectEqual(@as(usize, 4), direct_parser.type_store.function_signatures.items.len);
     var owners: [4]NodeIndex = undefined;
     var repeated_same: [2]NodeIndex = undefined;
     var same_count: usize = 0;
-    var arrow_count: usize = 0;
     for (direct_parser.type_store.function_signatures.items, 0..) |record, index| {
         owners[index] = record.owner;
-        const expected_offsets = [_]u32{ 32, 61, 132, 206 };
+        const expected_offsets = [_]u32{ 32, 61, 132, 207 };
         try std.testing.expectEqual(expected_offsets[index], direct_view.signatureOffset(record.owner).?);
         const reference = direct_env.functionTypeRef(direct_view, record.owner) orelse return error.TestUnexpectedResult;
         const signature = direct_env.getFunctionSignature(reference) orelse return error.TestUnexpectedResult;
@@ -4623,12 +4622,10 @@ test "direct signature replay retains exact nested generic arrow and same-line o
             repeated_same[same_count] = record.owner;
             same_count += 1;
         }
-        if (direct_view.getTag(record.owner) == .arrow_function) arrow_count += 1;
         try std.testing.expectEqual(@as(u32, 1), direct_view.getLoc(record.owner).?.line);
     }
     try std.testing.expectEqual(@as(usize, 2), same_count);
     try std.testing.expect(repeated_same[0] != repeated_same[1]);
-    try std.testing.expectEqual(@as(usize, 1), arrow_count);
     for (owners, 0..) |owner, index| {
         for (owners[index + 1 ..]) |other| {
             try std.testing.expect(owner != other);
@@ -4647,7 +4644,6 @@ test "direct signature replay retains exact nested generic arrow and same-line o
     for (direct_parser.type_store.generic_owners.items) |generic_owner| {
         const owner = switch (generic_owner.identity) {
             .function => |node| node,
-            .arrow => |node| node,
             else => return error.TestUnexpectedResult,
         };
         const reference = direct_env.functionTypeRef(direct_view, owner) orelse

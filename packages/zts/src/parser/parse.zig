@@ -39,6 +39,7 @@ const Binding = scope_mod.Binding;
 
 const ErrorList = error_mod.ErrorList;
 
+const generic_arrow_message = "type parameters on an arrow are not supported; write the arrow without them, or a module-level generic function";
 const raw_jsx_message = "raw JSX is not supported; use ordinary TypeScript expressions";
 
 pub const AdmissionFailure = union(enum) {
@@ -2633,9 +2634,14 @@ pub const Parser = struct {
     };
 
     fn tryReserveArrowGenericOwner(self: *Parser) !ArrowGenericOwnerProbe {
+        const opener = self.current;
         return switch (try self.selectArrowGeneric()) {
             .not_generic => .not_generic,
             .selected => |selected| blk: {
+                if (!self.expression_profile) {
+                    self.errors.addErrorAt(.unsupported_feature, opener, generic_arrow_message);
+                    return error.ParseError;
+                }
                 const pending = try self.type_store.reserveGenericOwner(selected.options);
                 self.adoptAdmissionCursor(selected.cursor, selected.previous);
                 break :blk .{ .reserved = pending };
@@ -10781,8 +10787,8 @@ test "error-list allocation failure outranks a retained type-only module refusal
 test "nested type-only module refusal removes enclosing type syntax" {
     const tails = [_][]const u8{
         "function helper<T>(value: string): string {import type { Spec } from \"" ++ retired_types_module ++ "\";return value;}",
-        "const helper=<T>(value)=>{import type { Spec } from \"" ++ retired_types_module ++ "\";return value;};",
-        "export const helper=<T>(value)=>{import type { Spec } from \"" ++ retired_types_module ++ "\";return value;};",
+        "const helper=(value)=>{import type { Spec } from \"" ++ retired_types_module ++ "\";return value;};",
+        "export const helper=(value)=>{import type { Spec } from \"" ++ retired_types_module ++ "\";return value;};",
     };
     for (tails) |tail| {
         const source = try std.mem.concat(

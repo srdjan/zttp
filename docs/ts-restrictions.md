@@ -115,6 +115,7 @@ Declaration merging, open interfaces, and inheritance are excluded.
 | A default parameter, such as `limit = 50` | ZTS054 | `limit: number \| undefined`, then `const resolved = limit ?? 50;` in the body |
 | Optional parameter shorthand `name?: T` | ZTS055 | `name: T \| undefined` |
 | Rest parameters `...args` | ZTS001 | An explicit array parameter |
+| Type parameters on an arrow, such as `<T>(x: T) => x` | ZTS001 | The arrow without type parameters, or a module-level generic function |
 | Call-site spread `f(...args)` | ZTS616 | Positional arguments |
 | A named function without parameter or return annotations | ZTS601 | Annotate every parameter and the return type |
 | A call with too few or too many arguments | ZTS202 | Supply every declared argument, and no more |
@@ -371,7 +372,6 @@ against the compiler.
 | A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
-| Type parameters on an arrow, such as `<T>(x: T) => x` | Accepted, exit 0 | ZTS001. Write the callback without type parameters |
 | A type name outside the admitted types, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error` | Accepted, exit 0 | A targeted refusal. Use an admitted type from section 5.7 of the specification |
 | A readonly record type, such as `readonly { a: number }`, and a record type with comma separators, such as `{ a: number, b: string }` | Accepted, exit 0 | ZTS001. Write an admitted type form. A record type separates its fields with `;` |
 | A `Dict` key type other than `string` or `number`, such as `Dict<boolean, string>` | Accepted, exit 0 | ZTS209. Use `string` or `number` as the key type |

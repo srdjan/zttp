@@ -414,6 +414,11 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(top("function f(args: number[]): number {\n  return 1;\n}")),
     },
     .{
+        .key = "Type parameters on an arrow, such as `<T>(x: T) => x`",
+        .refused = &.{r("<T>(x: T) => x", top("function g(): number[] {\n  return [1].map(<T>(x: T) => x);\n}"))},
+        .clean = c(top("function g(): number[] {\n  return [1].map((x: number) => x);\n}")),
+    },
+    .{
         .key = "Call-site spread `f(...args)`",
         .refused = &.{r("f(...args)", top("function f(a: number): number {\n  return a;\n}\nfunction g(args: number[]): number {\n  return f(...args);\n}"))},
         .clean = c(top("function f(a: number): number {\n  return a;\n}\nfunction g(args: number[]): number {\n  return f(1);\n}")),
@@ -1275,10 +1280,6 @@ pub const gap_rows = [_]GapRow{
             c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) {\n    return 1;\n  } else g();\n  return 2;\n}")),
             c(top(g_fn ++ "function h(xs: number[]): number {\n  for (const k of xs) g();\n  return 2;\n}")),
         },
-    },
-    .{
-        .key = "Type parameters on an arrow, such as `<T>(x: T) => x`",
-        .sources = &.{c(top("function g(): number[] {\n  return [1].map(<T>(x: T) => x);\n}"))},
     },
     .{
         .key = "A type name outside the admitted types, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error`",

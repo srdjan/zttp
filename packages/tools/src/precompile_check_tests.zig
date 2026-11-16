@@ -1607,7 +1607,6 @@ test "CHECK refuses an erased type prefix at the angle bracket" {
         .{ .source = "const x = <T> { id: 1 };\n", .diagnostic = .{ .code = "ZTS042", .message = "the angle-bracket type assertion `<T>x` is not supported", .suggestion = "narrow with `typeof`, a type predicate, or a decoder", .line = 1, .column = 11 } },
         .{ .source = "<T> { const a = 1; }\n", .diagnostic = .{ .code = "ZTS042", .message = "the angle-bracket type assertion `<T>x` is not supported", .suggestion = "narrow with `typeof`, a type predicate, or a decoder", .line = 1, .column = 1 } },
         .{ .source = "const x = (<T>(1));\n", .diagnostic = .{ .code = "ZTS042", .message = "the angle-bracket type assertion `<T>x` is not supported", .suggestion = "narrow with `typeof`, a type predicate, or a decoder", .line = 1, .column = 12 } },
-        .{ .source = "const f = <T>(value /* ( */): number => value;\n", .diagnostic = .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 1, .column = 11 } },
     };
     for (cases) |case| {
         var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{ .json_mode = true });
@@ -5837,7 +5836,6 @@ test "CHECK preserves generic admission and projection outcomes" {
     }{
         .{ .name = "adjacent_function", .source = "function id<T>(x: T): T { return x; }\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "spaced_function", .source = "function id <T>(x: T): T { return x; }\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 18, .suggestion = "')'" }} },
-        .{ .name = "generic_arrow", .source = "const id = <T>(x: T): T => x;\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "spaced_alias", .source = "structural Box <T> = { value: T };\nconst probe: Box<string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: string }'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "nested_function", .source = "function outer(): number {\n  function id<T>(x: T): T { return x; }\n  return id(\"x\");\n}\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 3, .column = 3, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" }} },
         .{ .name = "function_default", .source = "function make<T = string>(x: T): T { return x; }\nconst probe: number = make(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "a generic default is not supported", .line = 1, .column = 17, .suggestion = "remove the default and pass the type argument at each use" }} },
@@ -5864,7 +5862,6 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "shift_control", .source = "const value = 8 >> 1;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "bitwise operators are not supported", .line = 1, .column = 17, .suggestion = "use arithmetic or a comparison" }} },
         .{ .name = "comparison_shift_control", .source = "const a = 1;\nconst b = 2;\nconst c = 1;\nconst value = a < b >> c;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "bitwise operators are not supported", .line = 4, .column = 21, .suggestion = "use arithmetic or a comparison" }} },
         .{ .name = "comparison_unsigned_shift_control", .source = "const a = 1;\nconst b = 2;\nconst c = 1;\nconst value = a < b >>> c;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "bitwise operators are not supported", .line = 4, .column = 21, .suggestion = "use arithmetic or a comparison" }} },
-        .{ .name = "method_call", .source = "const object = { id: <T>(value: T): T => value };\nconst probe: number = object.id<string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .contract, .diagnostics = &.{.{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 3, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: cost_bounded, deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\">`." }} },
         .{ .name = "triple_closer", .source = "structural Box<T> = { value: T };\nconst probe: Box<Box<Box<string>>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: { value: { value: string } } }'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "application_missing_comma", .source = "structural Box<T> = { value: T };\nconst probe: Box<string number> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Box<string, number>'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "application_missing_close", .source = "structural Box<T> = { value: T };\nconst probe: Box<string = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{ .{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 25, .suggestion = "write an admitted type from section 5.7 of the specification" }, .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 6, .column = 1, .suggestion = null }, .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 7, .suggestion = null } } },
@@ -5899,9 +5896,6 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "name33_array", .source = "function f<TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT>(x: TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT[]): TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT[] { return x; }\nconst probe: number[] = f([\"x\"]);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string[]' is not assignable to type 'number[]'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "constraint_control", .source = "function f<T extends number>(x: T): T { return x; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS209", .message = "type argument \"x\" for 'T' does not satisfy constraint number", .line = 2, .column = 24, .suggestion = null }, .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
         .{ .name = "empty_alias_parameters", .source = "structural Box<> = number;\nconst bare: Box = \"x\";\nconst applied: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'Box'", .line = 2, .column = 1, .suggestion = null }, .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null } } },
-        .{ .name = "parenthesized_arrow_spaced_window", .source = "const id = (<T> (value: T): T => value);\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS208", .message = "no argument determines type parameter 'T>'", .line = 2, .column = 25, .suggestion = "Name the type argument at the call site." }, .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
-        .{ .name = "parenthesized_arrow_adjacent_window", .source = "const id = (<T>(value: T): T => value);\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "assignment_arrow_spaced_window", .source = "const id = <T> (value: T): T => value;\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "empty_generic_alias_body", .source = "structural Box<> = ;\nconst bare: Box = \"x\";\nconst applied: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 1, .column = 20, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
     };
     const types_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
@@ -5951,7 +5945,7 @@ test "CHECK preserves generic admission and projection outcomes" {
         }
         observed += 1;
     }
-    try std.testing.expectEqual(@as(usize, 68), cases.len);
+    try std.testing.expectEqual(@as(usize, 63), cases.len);
     try std.testing.expectEqual(cases.len, observed);
 }
 
@@ -6037,128 +6031,34 @@ test "CHECK preserves the any suffix refusal in a generic alias name" {
     });
 }
 
-test "CHECK preserves the general generic arrow window after an assignment comment" {
-    const source =
-        "const id = /* gap */ <T> (value: T): T => value;\n" ++
-        "const probe: number = id(\"x\");\n" ++
-        "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
-    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
-        .json_mode = true,
-    });
-    defer result.deinit(std.testing.allocator);
-    try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict }), result.stages_run);
-    try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
-    try std.testing.expectEqual(@as(u32, 2), result.type_errors);
-    try std.testing.expectEqual(@as(u32, 2), result.totalErrors());
-    try std.testing.expect(result.contract == null);
-    try std.testing.expectEqual(@as(usize, 2), result.json_diagnostics.items.len);
-    try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
-        .code = "ZTS208",
-        .message = "no argument determines type parameter 'T>'",
-        .line = 2,
-        .column = 25,
-        .suggestion = "Name the type argument at the call site.",
-    });
-    try expectCompoundDiagnostic(result.json_diagnostics.items[1], .{
-        .code = "ZTS200",
-        .message = "type 'T' is not assignable to type 'number'",
-        .line = 2,
-        .column = 1,
-        .suggestion = null,
-    });
-}
-
-test "CHECK preserves arrow capture after line comment text" {
-    const cases = [_]struct {
-        source: []const u8,
-        parse_refusal: bool,
-        diagnostics: []const CompoundDiagnostic,
-    }{
-        .{
-            .source = "const id = // note\n<T> (value: T): T => value;\n" ++
-                "const probe: number = id(\"x\");\n" ++
-                "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-            .parse_refusal = false,
-            .diagnostics = &.{
-                .{ .code = "ZTS208", .message = "no argument determines type parameter 'T>'", .line = 3, .column = 25, .suggestion = "Name the type argument at the call site." },
-                .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null },
-            },
-        },
-        .{
-            .source = "const id = // note=\n<T> (value: T): T => value;\n" ++
-                "const probe: number = id(\"x\");\n" ++
-                "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-            .parse_refusal = false,
-            .diagnostics = &.{
-                .{ .code = "ZTS208", .message = "no argument determines type parameter 'T>'", .line = 3, .column = 25, .suggestion = "Name the type argument at the call site." },
-                .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null },
-            },
-        },
+test "CHECK refuses type parameters on an arrow at the angle bracket" {
+    const handler_line = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+    const cases = [_]struct { source: []const u8, line: u32, column: u32 }{
+        .{ .source = "function make() { return <T>(value: T): T => value; }\n" ++ handler_line, .line = 1, .column = 26 },
+        .{ .source = "function make() { return <T>\n(value: T): T => value; }\n" ++ handler_line, .line = 1, .column = 26 },
+        .{ .source = "const id = // note\n<T>(value: T): T => value;\n" ++ handler_line, .line = 2, .column = 1 },
+        .{ .source = "const xs = [1].map(<T>(x: T) => x);\n" ++ handler_line, .line = 1, .column = 20 },
+        .{ .source = "const id = <T>(value: T): T => value;\n" ++ handler_line, .line = 1, .column = 12 },
     };
-    var observed: usize = 0;
     for (cases) |case| {
+        errdefer std.debug.print("generic arrow refusal failed for source:\n{s}\n", .{case.source});
         var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{
             .json_mode = true,
         });
         defer result.deinit(std.testing.allocator);
-        try std.testing.expectEqual(@as(u32, @intCast(case.diagnostics.len)), result.totalErrors());
-        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
-        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectCompoundDiagnostic(actual, expected);
-        }
-        try std.testing.expect(result.contract == null);
-        if (case.parse_refusal) {
-            try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse }), result.stages_run);
-            try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
-            try std.testing.expectEqual(@as(u32, 0), result.type_errors);
-        } else {
-            try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict }), result.stages_run);
-            try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
-            try std.testing.expectEqual(@as(u32, 2), result.type_errors);
-        }
-        observed += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 2), cases.len);
-    try std.testing.expectEqual(cases.len, observed);
-}
-
-test "CHECK reads a generic arrow after a line comment like one with no comment" {
-    const source =
-        "const id = // note\n<T>(value: T): T => value;\n" ++
-        "const probe: number = id(\"x\");\n" ++
-        "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
-    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
-        .json_mode = true,
-    });
-    defer result.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
-    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
-    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
-    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-    try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
-        .code = "ZTS200",
-        .message = "type 'string' is not assignable to type 'number'",
-        .line = 3,
-        .column = 1,
-        .suggestion = null,
-    });
-}
-
-test "CHECK parses a generic arrow after return" {
-    const cases = [_][]const u8{
-        "function make() { return <T>(value: T): T => value; }\n",
-        "function make() { return <T extends string>(value: T): T => value; }\n",
-        "function make() { return <T>\n(value: T): T => value; }\n",
-    };
-    inline for (cases) |head| {
-        const source = head ++
-            "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
-        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
-            .json_mode = true,
+        try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse }), result.stages_run);
+        try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
+            .code = "ZTS001",
+            .message = "type parameters on an arrow are not supported",
+            .line = case.line,
+            .column = case.column,
+            .suggestion = "write the arrow without them, or a module-level generic function",
         });
-        defer result.deinit(std.testing.allocator);
-        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expect(result.contract == null);
     }
+    try std.testing.expectEqual(@as(usize, 5), cases.len);
 }
 
 test "CHECK classifies predicate targets and quoted return types" {
@@ -6585,19 +6485,6 @@ test "CHECK preserves lexical diagnostics inside type-only modules" {
 test "CHECK preserves typed generic arrows and comment classification" {
     const FailureStage = enum { parse, types, strict };
     const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostics: []const CompoundDiagnostic }{
-        .{ .source = "const id=<T>(value: T): T => value;\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{
-            .{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null },
-        } },
-        .{ .source = "const id=(<T> (value: T): T => value);\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{
-            .{ .code = "ZTS208", .message = "no argument determines type parameter 'T>'", .line = 2, .column = 25, .suggestion = "Name the type argument at the call site." },
-            .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null },
-        } },
-        .{ .source = "const id = // note\n<T>(value: T): T => value;\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{
-            .{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null },
-        } },
-        .{ .source = "const id = // note=\n<T>(value: T): T => value;\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{
-            .{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null },
-        } },
         .{ .source = "function // note\nidentity<T>(value) { return value; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strict, .diagnostics = &.{
             .{ .code = "ZTS601", .message = "strict ZigTS requires explicit function parameter and return types", .line = 2, .column = 12, .suggestion = "annotate each parameter and the return type, for example `function handler(req: Request): Response`" },
         } },
@@ -6630,7 +6517,7 @@ test "CHECK preserves typed generic arrows and comment classification" {
         try std.testing.expect(result.contract == null);
         observed += 1;
     }
-    try std.testing.expectEqual(@as(usize, 7), cases.len);
+    try std.testing.expectEqual(@as(usize, 3), cases.len);
     try std.testing.expectEqual(cases.len, observed);
 }
 

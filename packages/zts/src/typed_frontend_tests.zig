@@ -1117,74 +1117,6 @@ fn runHeaderTypeAllocation(
     try expectOrderedTypeValueTags(&parser, &values, &.{ .t_unknown_type, .t_string });
 }
 
-const GenericArrowAllocationCase = enum {
-    dedicated,
-    line_comment,
-};
-
-const GenericArrowAllocationObservations = struct {
-    failures: usize = 0,
-    post_seed_rollbacks: usize = 0,
-    successes: usize = 0,
-};
-
-fn runGenericArrowTypeAllocation(
-    type_allocator: std.mem.Allocator,
-    case: GenericArrowAllocationCase,
-    observations: *GenericArrowAllocationObservations,
-) !void {
-    const source = switch (case) {
-        .dedicated => "const seed: number = 1; const id=<T>(value: T): T => value;",
-        .line_comment => "const seed: number = 1; const id = // note\n<T>(value: T): T => value;",
-    };
-    var runtime_count = CountingAllocator.init(std.testing.allocator);
-    const runtime_allocator = runtime_count.allocator();
-    var atoms = AtomTable.init(runtime_allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.initAdmission(runtime_allocator, type_allocator, source, .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const arrow_offset: u32 = @intCast(std.mem.indexOf(u8, source, "const id") orelse
-        return error.TestUnexpectedResult);
-    const root = parser.parse() catch |err| {
-        switch (err) {
-            error.OutOfMemory => {},
-            else => return err,
-        }
-        observations.failures += 1;
-        try std.testing.expectEqual(@as(u16, 0), parser.scopes.current_scope);
-        if (parser.current.start >= arrow_offset) {
-            try expectStoreCheckpoint(&parser.type_store, seedCheckpoint());
-            observations.post_seed_rollbacks += 1;
-        } else {
-            try expectStoreCheckpoint(
-                &parser.type_store,
-                std.mem.zeroes(TypeSyntax.Store.Checkpoint),
-            );
-        }
-        try parser.type_store.validate();
-        return err;
-    };
-
-    observations.successes += 1;
-    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
-    try parser.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&parser));
-    try std.testing.expect(parser.type_store.nodes.items.len > 0);
-    try expectSeedAnnotationLowersToNumber(&parser);
-    // Both sources hold the seed annotation and one arrow `<T>(value: T): T`.
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_parameters.items.len);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.projected_generic_parameters.items.len);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.parameter_annotations.items.len);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        parser.type_store.authored_call_arguments.items.len,
-    );
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
-}
-
 const NamedFunctionCommentAllocationCase = enum {
     before_name,
     after_list,
@@ -2536,22 +2468,6 @@ test "predicate header type allocation failures restore the seed checkpoint" {
         );
         try std.testing.expect(observed_failures > 0);
         try std.testing.expect(observed_post_seed_rollbacks > 0);
-    }
-    try std.testing.expectEqual(@as(usize, 2), cases.len);
-}
-
-test "typed generic arrow allocation failures restore every store array" {
-    const cases = [_]GenericArrowAllocationCase{ .dedicated, .line_comment };
-    for (cases) |case| {
-        var observations: GenericArrowAllocationObservations = .{};
-        try std.testing.checkAllAllocationFailures(
-            std.testing.allocator,
-            runGenericArrowTypeAllocation,
-            .{ case, &observations },
-        );
-        try std.testing.expect(observations.failures > 0);
-        try std.testing.expect(observations.post_seed_rollbacks > 0);
-        try std.testing.expect(observations.successes > 0);
     }
     try std.testing.expectEqual(@as(usize, 2), cases.len);
 }
@@ -4588,335 +4504,6 @@ test "first generic function slice accepts only its bounded source shape" {
     }
 }
 
-const GenericArrowExpectation = struct {
-    list: []const u8,
-    actual_capture: []const u8,
-    recorded_capture: []const u8,
-    projected_name: []const u8,
-};
-
-fn expectGenericArrowOrderedProjection(
-    parser: *const JsParser,
-    expected: GenericArrowExpectation,
-) !void {
-    var pool = TypePool.init(std.testing.allocator);
-    defer pool.deinit(std.testing.allocator);
-    var env = TypeEnv.init(std.testing.allocator, &pool);
-    defer env.deinit();
-    const prior_nodes = pool.nodes.items.len;
-    try lowerSyntaxStore(
-        std.testing.allocator,
-        &parser.type_store,
-        &pool,
-        &env,
-        parserIrView(parser),
-    );
-    const expected_nodes: usize = if (std.mem.eql(u8, expected.projected_name, "T")) 1 else 3;
-    try std.testing.expectEqual(prior_nodes + expected_nodes, pool.nodes.items.len);
-    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-
-    const owner = parser.type_store.generic_owners.items[0];
-    const owner_node = switch (owner.identity) {
-        .arrow => |node| node,
-        else => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqual(
-        TypeTag.t_generic_param,
-        pool.getTag(@intCast(prior_nodes)).?,
-    );
-    try std.testing.expectEqualStrings(
-        expected.projected_name,
-        pool.getRefName(@intCast(prior_nodes)),
-    );
-    try std.testing.expect(env.direct_call_type_args.get(owner_node) == null);
-}
-
-fn expectTypedGenericArrowRecords(
-    parser: *const JsParser,
-    source: []const u8,
-    expected: GenericArrowExpectation,
-) !void {
-    const store = &parser.type_store;
-    const view = parserIrView(parser);
-    try store.validateRuntimeOwners(std.testing.allocator, view);
-    try std.testing.expectEqual(@as(usize, 1), store.generic_owners.items.len);
-    try std.testing.expectEqual(@as(usize, 1), store.generic_parameters.items.len);
-    try std.testing.expectEqual(@as(usize, 1), store.projected_generic_parameters.items.len);
-    try std.testing.expectEqual(@as(usize, 1), store.parameter_annotations.items.len);
-    try std.testing.expectEqual(@as(usize, 1), store.function_signatures.items.len);
-    try std.testing.expectEqual(@as(usize, 0), store.type_only_modules.items.len);
-
-    const owner = store.generic_owners.items[0];
-    try std.testing.expectEqualStrings(expected.list, owner.list_span.text(source));
-    try std.testing.expectEqualStrings(
-        expected.actual_capture,
-        owner.capture_spans.actual_erased_span.text(source),
-    );
-    try std.testing.expectEqualStrings(
-        expected.recorded_capture,
-        owner.capture_spans.recorded_span.text(source),
-    );
-    try std.testing.expectEqual(@as(u32, 0), owner.authored_parameters.start);
-    try std.testing.expectEqual(@as(u32, 1), owner.authored_parameters.count);
-    try std.testing.expectEqual(@as(u32, 0), owner.projected_parameters.start);
-    try std.testing.expectEqual(@as(u32, 1), owner.projected_parameters.count);
-    const projected = store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings(expected.projected_name, projected[0].name_span.text(source));
-
-    const owner_node = switch (owner.identity) {
-        .arrow => |node| node,
-        else => return error.TestUnexpectedResult,
-    };
-    const signature = store.function_signatures.items[0];
-    try std.testing.expectEqual(owner_node, signature.owner);
-    try std.testing.expectEqual(engine.parser.NodeTag.arrow_function, view.getTag(owner_node).?);
-    const function = view.getFunction(owner_node) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u8, 1), function.params_count);
-    try std.testing.expectEqual(@as(u32, 0), signature.parameters.start);
-    try std.testing.expectEqual(@as(u32, 1), signature.parameters.count);
-    const pattern = view.getListIndex(function.params_start, 0);
-    const parameter = store.parameter_annotations.items[0];
-    try std.testing.expectEqual(pattern, parameter.owner.pattern);
-    try std.testing.expect(std.meta.eql(
-        parameter.owner.binding,
-        view.paramBinding(pattern) orelse return error.TestUnexpectedResult,
-    ));
-    try std.testing.expectEqualStrings("T", parameter.value.raw_span.text(source));
-    const parameter_root = store.node(try syntaxChildIndex(parameter.value.root)) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(TypeSyntax.NodeTag.named_reference, parameter_root.tag);
-    try std.testing.expectEqualStrings("T", parameter_root.semantic_span.text(source));
-
-    const return_syntax = signature.return_syntax orelse return error.TestUnexpectedResult;
-    const return_value = switch (return_syntax.structure) {
-        .value => |value| value,
-        .predicate => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqualStrings("T ", return_value.raw_span.text(source));
-    const return_root = store.node(try syntaxChildIndex(return_value.root)) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(TypeSyntax.NodeTag.named_reference, return_root.tag);
-    try std.testing.expectEqualStrings("T", return_root.semantic_span.text(source));
-
-    const opener = std.mem.indexOf(u8, source, "(value") orelse
-        return error.TestUnexpectedResult;
-    const body = std.mem.lastIndexOf(u8, source, "value") orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u32, @intCast(opener)), view.getLoc(owner_node).?.offset);
-    try std.testing.expectEqual(@as(u32, @intCast(opener)), signature.source_span.start);
-    try std.testing.expectEqual(@as(u32, @intCast(body)), signature.source_span.end);
-
-    switch (owner.compatibility) {
-        .declaration_parameters => {},
-        else => return error.TestUnexpectedResult,
-    }
-    try std.testing.expectEqual(@as(usize, 0), store.authored_call_arguments.items.len);
-    try std.testing.expectEqual(@as(usize, 0), store.semantic_fragments.items.len);
-    try expectGenericArrowOrderedProjection(parser, expected);
-}
-
-test "typed generic arrows retain final owners and recorded projection windows" {
-    const Fixture = struct {
-        source: []const u8,
-        expected: GenericArrowExpectation,
-    };
-    const fixtures = [_]Fixture{
-        .{
-            .source = "const id=<T>(value: T): T => value;",
-            .expected = .{
-                .list = "<T>",
-                .actual_capture = "<T>",
-                .recorded_capture = "T",
-                .projected_name = "T",
-            },
-        },
-        .{
-            .source = "const id=(<T> (value: T): T => value);",
-            .expected = .{
-                .list = "<T>",
-                .actual_capture = "<T> ",
-                .recorded_capture = "T>",
-                .projected_name = "T>",
-            },
-        },
-        .{
-            .source = "const id = /* gap */ <T> (value: T): T => value;",
-            .expected = .{
-                .list = "<T>",
-                .actual_capture = "<T> ",
-                .recorded_capture = "T>",
-                .projected_name = "T>",
-            },
-        },
-        .{
-            .source = "const id = // note\n<T>(value: T): T => value;",
-            .expected = .{
-                .list = "<T>",
-                .actual_capture = "<T>",
-                .recorded_capture = "T",
-                .projected_name = "T",
-            },
-        },
-        .{
-            .source = "const id = // note=\n<T> (value: T): T => value;",
-            .expected = .{
-                .list = "<T>",
-                .actual_capture = "<T> ",
-                .recorded_capture = "T>",
-                .projected_name = "T>",
-            },
-        },
-    };
-
-    for (fixtures) |fixture| {
-        var runtime_count = CountingAllocator.init(std.testing.allocator);
-        const runtime_allocator = runtime_count.allocator();
-        var atoms = AtomTable.init(runtime_allocator);
-        defer atoms.deinit();
-        var parser = try JsParser.initAdmission(
-            runtime_allocator,
-            std.testing.allocator,
-            fixture.source,
-            .compile,
-        );
-        defer parser.deinit();
-        parser.setAtomTable(&atoms);
-        const root = try parser.parse();
-        try expectParsedStoreValidWithAllocations(fixture.source, &parser, root, runtime_count);
-        try expectTypedGenericArrowRecords(&parser, fixture.source, fixture.expected);
-    }
-    try std.testing.expectEqual(@as(usize, 5), fixtures.len);
-}
-
-test "generic arrow and explicit call retain ordered syntax before equivalence" {
-    const source =
-        "const seed: number = 1; const id=<T>(value)=>value; const result=id<string>(seed);";
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try parser.type_store.validate();
-
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.explicit_call_arguments.items.len);
-    const owner = parser.type_store.generic_owners.items[0];
-    const view = parserIrView(&parser);
-    const arrow_paren = std.mem.indexOf(u8, source, "(value)") orelse
-        return error.TestUnexpectedResult;
-    switch (owner.identity) {
-        .arrow => |node| {
-            try std.testing.expectEqual(engine.parser.NodeTag.arrow_function, view.getTag(node).?);
-            try std.testing.expectEqual(@as(u32, @intCast(arrow_paren)), view.getLoc(node).?.offset);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-    try std.testing.expectEqualStrings("<T>", owner.list_span.text(source));
-    const projected = parser.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), projected.len);
-    try std.testing.expectEqualStrings("T", projected[0].name_span.text(source));
-
-    const call = parser.type_store.explicit_call_arguments.items[0];
-    const call_paren = std.mem.indexOf(u8, source, "(seed)") orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(engine.parser.NodeTag.call, view.getTag(call.owner).?);
-    try std.testing.expectEqual(@as(u32, @intCast(call_paren)), view.getLoc(call.owner).?.offset);
-    try std.testing.expectEqualStrings("<string>", call.list_span.text(source));
-    const authored = parser.type_store.authoredCallArgumentSlice(call.authored_arguments) orelse
-        return error.TestUnexpectedResult;
-    const fragments = parser.type_store.semanticFragmentSlice(call.semantic_fragments) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), authored.len);
-    try std.testing.expectEqual(@as(usize, 1), fragments.len);
-    try std.testing.expectEqualStrings("string", std.mem.trim(
-        u8,
-        authored[0].full_span.text(source),
-        " \t\r\n",
-    ));
-    try std.testing.expectEqualStrings("string", fragments[0].raw_span.text(source));
-
-    var pool = TypePool.init(std.testing.allocator);
-    defer pool.deinit(std.testing.allocator);
-    var env = TypeEnv.init(std.testing.allocator, &pool);
-    defer env.deinit();
-    const prior_nodes = pool.nodes.items.len;
-    const prior_signatures = env.direct_fn_signatures.count();
-    try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
-    try std.testing.expectEqual(prior_nodes + 1, pool.nodes.items.len);
-    try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes)).?);
-    try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes)));
-    try std.testing.expectEqual(prior_signatures, env.direct_fn_signatures.count());
-    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-    const lowered_call = env.getCallTypeArgsForCall(view, call.owner) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u8, 1), lowered_call.count);
-    try std.testing.expectEqual(pool.idx_string, lowered_call.args[0]);
-
-    try expectDirectAccepted(source);
-}
-
-test "nested generic owners and call retain source reservation order" {
-    const source =
-        "const seed: number = 1; function outer<T extends string>(value) { " ++
-        "const inner=<U>(item)=>item; return inner<number>(value); }";
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try parser.type_store.validate();
-
-    try std.testing.expectEqual(@as(usize, 2), parser.type_store.generic_owners.items.len);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.explicit_call_arguments.items.len);
-    const outer = parser.type_store.generic_owners.items[0];
-    const inner = parser.type_store.generic_owners.items[1];
-    const view = parserIrView(&parser);
-    switch (outer.identity) {
-        .function => |node| try std.testing.expectEqual(
-            @as(u32, @intCast(std.mem.indexOf(u8, source, "(value)") orelse return error.TestUnexpectedResult)),
-            view.getLoc(node).?.offset,
-        ),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (inner.identity) {
-        .arrow => |node| try std.testing.expectEqual(
-            @as(u32, @intCast(std.mem.indexOf(u8, source, "(item)") orelse return error.TestUnexpectedResult)),
-            view.getLoc(node).?.offset,
-        ),
-        else => return error.TestUnexpectedResult,
-    }
-    try std.testing.expectEqual(@as(u32, 0), outer.authored_parameters.start);
-    try std.testing.expectEqual(outer.authored_parameters.count, inner.authored_parameters.start);
-    try std.testing.expectEqual(@as(u32, 0), outer.projected_parameters.start);
-    try std.testing.expectEqual(outer.projected_parameters.count, inner.projected_parameters.start);
-    const outer_projected = parser.type_store.projectedGenericParameterSlice(outer.projected_parameters) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), outer_projected.len);
-    try std.testing.expectEqualStrings(
-        "string",
-        (outer_projected[0].bound_span orelse return error.TestUnexpectedResult).text(source),
-    );
-    try std.testing.expect(outer_projected[0].bound_fragment != null);
-    const call = parser.type_store.explicit_call_arguments.items[0];
-    const expected_call = std.mem.indexOf(u8, source, "(value);") orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u32, @intCast(expected_call)), view.getLoc(call.owner).?.offset);
-
-    var pool = TypePool.init(std.testing.allocator);
-    defer pool.deinit(std.testing.allocator);
-    var env = TypeEnv.init(std.testing.allocator, &pool);
-    defer env.deinit();
-    const prior_signatures = env.direct_fn_signatures.count();
-    try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
-    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-    try std.testing.expectEqual(prior_signatures, env.direct_fn_signatures.count());
-    const lowered_call = env.getCallTypeArgsForCall(view, call.owner) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u8, 1), lowered_call.count);
-    try std.testing.expectEqual(pool.idx_number, lowered_call.args[0]);
-
-    try expectDirectAccepted(source);
-}
-
 test "iterative generic function preflight accepts a nonempty nested body" {
     const source =
         "const seed: number = 1; function outer<T>(value) { " ++
@@ -4938,14 +4525,6 @@ test "iterative generic function preflight accepts a nonempty nested body" {
 }
 
 const GenericRuntimeCase = enum {
-    assignment_arrow_adjacent,
-    assignment_arrow_whitespace,
-    equality_arrow_window,
-    general_arrow_spaced,
-    comment_arrow_general,
-    line_comment_equals_general,
-    empty_assignment_arrow,
-    empty_general_arrow,
     empty_explicit_call,
     explicit_call_adjacent,
     explicit_call_combined_opener,
@@ -4964,25 +4543,17 @@ const generic_runtime_fixtures = [_]struct {
     case: GenericRuntimeCase,
     source: []const u8,
 }{
-    .{ .case = .assignment_arrow_adjacent, .source = "const seed: number = 1; const id=<T>(value)=>value;" },
-    .{ .case = .assignment_arrow_whitespace, .source = "const seed: number = 1; const id = <T> (value)=>value;" },
-    .{ .case = .equality_arrow_window, .source = "const seed: number = 1; const result=seed === <T> (value)=>value;" },
-    .{ .case = .general_arrow_spaced, .source = "const seed: number = 1; const id=(<T> (value)=>value);" },
-    .{ .case = .comment_arrow_general, .source = "const seed: number = 1; const id=/* gap */<T> (value)=>value;" },
-    .{ .case = .line_comment_equals_general, .source = "const seed: number = 1; const id = // note=\n<T> (value)=>value;" },
-    .{ .case = .empty_assignment_arrow, .source = "const seed: number = 1; const id=<>()=>seed;" },
-    .{ .case = .empty_general_arrow, .source = "const seed: number = 1; const id=(<> (value)=>value);" },
-    .{ .case = .empty_explicit_call, .source = "const seed: number = 1; const id=<T>(value)=>value; const result=id<>(seed);" },
-    .{ .case = .explicit_call_adjacent, .source = "const seed: number = 1; const id=<T>(value)=>value; const result=id<string>(seed);" },
+    .{ .case = .empty_explicit_call, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<>(seed);" },
+    .{ .case = .explicit_call_adjacent, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string>(seed);" },
     .{ .case = .explicit_call_combined_opener, .source = "const seed: number = 1; const result=id<<string>>(seed);" },
-    .{ .case = .nested_call_closers, .source = "const seed: number = 1; const id=<T>(value)=>value; const result=id<Outer<Inner<string>>>(seed);" },
-    .{ .case = .missing_call_comma, .source = "const seed: number = 1; const id=<T>(value)=>value; const result=id<string number>(seed);" },
+    .{ .case = .nested_call_closers, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<Outer<Inner<string>>>(seed);" },
+    .{ .case = .missing_call_comma, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string number>(seed);" },
     .{ .case = .missing_call_closer, .source = "const seed: number = 1; const result=id<string(seed);" },
-    .{ .case = .call_semantic_absence_first, .source = "const seed: number = 1; const id=<T>(value)=>value; const result=id<(),string>(seed);" },
-    .{ .case = .quoted_call_comma, .source = "const seed: number = 1; const id=<T>(value)=>value; const result=id<\"a,b\">(seed);" },
-    .{ .case = .comment_call_comma, .source = "const seed: number = 1; const id=<T>(value)=>value; const result=id<string /*,*/>(seed);" },
-    .{ .case = .call_projection_cap, .source = "const seed: number = 1; const id=<T>(value)=>value; const result=id<A,B,C,D,E,F,G,H,I>(seed);" },
-    .{ .case = .spaced_call_comparison, .source = "const seed: number = 1; const id=<T>(value)=>value; const result=id<string> (seed);" },
+    .{ .case = .call_semantic_absence_first, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<(),string>(seed);" },
+    .{ .case = .quoted_call_comma, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<\"a,b\">(seed);" },
+    .{ .case = .comment_call_comma, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string /*,*/>(seed);" },
+    .{ .case = .call_projection_cap, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<A,B,C,D,E,F,G,H,I>(seed);" },
+    .{ .case = .spaced_call_comparison, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string> (seed);" },
     .{ .case = .logical_comparison_control, .source = "const seed: number = 1; const result=seed < value && other > (seed);" },
 };
 
@@ -5010,60 +4581,6 @@ test "generic runtime syntax census observes every case" {
         try expectDirectAccepted(fixture.source);
 
         switch (fixture.case) {
-            .assignment_arrow_adjacent, .equality_arrow_window => {
-                const owner = parser.type_store.generic_owners.items[0];
-                const projected = parser.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-                    return error.TestUnexpectedResult;
-                try std.testing.expectEqual(@as(usize, 1), projected.len);
-                try std.testing.expectEqualStrings("T", projected[0].name_span.text(fixture.source));
-            },
-            .assignment_arrow_whitespace => {
-                const owner = parser.type_store.generic_owners.items[0];
-                try std.testing.expect(std.meta.eql(
-                    owner.list_span,
-                    owner.capture_spans.actual_erased_span,
-                ));
-                try std.testing.expectEqualStrings(
-                    "T",
-                    owner.capture_spans.recorded_span.text(fixture.source),
-                );
-            },
-            .general_arrow_spaced => {
-                const owner = parser.type_store.generic_owners.items[0];
-                const opener = std.mem.indexOf(u8, fixture.source, "(value)") orelse
-                    return error.TestUnexpectedResult;
-                try std.testing.expectEqual(owner.list_span.start, owner.capture_spans.actual_erased_span.start);
-                try std.testing.expectEqual(@as(u32, @intCast(opener)), owner.capture_spans.actual_erased_span.end);
-                try std.testing.expectEqualStrings("<T> ", owner.capture_spans.actual_erased_span.text(fixture.source));
-            },
-            .comment_arrow_general, .line_comment_equals_general => {
-                const owner = parser.type_store.generic_owners.items[0];
-                const projected = parser.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-                    return error.TestUnexpectedResult;
-                try std.testing.expectEqual(@as(usize, 1), projected.len);
-                try std.testing.expectEqualStrings("T>", projected[0].name_span.text(fixture.source));
-            },
-            .empty_assignment_arrow => {
-                const owner = parser.type_store.generic_owners.items[0];
-                try std.testing.expectEqual(@as(u32, 0), owner.authored_parameters.count);
-                try std.testing.expectEqual(@as(u32, 0), owner.projected_parameters.count);
-                try std.testing.expect(std.meta.eql(
-                    owner.list_span,
-                    owner.capture_spans.actual_erased_span,
-                ));
-                try std.testing.expectEqualStrings(
-                    "",
-                    owner.capture_spans.recorded_span.text(fixture.source),
-                );
-            },
-            .empty_general_arrow => {
-                const owner = parser.type_store.generic_owners.items[0];
-                try std.testing.expectEqual(@as(u32, 0), owner.authored_parameters.count);
-                const projected = parser.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-                    return error.TestUnexpectedResult;
-                try std.testing.expectEqual(@as(usize, 1), projected.len);
-                try std.testing.expectEqualStrings(">", projected[0].name_span.text(fixture.source));
-            },
             .empty_explicit_call => {
                 const call = parser.type_store.explicit_call_arguments.items[0];
                 try std.testing.expectEqual(@as(u32, 0), call.authored_arguments.count);
@@ -5159,50 +4676,6 @@ test "generic runtime syntax census observes every case" {
         seen.insert(fixture.case);
     }
     try std.testing.expectEqual(@typeInfo(GenericRuntimeCase).@"enum".field_names.len, seen.count());
-}
-
-test "compound assignment uses the dedicated generic arrow window" {
-    const source = "let seed = 1; seed += <T> (value)=>value;";
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try parser.type_store.validate();
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
-    const owner = parser.type_store.generic_owners.items[0];
-    const projected = parser.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), projected.len);
-    try std.testing.expectEqualStrings("T", projected[0].name_span.text(source));
-}
-
-test "function arrow and call generic names use independent scopes" {
-    const source =
-        "const seed: number = 1; function outer<T>(value) { " ++
-        "const inner=<T>(item)=>item; return inner<T>(value); }";
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try parser.type_store.validate();
-    try std.testing.expectEqual(@as(usize, 2), parser.type_store.generic_owners.items.len);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.explicit_call_arguments.items.len);
-
-    var pool = TypePool.init(std.testing.allocator);
-    defer pool.deinit(std.testing.allocator);
-    var env = TypeEnv.init(std.testing.allocator, &pool);
-    defer env.deinit();
-    const prior_nodes = pool.nodes.items.len;
-    try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
-    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-    try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes)).?);
-    try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes + 1)).?);
-    try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes)));
-    try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes + 1)));
-    const call_owner = parser.type_store.explicit_call_arguments.items[0].owner;
-    const call = env.getCallTypeArgsForCall(parserIrView(&parser), call_owner) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u8, 1), call.count);
-    try std.testing.expectEqual(TypeTag.t_ref, pool.getTag(call.args[0]).?);
-    try std.testing.expectEqualStrings("T", pool.getRefName(call.args[0]));
-    try expectDirectAccepted(source);
 }
 
 test "nested explicit calls reserve outer records before value arguments" {
@@ -5353,71 +4826,10 @@ test "direct calls retain eight projected arguments without publishing a ninth" 
     try excess_env.ensureHealthy();
 }
 
-test "nested generic arrows reserve outer owners before expression bodies" {
-    const source = "const seed:number=1; const outer=<T extends string>(value)=><U extends number>(item)=>item;";
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try parser.type_store.validate();
-    try std.testing.expectEqual(@as(usize, 2), parser.type_store.generic_owners.items.len);
-
-    const outer = parser.type_store.generic_owners.items[0];
-    const inner = parser.type_store.generic_owners.items[1];
-    const outer_lparen = std.mem.indexOf(u8, source, "(value)") orelse return error.TestUnexpectedResult;
-    const inner_lparen = std.mem.indexOf(u8, source, "(item)") orelse return error.TestUnexpectedResult;
-    const view = parserIrView(&parser);
-    const outer_identity = switch (outer.identity) {
-        .arrow => |node| view.getLoc(node).?.offset,
-        else => return error.TestUnexpectedResult,
-    };
-    const inner_identity = switch (inner.identity) {
-        .arrow => |node| view.getLoc(node).?.offset,
-        else => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqual(
-        @as(u32, @intCast(outer_lparen)),
-        outer_identity,
-    );
-    try std.testing.expectEqual(
-        @as(u32, @intCast(inner_lparen)),
-        inner_identity,
-    );
-    try std.testing.expectEqual(@as(u32, 0), outer.authored_parameters.start);
-    try std.testing.expectEqual(outer.authored_parameters.start + outer.authored_parameters.count, inner.authored_parameters.start);
-    try std.testing.expectEqual(@as(u32, 0), outer.projected_parameters.start);
-    try std.testing.expectEqual(outer.projected_parameters.start + outer.projected_parameters.count, inner.projected_parameters.start);
-    const outer_projected = parser.type_store.projected_generic_parameters.items[outer.projected_parameters.start];
-    const inner_projected = parser.type_store.projected_generic_parameters.items[inner.projected_parameters.start];
-    const outer_fragment = parser.type_store.semantic_fragments.items[
-        outer_projected.bound_fragment orelse return error.TestUnexpectedResult
-    ];
-    const inner_fragment = parser.type_store.semantic_fragments.items[
-        inner_projected.bound_fragment orelse return error.TestUnexpectedResult
-    ];
-    try std.testing.expect(outer_fragment.node_range.count > 0);
-    try std.testing.expect(inner_fragment.node_range.count > 0);
-    try std.testing.expectEqualStrings("string", outer_fragment.raw_span.text(source));
-    try std.testing.expectEqualStrings("number", inner_fragment.raw_span.text(source));
-    try std.testing.expect(outer_fragment.node_range.start + outer_fragment.node_range.count <= inner_fragment.node_range.start);
-
-    var pool = TypePool.init(std.testing.allocator);
-    defer pool.deinit(std.testing.allocator);
-    var env = TypeEnv.init(std.testing.allocator, &pool);
-    defer env.deinit();
-    const prior_nodes = pool.nodes.items.len;
-    try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
-    try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes)).?);
-    try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes + 1)).?);
-    try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes)));
-    try std.testing.expectEqualStrings("U", pool.getRefName(@intCast(prior_nodes + 1)));
-    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-    try std.testing.expect(env.getFnSigByName("outer") == null);
-}
-
 test "explicit call applications instantiate the completed generic alias namespace" {
     const source =
         "const seed: number = 1;\nstructural Box<T> = { value: T };\n" ++
-        "const id=<U>(value)=>value; const result=id<Box<number>>(seed);";
+        "function id<U>(value) { return value; } const result=id<Box<number>>(seed);";
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
@@ -5441,237 +4853,6 @@ test "explicit call applications instantiate the completed generic alias namespa
     );
     try std.testing.expectEqual(pool.idx_number, fields[0].type_idx);
     try expectDirectAccepted(source);
-}
-
-test "line comment arrows keep direct source and owner boundaries" {
-    const sources = [_][]const u8{
-        "const seed: number = 1; const id = // note\n<T>(value: T): T => value;",
-        "const seed: number = 1; const id = // note\n<T> (value: T): T => value;",
-    };
-    for (sources) |source| {
-        var parser = try JsParser.initAdmission(
-            std.testing.allocator,
-            std.testing.allocator,
-            source,
-            .compile,
-        );
-        defer parser.deinit();
-        _ = try parser.parse();
-        try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
-        try std.testing.expectEqual(@as(usize, 1), parser.type_store.parameter_annotations.items.len);
-        try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
-        try parser.type_store.validate();
-    }
-}
-
-test "nested line-comment arrow retains captures and semantic projection" {
-    const source = "const id = // note\n<<T>>(value: T): T => value;";
-    var runtime_count = CountingAllocator.init(std.testing.allocator);
-    var type_count = CountingAllocator.init(std.testing.allocator);
-    const runtime_allocator = runtime_count.allocator();
-    var atoms = AtomTable.init(runtime_allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.initAdmission(runtime_allocator, type_count.allocator(), source, .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-
-    const root = try parser.parse();
-    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
-    try expectTypedGenericArrowRecords(&parser, source, .{
-        .list = "<<T>>",
-        .actual_capture = "<<T>>",
-        .recorded_capture = "<T>",
-        .projected_name = "T",
-    });
-}
-
-test "generic arrow lists after a line comment read like lists with no comment" {
-    const sources = [_][]const u8{
-        "const id = // word\n<T>(value: T): T => value;",
-        "const id = // word\n<T || U>(value: T): T => value;",
-        "const id = // word\n<T + U>(value: T): T => value;",
-    };
-    for (sources) |source| {
-        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-        defer parser.deinit();
-        _ = try parser.parse();
-        try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
-        try std.testing.expectEqual(@as(usize, 1), parser.type_store.parameter_annotations.items.len);
-        try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
-        try parser.type_store.validate();
-    }
-    try std.testing.expectEqual(@as(usize, 3), sources.len);
-}
-
-test "generic arrow lookahead selects an outer arrow after a function return type" {
-    const source = "const make=<T>(): (value: T) => T => (value: T): T => value;";
-    var runtime_count = CountingAllocator.init(std.testing.allocator);
-    const runtime_allocator = runtime_count.allocator();
-    var atoms = AtomTable.init(runtime_allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
-
-    const view = parserIrView(&parser);
-    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
-    try std.testing.expectEqual(@as(usize, 2), parser.type_store.function_signatures.items.len);
-    const outer = parser.type_store.function_signatures.items[0];
-    const inner = parser.type_store.function_signatures.items[1];
-    const owner = switch (parser.type_store.generic_owners.items[0].identity) {
-        .arrow => |node| node,
-        else => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqual(outer.owner, owner);
-    try std.testing.expect(outer.owner != inner.owner);
-    try std.testing.expect(outer.source_span.start < inner.source_span.start);
-    const outer_return = outer.return_syntax orelse return error.TestUnexpectedResult;
-    const outer_value = switch (outer_return.structure) {
-        .value => |value| value,
-        .predicate => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqualStrings("(value: T) => T ", outer_value.raw_span.text(source));
-    const outer_root = parser.type_store.node(try syntaxChildIndex(outer_value.root)) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(TypeSyntax.NodeTag.function, outer_root.tag);
-
-    const missing_outer = "const make=<T>(): (value: T) => T;";
-    var control = try JsParser.initAdmission(
-        std.testing.allocator,
-        std.testing.allocator,
-        missing_outer,
-        .compile,
-    );
-    defer control.deinit();
-    try std.testing.expectError(error.UnexpectedToken, control.parse());
-    try std.testing.expectEqual(@as(usize, 0), control.type_store.generic_owners.items.len);
-    try std.testing.expectEqual(@as(usize, 0), control.type_store.parameter_annotations.items.len);
-    try std.testing.expectEqual(@as(usize, 0), control.type_store.function_signatures.items.len);
-    try control.type_store.validate();
-}
-
-test "first runtime token generic arrows have a defined previous token" {
-    const sources = [_][]const u8{
-        "<T>(value)=>value;",
-        "/* leading */ <T>(value)=>value;",
-    };
-    for (sources) |source| {
-        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-        defer parser.deinit();
-        _ = try parser.parse();
-        try parser.type_store.validate();
-        try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
-        try std.testing.expectEqualStrings(
-            "<T>",
-            parser.type_store.generic_owners.items[0].list_span.text(source),
-        );
-    }
-}
-
-test "generic owner projection removes one pair from its recorded window" {
-    const cases = [_]struct {
-        source: []const u8,
-        projected_name: ?[]const u8,
-    }{
-        .{ .source = "const seed:number=1; function identity<<T>>(value){return value;}", .projected_name = "T" },
-        .{ .source = "const seed:number=1; const id=<<T>>(value)=>value;", .projected_name = "T" },
-        .{ .source = "const seed:number=1; function identity<<>>(value){return value;}", .projected_name = null },
-        .{ .source = "const seed:number=1; const id=<<>>(value)=>value;", .projected_name = null },
-        .{ .source = "const seed:number=1;\nstructural Box<<T>> = number;", .projected_name = "<T>" },
-    };
-    var observed: usize = 0;
-    for (cases) |case| {
-        errdefer std.debug.print("generic owner window failed: {s}\n", .{case.source});
-        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
-        defer parser.deinit();
-        _ = try parser.parse();
-        try expectDirectAccepted(case.source);
-        try parser.type_store.validate();
-        try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
-        const owner = parser.type_store.generic_owners.items[0];
-        if (std.mem.indexOf(u8, case.source, "structural") != null) {
-            try std.testing.expect(std.meta.eql(
-                owner.list_span,
-                owner.capture_spans.actual_erased_span,
-            ));
-            try std.testing.expect(std.meta.eql(
-                owner.list_span,
-                owner.capture_spans.recorded_span,
-            ));
-        }
-        const projected = parser.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-            return error.TestUnexpectedResult;
-        const expected_count: usize = if (case.projected_name != null) 1 else 0;
-        try std.testing.expectEqual(expected_count, projected.len);
-        if (case.projected_name) |name| {
-            try std.testing.expectEqualStrings(name, projected[0].name_span.text(case.source));
-        }
-
-        var pool = TypePool.init(std.testing.allocator);
-        defer pool.deinit(std.testing.allocator);
-        var env = TypeEnv.init(std.testing.allocator, &pool);
-        defer env.deinit();
-        const prior_nodes = pool.nodes.items.len;
-        try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
-        try std.testing.expectEqual(prior_nodes + expected_count, pool.nodes.items.len);
-        if (case.projected_name) |name| {
-            try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes)).?);
-            try std.testing.expectEqualStrings(name, pool.getRefName(@intCast(prior_nodes)));
-        }
-        try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-        try std.testing.expectEqual(@as(usize, 0), env.direct_fn_signatures.count());
-        observed += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 5), cases.len);
-    try std.testing.expectEqual(cases.len, observed);
-}
-
-test "empty generic owners retain direct allocation failure" {
-    const empty_source = "const id=<>()=>undefined;";
-    var empty_parser = try JsParser.initAdmission(
-        std.testing.allocator,
-        std.testing.allocator,
-        empty_source,
-        .compile,
-    );
-    defer empty_parser.deinit();
-    _ = try empty_parser.parse();
-    try empty_parser.type_store.validate();
-    try std.testing.expectEqual(
-        @as(u32, 0),
-        empty_parser.type_store.generic_owners.items[0].projected_parameters.count,
-    );
-
-    var empty_pool = TypePool.init(std.testing.allocator);
-    defer empty_pool.deinit(std.testing.allocator);
-    var empty_failing = std.testing.FailingAllocator.init(
-        std.testing.allocator,
-        .{ .fail_index = 0 },
-    );
-    var empty_env = TypeEnv.init(std.testing.allocator, &empty_pool);
-    defer empty_env.deinit();
-    empty_env.generic_scopes.deinit(std.testing.allocator);
-    empty_env.generic_scopes = .empty;
-    empty_env.allocator = empty_failing.allocator();
-    defer empty_env.allocator = std.testing.allocator;
-    try std.testing.expectError(
-        error.OutOfMemory,
-        lowerSyntaxStore(
-            std.testing.allocator,
-            &empty_parser.type_store,
-            &empty_pool,
-            &empty_env,
-            parserIrView(&empty_parser),
-        ),
-    );
-    try std.testing.expect(empty_failing.has_induced_failure);
-    try std.testing.expectEqual(@as(usize, 0), empty_failing.alloc_index);
-    try std.testing.expect(empty_env.sourceTypeMode() == null);
-    try std.testing.expectError(error.OutOfMemory, empty_env.ensureHealthy());
 }
 
 test "explicit call depth exclusion does not fall back to comparison admission" {
@@ -5738,81 +4919,9 @@ test "recovered generic function body error removes its owner and retains earlie
     );
 }
 
-test "recovered generic arrow wrappers remove current and nested type syntax" {
-    const sources = [_][]const u8{
-        "const seed: number = 1; " ++
-            "const id=<T>(value: T): T => { " ++
-            "const nested=<U>(item: U): U => item; const broken = ; return value; }; " ++
-            "const after = 2;",
-        "const seed: number = 1; " ++
-            "export const id=<T>(value: T): T => { " ++
-            "const nested=<U>(item: U): U => item; const broken = ; return value; }; " ++
-            "const after = 2;",
-    };
-    for (sources) |source| {
-        const broken = std.mem.indexOf(u8, source, "const broken = ; ") orelse
-            return error.TestUnexpectedResult;
-        const control_source = try std.mem.concat(
-            std.testing.allocator,
-            u8,
-            &.{ source[0..broken], source[broken + "const broken = ; ".len ..] },
-        );
-        defer std.testing.allocator.free(control_source);
-        var runtime_count = CountingAllocator.init(std.testing.allocator);
-        const runtime_allocator = runtime_count.allocator();
-        var control_atoms = AtomTable.init(runtime_allocator);
-        defer control_atoms.deinit();
-        var control = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, control_source, .compile);
-        defer control.deinit();
-        control.setAtomTable(&control_atoms);
-        const control_root = try control.parse();
-        try expectParsedStoreValidWithAllocations(control_source, &control, control_root, runtime_count);
-        try std.testing.expectEqual(@as(usize, 2), control.type_store.generic_owners.items.len);
-        try std.testing.expectEqual(@as(usize, 2), control.type_store.function_signatures.items.len);
-        try control.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&control));
-
-        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-        defer parser.deinit();
-        try std.testing.expectError(error.ParseError, parser.parse());
-        try std.testing.expectEqual(TokenType.eof, parser.current.type);
-        try std.testing.expectEqual(@as(u16, 0), parser.scopes.current_scope);
-        try expectStoreCheckpoint(&parser.type_store, seedCheckpoint());
-        try parser.type_store.validate();
-        const view = parserIrView(&parser);
-        const after_offset = std.mem.indexOf(u8, source, "const after") orelse
-            return error.TestUnexpectedResult;
-        const outer_opener = std.mem.indexOf(u8, source, "(value") orelse
-            return error.TestUnexpectedResult;
-        var after_node: ?NodeIndex = null;
-        var outer_node: ?NodeIndex = null;
-        for (parser.nodes.tags.items, parser.nodes.locs.items, 0..) |tag, loc, index| {
-            if (tag == .var_decl and loc.offset == after_offset) {
-                try std.testing.expect(after_node == null);
-                after_node = @intCast(index);
-            }
-            if (tag == .arrow_function and loc.offset == outer_opener) {
-                try std.testing.expect(outer_node == null);
-                outer_node = @intCast(index);
-            }
-        }
-        try std.testing.expect(after_node != null);
-        const outer = view.getFunction(outer_node orelse return error.TestUnexpectedResult) orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expectEqual(engine.parser.NodeTag.block, view.getTag(outer.body).?);
-        const body = view.getBlock(outer.body) orelse return error.TestUnexpectedResult;
-        try std.testing.expect(body.stmts_count > 0);
-        const retained_return = view.getListIndex(body.stmts_start, body.stmts_count - 1);
-        try std.testing.expectEqual(engine.parser.NodeTag.return_stmt, view.getTag(retained_return).?);
-        try std.testing.expectEqual(
-            @as(u32, @intCast(std.mem.indexOf(u8, source, "return value").?)),
-            view.getLoc(retained_return).?.offset,
-        );
-    }
-}
-
 test "enclosing expression transactions remove completed nested calls" {
     const prefix =
-        "const seed: number=1; const id=<T>(value)=>value; " ++
+        "const seed: number=1; function id<T>(value) { return value; } " ++
         "const prior=id<number>(seed); ";
     const tails = [_][]const u8{
         "outer(inner<string>(seed), ;",
@@ -5993,36 +5102,6 @@ fn expectFinalNodeAllocationRollback(case: FinalNodeRollbackCase) !void {
     );
 }
 
-test "final wrapper node allocation removes only current generic records" {
-    const prefix =
-        "const seed: number = 1; const priorId=<P>(value)=>value; " ++
-        "const prior=priorId<number>(seed); ";
-    const variable_source = prefix ++ "const id=<T>(value)=>value;";
-    const export_source = prefix ++ "export const result=priorId<string>(seed);";
-    const expression_source = prefix ++ "priorId<string>(seed);";
-    try expectFinalNodeAllocationRollback(.{
-        .source = variable_source,
-        .target_tag = .var_decl,
-        .target_offset = @intCast(std.mem.lastIndexOf(u8, variable_source, "const id").?),
-        .control_owners = 2,
-        .control_calls = 1,
-    });
-    try expectFinalNodeAllocationRollback(.{
-        .source = export_source,
-        .target_tag = .export_decl,
-        .target_offset = @intCast(std.mem.indexOf(u8, export_source, "export").?),
-        .control_owners = 1,
-        .control_calls = 2,
-    });
-    try expectFinalNodeAllocationRollback(.{
-        .source = expression_source,
-        .target_tag = .expr_stmt,
-        .target_offset = @intCast(std.mem.lastIndexOf(u8, expression_source, "priorId<string>").?),
-        .control_owners = 1,
-        .control_calls = 2,
-    });
-}
-
 test "function and declaration node allocation failures remove pending signatures" {
     const source =
         "const seed: number = 1;\n" ++
@@ -6055,7 +5134,7 @@ test "function and declaration node allocation failures remove pending signature
 
 test "named function comment node failures remove pending compatibility owners" {
     const prefix =
-        "const seed: number = 1; const priorId=<P>(value)=>value; " ++
+        "const seed: number = 1; function priorId<P>(value) { return value; } " ++
         "const prior=priorId<number>(seed); ";
     const sources = [_][]const u8{
         prefix ++ "function /* note */ identity<T>(value) { return value; }",
@@ -6132,62 +5211,9 @@ test "arrow and wrapper allocation failures restore all header arrays" {
     try expectFinalNodeAllocationRollback(export_wrapper);
 }
 
-test "typed generic arrow final node failures restore owner and signature arrays" {
-    const variable_source =
-        "const seed: number = 1;\n" ++
-        "const id=<T>(value: T): T => value;";
-    const export_source =
-        "const seed: number = 1;\n" ++
-        "export const id=<T>(value: T): T => value;";
-    const final_semicolon = std.mem.lastIndexOfScalar(u8, variable_source, ';').?;
-    const last_newline = std.mem.lastIndexOfScalar(u8, variable_source, '\n').?;
-    const common = FinalNodeRollbackCase{
-        .source = variable_source,
-        .target_tag = .arrow_function,
-        .target_offset = @intCast(std.mem.indexOf(u8, variable_source, "(value").?),
-        .control_owners = 1,
-        .control_calls = 0,
-        .control_signatures = 1,
-        .retained_nodes = 1,
-        .retained_owners = 0,
-        .retained_generic_parameters = 0,
-        .retained_projected_parameters = 0,
-        .retained_calls = 0,
-        .retained_call_arguments = 0,
-        .retained_fragments = 0,
-        .retained_parameter_annotations = 0,
-        .retained_signatures = 0,
-        .retained_checkpoint = seedCheckpoint(),
-        .runtime_validation = true,
-        .expected_current = .{ .token = .{
-            .kind = .semicolon,
-            .location = .{
-                .offset = @intCast(final_semicolon),
-                .end_offset = @intCast(final_semicolon + 1),
-                .line = 2,
-                .column = @intCast(final_semicolon - last_newline),
-            },
-        } },
-    };
-    try expectFinalNodeAllocationRollback(common);
-
-    var variable = common;
-    variable.target_tag = .var_decl;
-    variable.target_offset = @intCast(std.mem.indexOf(u8, variable_source, "const id").?);
-    variable.expected_current = .eof;
-    try expectFinalNodeAllocationRollback(variable);
-
-    var export_wrapper = common;
-    export_wrapper.source = export_source;
-    export_wrapper.target_tag = .export_decl;
-    export_wrapper.target_offset = @intCast(std.mem.indexOf(u8, export_source, "export").?);
-    export_wrapper.expected_current = .eof;
-    try expectFinalNodeAllocationRollback(export_wrapper);
-}
-
-test "diagnostic allocation failure removes arrow and call records from wrappers" {
+test "diagnostic allocation failure removes call records from wrappers" {
     const prefix =
-        "const seed: number = 1; const priorId=<P>(value)=>value; " ++
+        "const seed: number = 1; function priorId<P>(value) { return value; } " ++
         "const prior=priorId<number>(seed); ";
     const Fixture = struct {
         tail: []const u8,
@@ -6195,8 +5221,6 @@ test "diagnostic allocation failure removes arrow and call records from wrappers
         control_calls: usize,
     };
     const fixtures = [_]Fixture{
-        .{ .tail = "const id=<T>(value)=>value", .control_owners = 2, .control_calls = 1 },
-        .{ .tail = "export const id=<T>(value)=>value", .control_owners = 2, .control_calls = 1 },
         .{ .tail = "const result=priorId<string>(seed)", .control_owners = 1, .control_calls = 2 },
         .{ .tail = "export const result=priorId<string>(seed)", .control_owners = 1, .control_calls = 2 },
     };
@@ -6221,7 +5245,7 @@ test "diagnostic allocation failure removes arrow and call records from wrappers
         try control.type_store.validate();
         try std.testing.expectEqual(fixture.control_owners, control.type_store.generic_owners.items.len);
         try std.testing.expectEqual(fixture.control_calls, control.type_store.explicit_call_arguments.items.len);
-        // Each arrow owner holds one type parameter and each call one argument.
+        // Each function owner holds one type parameter and each call one argument.
         try std.testing.expectEqual(fixture.control_owners, control.type_store.generic_parameters.items.len);
         try std.testing.expectEqual(fixture.control_owners, control.type_store.projected_generic_parameters.items.len);
         try std.testing.expectEqual(fixture.control_calls, control.type_store.authored_call_arguments.items.len);
@@ -6267,9 +5291,9 @@ test "diagnostic allocation failure removes arrow and call records from wrappers
     }
 }
 
-test "failed explicit call retains an earlier generic arrow owner" {
+test "failed explicit call retains an earlier generic function owner" {
     const source =
-        "const seed: number = 1; const id=<T>(value)=>value; " ++
+        "const seed: number = 1; function id<T>(value) { return value; } " ++
         "const result=id<string>(;";
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
@@ -7590,18 +6614,6 @@ test "direct structural generic source closes every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
 }
 
-test "direct generic arrow and call close every allocation failure" {
-    const Context = struct {
-        fn run(allocator: std.mem.Allocator) !void {
-            const source =
-                "const seed: number = 1; const id=<T>(value)=>value; " ++
-                "const result=id<string>(seed);";
-            try expectDirectSourceWithAllocator(allocator, source);
-        }
-    };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
-}
-
 test "later semantic fragment rollback closes every allocation failure" {
     const source = "structural Box<T> = T;\n<Outer<number>>(";
     const Later = struct {
@@ -8673,7 +7685,6 @@ test "shadowed bindings and closure parameters retain their actual owners" {
 
 const DirectGenericConsumerCase = enum {
     duplicate_parameters,
-    generic_arrow,
     empty_callable,
     generic_only,
     ignored_callable,
@@ -8733,33 +7744,6 @@ fn expectDirectGenericConsumer(
             try std.testing.expectEqual(direct_pool.idx_number, signature.type_params[1].constraint);
             try std.testing.expectEqual(signature.type_params[0].idx, signature.param_types[0]);
             try std.testing.expectEqual(signature.type_params[0].idx, signature.return_type);
-        },
-        .generic_arrow => {
-            try std.testing.expectEqual(prior_nodes + 1, direct_pool.nodes.items.len);
-            try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
-            const generic_owner = direct.type_store.generic_owners.items[0];
-            try std.testing.expect(
-                std.meta.activeTag(generic_owner.compatibility) == .declaration_parameters,
-            );
-            try std.testing.expectEqual(@as(u32, 1), generic_owner.projected_parameters.count);
-            const owner = switch (generic_owner.identity) {
-                .arrow => |node| node,
-                else => return error.TestUnexpectedResult,
-            };
-            try std.testing.expectEqual(engine.parser.NodeTag.arrow_function, direct_view.getTag(owner).?);
-            const reference = direct_env.functionTypeRef(direct_view, owner) orelse
-                return error.TestUnexpectedResult;
-            const signature = direct_env.getFunctionSignature(reference) orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(u8, 1), signature.type_param_count);
-            try std.testing.expectEqualStrings("T", signature.type_params[0].name);
-            try std.testing.expectEqual(@as(TypeIndex, @intCast(prior_nodes)), signature.type_params[0].idx);
-            try std.testing.expectEqual(direct_pool.idx_string, signature.type_params[0].constraint);
-            try std.testing.expectEqual(@as(u8, 1), signature.param_count);
-            try std.testing.expectEqual(signature.type_params[0].idx, signature.param_types[0]);
-            try std.testing.expectEqual(signature.type_params[0].idx, signature.return_type);
-            try std.testing.expectEqual(@as(usize, 0), direct_env.fn_sigs_by_name.count());
-            try std.testing.expectEqual(@as(usize, 0), direct_env.source_fn_sigs_by_name.count());
         },
         .empty_callable => {
             try std.testing.expectEqual(prior_nodes, direct_pool.nodes.items.len);
@@ -8879,10 +7863,6 @@ test "direct phase two consumer matrix preserves generics and headers" {
             .case = .duplicate_parameters,
         },
         .{
-            .source = "const identity = <T extends string>(value: T): T => value;",
-            .case = .generic_arrow,
-        },
-        .{
             .source = "function identity<>(value: string): string { return value; }",
             .case = .empty_callable,
         },
@@ -8909,7 +7889,6 @@ const DirectCallConsumerCase = enum {
     interleaved,
     generic_scope_contrast,
     generic_application_argument,
-    line_comment_arrow,
 };
 
 fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !void {
@@ -9030,24 +8009,6 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
             try std.testing.expectEqualStrings("Box", direct_pool.getRefName(application.base));
             try std.testing.expectEqualSlices(TypeIndex, &.{direct_pool.idx_string}, application.args);
         },
-        .line_comment_arrow => {
-            try std.testing.expectEqual(@as(usize, 0), direct.type_store.explicit_call_arguments.items.len);
-            try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
-            const record = direct.type_store.generic_owners.items[0];
-            const owner = switch (record.identity) {
-                .arrow => |owner| owner,
-                else => return error.TestUnexpectedResult,
-            };
-            try std.testing.expectEqual(engine.parser.NodeTag.arrow_function, direct_view.getTag(owner).?);
-            try std.testing.expectEqual(
-                std.meta.Tag(TypeSyntax.GenericOwnerCompatibility).declaration_parameters,
-                std.meta.activeTag(record.compatibility),
-            );
-            try std.testing.expectEqualStrings("<T>", record.list_span.text(source));
-            try std.testing.expect(direct_env.direct_call_type_args.get(owner) == null);
-            try std.testing.expect(direct_env.getCallTypeArgsForCall(direct_view, owner) == null);
-            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_call_type_args.count());
-        },
     }
 
     var direct_checker = type_checker_mod.TypeChecker.init(
@@ -9083,7 +8044,6 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
             .missing_public_annotation,
             .implicit_unknown,
         },
-        .line_comment_arrow => &.{},
     };
     try std.testing.expectEqual(@as(u32, @intCast(expected_strict.len)), strict_ok);
     try std.testing.expectEqual(expected_strict.len, direct_strict.getDiagnostics().len);
@@ -9117,10 +8077,6 @@ test "direct phase three preserves actual call construction" {
             .source = "function identity(value) { return value; }\n" ++
                 "const result = identity<Box<string>>(\"value\");",
             .case = .generic_application_argument,
-        },
-        .{
-            .source = "const id = // note\n<T>(value: T): T => value;",
-            .case = .line_comment_arrow,
         },
     };
     var seen = std.EnumSet(DirectCallConsumerCase).empty;
@@ -9379,7 +8335,6 @@ const DirectPredicateCase = enum {
     compact_target_position,
     repeated_target,
     target_after_sixteen,
-    captured_generic,
     trailing_ordinary,
     quoted_marker_space,
     quoted_marker_tab,
@@ -9388,7 +8343,6 @@ const DirectPredicateCase = enum {
 const ExpectedPredicate = union(enum) {
     absent,
     parameter: u8,
-    captured_generic,
     literal: []const u8,
 };
 
@@ -9470,18 +8424,6 @@ fn expectDirectPredicateConsumerInner(
                 return error.TestUnexpectedResult;
             try std.testing.expectEqual(expected_index, predicate.param_index);
             try std.testing.expectEqual(direct_pool.idx_string, predicate.narrowed);
-        },
-        .captured_generic => {
-            const predicate = direct_signature.type_predicate orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(u8, 0), predicate.param_index);
-            try std.testing.expectEqual(@as(u8, 1), direct_signature.type_param_count);
-            try std.testing.expectEqual(direct_signature.type_params[0].idx, predicate.narrowed);
-            try std.testing.expectEqualStrings("T", direct_signature.type_params[0].name);
-            try std.testing.expectEqual(
-                prior_nodes,
-                @as(usize, @intCast(direct_signature.type_params[0].idx)),
-            );
         },
         .literal => |expected_literal| {
             const predicate = direct_signature.type_predicate orelse
@@ -9631,7 +8573,6 @@ fn expectDirectPredicateConsumerInner(
         .compact_target_position,
         .repeated_target,
         .target_after_sixteen,
-        .captured_generic,
         => {
             switch (return_syntax.structure) {
                 .predicate => {},
@@ -9651,7 +8592,7 @@ fn expectDirectPredicateConsumerInner(
     direct_checker.scopes = &direct.scopes;
     const type_ok = try direct_checker.check(direct_root);
     const expected_type: []const type_checker_mod.DiagnosticKind = switch (case) {
-        .named_guard_unverified, .arrow_guard_unverified, .arrow_ordinary_tab, .compact_target_position, .repeated_target, .captured_generic, .unresolved_target, .mixed_untyped_target, .target_after_sixteen, .quoted_marker_space, .quoted_marker_tab, .ordinary_tab, .readonly_tab => &.{.invalid_type_predicate},
+        .named_guard_unverified, .arrow_guard_unverified, .arrow_ordinary_tab, .compact_target_position, .repeated_target, .unresolved_target, .mixed_untyped_target, .target_after_sixteen, .quoted_marker_space, .quoted_marker_tab, .ordinary_tab, .readonly_tab => &.{.invalid_type_predicate},
         .quoted_value => &.{.return_type_mismatch},
         else => &.{},
     };
@@ -9703,7 +8644,6 @@ test "direct predicates preserve construction and checker behavior" {
         .{ .case = .compact_target_position, .source = "const guard = (lead, marker: unknown, candidate: unknown): candidate is string => true;", .predicate = .{ .parameter = 1 }, .return_spelling = null },
         .{ .case = .repeated_target, .source = "const guard = (candidate, candidate: number, candidate: string): candidate is string => true;", .predicate = .{ .parameter = 0 }, .return_spelling = null },
         .{ .case = .target_after_sixteen, .source = "const guard = (p0: unknown, p1: unknown, p2: unknown, p3: unknown, p4: unknown, p5: unknown, p6: unknown, p7: unknown, p8: unknown, p9: unknown, p10: unknown, p11: unknown, p12: unknown, p13: unknown, p14: unknown, p15: unknown, target: unknown): target is string[] => true;\n", .predicate = .absent, .return_spelling = null },
-        .{ .case = .captured_generic, .source = "const guard = <T>(candidate: unknown): candidate is T => true;", .predicate = .captured_generic, .return_spelling = null },
         .{ .case = .trailing_ordinary, .source = "function echo(value: string): string   { return value; }", .predicate = .absent, .return_spelling = "string   " },
         .{ .case = .quoted_marker_space, .source = "function guard(candidate: unknown): candidate is \"a is b\" { return true; }\n", .predicate = .{ .literal = "a is b" }, .return_spelling = null },
         .{ .case = .quoted_marker_tab, .source = "function guard(candidate: unknown): candidate\tis \"a is b\" { return true; }\n", .predicate = .{ .literal = "a is b" }, .return_spelling = null },
@@ -9736,7 +8676,7 @@ fn runPredicateAllocationSweep(
 ) !void {
     const source =
         "structural Seed = string;\n" ++
-        "const guard = <T>(candidate: Seed): candidate is T[] => true;\n";
+        "function guard<T>(candidate: Seed): candidate is T[] { return true; }\n";
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
     defer atoms.deinit();
@@ -9873,9 +8813,9 @@ fn runDirectGenericAllocationSweep(
 ) !void {
     const source =
         "structural Seed = string;\n" ++
-        "const before = <P extends { id: string }>(value) => value;\n" ++
+        "function before<P extends { id: string }>(value) { return value; }\n" ++
         "function identity<T extends string>(value: T): T { return value; }\n" ++
-        "const after = <Q extends number>(value) => value;";
+        "function after<Q extends number>(value) { return value; }";
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
     defer atoms.deinit();
@@ -12192,10 +11132,9 @@ test "admission header fallback preserves grouped and raw arrow type constructio
         initializer: engine.parser.NodeTag,
         generic_owners: usize,
     }{
-        .{ .source = "const result = <T>(value /* ( */) => value;", .initializer = .arrow_function, .generic_owners = 1 },
         .{ .source = "const result = (value /* ( */) => value;", .initializer = .arrow_function, .generic_owners = 0 },
     };
-    try std.testing.expectEqual(@as(usize, 2), cases.len);
+    try std.testing.expectEqual(@as(usize, 1), cases.len);
     for (cases) |case| {
         const source = case.source;
         var direct_atoms = AtomTable.init(std.testing.allocator);
@@ -12227,22 +11166,7 @@ test "admission header fallback preserves grouped and raw arrow type constructio
             .atoms = &direct_atoms,
         } });
         try direct.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&direct));
-        if (case.generic_owners == 1) {
-            const owner = direct.type_store.generic_owners.items[0];
-            try std.testing.expectEqualStrings("<T>", owner.list_span.text(source));
-            try std.testing.expectEqual(declaration.init, owner.identity.arrow);
-            const parameters = direct.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(usize, 1), parameters.len);
-            try std.testing.expectEqualStrings("T", parameters[0].name_span.text(source));
-            try std.testing.expectEqual(owner.list_span.start + 1, parameters[0].name_span.start);
-            try std.testing.expect(parameters[0].bound_fragment == null);
-            try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(@intCast(prior_type_nodes)).?);
-            try std.testing.expectEqualStrings("T", direct_pool.getRefName(@intCast(prior_type_nodes)));
-            try std.testing.expectEqual(prior_type_nodes + 1, direct_pool.nodes.items.len);
-        } else {
-            try std.testing.expectEqual(prior_type_nodes, direct_pool.nodes.items.len);
-        }
+        try std.testing.expectEqual(prior_type_nodes, direct_pool.nodes.items.len);
         try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
         try direct_pool.ensureHealthy();
         try direct_env.ensureHealthy();

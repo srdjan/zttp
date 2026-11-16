@@ -2681,7 +2681,7 @@ test "a refused plus does not refuse the times around it" {
 
 test "minus on a type parameter is refused" {
     try expectArithCounts(
-        "const f = <T>(v: T): number => v - 1;",
+        "function f<T>(v: T): number { return v - 1; }",
         1,
         0,
     );
