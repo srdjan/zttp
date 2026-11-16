@@ -2726,13 +2726,11 @@ const application_fixtures = [_]ApplicationFixture{
 };
 
 const GenericAliasCase = enum {
-    complete_record,
     spaced_list,
     empty_list,
     present_null_body,
     absent_body,
     ignored_constraint,
-    ignored_default,
     eight_item_projection,
     ninth_item_unprojected,
     generic_then_plain,
@@ -2742,12 +2740,9 @@ const GenericAliasCase = enum {
     duplicate_parameter,
     nested_substitution,
     nested_application_projection,
-    default_comparison,
     constraint_closer,
-    default_less_than,
     constraint_less_than,
     wrapped_constraint_less_than,
-    nested_arrow_default,
     quoted_equals,
     adjacent_alias_equals,
     adjacent_annotation_equals,
@@ -2759,17 +2754,11 @@ const GenericAliasFixture = struct {
 };
 
 const generic_alias_fixtures = [_]GenericAliasFixture{
-    .{
-        .case = .complete_record,
-        .source = "structural Box<T extends string = boolean> = { value: T };\n" ++
-            "const value: Box<number> = undefined;",
-    },
     .{ .case = .spaced_list, .source = "structural Box <T> = { value: T };\nconst value: Box<number> = undefined;" },
     .{ .case = .empty_list, .source = "structural Box<> = number;\nconst value: Box<> = undefined;" },
     .{ .case = .present_null_body, .source = "structural Empty<T> = ();" },
     .{ .case = .absent_body, .source = "structural Empty<T> =;" },
     .{ .case = .ignored_constraint, .source = "structural Box<T extends string> = { value: T };\nconst value: Box<number> = undefined;" },
-    .{ .case = .ignored_default, .source = "structural Box<T = string> = { value: T };\nconst value: Box<number> = undefined;" },
     .{ .case = .eight_item_projection, .source = "structural Wide<A,B,C,D,E,F,G,H> = H;\nconst value: Wide<string,string,string,string,string,string,string,number> = undefined;" },
     .{ .case = .ninth_item_unprojected, .source = "structural Many<A,B,C,D,E,F,G,H,I> = I;" },
     .{ .case = .generic_then_plain, .source = "structural Both<T> = T;\nstructural Both = number;" },
@@ -2779,25 +2768,20 @@ const generic_alias_fixtures = [_]GenericAliasFixture{
     .{ .case = .duplicate_parameter, .source = "structural Box<T,T> = T;\nconst value: Box<string,number> = undefined;" },
     .{ .case = .nested_substitution, .source = "structural Box<T> = { values: T[] };\nconst value: Box<number> = undefined;" },
     .{ .case = .nested_application_projection, .source = "structural Inner<T> = { value: T };\nstructural Outer<U> = Inner<U>;\nconst value: Outer<number> = undefined;" },
-    .{ .case = .default_comparison, .source = "structural Box<T = (left > right)> = number;\nconst value: Box<string> = undefined;" },
     .{ .case = .constraint_closer, .source = "structural Box<T extends { value: Missing > }> = number;\nconst value: Box<string> = undefined;" },
-    .{ .case = .default_less_than, .source = "structural Box<T = (left < right)> = number;\nconst value: Box<> = undefined;" },
-    .{ .case = .constraint_less_than, .source = "structural Box<T extends { value: Missing < } = boolean> = number;\nconst value: Box<> = undefined;" },
-    .{ .case = .wrapped_constraint_less_than, .source = "structural Box<T extends Wrap<{ value: Missing < }, string> = boolean> = number;\nconst value: Box<> = undefined;" },
-    .{ .case = .nested_arrow_default, .source = "structural Box<T = Wrap<(x: string) => number, string>> = number;\nconst value: Box<string,number> = undefined;" },
-    .{ .case = .quoted_equals, .source = "structural Box<T extends \"a=b\" = boolean> = number;\nconst value: Box<string> = undefined;" },
+    .{ .case = .constraint_less_than, .source = "structural Box<T extends { value: Missing < }> = number;\nconst value: Box<> = undefined;" },
+    .{ .case = .wrapped_constraint_less_than, .source = "structural Box<T extends Wrap<{ value: Missing < }, string>> = number;\nconst value: Box<> = undefined;" },
+    .{ .case = .quoted_equals, .source = "structural Box<T extends \"a=b\"> = number;\nconst value: Box<string> = undefined;" },
     .{ .case = .adjacent_alias_equals, .source = "structural Box<T>=T;\nconst value: Box<number> = undefined;" },
     .{ .case = .adjacent_annotation_equals, .source = "structural Box<T> = T;\nconst value:Box<number>=undefined;" },
 };
 
 const GenericProjectionCase = enum {
     blank_piece_before_limit,
-    nonempty_empty_name,
     quoted_comma,
     comment_comma,
     authored_empty_piece,
     malformed_tail,
-    nested_arrow_default,
     quoted_equals_metadata,
     arrow_constraint_metadata,
     commented_equals_metadata,
@@ -2810,15 +2794,13 @@ const GenericProjectionFixture = struct {
 
 const generic_projection_fixtures = [_]GenericProjectionFixture{
     .{ .case = .blank_piece_before_limit, .source = "structural Box<A, ,B,C,D,E,F,G,H,I> = A;" },
-    .{ .case = .nonempty_empty_name, .source = "structural Box<=string,T extends number> = T;" },
     .{ .case = .quoted_comma, .source = "structural Box<T extends \"a,b\"> = T;" },
     .{ .case = .comment_comma, .source = "structural Box<T /*,*/> = T;" },
     .{ .case = .authored_empty_piece, .source = "structural Box<T,,U> = T;" },
     .{ .case = .malformed_tail, .source = "structural Box<T nonsense> = T;" },
-    .{ .case = .nested_arrow_default, .source = "structural Box<T=Wrap<(x:string)=>number,string>> = number;\nconst value: Box<string,number> = undefined;" },
-    .{ .case = .quoted_equals_metadata, .source = "structural Box<T extends \"a=b\" = boolean> = number;\nconst value: Box<string> = undefined;" },
-    .{ .case = .arrow_constraint_metadata, .source = "structural Box<T extends (x:string)=>number = boolean> = number;\nconst value: Box<string> = undefined;" },
-    .{ .case = .commented_equals_metadata, .source = "structural Box<T extends Wrap<string /* = */> = boolean> = number;\nconst value: Box<string> = undefined;" },
+    .{ .case = .quoted_equals_metadata, .source = "structural Box<T extends \"a=b\"> = number;\nconst value: Box<string> = undefined;" },
+    .{ .case = .arrow_constraint_metadata, .source = "structural Box<T extends (x:string)=>number> = number;\nconst value: Box<string> = undefined;" },
+    .{ .case = .commented_equals_metadata, .source = "structural Box<T extends Wrap<string /* = */>> = number;\nconst value: Box<string> = undefined;" },
 };
 
 const GenericFragmentCase = enum {
@@ -3287,7 +3269,7 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
         );
     };
     switch (case) {
-        .complete_record, .spaced_list, .ignored_constraint, .ignored_default => {
+        .spaced_list, .ignored_constraint => {
             const owner = parser.type_store.generic_owners.items[0];
             const authored = parser.type_store.genericParameterSlice(owner.authored_parameters) orelse
                 return error.TestUnexpectedResult;
@@ -3297,17 +3279,6 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
             try std.testing.expectEqual(@as(usize, 1), projected.len);
             try std.testing.expectEqualStrings("T", projected[0].name_span.text(source));
             try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
-            if (case == .complete_record) {
-                const recognized = authored[0].recognized orelse return error.TestUnexpectedResult;
-                try std.testing.expect(recognized.extends_span != null);
-                try std.testing.expect(recognized.constraint_span != null);
-                try std.testing.expect(recognized.equals_span != null);
-                try std.testing.expect(recognized.default_span != null);
-                try std.testing.expectEqualStrings(
-                    "string = boolean",
-                    (projected[0].bound_span orelse return error.TestUnexpectedResult).text(source),
-                );
-            }
             const fields = pool.getRecordFields(value_type orelse return error.TestUnexpectedResult);
             try std.testing.expectEqual(@as(usize, 1), fields.len);
             try std.testing.expectEqual(pool.idx_number, fields[0].type_idx);
@@ -3367,14 +3338,6 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
             const fields = pool.getRecordFields(value_type orelse return error.TestUnexpectedResult);
             try std.testing.expectEqual(pool.idx_number, fields[0].type_idx);
         },
-        .default_comparison => {
-            const owner = parser.type_store.generic_owners.items[0];
-            try std.testing.expectEqualStrings(
-                "<T = (left > right)>",
-                owner.list_span.text(source),
-            );
-            try std.testing.expectEqual(pool.idx_number, value_type orelse return error.TestUnexpectedResult);
-        },
         .constraint_closer => {
             const owner = parser.type_store.generic_owners.items[0];
             try std.testing.expectEqualStrings(
@@ -3383,7 +3346,7 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
             );
             try std.testing.expectEqual(pool.idx_number, value_type orelse return error.TestUnexpectedResult);
         },
-        .default_less_than, .constraint_less_than, .wrapped_constraint_less_than => {
+        .constraint_less_than, .wrapped_constraint_less_than => {
             const owner = parser.type_store.generic_owners.items[0];
             const authored = parser.type_store.genericParameterSlice(owner.authored_parameters) orelse
                 return error.TestUnexpectedResult;
@@ -3391,10 +3354,6 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
             try std.testing.expectEqual(@as(u32, 0), owner.projected_parameters.count);
             const recognized = authored[0].recognized orelse return error.TestUnexpectedResult;
             switch (case) {
-                .default_less_than => try std.testing.expectEqualStrings(
-                    "(left < right)",
-                    (recognized.default_span orelse return error.TestUnexpectedResult).text(source),
-                ),
                 .constraint_less_than => try std.testing.expectEqualStrings(
                     "{ value: Missing < }",
                     (recognized.constraint_span orelse return error.TestUnexpectedResult).text(source),
@@ -3405,18 +3364,6 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
                 ),
                 else => unreachable,
             }
-            if (case != .default_less_than) {
-                try std.testing.expectEqualStrings(
-                    "boolean",
-                    (recognized.default_span orelse return error.TestUnexpectedResult).text(source),
-                );
-            }
-            try std.testing.expectEqual(pool.idx_number, value_type orelse return error.TestUnexpectedResult);
-        },
-        .nested_arrow_default => {
-            const owner = parser.type_store.generic_owners.items[0];
-            try std.testing.expectEqual(@as(u32, 1), owner.authored_parameters.count);
-            try std.testing.expectEqual(@as(u32, 2), owner.projected_parameters.count);
             try std.testing.expectEqual(pool.idx_number, value_type orelse return error.TestUnexpectedResult);
         },
         .quoted_equals => {
@@ -3427,10 +3374,6 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
             try std.testing.expectEqualStrings(
                 "\"a=b\"",
                 (recognized.constraint_span orelse return error.TestUnexpectedResult).text(source),
-            );
-            try std.testing.expectEqualStrings(
-                "boolean",
-                (recognized.default_span orelse return error.TestUnexpectedResult).text(source),
             );
             try std.testing.expectEqual(pool.idx_number, value_type orelse return error.TestUnexpectedResult);
         },
@@ -3462,13 +3405,6 @@ fn assertGenericProjectionProperty(case: GenericProjectionCase, source: []const 
             try std.testing.expectEqual(@as(usize, 8), projected.len);
             try std.testing.expectEqualStrings("H", projected[7].name_span.text(source));
         },
-        .nonempty_empty_name => {
-            try std.testing.expectEqual(@as(usize, 2), authored.len);
-            try std.testing.expectEqual(@as(usize, 2), projected.len);
-            try std.testing.expectEqualStrings("=string", projected[0].raw_span.text(source));
-            try std.testing.expectEqualStrings("", projected[0].name_span.text(source));
-            try std.testing.expectEqualStrings("T", projected[1].name_span.text(source));
-        },
         .quoted_comma => {
             try std.testing.expectEqual(@as(usize, 1), authored.len);
             try std.testing.expectEqual(@as(usize, 2), projected.len);
@@ -3488,27 +3424,12 @@ fn assertGenericProjectionProperty(case: GenericProjectionCase, source: []const 
             try std.testing.expect(authored[0].recognized == null);
             try std.testing.expectEqualStrings("T", projected[0].name_span.text(source));
         },
-        .nested_arrow_default => {
-            try std.testing.expectEqual(@as(usize, 1), authored.len);
-            try std.testing.expectEqual(@as(usize, 2), projected.len);
-            try std.testing.expectEqualStrings("T", projected[0].name_span.text(source));
-            try std.testing.expectEqualStrings("string>", projected[1].name_span.text(source));
-            const recognized = authored[0].recognized orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqualStrings(
-                "Wrap<(x:string)=>number,string>",
-                (recognized.default_span orelse return error.TestUnexpectedResult).text(source),
-            );
-        },
         .quoted_equals_metadata => {
             try std.testing.expectEqual(@as(usize, 1), authored.len);
             const recognized = authored[0].recognized orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualStrings(
                 "\"a=b\"",
                 (recognized.constraint_span orelse return error.TestUnexpectedResult).text(source),
-            );
-            try std.testing.expectEqualStrings(
-                "boolean",
-                (recognized.default_span orelse return error.TestUnexpectedResult).text(source),
             );
         },
         .arrow_constraint_metadata => {
@@ -3517,20 +3438,12 @@ fn assertGenericProjectionProperty(case: GenericProjectionCase, source: []const 
                 "(x:string)=>number",
                 (recognized.constraint_span orelse return error.TestUnexpectedResult).text(source),
             );
-            try std.testing.expectEqualStrings(
-                "boolean",
-                (recognized.default_span orelse return error.TestUnexpectedResult).text(source),
-            );
         },
         .commented_equals_metadata => {
             const recognized = authored[0].recognized orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualStrings(
                 "Wrap<string /* = */>",
                 (recognized.constraint_span orelse return error.TestUnexpectedResult).text(source),
-            );
-            try std.testing.expectEqualStrings(
-                "boolean",
-                (recognized.default_span orelse return error.TestUnexpectedResult).text(source),
             );
         },
     }
@@ -4473,8 +4386,8 @@ test "nominal generic scalar matrix retains ignored bounds and declaration order
     const source =
         "nominal Text<T> = string;\n" ++
         "nominal Count<T extends string> = number;\n" ++
-        "nominal Flag<T = number> = boolean;\n" ++
-        "nominal Both<T extends string = boolean> = string;\n";
+        "nominal Flag<T> = boolean;\n" ++
+        "nominal Both<T extends string> = string;\n";
     try expectDirectAccepted(source);
 
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -4503,18 +4416,16 @@ test "nominal generic scalar matrix retains ignored bounds and declaration order
     try expectNominalGenericOwner(&parser.type_store, .{
         .declaration_index = 2,
         .name = "Flag",
-        .list = "<T = number>",
+        .list = "<T>",
         .base = .boolean,
-        .authored_default = "number",
     });
     try expectNominalGenericOwner(&parser.type_store, .{
         .declaration_index = 3,
         .name = "Both",
-        .list = "<T extends string = boolean>",
+        .list = "<T extends string>",
         .base = .string,
         .constraint = "string",
-        .authored_default = "boolean",
-        .projected_bound = "string = boolean",
+        .projected_bound = "string",
     });
     for (parser.type_store.projected_generic_parameters.items) |parameter| {
         try std.testing.expect(parameter.bound_fragment == null);
@@ -4557,7 +4468,7 @@ test "nominal generic base refusal retains direct diagnostic" {
 test "nominal generic type allocation failures restore the published seed" {
     const source =
         "nominal Seed<S> = number;\n" ++
-        "nominal Id<T extends string = boolean> = string;\n";
+        "nominal Id<T extends string> = string;\n";
     const Context = struct {
         fn run(
             type_allocator: std.mem.Allocator,
@@ -4609,11 +4520,10 @@ test "nominal generic type allocation failures restore the published seed" {
             try expectNominalGenericOwner(&parser.type_store, .{
                 .declaration_index = 1,
                 .name = "Id",
-                .list = "<T extends string = boolean>",
+                .list = "<T extends string>",
                 .base = .string,
                 .constraint = "string",
-                .authored_default = "boolean",
-                .projected_bound = "string = boolean",
+                .projected_bound = "string",
             });
         }
     };
@@ -4694,42 +4604,6 @@ test "first generic function slice accepts only its bounded source shape" {
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_parameters.items.len);
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.projected_generic_parameters.items.len);
     }
-}
-
-test "first generic function slice parses unsafe generic list scans for the strict checker" {
-    {
-        // Production parses this source; the strict checker refuses it later (ZTS601).
-        var parser = try JsParser.initAdmission(
-            std.testing.allocator,
-            std.testing.allocator,
-            "const seed: number = 1; function identity<T = /,/, U>(value) { return value; }",
-            .compile,
-        );
-        defer parser.deinit();
-        _ = try parser.parse();
-    }
-
-    var balanced_template: std.ArrayListUnmanaged(u8) = .empty;
-    defer balanced_template.deinit(std.testing.allocator);
-    try balanced_template.appendSlice(
-        std.testing.allocator,
-        "const seed: number = 1; function identity<T = ",
-    );
-    for (0..TypeSyntax.max_type_depth + 1) |_| {
-        try balanced_template.appendSlice(std.testing.allocator, "`${");
-    }
-    try balanced_template.appendSlice(std.testing.allocator, "string");
-    for (0..TypeSyntax.max_type_depth + 1) |_| {
-        try balanced_template.appendSlice(std.testing.allocator, "}`");
-    }
-    try balanced_template.appendSlice(
-        std.testing.allocator,
-        ", U>(value) { return value; }",
-    );
-    // Production parses this source too; the strict checker refuses it later (ZTS601).
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, balanced_template.items, .compile);
-    defer parser.deinit();
-    _ = try parser.parse();
 }
 
 const GenericArrowExpectation = struct {
@@ -4903,12 +4777,12 @@ test "typed generic arrows retain final owners and recorded projection windows" 
             },
         },
         .{
-            .source = "const id = // note=\n<T = string> (value: T): T => value;",
+            .source = "const id = // note=\n<T> (value: T): T => value;",
             .expected = .{
-                .list = "<T = string>",
-                .actual_capture = "<T = string> ",
-                .recorded_capture = "T = string>",
-                .projected_name = "T",
+                .list = "<T>",
+                .actual_capture = "<T> ",
+                .recorded_capture = "T>",
+                .projected_name = "T>",
             },
         },
     };
@@ -5002,7 +4876,7 @@ test "generic arrow and explicit call retain ordered syntax before equivalence" 
 
 test "nested generic owners and call retain source reservation order" {
     const source =
-        "const seed: number = 1; function outer<T extends string = boolean>(value) { " ++
+        "const seed: number = 1; function outer<T extends string>(value) { " ++
         "const inner=<U>(item)=>item; return inner<number>(value); }";
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
@@ -5036,7 +4910,7 @@ test "nested generic owners and call retain source reservation order" {
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), outer_projected.len);
     try std.testing.expectEqualStrings(
-        "string = boolean",
+        "string",
         (outer_projected[0].bound_span orelse return error.TestUnexpectedResult).text(source),
     );
     try std.testing.expect(outer_projected[0].bound_fragment != null);
@@ -5084,8 +4958,6 @@ test "iterative generic function preflight accepts a nonempty nested body" {
 const GenericRuntimeCase = enum {
     assignment_arrow_adjacent,
     assignment_arrow_whitespace,
-    leading_empty_arrow_parameter,
-    arrow_constraint_default,
     equality_arrow_window,
     general_arrow_spaced,
     comment_arrow_general,
@@ -5112,8 +4984,6 @@ const generic_runtime_fixtures = [_]struct {
 }{
     .{ .case = .assignment_arrow_adjacent, .source = "const seed: number = 1; const id=<T>(value)=>value;" },
     .{ .case = .assignment_arrow_whitespace, .source = "const seed: number = 1; const id = <T> (value)=>value;" },
-    .{ .case = .leading_empty_arrow_parameter, .source = "const seed: number = 1; const id=<=string,T>(value)=>value;" },
-    .{ .case = .arrow_constraint_default, .source = "const seed: number = 1; const id=<T extends string = boolean>(value)=>value;" },
     .{ .case = .equality_arrow_window, .source = "const seed: number = 1; const result=seed === <T> (value)=>value;" },
     .{ .case = .general_arrow_spaced, .source = "const seed: number = 1; const id=(<T> (value)=>value);" },
     .{ .case = .comment_arrow_general, .source = "const seed: number = 1; const id=/* gap */<T> (value)=>value;" },
@@ -5175,26 +5045,6 @@ test "generic runtime syntax census observes every case" {
                     "T",
                     owner.capture_spans.recorded_span.text(fixture.source),
                 );
-            },
-            .leading_empty_arrow_parameter => {
-                const owner = parser.type_store.generic_owners.items[0];
-                const projected = parser.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-                    return error.TestUnexpectedResult;
-                try std.testing.expectEqual(@as(usize, 2), projected.len);
-                try std.testing.expectEqualStrings("", projected[0].name_span.text(fixture.source));
-                try std.testing.expectEqualStrings("T", projected[1].name_span.text(fixture.source));
-            },
-            .arrow_constraint_default => {
-                const owner = parser.type_store.generic_owners.items[0];
-                const projected = parser.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-                    return error.TestUnexpectedResult;
-                try std.testing.expectEqual(@as(usize, 1), projected.len);
-                try std.testing.expectEqualStrings("T", projected[0].name_span.text(fixture.source));
-                try std.testing.expectEqualStrings(
-                    "string = boolean",
-                    (projected[0].bound_span orelse return error.TestUnexpectedResult).text(fixture.source),
-                );
-                try std.testing.expect(projected[0].bound_fragment != null);
             },
             .general_arrow_spaced => {
                 const owner = parser.type_store.generic_owners.items[0];
@@ -5655,7 +5505,7 @@ test "nested line-comment arrow retains captures and semantic projection" {
 
 test "generic arrow lists after a line comment read like lists with no comment" {
     const sources = [_][]const u8{
-        "const id = // word\n<T = string>(value: T): T => value;",
+        "const id = // word\n<T>(value: T): T => value;",
         "const id = // word\n<T || U>(value: T): T => value;",
         "const id = // word\n<T + U>(value: T): T => value;",
     };
@@ -5798,7 +5648,7 @@ test "generic owner projection removes one pair from its recorded window" {
     try std.testing.expectEqual(cases.len, observed);
 }
 
-test "empty and compact generic owners retain direct allocation failure" {
+test "empty generic owners retain direct allocation failure" {
     const empty_source = "const id=<>()=>undefined;";
     var empty_parser = try JsParser.initAdmission(
         std.testing.allocator,
@@ -5840,50 +5690,6 @@ test "empty and compact generic owners retain direct allocation failure" {
     try std.testing.expectEqual(@as(usize, 0), empty_failing.alloc_index);
     try std.testing.expect(empty_env.sourceTypeMode() == null);
     try std.testing.expectError(error.OutOfMemory, empty_env.ensureHealthy());
-
-    const compact_source = "const id=<=string>()=>undefined;";
-    var compact_parser = try JsParser.initAdmission(
-        std.testing.allocator,
-        std.testing.allocator,
-        compact_source,
-        .compile,
-    );
-    defer compact_parser.deinit();
-    _ = try compact_parser.parse();
-    try compact_parser.type_store.validate();
-    const compact_owner = compact_parser.type_store.generic_owners.items[0];
-    const compact_projected = compact_parser.type_store.projectedGenericParameterSlice(
-        compact_owner.projected_parameters,
-    ) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), compact_projected.len);
-    try std.testing.expectEqualStrings("", compact_projected[0].name_span.text(compact_source));
-
-    var compact_pool = TypePool.init(std.testing.allocator);
-    defer compact_pool.deinit(std.testing.allocator);
-    var compact_failing = std.testing.FailingAllocator.init(
-        std.testing.allocator,
-        .{ .fail_index = 0 },
-    );
-    var compact_env = TypeEnv.init(std.testing.allocator, &compact_pool);
-    defer compact_env.deinit();
-    compact_env.generic_scopes.deinit(std.testing.allocator);
-    compact_env.generic_scopes = .empty;
-    compact_env.allocator = compact_failing.allocator();
-    defer compact_env.allocator = std.testing.allocator;
-    try std.testing.expectError(
-        error.OutOfMemory,
-        lowerSyntaxStore(
-            std.testing.allocator,
-            &compact_parser.type_store,
-            &compact_pool,
-            &compact_env,
-            parserIrView(&compact_parser),
-        ),
-    );
-    try std.testing.expect(compact_failing.has_induced_failure);
-    try std.testing.expectEqual(@as(usize, 0), compact_failing.alloc_index);
-    try std.testing.expect(compact_env.sourceTypeMode() == null);
-    try std.testing.expectError(error.OutOfMemory, compact_env.ensureHealthy());
 }
 
 test "explicit call depth exclusion does not fall back to comparison admission" {
@@ -5919,65 +5725,6 @@ test "a shift after a name or a comparison is refused at the shift" {
         try std.testing.expectEqual(case.offset, errors[0].location.offset);
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.explicit_call_arguments.items.len);
     }
-}
-
-test "function bounds stop at the compact parameter count" {
-    const source =
-        "const seed: number = 1; function ignored<T, =string, U extends 1>() { return seed; }";
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try parser.type_store.validate();
-
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
-    const owner = parser.type_store.generic_owners.items[0];
-    const projected = parser.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 3), projected.len);
-    try std.testing.expectEqualStrings("T", projected[0].name_span.text(source));
-    try std.testing.expectEqualStrings("", projected[1].name_span.text(source));
-    try std.testing.expectEqualStrings("U", projected[2].name_span.text(source));
-    try std.testing.expectEqualStrings(
-        "1",
-        (projected[2].bound_span orelse return error.TestUnexpectedResult).text(source),
-    );
-    try std.testing.expect(projected[2].bound_fragment == null);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
-
-    var pool = TypePool.init(std.testing.allocator);
-    defer pool.deinit(std.testing.allocator);
-    var env = TypeEnv.init(std.testing.allocator, &pool);
-    defer env.deinit();
-    const prior_nodes = pool.nodes.items.len;
-    try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
-    try std.testing.expectEqual(prior_nodes + 2, pool.nodes.items.len);
-    try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes)).?);
-    try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes + 1)).?);
-    try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes)));
-    try std.testing.expectEqualStrings("U", pool.getRefName(@intCast(prior_nodes + 1)));
-    try expectDirectAccepted(source);
-
-    const unsupported =
-        "const seed: number = 1; function ignored<T, =string, U extends ?>() { return seed; }";
-    var unsupported_parser = try JsParser.initAdmission(
-        std.testing.allocator,
-        std.testing.allocator,
-        unsupported,
-        .compile,
-    );
-    defer unsupported_parser.deinit();
-    _ = try unsupported_parser.parse();
-    try unsupported_parser.type_store.validate();
-    const unsupported_owner = unsupported_parser.type_store.generic_owners.items[0];
-    const unsupported_projected = unsupported_parser.type_store.projectedGenericParameterSlice(
-        unsupported_owner.projected_parameters,
-    ) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings(
-        "?",
-        (unsupported_projected[2].bound_span orelse return error.TestUnexpectedResult).text(unsupported),
-    );
-    try std.testing.expect(unsupported_projected[2].bound_fragment == null);
-    try std.testing.expectEqual(@as(usize, 0), unsupported_parser.type_store.semantic_fragments.items.len);
 }
 
 test "recovered generic function body error removes its owner and retains earlier syntax" {
@@ -7819,7 +7566,7 @@ test "direct structural generic source closes every allocation failure" {
     const Context = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const source =
-                "structural Box<T extends string = boolean> = { value: T };\n" ++
+                "structural Box<T extends string> = { value: T };\n" ++
                 "const value: Box<number> = undefined;";
             try expectDirectSourceWithAllocator(allocator, source);
         }
@@ -10127,80 +9874,6 @@ test "direct predicate allocation failures restore scopes and poison consumers" 
     try std.testing.expect(observations.post_seed_failures > 0);
     try std.testing.expect(observations.incomplete_publication_failures > 0);
     try std.testing.expect(observations.successes > 0);
-}
-
-test "direct callable bounds stop before excluded projected fragments" {
-    const source =
-        "function compact<T, = string, U extends { id: string }>(value: T): T { " ++
-        "return value; }";
-    var direct_count = CountingAllocator.init(std.testing.allocator);
-    var type_count = CountingAllocator.init(std.testing.allocator);
-    var direct_atoms = AtomTable.init(direct_count.allocator());
-    defer direct_atoms.deinit();
-    var direct = try JsParser.initAdmission(
-        direct_count.allocator(),
-        type_count.allocator(),
-        source,
-        .compile,
-    );
-    defer direct.deinit();
-    direct.setAtomTable(&direct_atoms);
-    const direct_root = try direct.parse();
-    const direct_view = parserIrView(&direct);
-    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_count);
-
-    try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
-    const owner = direct.type_store.generic_owners.items[0];
-    const projected = direct.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 3), projected.len);
-    try std.testing.expectEqualStrings("T", projected[0].name_span.text(source));
-    try std.testing.expectEqualStrings("", projected[1].name_span.text(source));
-    try std.testing.expectEqualStrings("U", projected[2].name_span.text(source));
-    try std.testing.expectEqualStrings(
-        "{ id: string }",
-        (projected[2].bound_span orelse return error.TestUnexpectedResult).text(source),
-    );
-    try std.testing.expect(projected[2].bound_fragment == null);
-    const fragment_index = try TypeSyntax.parseSemanticFragmentAndStore(
-        &direct.type_store,
-        projected[2].bound_span.?,
-    );
-    direct.type_store.projected_generic_parameters.items[
-        owner.projected_parameters.start + 2
-    ].bound_fragment = fragment_index;
-    try direct.type_store.validateRuntimeOwners(std.testing.allocator, direct_view);
-
-    var direct_pool = TypePool.init(std.testing.allocator);
-    defer direct_pool.deinit(std.testing.allocator);
-    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
-    defer direct_env.deinit();
-    const prior_nodes = direct_pool.nodes.items.len;
-    try direct_env.populateSourceTypes(.{ .direct = .{
-        .store = &direct.type_store,
-        .ir_view = direct_view,
-        .atoms = &direct_atoms,
-    } });
-    try std.testing.expectEqual(prior_nodes + 2, direct_pool.nodes.items.len);
-    try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(@intCast(prior_nodes)).?);
-    try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(@intCast(prior_nodes + 1)).?);
-    try std.testing.expectEqualStrings("T", direct_pool.getRefName(@intCast(prior_nodes)));
-    try std.testing.expectEqualStrings("U", direct_pool.getRefName(@intCast(prior_nodes + 1)));
-    const function_owner = switch (owner.identity) {
-        .function => |node| node,
-        else => return error.TestUnexpectedResult,
-    };
-    const reference = direct_env.functionTypeRef(direct_view, function_owner) orelse
-        return error.TestUnexpectedResult;
-    const signature = direct_env.getFunctionSignature(reference) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u8, 2), signature.type_param_count);
-    try std.testing.expectEqualStrings("T", signature.type_params[0].name);
-    try std.testing.expectEqualStrings("U", signature.type_params[1].name);
-    try std.testing.expectEqual(null_type_idx, signature.type_params[1].constraint);
-    try std.testing.expectEqual(signature.type_params[0].idx, signature.param_types[0]);
-    try std.testing.expectEqual(signature.type_params[0].idx, signature.return_type);
-    try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
 }
 
 fn poolHasGenericName(pool: *const TypePool, start: usize, name: []const u8) bool {

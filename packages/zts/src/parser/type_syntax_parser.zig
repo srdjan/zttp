@@ -299,6 +299,17 @@ pub fn predicateHeader(source: []const u8, raw_span: Span) ?PredicateHeader {
     };
 }
 
+/// The offset of `asserts` when the return type that starts at `start` is an
+/// `asserts x` or `asserts x is T` form.
+pub fn assertsReturnOffset(source: []const u8, start: u32) ?u32 {
+    const word = skipTypeWhitespace(source, start);
+    const end: u32 = @intCast(source.len);
+    if (!wordAt(source, word, end, "asserts")) return null;
+    const target = skipWhitespaceWithin(source, word + @as(u32, "asserts".len), end);
+    if (target == end or target == word + "asserts".len or !isIdentifierStart(source[target])) return null;
+    return word;
+}
+
 pub fn parseFunctionReturnAndStore(
     store: *Store,
     raw_start_offset: u32,
@@ -511,10 +522,53 @@ pub const AdmittedDeclarationOptions = struct {
 };
 
 pub fn appendAuthoredGenericParameters(store: *Store, list_span: Span) !void {
+    try eachGenericPiece(store.source, list_span, store, appendAuthoredGenericParameter);
+}
+
+pub const GenericListRefusalKind = enum { default, modifier };
+
+/// Calls `report(context, kind, offset)` for each generic default and each
+/// `in`, `out`, or `const` modifier that the source profile refuses. `offset`
+/// is the `=` of a default, or the first byte of the modifier word.
+pub fn eachGenericListRefusal(
+    source: []const u8,
+    list_span: Span,
+    context: anytype,
+    comptime report: anytype,
+) void {
+    const Context = @TypeOf(context);
+    const Piece = struct {
+        source: []const u8,
+        context: Context,
+        fn visit(self: @This(), raw_span: Span) error{}!void {
+            const span = trimSpan(self.source, raw_span);
+            if (genericModifierOffset(self.source, span)) |offset| report(self.context, .modifier, offset);
+            if (findTopLevelEquals(self.source, span.start, span.end)) |offset| report(self.context, .default, offset);
+        }
+    };
+    eachGenericPiece(source, list_span, Piece{ .source = source, .context = context }, Piece.visit) catch |err| switch (err) {};
+}
+
+fn genericModifierOffset(source: []const u8, span: Span) ?u32 {
+    const start = skipWhitespaceWithin(source, span.start, span.end);
+    inline for (.{ "in", "out", "const" }) |modifier| {
+        if (wordAt(source, start, span.end, modifier)) {
+            const after = skipWhitespaceWithin(source, start + @as(u32, modifier.len), span.end);
+            if (after < span.end and after > start + modifier.len and
+                isIdentifierStart(source[after]) and !wordAt(source, after, span.end, "extends"))
+            {
+                return start;
+            }
+        }
+    }
+    return null;
+}
+
+fn eachGenericPiece(source: []const u8, list_span: Span, context: anytype, comptime emit: anytype) !void {
     const body_start = list_span.start + 1;
     const body_end = list_span.end - 1;
-    if (trimSpan(store.source, .{ .start = body_start, .end = body_end }).start ==
-        trimSpan(store.source, .{ .start = body_start, .end = body_end }).end)
+    if (trimSpan(source, .{ .start = body_start, .end = body_end }).start ==
+        trimSpan(source, .{ .start = body_start, .end = body_end }).end)
     {
         return;
     }
@@ -528,29 +582,29 @@ pub fn appendAuthoredGenericParameters(store: *Store, list_span: Span) !void {
     while (pos <= body_end) {
         const at_end = pos == body_end;
         if (at_end) {
-            try appendAuthoredGenericParameter(store, .{
+            try emit(context, .{
                 .start = piece_start,
                 .end = body_end,
             });
             break;
         }
-        const byte = store.source[pos];
+        const byte = source[pos];
         if (byte == '"' or byte == '\'' or byte == '`') {
-            switch (scanTypeQuoted(store.source, pos, byte)) {
+            switch (scanTypeQuoted(source, pos, byte)) {
                 .end => |end| pos = @min(end, @as(usize, body_end)),
                 else => pos = body_end,
             }
             continue;
         }
         if (byte == '/' and pos + 1 < body_end) {
-            if (store.source[pos + 1] == '/') {
+            if (source[pos + 1] == '/') {
                 pos += 2;
-                while (pos < body_end and store.source[pos] != '\n') pos += 1;
+                while (pos < body_end and source[pos] != '\n') pos += 1;
                 continue;
             }
-            if (store.source[pos + 1] == '*') {
+            if (source[pos + 1] == '*') {
                 pos += 2;
-                while (pos + 1 < body_end and !(store.source[pos] == '*' and store.source[pos + 1] == '/')) pos += 1;
+                while (pos + 1 < body_end and !(source[pos] == '*' and source[pos + 1] == '/')) pos += 1;
                 pos = @min(pos + 2, @as(usize, body_end));
                 continue;
             }
@@ -560,7 +614,7 @@ pub fn appendAuthoredGenericParameters(store: *Store, list_span: Span) !void {
             '<' => if (outside_groups) {
                 angle_depth += 1;
             },
-            '>' => if (outside_groups and (pos == 0 or store.source[pos - 1] != '=')) {
+            '>' => if (outside_groups and (pos == 0 or source[pos - 1] != '=')) {
                 if (angle_depth > 0) angle_depth -= 1;
             },
             '(' => paren_depth += 1,
@@ -580,7 +634,7 @@ pub fn appendAuthoredGenericParameters(store: *Store, list_span: Span) !void {
         if (byte == ',' and angle_depth == 0 and paren_depth == 0 and
             bracket_depth == 0 and brace_depth == 0)
         {
-            try appendAuthoredGenericParameter(store, .{
+            try emit(context, .{
                 .start = piece_start,
                 .end = @intCast(pos),
             });

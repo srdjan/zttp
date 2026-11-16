@@ -1067,6 +1067,28 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(top("structural L = number;\nfunction g(x: L): L {\n  return x;\n}")),
     },
     .{
+        .key = "A generic default, such as `function f<T = string>(a: T): T`",
+        .refused = &.{
+            r("function f<T = string>(a: T): T", top("function f<T = string>(a: T): T {\n  return a;\n}")),
+            r("function f<T = string>(a: T): T", top("structural Box<T = string> = { value: T };")),
+        },
+        .clean = c(top("function f<T>(a: T): T {\n  return a;\n}")),
+    },
+    .{
+        .key = "A type-parameter modifier, such as `in`, `out`, or `const`",
+        .refused = &.{
+            r("in", top("function f<in T>(a: T): T {\n  return a;\n}")),
+            r("out", top("function f<out T>(a: T): T {\n  return a;\n}")),
+            r("const", top("function f<const T>(a: T): T {\n  return a;\n}")),
+        },
+        .clean = c(top("function f<T>(a: T): T {\n  return a;\n}")),
+    },
+    .{
+        .key = "An `asserts` return type",
+        .refused = &.{r("asserts", top("function f(x: unknown): asserts x is string {\n  return;\n}"))},
+        .clean = c(top("function f(x: unknown): x is string {\n  return typeof x === \"string\";\n}")),
+    },
+    .{
         .key = "A declaration that binds two names, such as `const a = 1, b = 2;`",
         .refused = &.{r("const a = 1, b = 2;", body("  const a = 1, b = 2;"))},
         .clean = c(body("  const a = 1;\n  const b = 2;")),
@@ -1099,10 +1121,6 @@ pub const refusal_rows = [_]RefusalRow{
 // ---------------------------------------------------------------------------
 
 pub const gap_rows = [_]GapRow{
-    .{
-        .key = "Generic defaults, such as `function f<T = string>(a: T): T`",
-        .sources = &.{c(top("function f<T = string>(a: T): T {\n  return a;\n}"))},
-    },
     .{
         .key = "Index signatures, such as `{ [k: string]: number }`",
         .sources = &.{
@@ -1219,14 +1237,6 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "Type parameters on an arrow, such as `<T>(x: T) => x`",
         .sources = &.{c(top("function g(): number[] {\n  return [1].map(<T>(x: T) => x);\n}"))},
-    },
-    .{
-        .key = "A type-parameter modifier (`in`, `const`) and an `asserts` return type",
-        .sources = &.{
-            c(top("function f<in T>(a: T): T {\n  return a;\n}")),
-            c(top("function f<const T>(a: T): T {\n  return a;\n}")),
-            c(top("function f(x: unknown): asserts x is string {\n}")),
-        },
     },
     .{
         .key = "A quoted key in a record type, such as `{ \"a\": number }`, when unused",

@@ -973,6 +973,21 @@ pub const Parser = struct {
         }
     }
 
+    /// The source profile refuses a generic default and a type-parameter
+    /// modifier. The parser records the error and keeps parsing the list.
+    fn refuseGenericListForms(self: *Parser, span: type_syntax.Span) void {
+        if (self.expression_profile or self.admission == null) return;
+        type_syntax.eachGenericListRefusal(self.source, span, self, reportGenericListRefusal);
+    }
+
+    fn reportGenericListRefusal(self: *Parser, kind: type_syntax.GenericListRefusalKind, offset: u32) void {
+        const message = switch (kind) {
+            .default => "a generic default is not supported; remove the default and pass the type argument at each use",
+            .modifier => "a type-parameter modifier is not supported; remove the `in`, `out`, or `const` modifier",
+        };
+        self.errors.addErrorAt(.unsupported_feature, type_syntax.tokenAtOffset(self.source, offset), message);
+    }
+
     fn classifyAdmissionGenericList(self: *Parser, span: type_syntax.Span) !void {
         if (self.admission == null) return;
         if (span.start >= span.end or
@@ -1431,6 +1446,7 @@ pub const Parser = struct {
             generic_list = scanned.span;
             presentation_committed = true;
             try self.classifyAdmissionGenericList(scanned.span);
+            self.refuseGenericListForms(scanned.span);
             self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
             var tokenizer = body_cursor.tokenizer;
             tokenizer.resumeAfterRawErasure(scanned.span.end, name);
@@ -2463,6 +2479,7 @@ pub const Parser = struct {
                 .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
             };
         };
+        self.refuseGenericListForms(scanned.span);
         if (named_header) {
             try self.classifyAdmissionGenericList(scanned.span);
         }
@@ -2632,6 +2649,7 @@ pub const Parser = struct {
             };
         };
         try self.classifyAdmissionGenericList(scanned.span);
+        self.refuseGenericListForms(scanned.span);
 
         const cursor = self.cursorAfterAdmittedGeneric(scanned.span.end, runtime_previous);
         const previous = runtime_previous;
@@ -2789,6 +2807,15 @@ pub const Parser = struct {
         previous_token: Token,
         params: []const NodeIndex,
     ) !type_syntax.ReturnSyntax {
+        if (!self.expression_profile) {
+            if (type_syntax.assertsReturnOffset(self.source, self.current.start + self.current.len)) |offset| {
+                self.errors.addErrorAt(
+                    .unsupported_feature,
+                    type_syntax.tokenAtOffset(self.source, offset),
+                    "an `asserts` return type is not supported; return `x is T` from a predicate, or use `assert` in the caller",
+                );
+            }
+        }
         if (self.admission != null) {
             return self.parseAdmittedFunctionReturnSyntax(kind, previous_token, params);
         }
@@ -11084,11 +11111,8 @@ test "admission preserves runtime prefixes and excludes commented parameter prod
         .{ .source = "function f/* gap */(x: any) { return 1; }\n", .parser_error = error.UnexpectedToken, .parser_kind = .expected_token, .parser_column = 22, .diagnostics = &.{} },
         .{ .source = "function f/* gap */(x?: any) { return 1; }\n", .parser_error = error.UnexpectedToken, .parser_kind = .expected_token, .parser_column = 22, .diagnostics = &.{} },
         .{ .source = "function f/* gap */(x =\r 1, y: any) { return 1; }\n", .parser_error = error.ParseError, .parser_kind = .unsupported_feature, .parser_column = 23, .diagnostics = &.{} },
-        .{ .source = "function f<T = string>\r; const later: any = 1;\n", .diagnostics = &.{
-            .{ .kind = .any_type, .span = .{ .start = 38, .end = 41 }, .presentation = .{ .line = 1, .column = 38 } },
-        } },
-        .{ .source = "function f<T = string>\r; const seed =\r1; const later: any = 1;\n", .diagnostics = &.{
-            .{ .kind = .any_type, .span = .{ .start = 54, .end = 57 }, .presentation = .{ .line = 1, .column = 53 } },
+        .{ .source = "function f<T>\r; const seed =\r1; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 45, .end = 48 }, .presentation = .{ .line = 1, .column = 44 } },
         } },
         .{ .source = "function f(x: number) { const seed =\r1; const later: any = 1; }\n", .diagnostics = &.{
             .{ .kind = .any_type, .span = .{ .start = 53, .end = 56 }, .presentation = .{ .line = 1, .column = 53 } },
@@ -11115,9 +11139,9 @@ test "admission preserves runtime prefixes and excludes commented parameter prod
         .{ .source = "function f<T as number>\r; const later: any = 1;\n", .diagnostics = &.{
             .{ .kind = .any_type, .span = .{ .start = 39, .end = 42 }, .presentation = .{ .line = 1, .column = 39 } },
         } },
-        .{ .source = "function f<T = string>\r;\n", .parser_error = error.UnexpectedToken, .parser_kind = .expected_token, .parser_column = 24, .diagnostics = &.{} },
+        .{ .source = "function f<T>\r;\n", .parser_error = error.UnexpectedToken, .parser_kind = .expected_token, .parser_column = 15, .diagnostics = &.{} },
     };
-    try std.testing.expectEqual(@as(usize, 34), cases.len);
+    try std.testing.expectEqual(@as(usize, 33), cases.len);
     for (cases) |case| {
         errdefer std.debug.print("runtime presentation failed: {s}\n", .{case.source});
         for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {

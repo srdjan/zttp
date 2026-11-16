@@ -262,13 +262,17 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | A type predicate whose body does not prove the predicate | ZTS211 | A predicate body that checks the claimed type |
 | A wrong number of explicit type arguments, or a violated constraint | ZTS210, ZTS209 | Match the declaration |
 | A `structural` or `nominal` declaration inside a function | ZTS002 | Declare the type at the top level |
+| A generic default, such as `function f<T = string>(a: T): T` | ZTS001 | Remove the default. Pass the type argument at each use |
+| A type-parameter modifier, such as `in`, `out`, or `const` | ZTS001 | Remove the modifier |
+| An `asserts` return type | ZTS001 | A type predicate `x is T`, or `assert` in the caller |
 
 The admitted types are listed in section 5.7 of the
 [specification](spec/zts-model-1.md). The specification also excludes these
 type features: higher-rank function types, `keyof`, indexed-access types,
 index signatures, type-position `typeof`, conditional types, mapped types,
-`infer`, overloads, ambient declarations, generic defaults, and variance
-annotations. The Declarations And Bindings table gives the refusals of
+`infer`, overloads, and ambient declarations. The Types table gives the
+refusals of generic defaults, type-parameter modifiers, and `asserts` return
+types. The Declarations And Bindings table gives the refusals of
 overloads and of `declare`. `zts check` gives the other features no targeted
 diagnostic. The gap section below gives the observed behavior.
 
@@ -342,7 +346,6 @@ against the compiler.
 
 | Form | Observed result | Required |
 |---|---|---|
-| Generic defaults, such as `function f<T = string>(a: T): T` | Accepted, exit 0 | A targeted refusal. Pass the type argument at each use |
 | Index signatures, such as `{ [k: string]: number }` | Accepted, exit 0, also when used in a signature | A targeted refusal. Write `Dict<string, number>` |
 | `JSON.parse` and `JSON.stringify` | Accepted | ZTS629. Use `parseJson` or `stringifyJson` from `zttp:json`, or `decodeJson` from `zttp:decode` |
 | `match` on a call, such as `match (g()) { ... }` | Accepted, exit 0. The specification requires an identifier or a member path | A targeted refusal. Bind the value to a `const` first |
@@ -361,7 +364,6 @@ against the compiler.
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
 | Type parameters on an arrow, such as `<T>(x: T) => x` | Accepted, exit 0 | ZTS001. Write the callback without type parameters |
-| A type-parameter modifier (`in`, `const`) and an `asserts` return type | Accepted, exit 0 | A targeted refusal. Remove the modifier. Write `x is T` or `boolean` as the return type |
 | A quoted key in a record type, such as `{ "a": number }`, when unused | Accepted, exit 0 | ZTS001. Write `{ a: number }` |
 | A quoted key in a record type, such as `{ "a": number }`, when read | Refused with ZTS201, "property does not exist on type" | ZTS001 on the declaration. Write `{ a: number }` |
 | A type name outside the admitted types, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error` | Accepted, exit 0 | A targeted refusal. Use an admitted type from section 5.7 of the specification |

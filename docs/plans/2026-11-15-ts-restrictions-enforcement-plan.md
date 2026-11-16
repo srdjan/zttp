@@ -497,3 +497,10 @@ later.
   incidentally. That deletion is a refactor, so U3 needs owner approval
   first. A refusal that still parses the arrow keeps the machinery running
   on refused input with no tests, so U3 must not use it.
+- G2 leaves default handling in the generic list code. The recorded
+  `equals_span` and `default_span`, the empty-name projection, and the
+  `compact_count` bound in `appendProjectedParametersWithBounds` now run only
+  on a source that the parser refuses with ZTS001. The parser keeps parsing
+  after the refusal, so that code still runs, and no test covers it. The X11
+  decision covers the same shape, so the deletion of both waits for that
+  decision.
