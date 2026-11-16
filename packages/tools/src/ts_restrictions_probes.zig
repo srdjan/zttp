@@ -1353,6 +1353,15 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(body("  const a = 1;\n  const b = 2;")),
     },
     .{
+        .key = "An assignment to a `const` binding, such as `const n: number = 1; n = 2;` and `for (const k of xs) { k = 1; }`",
+        .refused = &.{
+            r("const", top("const n: number = 1;\nfunction g(): number {\n  n = 2;\n  return n;\n}")),
+            r("const n: number = 1; n = 2;", top("function g(): number {\n  const n: number = 1;\n  n = 2;\n  return n;\n}")),
+            r("for (const k of xs) { k = 1; }", top("function g(xs: number[]): number {\n  for (const k of xs) {\n    k = 1;\n  }\n  return 0;\n}")),
+        },
+        .clean = c(top("function g(): number {\n  let n: number = 1;\n  n = 2;\n  return n;\n}")),
+    },
+    .{
         .key = "Destructuring in a `for...of` head",
         .refused = &.{
             r("for...of", top("function g(xs: number[][]): number {\n  for (const [a, b] of xs) {\n  }\n  return 1;\n}")),
@@ -1467,10 +1476,6 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "`DictKey` with no import, such as `<K extends DictKey>`",
         .sources = &.{c(top("function f<K extends DictKey>(k: K): K {\n  return k;\n}"))},
-    },
-    .{
-        .key = "An assignment to a `const`, such as `const n: number = 1; n = 2;`",
-        .sources = &.{c(top("function g(): number {\n  const n: number = 1;\n  n = 2;\n  return n;\n}"))},
     },
     .{
         .key = "A spread with no explicit field after it, such as `{ ...o }`",

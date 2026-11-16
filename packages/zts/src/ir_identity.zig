@@ -765,7 +765,7 @@ test "a change anywhere in the admitted surface is caught" {
         .{ .from = "orders[0];", .to = "orders[1];", .what = "an index literal" },
         .{ .from = "sum >= 0", .to = "sum > 0", .what = "an assert condition" },
         .{ .from = "sum > 0 ? true : false", .to = "sum > 0 ? false : true", .what = "ternary arms" },
-        .{ .from = "let sum = 0;", .to = "const sum = 0;", .what = "a binding keyword" },
+        .{ .from = "const id = firstOrder.id;", .to = "let id = firstOrder.id;", .what = "a binding keyword" },
         .{ .from = "(o: Order): string =>", .to = "(other: Order): string =>", .what = "a parameter name" },
         .{ .from = "import { json }", .to = "import { jsonx as json }", .what = "an imported name" },
         .{ .from = "Response.json(", .to = "Response.rawJson(", .what = "a called property" },

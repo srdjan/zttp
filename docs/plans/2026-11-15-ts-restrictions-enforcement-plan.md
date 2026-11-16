@@ -770,3 +770,13 @@ later.
   test. The dedup of an imported name stays, because one name imported under
   two aliases still reaches it. The `ImportResolutionFilter` stays, because a
   single unresolved import still needs it.
+- U4b-4 refuses an assignment to a `const` binding with the new parser code
+  ZTS066, at the assigned name. This covers a local, a module `const`, a
+  `for...of` `const`, an import, and a captured `const`. The help is
+  "Declare the name with `let`, or bind the new value to a new name."
+  `ScopeAnalyzer.isConstBinding` walks the scopes without creating an
+  upvalue. Before U4b-4, `for (const k of xs) { k = 1; }` was admitted with
+  no error, and the other forms got only ZTS200. An assignment to a module
+  `const` that is declared later in the file gets ZTS629, because the parser
+  has not declared the name yet. U4b-4 moves two fixtures to legal forms: the
+  IR identity mutation of a binding keyword, and one flow collision case.

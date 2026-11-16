@@ -8868,7 +8868,7 @@ test "imported bindings copy current shared globals and returned closures retain
     try testing.expect(!closure.cleared);
     try testing.expect(!closure.properties.no_credential_leakage);
     const collision = try probeImported(
-        "import { read } from \"./helper.ts\"; const shared = \"public\"; function handler(req) { shared = req.headers.authorization; return read(); }",
+        "import { read } from \"./helper.ts\"; let shared = \"public\"; function handler(req) { shared = req.headers.authorization; return read(); }",
         "const shared = \"public\"; export function read() { return shared; }",
         "read",
         "read",

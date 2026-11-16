@@ -87,6 +87,7 @@ pure.
 | A declaration with no initializer, such as `let a: number;` and `const a: number;` | ZTS021 | Write `const a: number = 1;`, or give the `let` an initializer |
 | A declaration that binds two names, such as `const a = 1, b = 2;` | ZTS001 | Write one `const` for each name |
 | A second declaration of a name in one scope, such as `const a = 1; const a = 2;`, a `function` and a `const` of one name, and an import and a declaration of one name | ZTS019 | A different name |
+| An assignment to a `const` binding, such as `const n: number = 1; n = 2;` and `for (const k of xs) { k = 1; }` | ZTS066 | Write `let`, or bind the new value to a new name |
 | `class` declarations and `class` expressions | ZTS001 | Plain records and functions |
 | `declare` declarations | ZTS001 | Import the value from a module |
 | `abstract class` | ZTS001 | Plain records and functions |
@@ -408,7 +409,6 @@ against the compiler.
 | A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | Accepted, exit 0 | ZTS209. Pass a type argument that satisfies the constraint |
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |
-| An assignment to a `const`, such as `const n: number = 1; n = 2;` | Refused with ZTS200, "type '2' is not assignable to type '1'" | A targeted refusal that names `const`. Write `let`, or bind a new name |
 | A spread with no explicit field after it, such as `{ ...o }` | Accepted, exit 0 | ZTS614. Use `o` itself, or add an explicit field after the spread |
 | A call in an assignment target, such as `mk().n = 2` | Accepted, exit 0 | A targeted refusal. Bind the call result to a `const` first |
 | A higher-order callback that calls `push`, or that assigns a captured binding | Accepted, exit 0 | A targeted refusal. Build the result with `for...of` |

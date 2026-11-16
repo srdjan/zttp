@@ -145,6 +145,7 @@ pub fn parserCode(kind: ParserKind) []const u8 {
         .duplicate_binding => "ZTS019",
         .undeclared_variable => "ZTS020",
         .const_without_initializer => "ZTS021",
+        .const_assignment => "ZTS066",
         .invalid_break => "ZTS022",
         .invalid_continue => "ZTS023",
         .invalid_return => "ZTS024",

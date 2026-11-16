@@ -4984,6 +4984,12 @@ pub const Parser = struct {
             self.errors.addErrorAt(.invalid_assignment_target, op_tok, "an assignment target must be a name, a member path, or an index; write `x = value`, `o.a = value`, or `xs[i] = value`, with no parentheses or `?.`");
             return error.ParseError;
         }
+        if (self.nodes.getTag(target) != .identifier) return;
+        const binding = ir.IrView.fromIRStore(&self.nodes, &self.constants).getBinding(target) orelse return;
+        if (self.scopes.isConstBinding(binding.name_atom)) {
+            self.errors.addError(.const_assignment, self.nodes.getLoc(target), "this name is declared `const` and cannot be assigned");
+            return error.ParseError;
+        }
     }
 
     fn isAssignmentTarget(self: *Parser, target: NodeIndex) bool {
