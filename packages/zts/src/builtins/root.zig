@@ -154,7 +154,6 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, object_obj, "keys", wrap(object_builtins.objectKeys), 1);
     try addMethodDynamic(ctx, object_obj, "values", wrap(object_builtins.objectValues), 1);
     try addMethodDynamic(ctx, object_obj, "entries", wrap(object_builtins.objectEntries), 1);
-    try addMethodDynamic(ctx, object_obj, "hasOwn", wrap(object_builtins.objectHasOwn), 2);
     try ctx.setGlobal(.Object, object_obj.toValue());
 
     // Create Error prototype with toString method
@@ -328,8 +327,6 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, array_proto, "toSorted", wrapTry(array.arrayToSorted), 1);
     const array_ctor = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodDynamic(ctx, array_ctor, "isArray", wrap(array.arrayIsArray), 1);
-    try addMethodDynamic(ctx, array_ctor, "from", wrapTry(array.arrayFrom), 1);
-    try addMethodDynamic(ctx, array_ctor, "of", wrap(array.arrayOf), 0);
     try ctx.setGlobal(.Array, array_ctor.toValue());
 
     // String.prototype

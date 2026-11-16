@@ -241,7 +241,7 @@ pub fn parseDoc(a: std.mem.Allocator, text: []const u8) !Doc {
         }
         if (std.mem.eql(u8, section, "Admitted Members") and line.len != 0) {
             const spans = try codeSpans(a, line);
-            if (spans.len != 0 and std.mem.endsWith(u8, spans[0], ".prototype")) {
+            if (spans.len != 0 and std.mem.startsWith(u8, line, "`")) {
                 try admitted.append(a, .{ .scope = spans[0], .members = spans[1..] });
             }
             continue;
@@ -693,13 +693,16 @@ fn checkKinds(report: *Report, inputs: Inputs, observed: []const []const u8) !vo
     }
 }
 
-/// A handler that reads `member` off a value of its scope. A read of an
-/// admitted member type-checks; a read of any other member is ZTS201.
+/// A handler that reads `member` off a value of its scope, or off the
+/// namespace that the scope names. A read of an admitted member type-checks;
+/// a read of any other member is ZTS201.
 fn memberRead(a: std.mem.Allocator, member: Member) ![]const u8 {
     const value = if (std.mem.eql(u8, member.scope, "Array.prototype"))
         "const xs: number[] = [1, 2];\n  const f = xs."
+    else if (std.mem.eql(u8, member.scope, "String.prototype"))
+        "const s: string = \"a\";\n  const f = s."
     else
-        "const s: string = \"a\";\n  const f = s.";
+        try std.mem.concat(a, u8, &.{ "const f = ", member.scope, "." });
     return std.mem.concat(a, u8, &.{
         "export function handler(req: Request): Proof<Response, \"no_secret_leakage\"> {\n  ",
         value,
@@ -807,6 +810,24 @@ fn integerOf(value: ?std.json.Value) !u64 {
     };
 }
 
+/// Append each own property of `holder` as a member of `scope`.
+fn appendOwnMembers(
+    a: std.mem.Allocator,
+    members: *std.ArrayList(Member),
+    ctx: *zts.Context,
+    pool: anytype,
+    scope: []const u8,
+    holder: *zts.JSObject,
+) !void {
+    var it = holder.propertyIterator(pool);
+    while (it.next()) |prop| {
+        // The atoms 0xFFFE and 0xFFFF are hidden-class sentinels.
+        if (@as(u32, @backingInt(prop.atom)) >= 0xFFFE) continue;
+        const name = prop.atom.toPredefinedName() orelse ctx.atoms.getName(prop.atom) orelse return error.UnnamedProperty;
+        try members.append(a, .{ .scope = scope, .name = try a.dupe(u8, name) });
+    }
+}
+
 fn realRegistry(a: std.mem.Allocator, gpa: std.mem.Allocator) !Registry {
     // Kinds that refuse source: the parser, the type stripper, the type
     // checker, and the strict checker.
@@ -832,13 +853,7 @@ fn realRegistry(a: std.mem.Allocator, gpa: std.mem.Allocator) !Registry {
     };
     for (holders) |entry| {
         const holder = entry.holder orelse return error.NoPrototype;
-        var it = holder.propertyIterator(pool);
-        while (it.next()) |prop| {
-            // The atoms 0xFFFE and 0xFFFF are hidden-class sentinels.
-            if (@as(u32, @backingInt(prop.atom)) >= 0xFFFE) continue;
-            const name = prop.atom.toPredefinedName() orelse ctx.atoms.getName(prop.atom) orelse return error.UnnamedProperty;
-            try members.append(a, .{ .scope = entry.scope, .name = try a.dupe(u8, name) });
-        }
+        try appendOwnMembers(a, &members, ctx, pool, entry.scope, holder);
         // `length` is a property read, not an own property of the prototype.
         try members.append(a, .{ .scope = entry.scope, .name = "length" });
     }
@@ -854,6 +869,13 @@ fn realRegistry(a: std.mem.Allocator, gpa: std.mem.Allocator) !Registry {
     var ambient: std.ArrayList([]const u8) = .empty;
     const values = (payload.get("ambient_names") orelse return error.MissingMetaField).object.get("values") orelse return error.MissingMetaField;
     for (values.array.items) |item| try ambient.append(a, item.string);
+    // The own members of each ambient name whose global is an object, such as
+    // `Math` and `Object`.
+    for (ambient.items) |name| {
+        const value = ctx.getGlobal(try ctx.atoms.intern(name)) orelse continue;
+        if (!value.isObject()) continue;
+        try appendOwnMembers(a, &members, ctx, pool, name, value.toPtr(zts.JSObject));
+    }
 
     var limits: std.ArrayList(Limit) = .empty;
     const limit_object = (payload.get("limits") orelse return error.MissingMetaField).object;

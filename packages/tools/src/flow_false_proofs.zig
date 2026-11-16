@@ -306,14 +306,15 @@ pub const fixtures = [_]Fixture{
     \\  return Response.html(unescapeHtml(escaped));
     \\}
     },
-    // -- `Array.from(secret, f)` where `f` logs.
+    // -- A callback over the characters of a secret that logs each one. The
+    // original shape was `Array.from(secret, f)`, which the profile refuses.
     // runtime: known-limits row "Array.from(secret, f), where f logs each character"
     .{ .name = "array_from_callback_logs_secret", .property = .no_secret_leakage, .source =
     \\import { env } from "zttp:env";
     \\import { logInfo } from "zttp:log";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const secret: string = env("SECRET_KEY") ?? "";
-    \\  const out: string[] = Array.from(secret, (ch: string): string => { logInfo("c", { k: ch }); return ch; });
+    \\  const out: string[] = secret.split("").map((ch: string): string => { logInfo("c", { k: ch }); return ch; });
     \\  return Response.json({ ok: true });
     \\}
     },

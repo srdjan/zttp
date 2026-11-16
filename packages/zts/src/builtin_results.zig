@@ -70,10 +70,6 @@ pub const Result = enum {
     /// `string` for an argument of bounded JSON depth, `string | undefined`
     /// for a recursive type, and no result for a type with an `unknown` part.
     json_text,
-    /// The array of the union of the arguments' types.
-    array_of,
-    /// `string[]` for a string, the same array for an array.
-    array_from,
 };
 
 pub const Kind = enum {
@@ -258,23 +254,15 @@ pub const rows =
     // indexes as string keys, and a Dict gives an empty array. A key is always
     // a string. A value is `unknown`, because a record can hold a field that
     // its type does not name (the discriminant-test gap in docs/roadmap.md).
-    // `hasOwn` returns false for a value that is not an object and for a key
-    // that is not a string.
     [_]Row{
         .{ .scope = "Object", .name = "keys", .min_args = 1, .params = &.{.object}, .result = .string_array },
         .{ .scope = "Object", .name = "values", .min_args = 1, .params = &.{.object}, .result = .unknown_array },
         .{ .scope = "Object", .name = "entries", .min_args = 1, .params = &.{.object}, .result = .entry_array },
-        .{ .scope = "Object", .name = "hasOwn", .params = any_two, .result = .boolean },
     } ++
     // Array. `isArray` is false for no argument and for a value that is not an
-    // array. `of` returns an array of its arguments. `from` returns
-    // `undefined` for no argument; a string gives an array of its characters,
-    // an array gives a copy, and a second argument maps the elements, so
-    // `from` has a result only for one argument.
+    // array.
     [_]Row{
         .{ .scope = "Array", .name = "isArray", .params = any_one, .result = .boolean },
-        .{ .scope = "Array", .name = "of", .min_args = 1, .rest = .any, .result = .array_of },
-        .{ .scope = "Array", .name = "from", .min_args = 1, .params = any_one, .result = .array_from },
     };
 
 pub fn find(kind: Kind, scope: []const u8, name: []const u8) ?Row {
@@ -291,6 +279,12 @@ pub fn find(kind: Kind, scope: []const u8, name: []const u8) ?Row {
 /// and for `Array.prototype`.
 pub fn installsMember(scope: []const u8, name: []const u8) bool {
     return rowFor(&rows, scope, name) or skipFor(&skips, scope, name);
+}
+
+/// Whether `name` is an ambient value that a handler may name without an
+/// import, such as `Math`, `Response`, or `range`.
+pub fn isAmbientGlobal(name: []const u8) bool {
+    return known_globals.isKnownGlobalFunction(name);
 }
 
 // ---------------------------------------------------------------------------

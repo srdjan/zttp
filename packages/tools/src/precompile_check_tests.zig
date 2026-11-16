@@ -12269,7 +12269,7 @@ const container_writes = [_]AbsentReadCase{
     \\  return Response.text(p.name);
     \\}
     },
-    .{ .name = "w1_array_length_write_is_clean", .expect = "clean", .source =
+    .{ .name = "w1_array_length_write_is_refused", .expect = "ZTS200@3", .source =
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const xs: number[] = [1, 2];
     \\  xs.length = 0;
@@ -15162,7 +15162,6 @@ test "a branch on request data, a constant, or an unused clock read keeps determ
         .{ .name = "c_secret_det", .source = "import { env } from \"zttp:env\";\nexport function handler(req: Request): Proof<Response, \"no_secret_leakage\" | \"deterministic\"> {\n  const secret = env(\"API_KEY\");\n  const guess = req.headers.get(\"x\");\n  if (secret === guess) {\n    return Response.text(\"yes\");\n  }\n  return Response.text(\"no\");\n}\n" },
         .{ .name = "d_map_data", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = [\"a\", \"b\"].map((x: string): string => \"k\");\n  return Response.text(xs.join(\",\"));\n}\n" },
         .{ .name = "d_map_data2", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = [\"a\", \"b\"].map((x: string): number => t);\n  return Response.text(\"x\");\n}\n" },
-        .{ .name = "d_arrayfrom", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = Array.from([\"a\", \"b\"], (x: string): number => t);\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "d_dictmapvalues", .source = "import { dictMapValues, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), \"a\", 1);\n  const f = dictMapValues(d, (v: number, k: string): number => v + t);\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "e_reduce_cb", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [1, 2].reduce((acc: number, x: number): number => acc + t, 0);\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "e_dictfold", .source = "import { dictFold, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), \"a\", 1);\n  const r = dictFold(d, (acc: number, v: number, k: string): number => acc + t, 0);\n  return Response.text(\"x\");\n}\n" },

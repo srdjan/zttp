@@ -265,8 +265,6 @@ const Rule = enum {
     array_test,
     /// `reduce`: the accumulator.
     array_reduce,
-    /// `Array.from`: a fresh array of the elements, or of the mapped elements.
-    array_from,
     /// `h`: a vnode that holds what it was given, components included.
     vnode,
     /// `renderToString`: runs no component, so it has a rule only for a vnode
@@ -282,7 +280,6 @@ const Rule = enum {
     object_keys,
     object_values,
     object_entries,
-    array_of,
     /// A `Response` static: a container that holds native methods.
     response_static,
     fetch_sync,
@@ -380,14 +377,11 @@ pub const operation_rows =
     rowsOf("Object", .object_keys, .drop_html, "", &.{"keys"}) ++
     rowsOf("Object", .object_values, .keep, "", &.{"values"}) ++
     rowsOf("Object", .object_entries, .drop_html, "", &.{"entries"}) ++
-    rowsOf("Object", .deep_scalar, .keep, "", &.{"hasOwn"}) ++
     rowsOf("Number", .deep_scalar, .keep, "", &.{ "isInteger", "isNaN", "isFinite", "parseFloat", "parseInt" }) ++
     rowsOf("Response", .response_static, .keep, "", &.{ "json", "text", "html", "redirect", "rawJson" }) ++
     rowsOf("console", .log, .keep, "", &.{"log"}) ++
     rowsOf("Date", .nondeterministic, .keep, "", &.{"now"}) ++
     rowsOf("Array", .deep_scalar, .keep, "", &.{"isArray"}) ++
-    rowsOf("Array", .array_of, .keep, "", &.{"of"}) ++
-    rowsOf("Array", .array_from, .keep, "", &.{"from"}) ++
     rowsOf("String", .deep_scalar, .drop_all, "", &.{"fromCharCode"}) ++
     rowsOf("global", .deep_scalar, .keep, "", &.{ "String", "Number", "parseFloat", "parseInt", "isDict", "isBytes" }) ++
     rowsOf("global", .range, .keep, "", &.{"range"}) ++

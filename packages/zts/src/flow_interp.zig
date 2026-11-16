@@ -1993,12 +1993,6 @@ pub const FlowInterp = struct {
                 );
                 return withFlow((try joinOpt(self.mem(), initial, results)) orelse initial, flow);
             },
-            .array_from => {
-                const source: Param = .{ .elements_labelled = argAt(args, 0) };
-                if (args.len < 2) return self.allocate(st, .allocated_array, node, &.{try self.paramValue(st, source, null)}, flow);
-                const results = try self.runCallback(node, args[1], &.{ source, .{ .structure = argAt(args, 0) } }, st);
-                return self.allocate(st, .allocated_array, node, &.{results orelse Value.clean}, flow);
-            },
             .deep_scalar => return Value.flowing(arg_flow),
             .nondeterministic => return Value.labelled(.{ .nondeterministic = true }),
             .parsed, .range => return self.allocate(st, .allocated_any, node, &.{Value.flowing(arg_flow)}, arg_flow),
@@ -2011,7 +2005,6 @@ pub const FlowInterp = struct {
                 &.{ try self.readAll(st.*, argAt(args, 0)), Value.flowing(arg_flow) },
                 flow,
             ),
-            .array_of => return self.allocate(st, .allocated_array, node, args, flow),
             .response_static => return self.makeResponse(st, node, row, args),
             .fetch_sync => {
                 var origin: ?flow_evidence.Origin = null;
@@ -2424,9 +2417,6 @@ pub const FlowInterp = struct {
         acc: Value,
         /// Every element of the value, read at the head.
         elements: Value,
-        /// Every element of the value, read at the head, and the flow of the
-        /// value itself.
-        elements_labelled: Value,
         /// The labels of everything the value reaches at the head, and no
         /// defense. The key of a dictionary entry takes this form.
         deep: Value,
@@ -2484,9 +2474,6 @@ pub const FlowInterp = struct {
         switch (param) {
             .acc => |initial| return (try joinOpt(self.mem(), initial, results)) orelse initial,
             .elements => |source| return self.readAll(head.*, source),
-            .elements_labelled => |source| {
-                return joinValue(self.mem(), try self.readAll(head.*, source), Value.flowing(source.flow()));
-            },
             .deep, .structure => |source| return Value.labelled((try self.deepFlow(head, &.{source})).labels),
             .itself => |v| return v,
         }
@@ -2543,7 +2530,7 @@ pub const FlowInterp = struct {
             .presumed => |args| self.markControl(st, node, try self.reach(st, args)),
             .precise => |list| for (list) |param| switch (param) {
                 .structure, .deep => |source| if (varyingFlow(try self.deepFlow(st, &.{source}))) self.markSite(st, node),
-                .acc, .elements, .elements_labelled, .itself => {},
+                .acc, .elements, .itself => {},
             },
         }
     }
@@ -6238,7 +6225,7 @@ test "census C1: every registered builtin has a row and every row names a builti
     );
     // A floor on the input: a census that enumerated nothing would pass.
     try testing.expect(counts.globals >= 19);
-    try testing.expect(counts.properties >= 79);
+    try testing.expect(counts.properties >= 76);
     try testing.expectEqual(operation_rows.len, counts.rows);
     // Every property belongs to one row, and a global function has a row of
     // its own, so the rows cover the properties and the global functions.
@@ -6673,17 +6660,6 @@ test "a comparator sees two elements and labels the sorted copy" {
 }
 
 // P5 specification test 45.
-test "Array.from passes the source and its labels to the callback" {
-    const from = "function f(s) { const o = { x: \"c\" }; ";
-    try expectSecret(from ++ "Array.from(s, (x) => { o.x = x; return \"c\"; }); return o.x; }", &.{secret_value}, true);
-    try expectSecret(from ++ "Array.from(\"c\", (x) => { o.x = x; return \"c\"; }); return o.x; }", &.{secret_value}, false);
-    try expectSecret("function f(s) { return Array.from([\"c\"], () => s)[0]; }", &.{secret_value}, true);
-    try expectSecret("function f(s) { return Array.from([s], (x) => x)[0]; }", &.{secret_value}, true);
-    // Without a callback the result holds the elements.
-    try expectSecret("function f(s) { return Array.from([s])[0]; }", &.{secret_value}, true);
-    try expectSecret("function f(s) { return Array.from([\"c\"])[0]; }", &.{secret_value}, false);
-}
-
 const ExportFixture = struct {
     specifier: []const u8,
     name: []const u8,
@@ -6850,7 +6826,6 @@ test "a callback that may be any function is an unknown callee" {
         "function f(g) { return [1].map(g); }",
         "function f(g) { return [1].reduce(g, 0); }",
         "function f(g) { return [1].toSorted(g); }",
-        "function f(g) { return Array.from([1], g); }",
         "import { dictMapValues, dictEmpty } from \"zttp:collections\"; function f(g) { return dictMapValues(dictEmpty(), g); }",
     };
     inline for (sources) |source| {
@@ -6864,7 +6839,6 @@ test "a callback that may be any function is an unknown callee" {
         "function f(g) { return [1].map(); }",
         "function f(g) { return [1].filter(3); }",
         "function f(g) { return [1].toSorted(3); }",
-        "function f(g) { return Array.from([1], 3); }",
         "import { dictFold, dictEmpty } from \"zttp:collections\"; function f(g) { return dictFold(dictEmpty()); }",
     };
     inline for (missing) |source| {
@@ -7111,14 +7085,6 @@ test "operations with the edge keep carry the defenses of their flow" {
     }
     // Contrast: a row with the edge keep leaves both defenses where they are.
     try expectDefenses("function f(v, u) { return v.trim(); }", &both, both_defenses);
-
-    // A container keeps the flow of its rule: it takes the raw flow of `u`
-    // while its elements are escaped.
-    const from = text_import ++ "function f(u) { return Array.from(u, (c) => escapeHtml(c)); }";
-    try expectDeepDefenses(from, &params, no_defenses);
-    const first = text_import ++ "function f(u) { return Array.from(u, (c) => escapeHtml(c))[0]; }";
-    try expectDefenses(first, &params, no_defenses);
-    try expectDeepDefenses(first, &params, no_defenses);
 }
 
 // P6 specification test 10.
@@ -7160,7 +7126,6 @@ test "the callback index carries the structure of the receiver" {
         "a.some((x, i) => { " ++ write ++ " return true; })",
         "a.findIndex((x, i) => { " ++ write ++ " return true; })",
         "a.reduce((acc, x, i) => { " ++ write ++ " return acc; }, \"c\")",
-        "Array.from(a, (x, i) => { " ++ write ++ " return x; })",
     };
     inline for (calls) |call| {
         const head = "function f(u) { const o = { w: \"c\" }; const a = ";
@@ -7170,11 +7135,6 @@ test "the callback index carries the structure of the receiver" {
         try expectUserInput(head ++ "[...u.split(\",\")]" ++ tail, &.{user_input_value}, true);
         try expectUserInput(head ++ "[\"c\", \"c\"]" ++ tail, &.{user_input_value}, false);
     }
-
-    const index = text_import ++ "function f(u) { return Array.from(escapeHtml(u), (c, i) => \"c\".charAt(i)).join(\"\"); }";
-    try expectUserInput(index, &.{user_input_value}, true);
-    const element = text_import ++ "function f(u) { return Array.from(escapeHtml(u), (c) => c).join(\"\"); }";
-    try expectDefenses(element, &.{user_input_value}, html_only);
 }
 
 // P6 specification test 13.

@@ -647,3 +647,17 @@ later.
   - `docs/proofs-and-receipts.md` keeps `forEach` and `[req].pop()` in its
     table of shapes that v0.22.3 proved falsely. The table records that
     release, so it stays as written.
+- U4a-2 refuses a read of a member that an ambient value does not install,
+  such as `Math.nope`, `Object.create`, `Date.parse`, and `h.foo`, with
+  ZTS201. Before U4a-2, the checker did not look at these reads, so a typo
+  in a namespace member passed the check and failed at run time. U4a-2
+  deletes `Array.from`, `Array.of`, and `Object.hasOwn` (Decision 7), and
+  refuses a write to the `length` of a string, an array, or a tuple with
+  ZTS200. The restriction gate now reads the own members of each ambient
+  value, and docs/ts-restrictions.md lists the admitted members of each
+  namespace. These findings stay open:
+  - `range.length` is admitted, because the result table names the length
+    of the iterator that `range` returns under the scope `range`. A read of
+    `range.length` off the function itself is a different value. A probe of
+    the run-time value can confirm what it reads.
+  - The `JSON` line of the admitted members goes away with U5.

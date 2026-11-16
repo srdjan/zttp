@@ -178,52 +178,6 @@ pub fn objectEntries(ctx: *context.Context, this: value.JSValue, args: []const v
     return result.toValue();
 }
 
-/// Object.hasOwn(obj, prop) - Check if object has own property
-pub fn objectHasOwn(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = this;
-    if (args.len < 2) return value.JSValue.false_val;
-
-    const obj = getObject(args[0]) orelse return value.JSValue.false_val;
-    const pool = ctx.hidden_class_pool orelse return value.JSValue.false_val;
-
-    const key = h.getStringDataCtx(args[1], ctx) orelse return value.JSValue.false_val;
-    const atom = ctx.atoms.intern(key) catch return value.JSValue.false_val;
-
-    return value.JSValue.fromBool(obj.hasOwnProperty(pool, atom));
-}
-
-test "objectHasOwn reports own properties ENG6" {
-    // Regression for ENG-6: Object.hasOwn was a stub that always returned false.
-    // It must intern the property-name argument and report real ownership.
-    var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
-    const allocator = dbg.allocator();
-    const gc_mod = @import("../gc.zig");
-    const heap_mod = @import("../heap.zig");
-
-    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-
-    var heap_state = heap_mod.Heap.init(allocator, .{});
-    defer heap_state.deinit();
-    gc_state.setHeap(&heap_state);
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const obj = try ctx.createObject(null);
-    const a_atom = try ctx.atoms.intern("a");
-    try ctx.setPropertyChecked(obj, a_atom, value.JSValue.fromInt(1));
-
-    const a_key = try ctx.createString("a");
-    const b_key = try ctx.createString("b");
-
-    const has_a = objectHasOwn(ctx, value.JSValue.undefined_val, &.{ obj.toValue(), a_key });
-    const has_b = objectHasOwn(ctx, value.JSValue.undefined_val, &.{ obj.toValue(), b_key });
-
-    try std.testing.expect(has_a.isTrue());
-    try std.testing.expect(has_b.isFalse());
-}
-
 test "Object enumeration orders array indexes before string keys" {
     var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const allocator = dbg.allocator();

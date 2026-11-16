@@ -5371,14 +5371,6 @@ test "builtin result: Object.keys of a string stays untyped" {
     );
 }
 
-test "builtin result: Object.hasOwn is boolean" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\structural O = { a: number };
-        \\function f(o: O): number { const p: Nope = Object.hasOwn(o, "a"); return 0; }
-    , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
-}
-
 test "builtin result: Object.values of a record is an unknown array" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
@@ -5413,48 +5405,6 @@ test "builtin result: Array.isArray is boolean" {
         \\structural Nope = { zz: Bytes };
         \\function f(xs: number[]): number { const p: Nope = Array.isArray(xs); return 0; }
     , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: Array.of of numbers is a number array" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(): number { const p: Nope = Array.of(1, 2); return 0; }
-    , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: Array.of with an argument that has no type stays untyped" {
-    try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
-        \\function f(n: number | undefined): number { const p: Nope = Array.of(1, Math.floor(n)); return 0; }
-    );
-}
-
-test "builtin result: Array.of with no argument stays untyped" {
-    try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
-        \\function f(): number { const p: Nope = Array.of(); return 0; }
-    );
-}
-
-test "builtin result: Array.from of a string is a string array" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(s: string): number { const p: Nope = Array.from(s); return 0; }
-    , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: Array.from of an array is the same array type" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[]): number { const p: Nope = Array.from(xs); return 0; }
-    , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: Array.from with a map function stays untyped" {
-    try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
-        \\function f(s: string, cb: (c: string) => number): number { const p: Nope = Array.from(s, cb); return 0; }
-    );
 }
 
 test "builtin result: a parameter named JSON keeps its own type" {

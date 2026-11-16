@@ -793,6 +793,23 @@ pub const TypeChecker = struct {
         return .{ .member = member, .name = name };
     }
 
+    /// Refuse a read of a member that an ambient value, such as `Math`, `Object`,
+    /// or `range`, does not install. The read yields `undefined`, and a call
+    /// raises `NotCallable`. A shadowed ambient name is not read here.
+    fn reportAmbientMemberRead(self: *TypeChecker, read: NodeIndex) void {
+        const named = self.namedMember(read) orelse return;
+        const ambient = self.builtinGlobalName(named.member.object) orelse return;
+        if (!builtin_results.isAmbientGlobal(ambient)) return;
+        if (builtin_results.installsMember(ambient, named.name)) return;
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .missing_field,
+            .node = read,
+            .message = "member does not exist on this ambient value at runtime",
+            .help = "an ambient value has only the members that docs/ts-restrictions.md lists",
+        });
+    }
+
     /// Refuse a member read or call on a receiver that cannot hold it at run
     /// time: a `number`, a `boolean`, a `string`, an array, a tuple, or a union
     /// of these. Such a read yields `undefined`, and a call raises
@@ -1946,6 +1963,7 @@ pub const TypeChecker = struct {
                 self.reportDictEntryRead(node, member.object);
                 if (tag == .computed_access) self.reportStringIndexRead(node, member.object);
                 self.reportNonRecordMemberRead(node);
+                self.reportAmbientMemberRead(node);
                 if (tag != .optional_chain) self.recordAbsentReceiver(node, member.object);
             },
 
@@ -4328,8 +4346,6 @@ pub const TypeChecker = struct {
             .map_array,
             .reduce_value,
             .json_text,
-            .array_of,
-            .array_from,
             => null_type_idx,
         };
     }
@@ -4586,38 +4602,6 @@ pub const TypeChecker = struct {
                     .opaque_part => null_type_idx,
                 };
             },
-            .array_of => {
-                var members: [MAX_UNION_MEMBERS]TypeIndex = undefined;
-                if (call.args_count > members.len) return null_type_idx;
-                for (0..call.args_count) |position| {
-                    const arg = self.ir_view.getListIndex(call.args_start, @intCast(position));
-                    const arg_type = pool.widenLiteral(self.inferType(arg));
-                    if (!self.isDefiniteType(arg_type, 0)) return null_type_idx;
-                    members[position] = arg_type;
-                }
-                const joined = pool.addUnion(self.allocator, members[0..call.args_count]);
-                if (joined == null_type_idx) return null_type_idx;
-                return pool.addArray(self.allocator, joined);
-            },
-            .array_from => {
-                const arg = self.ir_view.getListIndex(call.args_start, 0);
-                const source = pool.widenLiteral(self.resolvedType(self.inferType(arg)));
-                const tag = pool.getTag(source) orelse return null_type_idx;
-                switch (tag) {
-                    .t_string => return pool.addArray(self.allocator, pool.idx_string),
-                    .t_array, .t_tuple => {
-                        const copied = self.arrayReceiverType(source);
-                        if (copied == null_type_idx) return null_type_idx;
-                        const copied_element = pool.widenLiteral(pool.getArrayElement(copied));
-                        if (copied_element == null_type_idx) return null_type_idx;
-                        return pool.addArray(self.allocator, copied_element);
-                    },
-                    // exhaustive: any other source, such as an object with a
-                    // length, gives an array whose elements nothing here
-                    // determines.
-                    else => return null_type_idx,
-                }
-            },
             .number,
             .boolean,
             .string,
@@ -4731,8 +4715,6 @@ pub const TypeChecker = struct {
             .map_array,
             .reduce_value,
             .json_text,
-            .array_of,
-            .array_from,
             => self.builtinShapedResult(call, row.result, receiver_array),
             .number,
             .boolean,
@@ -8641,19 +8623,25 @@ pub const TypeChecker = struct {
     fn reportContainerWrite(self: *TypeChecker, node: NodeIndex, asgn: Node.AssignExpr) void {
         const target_tag = self.ir_view.getTag(asgn.target) orelse return;
         const member = self.ir_view.getMember(asgn.target) orelse return;
-        // A fresh array literal has no other holder, so a write to it breaks no type.
-        if (self.ir_view.getTag(member.object) == .array_literal) return;
         const slot = self.writeSlotOf(target_tag, member) orelse return;
         const receiver = self.inferType(member.object);
         if (receiver == null_type_idx) return;
+        if (slot == .field and std.mem.eql(u8, slot.field, "length") and self.holdsBuiltinLength(receiver)) {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .type_mismatch,
+                .node = node,
+                .message = "a write to `length` is not supported; the `length` of a string, an array, or a tuple is read-only",
+                .help = "build a new array with `slice` or spread",
+            });
+            return;
+        }
+        // A fresh array literal has no other holder, so a write to it breaks no type.
+        if (self.ir_view.getTag(member.object) == .array_literal) return;
 
         var stack: [MAX_UNION_MEMBERS]TypeIndex = undefined;
         const slots = self.collectWriteSlots(receiver, slot, &stack) orelse return;
         defer slots.deinit(self.allocator);
-        if (slots.has_tuple and slot == .field and std.mem.eql(u8, slot.field, "length")) {
-            self.addTupleLengthChange(node, true);
-            return;
-        }
         if (slots.items.len == 0) return;
         const value_type = self.inferType(asgn.value);
         if (value_type == null_type_idx) return;
@@ -8686,7 +8674,13 @@ pub const TypeChecker = struct {
         const slots = self.collectWriteSlots(receiver, .index_any, &stack) orelse return;
         defer slots.deinit(self.allocator);
         if (slots.has_tuple) {
-            self.addTupleLengthChange(node, false);
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .type_mismatch,
+                .node = node,
+                .message = "this call changes the length of a tuple, and a tuple type names its length",
+                .help = "annotate the binding as an array, such as `string[]`, when the length must change",
+            });
             return;
         }
         if (slots.items.len == 0) return;
@@ -8704,17 +8698,16 @@ pub const TypeChecker = struct {
         }
     }
 
-    fn addTupleLengthChange(self: *TypeChecker, node: NodeIndex, is_length_write: bool) void {
-        self.addDiagnostic(.{
-            .severity = .err,
-            .kind = .type_mismatch,
-            .node = node,
-            .message = if (is_length_write)
-                "a write to `length` changes the length of a tuple, and a tuple type names its length"
-            else
-                "this call changes the length of a tuple, and a tuple type names its length",
-            .help = "annotate the binding as an array, such as `string[]`, when the length must change",
-        });
+    /// Whether a value of `raw` holds the builtin `length` of a string, an
+    /// array, or a tuple, alone or as a member of a union.
+    fn holdsBuiltinLength(self: *const TypeChecker, raw: TypeIndex) bool {
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(raw));
+        if (pool.getTag(t) != .t_union) return self.primitiveMemberPresence(t, "length") == .present;
+        for (pool.getUnionMembers(t)) |m| {
+            if (self.primitiveMemberPresence(m, "length") == .present) return true;
+        }
+        return false;
     }
 
     /// Refuse a nominal type name used in call position.

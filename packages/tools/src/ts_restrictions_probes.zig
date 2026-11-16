@@ -806,6 +806,19 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(body("  const xs: number[] = [1, 2];\n  const a = [...xs, 3];\n  const s = \"abc\";\n  const b = s.slice(1);")),
     },
     .{
+        .key = "A member that an ambient value does not hold, such as `Object.create`, `Object.defineProperty`, `Object.fromEntries`, `Object.hasOwn`, `Array.from`, `Array.of`, or `h.foo`",
+        .refused = &.{
+            r("Object.create", top("function g(): unknown {\n  return Object.create(null);\n}")),
+            r("Object.defineProperty", top("function g(): unknown {\n  const o = { a: 1 };\n  Object.defineProperty(o, \"a\", 1);\n  return o;\n}")),
+            r("Object.fromEntries", top("function g(): unknown {\n  return Object.fromEntries([[\"a\", 1]]);\n}")),
+            r("Object.hasOwn", top("function g(): boolean {\n  return Object.hasOwn({ a: 1 }, \"a\");\n}")),
+            r("Array.from", top("function g(xs: number[]): number[] {\n  return Array.from(xs);\n}")),
+            r("Array.of", top("function g(): number[] {\n  return Array.of(1);\n}")),
+            r("h.foo", body("  const a = h.foo;")),
+        },
+        .clean = c(top("function g(): string[] {\n  return Object.keys({ a: 1 });\n}")),
+    },
+    .{
         .key = "A numeric index read on a string, such as `s[0]`",
         .refused = &.{r("s[0]", body("  const s = \"abc\";\n  const c = s[0];"))},
         .clean = c(body("  const s = \"abc\";\n  const c = s.charAt(0);")),
@@ -821,12 +834,18 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(body("  const xs: number[] = [1];\n  xs.push(2);")),
     },
     .{
-        .key = "`push` or a `length` write on a tuple",
-        .refused = &.{
-            r("push", body("  const t: [number, number] = [1, 2];\n  t.push(3);")),
-            r("length", body("  const t: [number, number] = [1, 2];\n  t.length = 1;")),
-        },
+        .key = "`push` on a tuple",
+        .refused = &.{r("push", body("  const t: [number, number] = [1, 2];\n  t.push(3);"))},
         .clean = c(body("  const t: number[] = [1, 2];\n  t.push(3);")),
+    },
+    .{
+        .key = "A write to the `length` of a string, an array, or a tuple",
+        .refused = &.{
+            r("length", body("  const xs: number[] = [1, 2];\n  xs.length = 0;")),
+            r("length", body("  const t: [number, number] = [1, 2];\n  t.length = 1;")),
+            r("length", body("  const s = \"ab\";\n  s.length = 0;")),
+        },
+        .clean = c(body("  const xs: number[] = [1, 2];\n  const ys = xs.slice(0, 0);")),
     },
     .{
         .key = "A mutating method on a `readonly` array",
@@ -1354,14 +1373,6 @@ pub const gap_rows = [_]GapRow{
         },
     },
     .{
-        .key = "`Array.from`, `Array.of`, and a write to `xs.length`",
-        .sources = &.{
-            c(top("function g(xs: number[]): number[] {\n  return Array.from(xs);\n}")),
-            c(top("function g(): number[] {\n  return Array.of(1);\n}")),
-            c(top("function g(xs: number[]): number {\n  xs.length = 0;\n  return 1;\n}")),
-        },
-    },
-    .{
         .key = "An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, `xs.indexOf(v, i)`, and a three-parameter `map` callback",
         .sources = &.{
             arr_call("xs.slice(1)"),
@@ -1383,14 +1394,6 @@ pub const gap_rows = [_]GapRow{
         .sources = &.{
             c(top("function g(b: Bytes): number {\n  return b[0];\n}")),
             c(top("function g(b: Bytes): number {\n  return b.length;\n}")),
-        },
-    },
-    .{
-        .key = "`Object` members other than `keys`, `values`, and `entries`, such as `Object.create`, `Object.defineProperty`, and `Object.fromEntries`",
-        .sources = &.{
-            c(top("function g(): unknown {\n  return Object.create(null);\n}")),
-            c(top("function g(): unknown {\n  const o = { a: 1 };\n  Object.defineProperty(o, \"a\", 1);\n  return o;\n}")),
-            c(top("function g(): unknown {\n  return Object.fromEntries([[\"a\", 1]]);\n}")),
         },
     },
     .{
