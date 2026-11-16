@@ -670,6 +670,9 @@ pub const TypeSerialization = struct {
     pub const key = type_key.typeKey;
 };
 
+/// The most type parameters that one generic declaration takes.
+pub const max_type_parameters = type_env.MAX_TYPE_PARAMS;
+
 test "stable AmbientCatalog and TypeSerialization publish the registries behind them" {
     const type_names = AmbientCatalog.typeNames();
     try std.testing.expectEqual(compiler.ambient_names.types.len, type_names.len);

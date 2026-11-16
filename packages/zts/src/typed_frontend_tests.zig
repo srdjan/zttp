@@ -2625,7 +2625,6 @@ const GenericAliasCase = enum {
     empty_list,
     ignored_constraint,
     eight_item_projection,
-    ninth_item_unprojected,
     generic_then_plain,
     plain_then_generic,
     ambient_replacement,
@@ -2651,7 +2650,6 @@ const generic_alias_fixtures = [_]GenericAliasFixture{
     .{ .case = .empty_list, .source = "structural Box<> = number;\nconst value: Box<> = undefined;" },
     .{ .case = .ignored_constraint, .source = "structural Box<T extends string> = { value: T };\nconst value: Box<number> = undefined;" },
     .{ .case = .eight_item_projection, .source = "structural Wide<A,B,C,D,E,F,G,H> = H;\nconst value: Wide<string,string,string,string,string,string,string,number> = undefined;" },
-    .{ .case = .ninth_item_unprojected, .source = "structural Many<A,B,C,D,E,F,G,H,I> = I;" },
     .{ .case = .generic_then_plain, .source = "structural Both<T> = T;\nstructural Both = number;" },
     .{ .case = .plain_then_generic, .source = "structural Both = number;\nstructural Both<T> = T;" },
     .{ .case = .ambient_replacement, .source = "structural Proof<T> = { value: T };\nconst value: Proof<number> = undefined;" },
@@ -2668,10 +2666,8 @@ const generic_alias_fixtures = [_]GenericAliasFixture{
 };
 
 const GenericProjectionCase = enum {
-    blank_piece_before_limit,
     quoted_comma,
     comment_comma,
-    authored_empty_piece,
     malformed_tail,
     quoted_equals_metadata,
     arrow_constraint_metadata,
@@ -2684,10 +2680,8 @@ const GenericProjectionFixture = struct {
 };
 
 const generic_projection_fixtures = [_]GenericProjectionFixture{
-    .{ .case = .blank_piece_before_limit, .source = "structural Box<A, ,B,C,D,E,F,G,H,I> = A;" },
     .{ .case = .quoted_comma, .source = "structural Box<T extends \"a,b\"> = T;" },
     .{ .case = .comment_comma, .source = "structural Box<T /*,*/> = T;" },
-    .{ .case = .authored_empty_piece, .source = "structural Box<T,,U> = T;" },
     .{ .case = .malformed_tail, .source = "structural Box<T nonsense> = T;" },
     .{ .case = .quoted_equals_metadata, .source = "structural Box<T extends \"a=b\"> = number;\nconst value: Box<string> = undefined;" },
     .{ .case = .arrow_constraint_metadata, .source = "structural Box<T extends (x:string)=>number> = number;\nconst value: Box<string> = undefined;" },
@@ -3140,11 +3134,6 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
             try std.testing.expectEqualStrings("H", alias.param_names[7]);
             try std.testing.expectEqual(pool.idx_number, value_type orelse return error.TestUnexpectedResult);
         },
-        .ninth_item_unprojected => {
-            const alias = env.generic_aliases.get("Many") orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(u8, 8), alias.param_count);
-            try expectRefName(&pool, alias.body, "I");
-        },
         .generic_then_plain, .plain_then_generic => {
             try std.testing.expectEqual(pool.idx_number, env.getTypeAlias("Both") orelse return error.TestUnexpectedResult);
             const alias = env.generic_aliases.get("Both") orelse return error.TestUnexpectedResult;
@@ -3239,10 +3228,6 @@ fn assertGenericProjectionProperty(case: GenericProjectionCase, source: []const 
     const projected = parser.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
         return error.TestUnexpectedResult;
     switch (case) {
-        .blank_piece_before_limit => {
-            try std.testing.expectEqual(@as(usize, 8), projected.len);
-            try std.testing.expectEqualStrings("H", projected[7].name_span.text(source));
-        },
         .quoted_comma => {
             try std.testing.expectEqual(@as(usize, 1), authored.len);
             try std.testing.expectEqual(@as(usize, 1), projected.len);
@@ -3250,11 +3235,6 @@ fn assertGenericProjectionProperty(case: GenericProjectionCase, source: []const 
         .comment_comma => {
             try std.testing.expectEqual(@as(usize, 1), authored.len);
             try std.testing.expectEqual(@as(usize, 1), projected.len);
-        },
-        .authored_empty_piece => {
-            try std.testing.expectEqual(@as(usize, 3), authored.len);
-            try std.testing.expectEqualStrings("", authored[1].trimmed_span.text(source));
-            try std.testing.expectEqual(@as(usize, 2), projected.len);
         },
         .malformed_tail => {
             try std.testing.expectEqual(@as(usize, 1), authored.len);
@@ -9747,7 +9727,7 @@ test "parsed generic declaration helper validates exact owner before mutation" {
 }
 
 test "parsed generic declaration helper rejects malformed oversized projected Store" {
-    const wide_source = "structural Wide<A, B, C, D, E, F, G, H, I> = string;";
+    const wide_source = "structural Wide<A, B, C, D, E, F, G, H> = string;";
     var wide_atoms = AtomTable.init(std.testing.allocator);
     defer wide_atoms.deinit();
     var wide_parser = try JsParser.initAdmission(
@@ -9760,7 +9740,7 @@ test "parsed generic declaration helper rejects malformed oversized projected St
     wide_parser.setAtomTable(&wide_atoms);
     _ = try wide_parser.parse();
     const wide_owner = wide_parser.type_store.generic_owners.items[0];
-    try std.testing.expectEqual(@as(u32, 9), wide_owner.authored_parameters.count);
+    try std.testing.expectEqual(@as(u32, 8), wide_owner.authored_parameters.count);
     try std.testing.expectEqual(
         @as(u32, @intCast(type_env_mod.MAX_TYPE_PARAMS)),
         wide_owner.projected_parameters.count,
@@ -11091,4 +11071,39 @@ test "admission header fallback preserves grouped and raw arrow type constructio
         try direct_pool.ensureHealthy();
         try direct_env.ensureHealthy();
     }
+}
+
+fn expectTooManyTypeParametersAt(source: []const u8, offset: u32) !void {
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.errors.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.too_many_parameters, errors[0].kind);
+    try std.testing.expectEqual(offset, errors[0].location.offset);
+    try std.testing.expectEqualStrings(
+        "a generic declaration has at most eight type parameters; remove a type parameter",
+        errors[0].message,
+    );
+}
+
+test "a ninth type parameter is refused at the ninth parameter" {
+    try expectTooManyTypeParametersAt("function f<A, B, C, D, E, F, G, H, I>(a: I): I { return a; }\n", 35);
+    try expectTooManyTypeParametersAt("structural Many<A, B, C, D, E, F, G, H, I> = I;\n", 40);
+    try expectTooManyTypeParametersAt("nominal Many<A, B, C, D, E, F, G, H, I> = string;\n", 37);
+    try expectTooManyTypeParametersAt("function f<A, B, C, D, E, F, G, H, I, J>(a: I): I { return a; }\n", 35);
+    try expectTooManyTypeParametersAt("structural Many<A,B,C,D,E,F,G,H,I> = I;", 32);
+}
+
+test "an empty type parameter is refused" {
+    const message = "an empty type parameter is not supported; remove the extra comma";
+    try expectRefusedAt("structural Box<A, ,B> = A;", 16, message);
+    try expectRefusedAt("structural Box<T,,U> = T;", 16, message);
+    try expectRefusedAt("function f<A,>(a: A): A { return a; }\n", 12, message);
+}
+
+test "eight type parameters parse, and a comma inside a constraint is not a separator" {
+    try expectParsesClean("function f<A, B, C, D, E, F, G, H>(a: H): H { return a; }\n");
+    try expectParsesClean("structural Many<A, B, C, D, E, F, G, H> = H;\n");
+    try expectParsesClean("function f<A extends Dict<string, number>, B, C, D, E, F, G, H>(a: A): A { return a; }\n");
 }

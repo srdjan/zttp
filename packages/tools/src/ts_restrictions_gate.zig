@@ -795,6 +795,7 @@ const limit_labels = [_]struct { field: []const u8, label: []const u8 }{
     .{ .field = "request_bytes", .label = "Request size" },
     .{ .field = "module_graph_modules", .label = "Modules in one module graph" },
     .{ .field = "normalize_iterations", .label = "Normalization iterations" },
+    .{ .field = "type_parameters", .label = "Type parameters in one generic declaration" },
 };
 const depth_label = "Type serialization depth";
 

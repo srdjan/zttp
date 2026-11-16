@@ -5869,9 +5869,9 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "nested_function", .source = "function outer(): number {\n  function id<T>(x: T): T { return x; }\n  return id(\"x\");\n}\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 3, .column = 3, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" }} },
         .{ .name = "function_default", .source = "function make<T = string>(x: T): T { return x; }\nconst probe: number = make(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "a generic default is not supported", .line = 1, .column = 17, .suggestion = "remove the default and pass the type argument at each use" }} },
         .{ .name = "eight_parameters", .source = "function f<A,B,C,D,E,F,G,H>(x: H): H { return x; }\nconst probe: number = f<string,string,string,string,string,string,string,string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "nine_parameters_eight_arguments", .source = "function f<A,B,C,D,E,F,G,H,I>(x: I): I { return x; }\nconst probe: number = f<string,string,string,string,string,string,string,string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected I, got \"x\"", .line = 2, .column = 82, .suggestion = null }, .{ .code = "ZTS200", .message = "type 'I' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
-        .{ .name = "nine_parameters_nine_arguments", .source = "function f<A,B,C,D,E,F,G,H,I>(x: I): I { return x; }\nconst probe: number = f<string,string,string,string,string,string,string,string,string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected I, got \"x\"", .line = 2, .column = 89, .suggestion = null }, .{ .code = "ZTS200", .message = "type 'I' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
-        .{ .name = "nine_alias_parameters", .source = "structural N<A,B,C,D,E,F,G,H,I> = I;\nconst probe: N<string,string,string,string,string,string,string,string,number> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'N<string, string, string, string, string, string, string, string, number>'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "nine_parameters_eight_arguments", .source = "function f<A,B,C,D,E,F,G,H,I>(x: I): I { return x; }\nconst probe: number = f<string,string,string,string,string,string,string,string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS028", .message = "a generic declaration has at most eight type parameters", .line = 1, .column = 28, .suggestion = "remove a type parameter" }} },
+        .{ .name = "nine_parameters_nine_arguments", .source = "function f<A,B,C,D,E,F,G,H,I>(x: I): I { return x; }\nconst probe: number = f<string,string,string,string,string,string,string,string,string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS028", .message = "a generic declaration has at most eight type parameters", .line = 1, .column = 28, .suggestion = "remove a type parameter" }} },
+        .{ .name = "nine_alias_parameters", .source = "structural N<A,B,C,D,E,F,G,H,I> = I;\nconst probe: N<string,string,string,string,string,string,string,string,number> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS028", .message = "a generic declaration has at most eight type parameters", .line = 1, .column = 30, .suggestion = "remove a type parameter" }} },
         .{ .name = "nongeneric_then_generic", .source = "structural Box = number;\nstructural Box<T> = T;\nconst bare: Box = \"x\";\nconst applied: Box<string> = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null }, .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 4, .column = 1, .suggestion = null } } },
         .{ .name = "generic_then_nongeneric", .source = "structural Box<T> = T;\nstructural Box = number;\nconst bare: Box = \"x\";\nconst applied: Box<string> = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null }, .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 4, .column = 1, .suggestion = null } } },
         .{ .name = "alias_before_parameter", .source = "structural T = number;\nfunction f<T>(x: T): T { return x; }\nconst probe: string = f(1);\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS208", .message = "no argument determines type parameter 'T'", .line = 3, .column = 24, .suggestion = "Name the type argument at the call site." }, .{ .code = "ZTS200", .message = "type 'number' is not assignable to type 'string'", .line = 3, .column = 1, .suggestion = null } } },
@@ -11417,7 +11417,7 @@ const absent_read_dict = [_]AbsentReadCase{
     },
     .{ .name = "k07_dict_param", .expect = "ZTS201@3", .source =
     \\import { dictEmpty } from "zttp:collections";
-    \\function pick(d: Dict<unknown, unknown>): unknown {
+    \\function pick(d: Dict<string, unknown>): unknown {
     \\  return d["a"] ?? 0;
     \\}
     \\function handler(req: Request): Response {
@@ -12605,7 +12605,7 @@ const json_dict_key = [_]AbsentReadCase{
     \\  return Response.json({ m: d });
     \\}
     },
-    .{ .name = "j1_boolean_key_in_an_array", .expect = "ZTS213@4", .source =
+    .{ .name = "j1_boolean_key_in_an_array", .expect = "ZTS209@3,ZTS213@4", .source =
     \\import { dictEmpty } from "zttp:collections";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const b: Dict<boolean, number> = dictEmpty();
@@ -12628,14 +12628,14 @@ const json_dict_key = [_]AbsentReadCase{
     \\  return Response.json(k);
     \\}
     },
-    .{ .name = "j1_null_key", .expect = "ZTS213@4", .source =
+    .{ .name = "j1_null_key", .expect = "ZTS209@3,ZTS213@4", .source =
     \\import { dictEmpty } from "zttp:collections";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const d: Dict<null, number> = dictEmpty();
     \\  return Response.json(d);
     \\}
     },
-    .{ .name = "j1_undefined_key", .expect = "ZTS213@4", .source =
+    .{ .name = "j1_undefined_key", .expect = "ZTS209@3,ZTS213@4", .source =
     \\import { dictEmpty } from "zttp:collections";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const d: Dict<undefined, number> = dictEmpty();
@@ -12649,49 +12649,49 @@ const json_dict_key = [_]AbsentReadCase{
     \\  return Response.json(d);
     \\}
     },
-    .{ .name = "j1_boolean_literal_key", .expect = "ZTS213@4", .source =
+    .{ .name = "j1_boolean_literal_key", .expect = "ZTS209@3,ZTS213@4", .source =
     \\import { dictEmpty } from "zttp:collections";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const d: Dict<true, number> = dictEmpty();
     \\  return Response.json(d);
     \\}
     },
-    .{ .name = "j1_array_key", .expect = "ZTS213@4", .source =
+    .{ .name = "j1_array_key", .expect = "ZTS209@3,ZTS213@4", .source =
     \\import { dictEmpty } from "zttp:collections";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const d: Dict<string[], number> = dictEmpty();
     \\  return Response.json(d);
     \\}
     },
-    .{ .name = "j1_tuple_key", .expect = "ZTS213@4", .source =
+    .{ .name = "j1_tuple_key", .expect = "ZTS209@3,ZTS213@4", .source =
     \\import { dictEmpty } from "zttp:collections";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const d: Dict<[string], number> = dictEmpty();
     \\  return Response.json(d);
     \\}
     },
-    .{ .name = "j1_bytes_key", .expect = "ZTS213@4", .source =
+    .{ .name = "j1_bytes_key", .expect = "ZTS209@3,ZTS213@4", .source =
     \\import { dictEmpty } from "zttp:collections";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const d: Dict<Bytes, number> = dictEmpty();
     \\  return Response.json(d);
     \\}
     },
-    .{ .name = "j1_dict_key", .expect = "ZTS213@4", .source =
+    .{ .name = "j1_dict_key", .expect = "ZTS209@3,ZTS213@4", .source =
     \\import { dictEmpty } from "zttp:collections";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const d: Dict<Dict<string, string>, number> = dictEmpty();
     \\  return Response.json(d);
     \\}
     },
-    .{ .name = "j1_record_key", .expect = "ZTS213@4", .source =
+    .{ .name = "j1_record_key", .expect = "ZTS209@3,ZTS213@4", .source =
     \\import { dictEmpty } from "zttp:collections";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const d: Dict<{ a: string }, number> = dictEmpty();
     \\  return Response.json(d);
     \\}
     },
-    .{ .name = "j1_function_alias_key", .expect = "ZTS213@5", .source =
+    .{ .name = "j1_function_alias_key", .expect = "ZTS209@4,ZTS213@5", .source =
     \\import { dictEmpty } from "zttp:collections";
     \\structural Fn = (x: number) => number;
     \\function handler(req: Request): Proof<Response, "read_only"> {
@@ -12699,7 +12699,7 @@ const json_dict_key = [_]AbsentReadCase{
     \\  return Response.json(d);
     \\}
     },
-    .{ .name = "j1_string_or_undefined_key", .expect = "ZTS213@4", .source =
+    .{ .name = "j1_string_or_undefined_key", .expect = "ZTS209@3,ZTS213@4", .source =
     \\import { dictEmpty } from "zttp:collections";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const d: Dict<string | undefined, number> = dictEmpty();
@@ -12715,7 +12715,7 @@ const json_dict_key = [_]AbsentReadCase{
     \\  const e: Dict<"a" | "b", number> = dictEmpty();
     \\  const n: Dict<Name, number> = dictEmpty();
     \\  const i: Dict<UserId, number> = dictEmpty();
-    \\  const u: Dict<unknown, unknown> = dictEmpty();
+    \\  const u: Dict<string, unknown> = dictEmpty();
     \\  const t: Dict<`/a/${string}`, number> = dictEmpty();
     \\  return Response.json({ d: d, e: e, n: n, i: i, u: u, t: t, z: dictEmpty() });
     \\}
@@ -15887,4 +15887,66 @@ test "type text before a trailing block comment is still refused" {
             .suggestion = "write an admitted type from section 5.7 of the specification",
         }},
     );
+}
+
+test "CHECK refuses a Dict key type that is not a string or a number" {
+    const handler_line = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+    const cases = [_]struct { source: []const u8, message: []const u8, line: u32, column: u32 }{
+        .{ .source = "function g(a: Dict<boolean, string>): number { return 1; }\n" ++ handler_line, .message = "type argument boolean for 'K' does not satisfy constraint DictKey", .line = 1, .column = 12 },
+        .{ .source = "function g(a: Dict<undefined, string>): number { return 1; }\n" ++ handler_line, .message = "type argument undefined for 'K' does not satisfy constraint DictKey", .line = 1, .column = 12 },
+        .{ .source = "function g(a: Dict<string | undefined, string>): number { return 1; }\n" ++ handler_line, .message = "type argument string | undefined for 'K' does not satisfy constraint DictKey", .line = 1, .column = 12 },
+        .{ .source = "function g(a: Dict<{ a: number }, string>): number { return 1; }\n" ++ handler_line, .message = "type argument { a: number } for 'K' does not satisfy constraint DictKey", .line = 1, .column = 12 },
+        .{ .source = "import { dictEmpty } from \"zttp:collections\";\nconst d: Dict<boolean, number> = dictEmpty();\n" ++ handler_line, .message = "type argument boolean for 'K' does not satisfy constraint DictKey", .line = 2, .column = 1 },
+        .{ .source = "function g(a: Dict<string, Dict<null, number>[]>): number { return 1; }\n" ++ handler_line, .message = "type argument null for 'K' does not satisfy constraint DictKey", .line = 1, .column = 12 },
+        .{ .source = "function g(): Dict<boolean, string> { return {}; }\n" ++ handler_line, .message = "type argument boolean for 'K' does not satisfy constraint DictKey", .line = 1, .column = 11 },
+        .{ .source = "const x: { d: Dict<boolean, string> } = { d: {} };\n" ++ handler_line, .message = "type argument boolean for 'K' does not satisfy constraint DictKey", .line = 1, .column = 1 },
+        .{ .source = "function g(a: [Dict<null, number>, string]): number { return 1; }\n" ++ handler_line, .message = "type argument null for 'K' does not satisfy constraint DictKey", .line = 1, .column = 12 },
+        .{ .source = "function g<K, V>(d: Dict<K, V>): number { return 1; }\n" ++ handler_line, .message = "type argument K for 'K' does not satisfy constraint DictKey", .line = 1, .column = 18 },
+        .{ .source = "const w: Dict<unknown, string> = {};\n" ++ handler_line, .message = "type argument unknown for 'K' does not satisfy constraint DictKey", .line = 1, .column = 1 },
+        .{ .source = "structural Flag = boolean;\nconst x: Dict<Flag, string> = {};\n" ++ handler_line, .message = "type argument Flag for 'K' does not satisfy constraint DictKey", .line = 2, .column = 1 },
+        .{ .source = "function id<T>(x: T): T { return x; }\nconst r = id<Dict<boolean, string>>({});\n" ++ handler_line, .message = "type argument boolean for 'K' does not satisfy constraint DictKey", .line = 2, .column = 36 },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("dict key refusal failed for source:\n{s}\n", .{case.source});
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
+            .code = "ZTS209",
+            .message = case.message,
+            .line = case.line,
+            .column = case.column,
+            .suggestion = "Use `string` or `number` as the key type.",
+        });
+    }
+    try std.testing.expectEqual(@as(usize, 13), cases.len);
+}
+
+test "CHECK admits a Dict key type that is assignable to a string or a number" {
+    const source =
+        "nominal UserId = string;\n" ++
+        "structural Name = \"a\" | \"b\";\n" ++
+        "structural Key = string | number;\n" ++
+        "function g1(a: Dict<string, number>): number { return 1; }\n" ++
+        "function g2(a: Dict<number, number>): number { return 1; }\n" ++
+        "function g3(a: Dict<\"a\" | \"b\", number>): number { return 1; }\n" ++
+        "function g4(a: Dict<string | number, number>): number { return 1; }\n" ++
+        "function g5(a: Dict<UserId, number>): number { return 1; }\n" ++
+        "function g6(a: Dict<Name, number>): number { return 1; }\n" ++
+        "function g7(a: Dict<Key, number>): number { return 1; }\n" ++
+        "function g8<K extends DictKey>(a: Dict<K, number>): number { return 1; }\n" ++
+        "function g9(a: Dict<string, unknown>): number { return 1; }\n" ++
+        "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+    try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
 }

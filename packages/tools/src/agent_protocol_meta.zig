@@ -281,6 +281,8 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
     try json.write(module_graph_record.max_source_bytes);
     try json.objectField("module_graph_modules");
     try json.write(module_graph_record.max_modules);
+    try json.objectField("type_parameters");
+    try json.write(zts.max_type_parameters);
     try json.endObject();
 
     try json.objectField("module_catalog");
@@ -1849,6 +1851,7 @@ test "meta limits are the constants the code enforces" {
         @as(i64, @intCast(module_graph_record.max_modules)),
         limits.get("module_graph_modules").?.integer,
     );
+    try testing.expectEqual(@as(i64, 8), limits.get("type_parameters").?.integer);
 }
 
 test "meta publishes the built-in module catalog from the bindings" {

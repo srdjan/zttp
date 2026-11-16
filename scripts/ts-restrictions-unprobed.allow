@@ -20,7 +20,6 @@ ZTS011 malformed source, not a form of the profile: no row of docs/ts-restrictio
 ZTS014 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
 ZTS015 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
 ZTS040 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
-ZTS028 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
 ZTS029 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
 ZTS030 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
 ZTS031 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits

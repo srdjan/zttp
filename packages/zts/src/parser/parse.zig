@@ -981,11 +981,13 @@ pub const Parser = struct {
     }
 
     fn reportGenericListRefusal(self: *Parser, kind: type_syntax.GenericListRefusalKind, offset: u32) void {
-        const message = switch (kind) {
-            .default => "a generic default is not supported; remove the default and pass the type argument at each use",
-            .modifier => "a type-parameter modifier is not supported; remove the `in`, `out`, or `const` modifier",
-        };
-        self.errors.addErrorAt(.unsupported_feature, type_syntax.tokenAtOffset(self.source, offset), message);
+        const token = type_syntax.tokenAtOffset(self.source, offset);
+        switch (kind) {
+            .default => self.errors.addErrorAt(.unsupported_feature, token, "a generic default is not supported; remove the default and pass the type argument at each use"),
+            .modifier => self.errors.addErrorAt(.unsupported_feature, token, "a type-parameter modifier is not supported; remove the `in`, `out`, or `const` modifier"),
+            .too_many => self.errors.addErrorAt(.too_many_parameters, token, "a generic declaration has at most eight type parameters; remove a type parameter"),
+            .empty => self.errors.addErrorAt(.unsupported_feature, token, "an empty type parameter is not supported; remove the extra comma"),
+        }
     }
 
     /// The type parser notes the first type form that it dropped or cannot express.

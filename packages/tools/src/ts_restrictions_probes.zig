@@ -419,6 +419,14 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(top("function g(): number[] {\n  return [1].map((x: number) => x);\n}")),
     },
     .{
+        .key = "An empty type parameter, such as `<A, ,B>` and `<A,>`",
+        .refused = &.{
+            r("<A, ,B>", top("function f<A, ,B>(a: A): A {\n  return a;\n}")),
+            r("<A,>", top("function f<A,>(a: A): A {\n  return a;\n}")),
+        },
+        .clean = c(top("function f<A, B>(a: A): A {\n  return a;\n}")),
+    },
+    .{
         .key = "Call-site spread `f(...args)`",
         .refused = &.{r("f(...args)", top("function f(a: number): number {\n  return a;\n}\nfunction g(args: number[]): number {\n  return f(...args);\n}"))},
         .clean = c(top("function f(a: number): number {\n  return a;\n}\nfunction g(args: number[]): number {\n  return f(1);\n}")),
@@ -953,6 +961,23 @@ pub const refusal_rows = [_]RefusalRow{
         },
         .clean = c(top("function f<T>(a: T): T {\n  return a;\n}\nconst r1 = f<string>(\"a\");")),
     },
+    .{
+        .key = "A ninth type parameter in one generic declaration, such as `function f<A, B, C, D, E, F, G, H, I>(a: A): A`",
+        .refused = &.{
+            r("function f<A, B, C, D, E, F, G, H, I>(a: A): A", top("function f<A, B, C, D, E, F, G, H, I>(a: A): A {\n  return a;\n}")),
+        },
+        .clean = c(top("function f<A, B, C, D, E, F, G, H>(a: A): A {\n  return a;\n}")),
+    },
+    .{
+        .key = "A Dict key type other than string or number, such as `Dict<boolean, string>`, `Dict<undefined, string>`, `Dict<unknown, string>`, and `Dict<string | undefined, string>`",
+        .refused = &.{
+            r("Dict<boolean, string>", paramText("Dict<boolean, string>")),
+            r("Dict<undefined, string>", paramText("Dict<undefined, string>")),
+            r("Dict<unknown, string>", paramText("Dict<unknown, string>")),
+            r("Dict<string | undefined, string>", paramText("Dict<string | undefined, string>")),
+        },
+        .clean = param("Dict<string, number>"),
+    },
 
     // ----- Ambient Names And Effects -----
     .{
@@ -1233,10 +1258,6 @@ pub const gap_rows = [_]GapRow{
         .sources = &.{c(body("  const o = { a: 1 };\n  for (const v of o) {\n    const y = v;\n  }"))},
     },
     .{
-        .key = "A generic declaration with nine type parameters",
-        .sources = &.{c(top("function g<A, B, C, D, E, F, G, H, I>(a: A, b: B, c: C, d: D, e: E, f: F, g2: G, h: H, i: I): A {\n  return a;\n}\nconst r1 = g(1, 2, 3, 4, 5, 6, 7, 8, 9);"))},
-    },
-    .{
         .key = "Array members `forEach`, `pop`, `shift`, `unshift`, `splice`",
         .sources = &.{
             c(body("  const xs: number[] = [1, 2];\n  xs.forEach((x: number): undefined => undefined);")),
@@ -1323,13 +1344,6 @@ pub const gap_rows = [_]GapRow{
         },
     },
     .{
-        .key = "A `Dict` key type other than `string` or `number`, such as `Dict<boolean, string>`",
-        .sources = &.{
-            param("Dict<boolean, string>"),
-            param("Dict<{ a: number }, string>"),
-        },
-    },
-    .{
         .key = "`toReversed`, `Array.from`, `Array.of`, and a write to `xs.length`",
         .sources = &.{
             c(top("function g(xs: number[]): number[] {\n  return xs.toReversed();\n}")),
@@ -1385,6 +1399,10 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "A duplicate type parameter, such as `function f<T, T>(a: T): T`",
         .sources = &.{c(top("function f<T, T>(a: T): T {\n  return a;\n}\nfunction g(): string {\n  return String(f(1));\n}"))},
+    },
+    .{
+        .key = "A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };`",
+        .sources = &.{c(top("structural Box<T extends string> = { value: T };\nfunction g(b: Box<number>): number {\n  return b.value;\n}"))},
     },
     .{
         .key = "An assignment to a `const`, such as `const n: number = 1; n = 2;`",

@@ -1422,6 +1422,9 @@ pub const TypeChecker = struct {
     /// body is a separate question that this walk does not answer. The function
     /// is on the stack of enclosing functions while its body is walked.
     fn walkFunctionBody(self: *TypeChecker, fn_node: NodeIndex, body: NodeIndex) void {
+        if (self.sourceFunctionSignature(fn_node)) |sig| {
+            self.reportBadDictKey(sig.return_type, fn_node, sig.typeParams());
+        }
         if (self.function_depth < max_function_stack) self.function_stack[self.function_depth] = fn_node;
         self.function_depth += 1;
         defer self.function_depth -= 1;
@@ -1471,6 +1474,7 @@ pub const TypeChecker = struct {
                     self.unannotated_decls.put(self.allocator, bindingKey(vd.binding), {}) catch self.markAllocationFailure();
                 }
                 self.reportIfNonContractive(declared, node);
+                self.reportBadDictKey(declared, node, &.{});
                 self.bindCallableMetadata(vd.binding, .unavailable);
                 if (vd.init != null_node) {
                     self.walkExpr(vd.init);
@@ -5848,6 +5852,7 @@ pub const TypeChecker = struct {
             }
             self.bindCallableMetadata(binding, callable);
             if (param_type == null_type_idx) continue;
+            self.reportBadDictKey(param_type, param_idx, sig.typeParams());
             const key = bindingKey(binding);
             self.param_types.put(self.allocator, key, param_type) catch self.markAllocationFailure();
             self.env.bindVarType(binding.scope_id, binding.name_atom, param_type) catch self.markAllocationFailure();
@@ -6526,6 +6531,9 @@ pub const TypeChecker = struct {
     /// follows compares against the uninstantiated parameter types rather than
     /// stacking a second diagnostic on the first.
     fn reportInstantiation(self: *TypeChecker, node: NodeIndex, inst: Instantiation) Instantiation {
+        if (self.explicitTypeArgs(node)) |explicit| {
+            for (explicit.args[0..explicit.count]) |arg| self.reportBadDictKey(arg, node, &.{});
+        }
         switch (inst) {
             .none, .ok => return inst,
             .arity => |a| self.addGenericDiagnostic(
@@ -8230,6 +8238,171 @@ pub const TypeChecker = struct {
             return;
         }
         mutable.addDiagnostic(diag);
+    }
+
+    /// Spec 6.2 bounds a Dict key by `DictKey`, which is `string | number`.
+    /// The key is admitted when it is assignable to that bound. `never` is
+    /// assignable to every type, so it stays admitted. `unknown` is not
+    /// assignable, so a source `Dict<unknown, V>` is refused. A type parameter
+    /// is admitted only when its constraint is itself admitted.
+    fn dictKeyViolatesBound(
+        self: *const TypeChecker,
+        key: TypeIndex,
+        own: []const type_env_mod.GenericParam,
+        depth: u8,
+    ) bool {
+        if (key == null_type_idx or depth >= 16) return false;
+        const pool = self.env.pool;
+        const tag = pool.getTag(key) orelse return false;
+        return switch (tag) {
+            .t_string, .t_number, .t_literal_string, .t_literal_number, .t_template_literal, .t_never => false,
+            .t_unknown_type,
+            .t_boolean,
+            .t_null,
+            .t_undefined,
+            .t_void,
+            .t_dict,
+            .t_bytes,
+            .t_record,
+            .t_array,
+            .t_tuple,
+            .t_function,
+            .t_literal_bool,
+            .t_nullable,
+            => true,
+            .t_union => blk: {
+                for (pool.getUnionMembers(key)) |member| {
+                    if (self.dictKeyViolatesBound(member, own, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .t_ref => blk: {
+                const resolved = self.env.resolveRef(key);
+                if (resolved != key) break :blk self.dictKeyViolatesBound(resolved, own, depth + 1);
+                break :blk self.typeParamKeyViolates(pool.getRefName(key), own, depth);
+            },
+            .t_generic_param => self.typeParamKeyViolates(pool.getRefName(key), own, depth),
+            .t_intersection, .t_generic_app, .t_error => false,
+        };
+    }
+
+    /// A type parameter used as a Dict key breaks the bound when its
+    /// constraint is missing or not admitted. A name that no enclosing function
+    /// declares is not a type parameter here, so it is admitted.
+    fn typeParamKeyViolates(
+        self: *const TypeChecker,
+        name: []const u8,
+        own: []const type_env_mod.GenericParam,
+        depth: u8,
+    ) bool {
+        for (own) |param| {
+            if (std.mem.eql(u8, param.name, name)) return self.constraintViolatesKey(param.constraint, own, depth);
+        }
+        var level = @min(self.function_depth, max_function_stack);
+        while (level > 0) {
+            level -= 1;
+            const sig = self.sourceFunctionSignature(self.function_stack[level]) orelse continue;
+            for (sig.typeParams()) |param| {
+                if (std.mem.eql(u8, param.name, name)) {
+                    return self.constraintViolatesKey(param.constraint, sig.typeParams(), depth);
+                }
+            }
+        }
+        return false;
+    }
+
+    fn constraintViolatesKey(
+        self: *const TypeChecker,
+        constraint: TypeIndex,
+        own: []const type_env_mod.GenericParam,
+        depth: u8,
+    ) bool {
+        if (constraint == null_type_idx) return true;
+        return self.dictKeyViolatesBound(constraint, own, depth + 1);
+    }
+
+    /// The first Dict key inside `idx` that `dictKeyViolatesBound` refuses.
+    /// The walk reaches every position a source type can name a Dict: a record
+    /// field, an array or tuple element, a union or intersection member, a
+    /// function parameter or return, a generic argument, and the body of an
+    /// alias that the type names.
+    fn firstBadDictKey(
+        self: *const TypeChecker,
+        idx: TypeIndex,
+        own: []const type_env_mod.GenericParam,
+        depth: u8,
+    ) ?TypeIndex {
+        if (idx == null_type_idx or depth >= 16) return null;
+        const pool = self.env.pool;
+        const tag = pool.getTag(idx) orelse return null;
+        return switch (tag) {
+            .t_dict => if (self.dictKeyViolatesBound(pool.getDictKey(idx), own, 0))
+                pool.getDictKey(idx)
+            else
+                self.firstBadDictKey(pool.getDictKey(idx), own, depth + 1) orelse
+                    self.firstBadDictKey(pool.getDictValue(idx), own, depth + 1),
+            .t_array => self.firstBadDictKey(pool.getArrayElement(idx), own, depth + 1),
+            .t_nullable => self.firstBadDictKey(pool.getNullableInner(idx), own, depth + 1),
+            .t_ref => blk: {
+                const resolved = self.env.resolveRef(idx);
+                if (resolved == idx) break :blk null;
+                break :blk self.firstBadDictKey(resolved, own, depth + 1);
+            },
+            .t_union => self.firstBadDictKeyIn(pool.getUnionMembers(idx), own, depth),
+            .t_intersection => self.firstBadDictKeyIn(pool.getIntersectionMembers(idx), own, depth),
+            .t_tuple => self.firstBadDictKeyIn(pool.getTupleElements(idx), own, depth),
+            .t_generic_app => self.firstBadDictKeyIn(pool.getGenericAppInfo(idx).args, own, depth),
+            .t_record => blk: {
+                for (pool.getRecordFields(idx)) |field| {
+                    if (self.firstBadDictKey(field.type_idx, own, depth + 1)) |bad| break :blk bad;
+                }
+                break :blk null;
+            },
+            .t_function => blk: {
+                const info = pool.getFunctionInfo(idx);
+                for (info.params) |param| {
+                    if (self.firstBadDictKey(param.type_idx, own, depth + 1)) |bad| break :blk bad;
+                }
+                break :blk self.firstBadDictKey(info.ret, own, depth + 1);
+            },
+            // exhaustive: every other tag is a leaf that holds no Dict, so it
+            // owes no key check. This walk reports a diagnostic; it decides no
+            // proof verdict, and a missed Dict here cannot weaken one.
+            else => null,
+        };
+    }
+
+    fn firstBadDictKeyIn(
+        self: *const TypeChecker,
+        members: []const TypeIndex,
+        own: []const type_env_mod.GenericParam,
+        depth: u8,
+    ) ?TypeIndex {
+        for (members) |member| {
+            if (self.firstBadDictKey(member, own, depth + 1)) |bad| return bad;
+        }
+        return null;
+    }
+
+    /// Report ZTS209 when a declared annotation holds a Dict whose key type
+    /// does not satisfy `DictKey`.
+    fn reportBadDictKey(
+        self: *TypeChecker,
+        declared: TypeIndex,
+        node: NodeIndex,
+        own: []const type_env_mod.GenericParam,
+    ) void {
+        if (declared == null_type_idx or node == null_node) return;
+        const bad = self.firstBadDictKey(declared, own, 0) orelse return;
+        var buf: [128]u8 = undefined;
+        self.addGenericDiagnostic(
+            .type_constraint_violation,
+            node,
+            "type argument {s} for 'K' does not satisfy constraint DictKey",
+            .{self.env.pool.formatType(bad, &buf)},
+            "a Dict key type does not satisfy DictKey",
+            "Use `string` or `number` as the key type.",
+        );
     }
 
     /// Report ZTS212 when a declared annotation names an alias whose cycle no

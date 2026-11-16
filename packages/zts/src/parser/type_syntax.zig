@@ -96,6 +96,7 @@ pub const Exclusion = type_syntax_parser_mod.Exclusion;
 pub const ExcludedType = type_syntax_parser_mod.ExcludedType;
 pub const max_type_depth = type_syntax_parser_mod.max_type_depth;
 pub const max_parser_frames = type_syntax_parser_mod.max_parser_frames;
+pub const max_type_parameters = type_syntax_parser_mod.max_type_parameters;
 pub const max_template_levels = type_syntax_parser_mod.max_template_levels;
 pub const parseTypeValueAndStore = type_syntax_parser_mod.parseTypeValueAndStore;
 pub const parseAdmittedTypeValue = type_syntax_parser_mod.parseAdmittedTypeValue;

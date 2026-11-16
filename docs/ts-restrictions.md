@@ -116,6 +116,7 @@ Declaration merging, open interfaces, and inheritance are excluded.
 | Optional parameter shorthand `name?: T` | ZTS055 | `name: T \| undefined` |
 | Rest parameters `...args` | ZTS001 | An explicit array parameter |
 | Type parameters on an arrow, such as `<T>(x: T) => x` | ZTS001 | The arrow without type parameters, or a module-level generic function |
+| An empty type parameter, such as `<A, ,B>` and `<A,>` | ZTS001 | Remove the extra comma |
 | Call-site spread `f(...args)` | ZTS616 | Positional arguments |
 | A named function without parameter or return annotations | ZTS601 | Annotate every parameter and the return type |
 | A call with too few or too many arguments | ZTS202 | Supply every declared argument, and no more |
@@ -262,6 +263,8 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | A recursive alias with a cycle that does not pass through a record, tuple, array, or `Dict` | ZTS212 | Put the cycle under one of those constructors |
 | A type predicate whose body does not prove the predicate | ZTS211 | A predicate body that checks the claimed type |
 | A wrong number of explicit type arguments, or a violated constraint | ZTS210, ZTS209 | Match the declaration |
+| A ninth type parameter in one generic declaration, such as `function f<A, B, C, D, E, F, G, H, I>(a: A): A` | ZTS028 | Use at most eight type parameters |
+| A Dict key type other than string or number, such as `Dict<boolean, string>`, `Dict<undefined, string>`, `Dict<unknown, string>`, and `Dict<string \| undefined, string>` | ZTS209 | Use `string` or `number` as the key type |
 | A `structural` or `nominal` declaration inside a function | ZTS002 | Declare the type at the top level |
 | A generic default, such as `function f<T = string>(a: T): T` | ZTS001 | Remove the default. Pass the type argument at each use |
 | A type-parameter modifier, such as `in`, `out`, or `const` | ZTS001 | Remove the modifier |
@@ -341,10 +344,11 @@ The `meta` operation publishes these limits:
 | Modules in one module graph | 1024 |
 | Normalization iterations | 64 |
 | Type serialization depth | 64 |
+| Type parameters in one generic declaration | 8 |
 
-The specification limits a generic declaration to eight type parameters. A
-declaration with eight type parameters passes `zts check`. Nesting deeper than
-the parser limit reports ZTS044.
+A generic declaration with eight type parameters passes `zts check`. The
+parser refuses a ninth type parameter with ZTS028. Nesting deeper than the
+parser limit reports ZTS044.
 
 ## Spec Rules That `zts check` Does Not Enforce
 
@@ -363,7 +367,6 @@ against the compiler.
 | `JSON.parse` and `JSON.stringify` | Accepted | ZTS629. Use `parseJson` or `stringifyJson` from `zttp:json`, or `decodeJson` from `zttp:decode` |
 | `match` on a call, such as `match (g()) { ... }` | Accepted, exit 0. The specification requires an identifier or a member path | A targeted refusal. Bind the value to a `const` first |
 | `for...of` over a fixed record | Accepted by the type and strict checks | A targeted refusal. Iterate an array, such as `Object.keys(r)` |
-| A generic declaration with nine type parameters | Refused with ZTS203 on the ninth argument, not with a limit diagnostic | A limit diagnostic. The `meta` limits publish the limit |
 | Array members `forEach`, `pop`, `shift`, `unshift`, `splice` | Accepted | ZTS201. Write `for...of`, `slice`, or spread |
 | `import { ... } from "zttp:types"` | Refused with ZTS206 for a value import, and with ZTS053 for `import type` | ZTS053 for both. Write `Proof<T, P>` or `Effects<T, R>` directly. Both are ambient |
 | C-style `for (;;)` | Refused with ZTS001 and ZTS002 | ZTS001 only. Write `for (const i of range(n))` |
@@ -375,7 +378,6 @@ against the compiler.
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
 | A type name outside the admitted types, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error` | Accepted, exit 0 | A targeted refusal. Use an admitted type from section 5.7 of the specification |
-| A `Dict` key type other than `string` or `number`, such as `Dict<boolean, string>` | Accepted, exit 0 | ZTS209. Use `string` or `number` as the key type |
 | `toReversed`, `Array.from`, `Array.of`, and a write to `xs.length` | Accepted, exit 0 | ZTS201 for the members and ZTS200 for the `length` write. Build a new array with `for...of` |
 | An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, `xs.indexOf(v, i)`, and a three-parameter `map` callback | Accepted, exit 0. A four-parameter callback reports ZTS203 | ZTS202. Pass the arguments that the specification gives |
 | `join` on an array of non-strings, such as `[1, 2].join("")` | Accepted, exit 0 | ZTS203. Convert each element with `String` first |
@@ -385,6 +387,7 @@ against the compiler.
 | A second `const` of the same name in one scope | Accepted, exit 0 | ZTS019. Write a different name |
 | A duplicate parameter name, such as `function f(a: number, a: number)` | Accepted, exit 0 | ZTS018. Write a different name |
 | A duplicate type parameter, such as `function f<T, T>(a: T): T` | Refused with ZTS208, "no argument determines type parameter" | A targeted refusal. Write a different name |
+| A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | Accepted, exit 0 | ZTS209. Pass a type argument that satisfies the constraint |
 | An assignment to a `const`, such as `const n: number = 1; n = 2;` | Refused with ZTS200, "type '2' is not assignable to type '1'" | A targeted refusal that names `const`. Write `let`, or bind a new name |
 | A quoted key in a record literal, such as `{ "a": 1 }` | Accepted, exit 0 | ZTS001. Write `{ a: 1 }` |
 | A spread with no explicit field after it, such as `{ ...o }` | Accepted, exit 0 | ZTS614. Use `o` itself, or add an explicit field after the spread |

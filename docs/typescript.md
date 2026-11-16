@@ -526,7 +526,7 @@ A `Dict<K, V>` is immutable, and a key that it does not hold reads `undefined`. 
 | `dictMapValues(d, f)` | `Dict<K, R>`, where `R` is the return type of `f` |
 | `dictFold(d, f, init)` | the widened type of `init` when `f` returns that type, else `unknown` |
 
-`Dict<never, never>` holds no entry, so it is assignable to every Dict type. A Dict is also assignable to a Dict whose key type is `unknown` when its values fit. For every other key type, the key types must be equal. An unannotated `let d = dictEmpty();` widens to `Dict<unknown, unknown>`. Annotate it instead: `let d: Dict<string, number> = dictEmpty();`.
+`Dict<never, never>` holds no entry, so it is assignable to every Dict type. A Dict is also assignable to a Dict whose key type is `unknown` when its values fit. For every other key type, the key types must be equal. An unannotated `let d = dictEmpty();` widens to `Dict<unknown, unknown>`. Annotate it instead: `let d: Dict<string, number> = dictEmpty();`. An annotation cannot name the key type `unknown`: ZTS209 refuses a key type that is not assignable to `string | number`, as spec 6.2 requires.
 
 `Response.json` refuses a Dict whose key type admits a value that is not a string, such as `Dict<number, string>` or the `Dict<number | string, string | number>` of `dictSet(dictSet(dictEmpty(), 2, "x"), "k", 1)`. It reports ZTS213, because the JSON encoder fails on such a key. A key type of `string`, a string literal, a template literal, `never`, or `unknown` is accepted. So the widened `Dict<unknown, unknown>` passes with a number key: annotate the key type.
 

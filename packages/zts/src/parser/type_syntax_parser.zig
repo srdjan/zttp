@@ -110,6 +110,10 @@ pub const max_type_depth: u16 = 512;
 /// The iterative parser declines syntax that exceeds this private frame budget.
 pub const max_parser_frames: usize = 4096;
 
+/// The most type parameters that one generic declaration takes. The parser
+/// refuses a ninth parameter, and the type environment sizes its scope by it.
+pub const max_type_parameters: usize = 8;
+
 /// The raw scanner declines syntax that exceeds this private template budget.
 pub const max_template_levels: usize = 512;
 
@@ -530,11 +534,14 @@ pub fn appendAuthoredGenericParameters(store: *Store, list_span: Span) !void {
     try eachGenericPiece(store.source, list_span, store, appendAuthoredGenericParameter);
 }
 
-pub const GenericListRefusalKind = enum { default, modifier };
+pub const GenericListRefusalKind = enum { default, modifier, too_many, empty };
 
-/// Calls `report(context, kind, offset)` for each generic default and each
-/// `in`, `out`, or `const` modifier that the source profile refuses. `offset`
-/// is the `=` of a default, or the first byte of the modifier word.
+/// Calls `report(context, kind, offset)` for each generic default, each
+/// `in`, `out`, or `const` modifier, the ninth parameter, and each empty
+/// parameter between commas, that the source profile refuses. `offset` is the
+/// `=` of a default, the first byte of the modifier word, the first byte of the
+/// ninth parameter, or the `,` or `<` before an empty parameter. An empty list
+/// `<>` emits no piece, so this walk does not refuse it.
 pub fn eachGenericListRefusal(
     source: []const u8,
     list_span: Span,
@@ -545,13 +552,21 @@ pub fn eachGenericListRefusal(
     const Piece = struct {
         source: []const u8,
         context: Context,
-        fn visit(self: @This(), raw_span: Span) error{}!void {
+        count: usize = 0,
+        fn visit(self: *@This(), raw_span: Span) error{}!void {
             const span = trimSpan(self.source, raw_span);
+            if (span.start == span.end) {
+                report(self.context, .empty, raw_span.start - 1);
+                return;
+            }
+            if (self.count == max_type_parameters) report(self.context, .too_many, span.start);
+            self.count += 1;
             if (genericModifierOffset(self.source, span)) |offset| report(self.context, .modifier, offset);
             if (findTopLevelEquals(self.source, span.start, span.end)) |offset| report(self.context, .default, offset);
         }
     };
-    eachGenericPiece(source, list_span, Piece{ .source = source, .context = context }, Piece.visit) catch |err| switch (err) {};
+    var piece = Piece{ .source = source, .context = context };
+    eachGenericPiece(source, list_span, &piece, Piece.visit) catch |err| switch (err) {};
 }
 
 fn genericModifierOffset(source: []const u8, span: Span) ?u32 {

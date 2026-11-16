@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS028","severity":"error","message":"a generic declaration has at most eight type parameters","file":"parse/bad/too_many_type_parameters.ts","line":2,"column":39,"suggestion":"remove a type parameter","repair_intent":null}

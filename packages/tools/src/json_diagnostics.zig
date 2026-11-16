@@ -102,7 +102,7 @@ fn parserErrorCode(kind: ErrorKind) []const u8 {
 // Conversion helpers
 // -------------------------------------------------------------------------
 
-/// Extract suggestion from unsupported_feature, type_assertion, and misplaced_default_arm
+/// Extract suggestion from unsupported_feature, type_assertion, misplaced_default_arm, and too_many_parameters
 /// parser errors. These follow the pattern: "'X' is not supported; use Y instead"
 fn splitSuggestion(message: []const u8) struct { msg: []const u8, suggestion: ?[]const u8 } {
     if (std.mem.indexOf(u8, message, "; ")) |sep| {
@@ -117,7 +117,7 @@ fn splitSuggestion(message: []const u8) struct { msg: []const u8, suggestion: ?[
 pub fn fromParseError(err: ParseError, file: []const u8) JsonDiagnostic {
     const code = parserErrorCode(err.kind);
 
-    if (err.kind == .unsupported_feature or err.kind == .type_assertion or err.kind == .misplaced_default_arm) {
+    if (err.kind == .unsupported_feature or err.kind == .type_assertion or err.kind == .misplaced_default_arm or err.kind == .too_many_parameters) {
         const parts = splitSuggestion(err.message);
         return .{
             .code = code,

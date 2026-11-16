@@ -578,3 +578,26 @@ later.
   gets ZTS106 "operand has no known type". HEAD before U3d gives the same
   result. This fails closed. The probable cause is that a tuple index read
   does not carry the element type to a call. A checker probe can confirm it.
+- U3e-1 refuses a ninth type parameter with ZTS028 and publishes
+  `type_parameters` in the `meta` limits. It refuses a Dict key type that
+  is not assignable to `string | number` with ZTS209, at each variable,
+  parameter, return type, and explicit call type argument, and inside
+  records, arrays, tuples, unions, function types, and the bodies of
+  aliases that these positions name. `Dict<unknown, V>` in source is
+  refused, as spec 6.2 requires, and `Dict<never, V>` is admitted. U3e-1
+  also refuses an empty type parameter between commas, such as `<A, ,B>`
+  and `<A,>`, which was admitted before. These findings stay open:
+  - An alias that nothing uses is not checked, so
+    `structural A = Dict<boolean, string>;` alone passes. The check runs
+    where a type names the alias, like the ZTS212 check.
+  - A generic alias keeps no constraints. `structural Box<T extends string>
+    = { value: T };` admits `Box<number>`, and the census case
+    `ignored_constraint` pins it. For the same reason, `Bag<boolean,
+    string>` passes when `Bag<K extends DictKey, V> = Dict<K, V>`. This
+    fails open. A later unit must check a generic alias argument against
+    its constraint.
+  - An empty type parameter list `<>` is admitted, as in
+    `structural Box<> = number;`. Six internal tests pin the empty-list
+    distinction, so removing it needs its own unit, like X11.
+  - A Dict key that is an intersection or an uninstantiated generic
+    application is admitted by the key check.

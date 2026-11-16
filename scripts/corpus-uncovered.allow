@@ -69,7 +69,6 @@ ZTS023 no producer for invalid_continue; `continue;` outside a loop is reported 
 ZTS024 no producer for invalid_return; a top-level `return 1;` is reported as ZTS002
 ZTS025 no producer for invalid_yield; `yield 1` is reported as ZTS001 (unsupported feature)
 ZTS027 no producer for invalid_super; `super.x` is reported as ZTS001 (unsupported feature)
-ZTS028 no producer for too_many_parameters; a function with 301 parameters is reported as ZTS002 "too many parameters"
 ZTS029 no producer for too_many_locals; 300 local constants in one function are reported as ZTS002 "too many local variables"
 ZTS030 no producer for too_many_upvalues; the parser has no construction site for the kind
 ZTS032 no producer for jump_too_large; the parser has no construction site for the kind

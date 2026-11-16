@@ -204,7 +204,7 @@ pub const MarkerExtraction = struct {
 // Generic scope
 // ---------------------------------------------------------------------------
 
-pub const MAX_TYPE_PARAMS = 8;
+pub const MAX_TYPE_PARAMS = TypeSyntax.max_type_parameters;
 
 pub const GenericScope = struct {
     /// Type parameter names mapped to their TypeIndex in the pool.
