@@ -3265,6 +3265,20 @@ test "an assignment to a plain local object leaves the table stable" {
     try std.testing.expect(!counts.unresolved_dispatch);
 }
 
+test "a closure write to a different captured name leaves the table stable" {
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  const box = { n: 1 };
+        \\  const bump = () => {
+        \\    box.n = 5;
+        \\    return 0;
+        \\  };
+        \\  bump();
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(!counts.unresolved_dispatch);
+}
+
 test "an alias of the table is unresolved" {
     const counts = try routeVerifierCounts(route_table_prelude ++
         \\const routes = { "GET /": getHome };
@@ -3283,6 +3297,52 @@ test "a table returned from a function and written through the result is unresol
         \\function handler(req) {
         \\  const t = getTable();
         \\  t["GET /"] = bad;
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(counts.unresolved_dispatch);
+}
+
+test "a table passed to a function that writes the parameter is unresolved" {
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": getHome };
+        \\function setRoute(t) {
+        \\  t["GET /"] = bad;
+        \\  return 0;
+        \\}
+        \\function handler(req) {
+        \\  setRoute(routes);
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(counts.unresolved_dispatch);
+}
+
+test "a table passed to a function whose closure writes the parameter is unresolved" {
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": getHome };
+        \\function setLater(t) {
+        \\  const g = () => {
+        \\    t["GET /"] = bad;
+        \\    return 0;
+        \\  };
+        \\  return g();
+        \\}
+        \\function handler(req) {
+        \\  setLater(routes);
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(counts.unresolved_dispatch);
+}
+
+test "a table captured by a closure that aliases and writes it is unresolved" {
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": getHome };
+        \\function setLater(t) {
+        \\  const g = () => {
+        \\    const u = t;
+        \\    u["GET /"] = bad;
+        \\    return 0;
+        \\  };
+        \\  return g();
+        \\}
+        \\function handler(req) {
+        \\  setLater(routes);
     ++ "\n" ++ route_table_dispatch);
     try std.testing.expect(counts.unresolved_dispatch);
 }

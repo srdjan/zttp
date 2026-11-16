@@ -186,13 +186,12 @@ pub const Resolver = struct {
     }
 
     fn bindingHasExtractedOrComputedSelector(self: *const Resolver, binding: ir.BindingRef) bool {
-        const key = packBindingKey(binding.scope_id, binding.slot);
         for (0..self.ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             const tag = self.ir_view.getTag(idx) orelse continue;
             if (tag == .computed_access) {
                 const member = self.ir_view.getMember(idx) orelse return true;
-                if (!self.nodeIsBinding(member.object, key)) continue;
+                if (!self.nodeIsBinding(member.object, binding)) continue;
                 const property = self.computedPropertyName(member.computed) orelse return true;
                 if (std.mem.eql(u8, property, "handler")) return true;
             }
@@ -201,7 +200,7 @@ pub const Resolver = struct {
             const init_tag = self.ir_view.getTag(declaration.init) orelse continue;
             if (init_tag != .member_access and init_tag != .optional_chain and init_tag != .computed_access) continue;
             const member = self.ir_view.getMember(declaration.init) orelse return true;
-            if (!self.nodeIsBinding(member.object, key)) continue;
+            if (!self.nodeIsBinding(member.object, binding)) continue;
             if (init_tag == .computed_access) {
                 const property = self.computedPropertyName(member.computed) orelse return true;
                 if (std.mem.eql(u8, property, "handler")) return true;
@@ -236,7 +235,6 @@ pub const Resolver = struct {
             }
         }
 
-        const key = packBindingKey(binding.scope_id, binding.slot);
         for (0..self.ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             if (self.ir_view.getTag(idx) != .assignment) continue;
@@ -244,7 +242,7 @@ pub const Resolver = struct {
                 result.unresolved = true;
                 continue;
             };
-            if (self.assignmentRootMatch(assignment.target, key, 0) != .match) continue;
+            if (self.assignmentRootMatch(assignment.target, binding, 0) != .match) continue;
             matched = try self.appendRouteSourceTargets(
                 allocator,
                 result,
@@ -338,7 +336,6 @@ pub const Resolver = struct {
             result.unresolved = true;
             return;
         };
-        const key = packBindingKey(binding.scope_id, binding.slot);
         for (0..self.ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             if (self.ir_view.getTag(idx) != .assignment) continue;
@@ -346,7 +343,7 @@ pub const Resolver = struct {
                 result.unresolved = true;
                 continue;
             };
-            if (self.assignmentRootMatch(assignment.target, key, 0) != .match) continue;
+            if (self.assignmentRootMatch(assignment.target, binding, 0) != .match) continue;
             const function = self.resolveInitialFunctionNode(assignment.value) orelse {
                 result.unresolved = true;
                 continue;
@@ -363,7 +360,6 @@ pub const Resolver = struct {
     ) !void {
         if (self.ir_view.getTag(table_arg) != .identifier) return;
         const binding = self.ir_view.getBinding(table_arg) orelse return;
-        const key = packBindingKey(binding.scope_id, binding.slot);
         for (0..self.ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             if (self.ir_view.getTag(idx) != .assignment) continue;
@@ -371,7 +367,7 @@ pub const Resolver = struct {
                 result.unresolved = true;
                 continue;
             };
-            if (self.assignmentRootMatch(assignment.target, key, 0) != .match) continue;
+            if (self.assignmentRootMatch(assignment.target, binding, 0) != .match) continue;
             const function = self.resolveInitialFunctionNode(assignment.value) orelse continue;
             try result.appendUnique(allocator, function);
         }
@@ -439,12 +435,11 @@ pub const Resolver = struct {
     /// `untracked` answer here comes only from IR this resolver cannot read. It
     /// also counts, because a missed mutation is the unsound direction.
     fn bindingIsMutated(self: *const Resolver, binding: ir.BindingRef) bool {
-        const key = packBindingKey(binding.scope_id, binding.slot);
         for (0..self.ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             if (self.ir_view.getTag(idx) != .assignment) continue;
             const assignment = self.ir_view.getAssignment(idx) orelse return true;
-            switch (self.assignmentRootMatch(assignment.target, key, 0)) {
+            switch (self.assignmentRootMatch(assignment.target, binding, 0)) {
                 .match, .untracked => return true,
                 .other => {},
             }
@@ -453,7 +448,6 @@ pub const Resolver = struct {
     }
 
     fn bindingHasAlias(self: *const Resolver, binding: ir.BindingRef) bool {
-        const key = packBindingKey(binding.scope_id, binding.slot);
         for (0..self.ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             const tag = self.ir_view.getTag(idx) orelse continue;
@@ -461,12 +455,12 @@ pub const Resolver = struct {
                 const declaration = self.ir_view.getVarDecl(idx) orelse continue;
                 if (self.ir_view.getTag(declaration.init) != .identifier) continue;
                 const source = self.ir_view.getBinding(declaration.init) orelse continue;
-                if (packBindingKey(source.scope_id, source.slot) == key) return true;
+                if (mayNameBinding(source, binding)) return true;
             } else if (tag == .assignment) {
                 const assignment = self.ir_view.getAssignment(idx) orelse continue;
                 if (self.ir_view.getTag(assignment.value) != .identifier) continue;
                 const source = self.ir_view.getBinding(assignment.value) orelse continue;
-                if (packBindingKey(source.scope_id, source.slot) == key) return true;
+                if (mayNameBinding(source, binding)) return true;
             }
         }
         return false;
@@ -514,13 +508,12 @@ pub const Resolver = struct {
         depth: u8,
     ) bool {
         if (depth >= max_resolution_depth) return true;
-        const key = packBindingKey(binding.scope_id, binding.slot);
         for (0..self.ir_view.nodeCount()) |idx_usize| {
             const parent: NodeIndex = @intCast(idx_usize);
             const parent_tag = self.ir_view.getTag(parent) orelse continue;
             var children = self.ir_view.expressionChildren(parent);
             while (children.next()) |child| {
-                if (!self.valueMayBeBinding(child, key, 0)) continue;
+                if (!self.valueMayBeBinding(child, binding, 0)) continue;
                 switch (parent_tag) {
                     .member_access, .optional_chain, .computed_access => {
                         const member = self.ir_view.getMember(parent) orelse return true;
@@ -538,7 +531,7 @@ pub const Resolver = struct {
                     .call => {
                         const call = self.ir_view.getCall(parent) orelse return true;
                         if (call.callee == child) return true;
-                        if (!self.nodeIsBinding(child, key)) return true;
+                        if (!self.nodeIsBinding(child, binding)) return true;
                         var argument_position: ?usize = null;
                         for (0..call.args_count) |argument_index| {
                             const argument = self.ir_view.getListIndex(call.args_start, @intCast(argument_index));
@@ -582,19 +575,19 @@ pub const Resolver = struct {
         return false;
     }
 
-    /// True when the value of `node` may be the table bound to `key` itself:
+    /// True when the value of `node` may be the table that `binding` names itself:
     /// the identifier, or a node that yields one of its operands (a logical
     /// operator, a conditional branch, a sequence). A node that builds a new
     /// value from the table, such as an array literal, is not included: its
     /// elements are children and are checked as such.
-    fn valueMayBeBinding(self: *const Resolver, node: NodeIndex, key: u32, depth: usize) bool {
+    fn valueMayBeBinding(self: *const Resolver, node: NodeIndex, binding: ir.BindingRef, depth: usize) bool {
         if (node == null_node) return false;
         // Expression edges point to nodes that already exist, so this walk is
         // acyclic. The node count is the structural bound. Past it, answer yes.
         if (depth >= self.ir_view.nodeCount()) return true;
         const tag = self.ir_view.getTag(node) orelse return true;
         switch (tag) {
-            .identifier => return self.nodeIsBinding(node, key),
+            .identifier => return self.nodeIsBinding(node, binding),
             .binary_op => {
                 const binary = self.ir_view.getBinary(node) orelse return true;
                 switch (binary.op) {
@@ -603,13 +596,13 @@ pub const Resolver = struct {
                     // primitive and never the table itself.
                     else => return false,
                 }
-                return self.valueMayBeBinding(binary.left, key, depth + 1) or
-                    self.valueMayBeBinding(binary.right, key, depth + 1);
+                return self.valueMayBeBinding(binary.left, binding, depth + 1) or
+                    self.valueMayBeBinding(binary.right, binding, depth + 1);
             },
             .ternary => {
                 const ternary = self.ir_view.getTernary(node) orelse return true;
-                return self.valueMayBeBinding(ternary.then_branch, key, depth + 1) or
-                    self.valueMayBeBinding(ternary.else_branch, key, depth + 1);
+                return self.valueMayBeBinding(ternary.then_branch, binding, depth + 1) or
+                    self.valueMayBeBinding(ternary.else_branch, binding, depth + 1);
             },
             // exhaustive: a call result, a member read, and the other shapes
             // build or fetch a different value, never the table itself. A call
@@ -636,7 +629,6 @@ pub const Resolver = struct {
         if (argument_index >= function.params_count) return false;
         const parameter = self.ir_view.getListIndex(function.params_start, @intCast(argument_index));
         const binding = self.ir_view.paramBinding(parameter) orelse return false;
-        const key = packBindingKey(binding.scope_id, binding.slot);
         for (0..self.ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             const tag = self.ir_view.getTag(idx) orelse continue;
@@ -644,17 +636,27 @@ pub const Resolver = struct {
             const nested_call = self.ir_view.getCall(idx) orelse return false;
             // A method call on the parameter may mutate it. An untracked
             // receiver root cannot be this parameter, so it does not count here.
-            if (self.assignmentRootMatch(nested_call.callee, key, 0) == .match) return false;
+            if (self.assignmentRootMatch(nested_call.callee, binding, 0) == .match) return false;
         }
         return !self.bindingIsMutated(binding) and
             !self.bindingHasAlias(binding) and
             !self.bindingEscapesStableResolutionDepth(binding, false, depth);
     }
 
-    fn nodeIsBinding(self: *const Resolver, node: NodeIndex, key: u32) bool {
+    fn nodeIsBinding(self: *const Resolver, node: NodeIndex, binding: ir.BindingRef) bool {
         if (self.ir_view.getTag(node) != .identifier) return false;
-        const binding = self.ir_view.getBinding(node) orelse return false;
-        return packBindingKey(binding.scope_id, binding.slot) == key;
+        const reference = self.ir_view.getBinding(node) orelse return false;
+        return mayNameBinding(reference, binding);
+    }
+
+    /// True when `reference` may name the storage of `binding`. Equal keys name
+    /// it. An upvalue carries the scope and slot of its closure, not of the
+    /// declaration it captures, and the IR keeps no capture record. So an
+    /// upvalue names every binding with its name: an unrelated capture with the
+    /// same name only leaves a table unresolved, which is the safe direction.
+    fn mayNameBinding(reference: ir.BindingRef, binding: ir.BindingRef) bool {
+        if (packBindingKey(reference.scope_id, reference.slot) == packBindingKey(binding.scope_id, binding.slot)) return true;
+        return (reference.kind == .upvalue or binding.kind == .upvalue) and reference.name_atom == binding.name_atom;
     }
 
     fn resolveFunctionNode(self: *const Resolver, node: NodeIndex) ?NodeIndex {
@@ -697,7 +699,7 @@ pub const Resolver = struct {
     }
 
     const RootMatch = enum {
-        /// The root is, or contains, the binding with the given key.
+        /// The root is, or contains, a name for `binding`.
         match,
         /// The root is a shape this resolver cannot follow, such as a call
         /// result or a conditional. It may alias any binding.
@@ -707,7 +709,7 @@ pub const Resolver = struct {
     };
 
     /// Classify the root of an assignment target or a call receiver against
-    /// the binding `key`. A member chain follows its object. An array literal
+    /// `binding`. A member chain follows its object. An array literal
     /// receiver root, as in `[xs][0].push(1)`, matches when any element roots
     /// at the binding, because `[xs][0]` is `xs` itself. Any other
     /// non-identifier root is `untracked`: reporting it as `other` would let a
@@ -717,7 +719,7 @@ pub const Resolver = struct {
     fn assignmentRootMatch(
         self: *const Resolver,
         target: NodeIndex,
-        key: u32,
+        binding: ir.BindingRef,
         depth: usize,
     ) RootMatch {
         // Expression edges point to nodes that already exist, so this walk is
@@ -726,12 +728,12 @@ pub const Resolver = struct {
         const tag = self.ir_view.getTag(target) orelse return .untracked;
         switch (tag) {
             .identifier => {
-                const binding = self.ir_view.getBinding(target) orelse return .other;
-                return if (packBindingKey(binding.scope_id, binding.slot) == key) .match else .other;
+                const reference = self.ir_view.getBinding(target) orelse return .other;
+                return if (mayNameBinding(reference, binding)) .match else .other;
             },
             .member_access, .optional_chain, .computed_access => {
                 const member = self.ir_view.getMember(target) orelse return .untracked;
-                return self.assignmentRootMatch(member.object, key, depth + 1);
+                return self.assignmentRootMatch(member.object, binding, depth + 1);
             },
             .array_literal => {
                 const array = self.ir_view.getArray(target) orelse return .untracked;
@@ -739,7 +741,7 @@ pub const Resolver = struct {
                 for (0..array.elements_count) |index| {
                     const element = self.ir_view.getListIndex(array.elements_start, @intCast(index));
                     if (element == null_node) continue;
-                    switch (self.assignmentRootMatch(element, key, depth + 1)) {
+                    switch (self.assignmentRootMatch(element, binding, depth + 1)) {
                         .match => return .match,
                         .untracked => result = .untracked,
                         .other => {},

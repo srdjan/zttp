@@ -864,3 +864,19 @@ later.
   `getBox` helper from the route-table test prelude, and it adds a test
   that a table returned from a function and written through the result
   stays unresolved.
+- R1 closes the closure-capture hole (Decision 14). The IR keeps no
+  capture record, so `route_resolution.zig#Resolver.mayNameBinding` treats
+  an upvalue as a name for every binding with its name. The mutation,
+  alias, and escape checks use it. `Resolver.findBindingDecl` stays exact,
+  so a table read through an upvalue still does not resolve. Two tests
+  reproduce the hole: a closure that writes a captured table parameter,
+  and a closure that aliases that parameter and writes the alias. Both
+  failed before the fix. A third test pins the direct parameter write. A
+  probe showed that the state-isolation check already reports a closure
+  write through an alias of module state (ZTS310).
+  A precision test pins that a closure write to a different captured name
+  leaves the table stable. Of four mutants of `mayNameBinding`, three are
+  killed. The survivor drops the upvalue test on the subject binding. No
+  test can kill it: a subject that is an upvalue never yields a stable
+  table, because `Resolver.resolveStableRouteTable` accepts only a global
+  and `Resolver.findBindingDecl` is exact.
