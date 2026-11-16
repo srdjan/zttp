@@ -53,10 +53,8 @@ const CompoundFamily = enum {
 };
 
 const SemanticQuirk = enum {
-    missing_record_type_absent,
     record_comment_prefix,
     record_comment_after_field,
-    omitted_record_separator,
     readonly_optional_fields,
     mutable_repeated_arrays,
     comment_before_array,
@@ -69,8 +67,6 @@ const SemanticQuirk = enum {
     wider_undefined_union,
     nested_optional_parameter,
     any_member_key,
-    missing_function_comma,
-    missing_function_return,
     named_function_parameters,
     escaped_template_slot,
     empty_template_slot,
@@ -2594,7 +2590,6 @@ fn expectDirectAbsentPrefix(annotation: []const u8, expected_prefix: []const u8)
 const ApplicationCase = enum {
     ambient_proof,
     nested_closers,
-    optional_comma,
     absent_first_before_close,
     absent_later_before_close,
     dict_exact_arity,
@@ -2613,7 +2608,6 @@ const ApplicationFixture = struct {
 const application_fixtures = [_]ApplicationFixture{
     .{ .case = .ambient_proof, .source = "const value: Proof<Response, \"pure\"> = undefined;" },
     .{ .case = .nested_closers, .source = "const value: Outer<Middle<Inner<string>>> = undefined;" },
-    .{ .case = .optional_comma, .source = "const value: Outer<string number> = undefined;" },
     .{ .case = .absent_first_before_close, .source = "const value: Outer<()> = undefined;" },
     .{ .case = .absent_later_before_close, .source = "const value: Outer<string, ()> = undefined;" },
     .{ .case = .dict_exact_arity, .source = "const value: Dict<string, number> = undefined;" },
@@ -3017,27 +3011,6 @@ fn assertApplicationSemanticProperty(case: ApplicationCase, source: []const u8) 
             const middle_pool = pool.getGenericAppInfo(outer_pool.args[0]);
             try expectPoolGenericApplication(&pool, middle_pool.args[0], "Inner", 1);
             try std.testing.expectEqual(pool.idx_string, pool.getGenericAppInfo(middle_pool.args[0]).args[0]);
-        },
-        .optional_comma => {
-            const application = try expectSyntaxApplication(
-                &parser.type_store,
-                annotation.root,
-                "Outer",
-                2,
-            );
-            const first = parser.type_store.node(try syntaxChildIndex(application.arguments[0])) orelse
-                return error.TestUnexpectedResult;
-            const second = parser.type_store.node(try syntaxChildIndex(application.arguments[1])) orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expectEqual(TypeSyntax.Primitive.string, first.data.primitive);
-            try std.testing.expectEqual(TypeSyntax.Primitive.number, second.data.primitive);
-            try expectPoolGenericApplication(&pool, lowered, "Outer", 2);
-            const lowered_application = pool.getGenericAppInfo(lowered);
-            try std.testing.expectEqualSlices(
-                TypeIndex,
-                &.{ pool.idx_string, pool.idx_number },
-                lowered_application.args,
-            );
         },
         .absent_first_before_close, .absent_later_before_close => {
             const retained: usize = switch (case) {
@@ -4522,11 +4495,8 @@ const GenericRuntimeCase = enum {
     explicit_call_adjacent,
     explicit_call_combined_opener,
     nested_call_closers,
-    missing_call_comma,
     missing_call_closer,
     call_semantic_absence_first,
-    quoted_call_comma,
-    comment_call_comma,
     call_projection_cap,
     spaced_call_comparison,
     logical_comparison_control,
@@ -4540,11 +4510,8 @@ const generic_runtime_fixtures = [_]struct {
     .{ .case = .explicit_call_adjacent, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string>(seed);" },
     .{ .case = .explicit_call_combined_opener, .source = "const seed: number = 1; const result=id<<string>>(seed);" },
     .{ .case = .nested_call_closers, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<Outer<Inner<string>>>(seed);" },
-    .{ .case = .missing_call_comma, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string number>(seed);" },
     .{ .case = .missing_call_closer, .source = "const seed: number = 1; const result=id<string(seed);" },
     .{ .case = .call_semantic_absence_first, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<(),string>(seed);" },
-    .{ .case = .quoted_call_comma, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<\"a,b\">(seed);" },
-    .{ .case = .comment_call_comma, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string /*,*/>(seed);" },
     .{ .case = .call_projection_cap, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<A,B,C,D,E,F,G,H,I>(seed);" },
     .{ .case = .spaced_call_comparison, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string> (seed);" },
     .{ .case = .logical_comparison_control, .source = "const seed: number = 1; const result=seed < value && other > (seed);" },
@@ -4622,16 +4589,6 @@ test "generic runtime syntax census observes every case" {
                     return error.TestUnexpectedResult;
                 try std.testing.expectEqual(TypeSyntax.NodeTag.generic_application, root.tag);
             },
-            .missing_call_comma => {
-                const call = parser.type_store.explicit_call_arguments.items[0];
-                const fragments = parser.type_store.semanticFragmentSlice(call.semantic_fragments) orelse
-                    return error.TestUnexpectedResult;
-                try std.testing.expectEqual(@as(usize, 1), fragments.len);
-                try std.testing.expectEqual(
-                    fragments[0].raw_span.start + @as(u32, "string".len),
-                    fragments[0].semantic_prefix_end,
-                );
-            },
             .call_semantic_absence_first => {
                 const call = parser.type_store.explicit_call_arguments.items[0];
                 const fragments = parser.type_store.semanticFragmentSlice(call.semantic_fragments) orelse
@@ -4645,11 +4602,6 @@ test "generic runtime syntax census observes every case" {
                     .present => return error.TestUnexpectedResult,
                 }
                 try std.testing.expectEqualStrings("string", fragments[1].raw_span.text(fixture.source));
-            },
-            .quoted_call_comma, .comment_call_comma => {
-                const call = parser.type_store.explicit_call_arguments.items[0];
-                try std.testing.expectEqual(@as(u32, 1), call.authored_arguments.count);
-                try std.testing.expectEqual(@as(u32, 2), call.semantic_fragments.count);
             },
             .call_projection_cap => {
                 const call = parser.type_store.explicit_call_arguments.items[0];
@@ -5499,6 +5451,18 @@ test "type text left after the type parser stops is refused with ZTS001" {
         .{ .source = "const value: Outer<string, (), number> = undefined;", .offset = 29 },
         .{ .source = "const value: (number: string | boolean, number) = undefined;", .offset = 20 },
         .{ .source = "const value: number | | string = undefined;", .offset = 20 },
+        .{ .source = "const value: Outer<string number> = undefined;", .offset = 26 },
+        .{ .source = "const value: { x }[] = undefined;", .offset = 17 },
+        .{ .source = "const value: { outer: { x }[]; tail: number }[] = undefined;", .offset = 26 },
+        .{ .source = "const value: {value:();tail:number} = undefined;", .offset = 22 },
+        .{ .source = "const value: (value:())=>number = undefined;", .offset = 22 },
+        .{ .source = "const value: { x: } = undefined;", .offset = 18 },
+        .{ .source = "const value: { x: number y: string } = undefined;", .offset = 25 },
+        .{ .source = "const value: (x: number y: string) => number = undefined;", .offset = 24 },
+        .{ .source = "const value: (x: number) => = undefined;", .offset = 13 },
+        .{ .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string number>(seed);", .offset = 87 },
+        .{ .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<\"a,b\">(seed);", .offset = 85 },
+        .{ .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string /*,*/>(seed);", .offset = 92 },
     };
     for (cases) |case| {
         var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
@@ -5783,10 +5747,8 @@ test "direct compound families and semantic quirks match ordered types" {
         quirk: SemanticQuirk,
     };
     const fixtures = [_]Fixture{
-        .{ .annotation = "{ x: }", .quirk = .missing_record_type_absent },
         .{ .annotation = "{ /*c*/ x: number }", .quirk = .record_comment_prefix },
         .{ .annotation = "{ x: number /*c*/ }", .quirk = .record_comment_after_field },
-        .{ .annotation = "{ x: number y: string }", .quirk = .omitted_record_separator },
         .{
             .annotation = "{ readonly id?: number; name: string }",
             .family = .record,
@@ -5807,8 +5769,6 @@ test "direct compound families and semantic quirks match ordered types" {
         .{ .annotation = "string | number | undefined", .quirk = .wider_undefined_union },
         .{ .annotation = "{ cb: (x?: number) => number }", .quirk = .nested_optional_parameter },
         .{ .annotation = "{ any: number }", .quirk = .any_member_key },
-        .{ .annotation = "(x: number y: string) => number", .quirk = .missing_function_comma },
-        .{ .annotation = "(x: number) =>", .quirk = .missing_function_return },
         .{
             .annotation = "(left: string, right: number) => boolean",
             .family = .function,
@@ -5879,9 +5839,7 @@ test "direct compound boundaries preserve ordered structure before key compariso
         "const value: undefined | undefined = undefined;",
         "const value: (undefined & undefined) | string = undefined;",
         "const value: [()][] = undefined;",
-        "const value: { x }[] = undefined;",
         "const value: [[()]][] = undefined;",
-        "const value: { outer: { x }[]; tail: number }[] = undefined;",
     }) |source| try expectDirectAccepted(source);
 }
 
@@ -6210,9 +6168,6 @@ test "compound syntax keeps complete field and parameter spans" {
 }
 
 test "bare groups keep consumed spans and lower as absent children" {
-    try expectDirectAccepted("const value: {value:();tail:number} = undefined;");
-    try expectDirectAccepted("const value: (value:())=>number = undefined;");
-
     const record_source = "{value:();tail:number} = value;";
     var record_store = TypeSyntax.Store.init(std.testing.allocator, record_source);
     defer record_store.deinit();
@@ -6888,12 +6843,8 @@ fn expectLiteralNumber(pool: *const TypePool, idx: TypeIndex, value: i16) !void 
 
 test "direct compound parsing preserves exact admitted type text" {
     const annotations = [_][]const u8{
-        "{ x: }",
         "{ /*c*/ x: number }",
         "{ x: number /*c*/ }",
-        "{ x: number y: string }",
-        "(x: number y: string) => number",
-        "(x: number) =>",
         "(number)",
         "() => number",
         "number /*c*/ []",
@@ -6911,7 +6862,7 @@ test "direct compound parsing preserves exact admitted type text" {
         "readonly [string, number]",
         "``",
     };
-    try std.testing.expectEqual(@as(usize, 22), annotations.len);
+    try std.testing.expectEqual(@as(usize, 18), annotations.len);
     var observed: usize = 0;
     for (annotations) |annotation| {
         try expectDirectTypeText(annotation);
@@ -6927,14 +6878,6 @@ test "direct compound family and semantic quirk census is exhaustive" {
     var families = std.EnumSet(CompoundFamily).empty;
     var quirks = std.EnumSet(SemanticQuirk).empty;
 
-    const missing_type = try parseDirectAnnotation(&pool, "{ x: }");
-    const missing_fields = pool.getRecordFields(missing_type);
-    try std.testing.expectEqual(@as(usize, 1), missing_fields.len);
-    try std.testing.expectEqualStrings("x", pool.getName(missing_fields[0].name_start, missing_fields[0].name_len));
-    try std.testing.expectEqual(null_type_idx, missing_fields[0].type_idx);
-    try std.testing.expectError(error.AbsentType, type_key.typeKey(&pool, allocator, missing_type));
-    quirks.insert(.missing_record_type_absent);
-
     const comment_prefix = try parseDirectAnnotation(&pool, "{ /*c*/ x: number }");
     const comment_prefix_fields = pool.getRecordFields(comment_prefix);
     try std.testing.expectEqual(@as(usize, 1), comment_prefix_fields.len);
@@ -6948,17 +6891,6 @@ test "direct compound family and semantic quirk census is exhaustive" {
     try std.testing.expectEqualStrings("x", pool.getName(comment_after_fields[0].name_start, comment_after_fields[0].name_len));
     try std.testing.expectEqual(pool.idx_number, comment_after_fields[0].type_idx);
     quirks.insert(.record_comment_after_field);
-
-    const omitted_separator = try parseDirectAnnotation(&pool, "{ x: number y: string }");
-    const omitted_fields = pool.getRecordFields(omitted_separator);
-    try std.testing.expectEqual(@as(usize, 2), omitted_fields.len);
-    try std.testing.expectEqualStrings("x", pool.getName(omitted_fields[0].name_start, omitted_fields[0].name_len));
-    try std.testing.expectEqual(pool.idx_number, omitted_fields[0].type_idx);
-    try std.testing.expectEqualStrings("y", pool.getName(omitted_fields[1].name_start, omitted_fields[1].name_len));
-    try std.testing.expectEqual(pool.idx_string, omitted_fields[1].type_idx);
-    // Fields sort by name; a plain field writes "." then name length, name, and type.
-    try std.testing.expectEqualStrings("R2.1:xn.1:ys", try type_key.typeKey(&pool, allocator, omitted_separator));
-    quirks.insert(.omitted_record_separator);
 
     const readonly_optional = try parseDirectAnnotation(&pool, "{ readonly id?: number; name: string }");
     const readonly_fields = pool.getRecordFields(readonly_optional);
@@ -7074,22 +7006,6 @@ test "direct compound family and semantic quirk census is exhaustive" {
     try std.testing.expectEqual(pool.idx_number, any_fields[0].type_idx);
     quirks.insert(.any_member_key);
 
-    const missing_comma = try parseDirectAnnotation(&pool, "(x: number y: string) => number");
-    const comma_info = pool.getFunctionInfo(missing_comma);
-    try std.testing.expectEqual(@as(usize, 2), comma_info.params.len);
-    try std.testing.expectEqualStrings("x", pool.getName(comma_info.params[0].name_start, comma_info.params[0].name_len));
-    try std.testing.expectEqual(pool.idx_number, comma_info.params[0].type_idx);
-    try std.testing.expectEqualStrings("y", pool.getName(comma_info.params[1].name_start, comma_info.params[1].name_len));
-    try std.testing.expectEqual(pool.idx_string, comma_info.params[1].type_idx);
-    try std.testing.expectEqual(pool.idx_number, comma_info.ret);
-    quirks.insert(.missing_function_comma);
-
-    const missing_return = try parseDirectAnnotation(&pool, "(x: number) =>");
-    try expectTag(&pool, missing_return, .t_function);
-    try std.testing.expectEqual(null_type_idx, pool.getFunctionInfo(missing_return).ret);
-    try std.testing.expectError(error.AbsentType, type_key.typeKey(&pool, allocator, missing_return));
-    quirks.insert(.missing_function_return);
-
     const named_function = try parseDirectAnnotation(&pool, "(left: string, right: number) => boolean");
     const named_info = pool.getFunctionInfo(named_function);
     try std.testing.expectEqual(@as(usize, 2), named_info.params.len);
@@ -7157,7 +7073,7 @@ test "direct compound family and semantic quirk census is exhaustive" {
 
     try pool.ensureHealthy();
     try std.testing.expectEqual(@as(usize, 8), @typeInfo(CompoundFamily).@"enum".field_names.len);
-    try std.testing.expectEqual(@as(usize, 24), @typeInfo(SemanticQuirk).@"enum".field_names.len);
+    try std.testing.expectEqual(@as(usize, 20), @typeInfo(SemanticQuirk).@"enum".field_names.len);
     inline for (@typeInfo(CompoundFamily).@"enum".field_names) |field| {
         const family: CompoundFamily = @fromBackingInt(@intCast(@backingInt(@field(CompoundFamily, field))));
         try std.testing.expect(families.contains(family));

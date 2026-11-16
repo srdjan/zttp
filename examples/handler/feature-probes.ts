@@ -25,7 +25,7 @@ function rangeProbe() {
 }
 
 structural UserEntry = { profile: { name: string } | undefined };
-structural Users = { active: UserEntry, empty: UserEntry, absent: UserEntry | undefined };
+structural Users = { active: UserEntry; empty: UserEntry; absent: UserEntry | undefined };
 
 function optionalProbe() {
   const users: Users = {

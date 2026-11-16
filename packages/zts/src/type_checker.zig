@@ -9155,7 +9155,7 @@ test "an object spread contributes the spread record's fields" {
     // spread object therefore failed to satisfy the record type it was written
     // to produce, which is the whole use of the form.
     try checkTypedSource(
-        \\structural Config = { host: string, port: number };
+        \\structural Config = { host: string; port: number };
         \\function defaults(): Config {
         \\  return { host: "localhost", port: 80 };
         \\}
@@ -9171,7 +9171,7 @@ test "an object spread does not invent fields the spread record lacks" {
     // field the target type requires and neither side provides is still a
     // mismatch.
     try checkTypedSourceSaying(
-        \\structural Config = { host: string, port: number };
+        \\structural Config = { host: string; port: number };
         \\function partial(): { port: number } {
         \\  return { port: 80 };
         \\}
@@ -9949,7 +9949,7 @@ test "TypeChecker: param-discriminant match with default arm is exhaustive (no w
     // regardless of discriminant type, and it is not redundant when a member of
     // the union (`kind: string`) is wider than the arms above it.
     try checkTypedSource(
-        \\structural C = { kind: "echo", text: string } | { kind: "ping", text: string } | { kind: string, text: string };
+        \\structural C = { kind: "echo"; text: string } | { kind: "ping"; text: string } | { kind: string; text: string };
         \\function run(c: C): string {
         \\  return match (c) {
         \\    when { kind: "echo" }: c.text,
@@ -9965,7 +9965,7 @@ test "TypeChecker: a default arm after full coverage of a closed union is redund
     // error (owner decision T1 (a)): it reaches the expert loop as a veto
     // violation and does not stop a build.
     try checkTypedSource(
-        \\structural C = { kind: "echo", text: string } | { kind: "ping", text: string };
+        \\structural C = { kind: "echo"; text: string } | { kind: "ping"; text: string };
         \\function run(c: C): string {
         \\  return match (c) {
         \\    when { kind: "echo" }: c.text,
@@ -10007,7 +10007,7 @@ test "TypeChecker: full-variant param-discriminant match without a default is ex
     // warning. (The canonical profile still separately requires a default arm
     // on every match; this only fixes the type-checker layer's false warn.)
     try checkTypedSource(
-        \\structural C = { kind: "echo", text: string } | { kind: "ping", text: string };
+        \\structural C = { kind: "echo"; text: string } | { kind: "ping"; text: string };
         \\function run(c: C): string {
         \\  return match (c) {
         \\    when { kind: "echo" }: c.text,
@@ -10022,7 +10022,7 @@ test "TypeChecker: partial param-discriminant match without a default still warn
     // two variants covered, no default - warn. The match is returned from a
     // `string` function, so its `string | undefined` type is also a ZTS204.
     try checkTypedSource(
-        \\structural C = { kind: "echo", text: string } | { kind: "ping", text: string };
+        \\structural C = { kind: "echo"; text: string } | { kind: "ping"; text: string };
         \\function run(c: C): string {
         \\  return match (c) {
         \\    when { kind: "echo" }: c.text,
@@ -11321,7 +11321,7 @@ test "a boolean field that is not a discriminant installs no guard" {
     // also be true at runtime, so the then-branch was narrowed to the wrong
     // member and a correct field read reported as missing.
     try checkTypedSource(
-        \\function f(c: { on: true, a: string } | { on: boolean, b: string }): string {
+        \\function f(c: { on: true; a: string } | { on: boolean; b: string }): string {
         \\    if (c.on) {
         \\        return c.b ?? "d";
         \\    }
@@ -11340,7 +11340,7 @@ test "a real boolean discriminant still selects its member" {
     // The positive control: reading the other arm's field inside the guard is
     // still an error, so the fix did not disable the guard.
     try checkTypedSource(
-        \\function f(r: { ok: true, value: string } | { ok: false, error: string }): string {
+        \\function f(r: { ok: true; value: string } | { ok: false; error: string }): string {
         \\    if (r.ok) {
         \\        return r.error;
         \\    }
@@ -12562,14 +12562,14 @@ test "narrowing: an arm that assigns the narrowed scrutinee keeps the kill" {
     // The match restored the discriminant's saved narrowing by hand after the
     // arm, which put it back over the arm's own assignment.
     const disc =
-        \\function needAB(m: { kind: "a", v: string } | { kind: "b", n: number }): number {
+        \\function needAB(m: { kind: "a"; v: string } | { kind: "b"; n: number }): number {
         \\  return 1;
         \\}
         \\function run(
-        \\  p: { kind: "a", v: string } | { kind: "b", n: number } | undefined,
-        \\  q: { kind: "a", v: string } | { kind: "b", n: number } | undefined,
+        \\  p: { kind: "a"; v: string } | { kind: "b"; n: number } | undefined,
+        \\  q: { kind: "a"; v: string } | { kind: "b"; n: number } | undefined,
         \\): number {
-        \\  let m: { kind: "a", v: string } | { kind: "b", n: number } | undefined = p;
+        \\  let m: { kind: "a"; v: string } | { kind: "b"; n: number } | undefined = p;
         \\  if (m === undefined) {
         \\    return 0;
         \\  }
@@ -13566,8 +13566,8 @@ test "predicate claim: a test that proves string backs a string claim over unkno
 
 test "predicate claim: a discriminant test for the other member does not back the claim" {
     try expectOnlyDiagnostic(
-        \\structural A = { kind: "a", n: number };
-        \\function isA(v: { kind: "a", n: number } | { kind: "b", s: string }): v is A {
+        \\structural A = { kind: "a"; n: number };
+        \\function isA(v: { kind: "a"; n: number } | { kind: "b"; s: string }): v is A {
         \\    return v.kind === "b";
         \\}
     , .invalid_type_predicate);
@@ -13575,12 +13575,12 @@ test "predicate claim: a discriminant test for the other member does not back th
 
 test "predicate claim: a discriminant test for the claimed member is admitted and narrows" {
     try expectNoDiagnostics(
-        \\structural A = { kind: "a", n: number };
-        \\function isA(v: { kind: "a", n: number } | { kind: "b", s: string }): v is A {
+        \\structural A = { kind: "a"; n: number };
+        \\function isA(v: { kind: "a"; n: number } | { kind: "b"; s: string }): v is A {
         \\    return v.kind === "a";
         \\}
         \\function handler(req: Request): Response {
-        \\    const raw: { kind: "a", n: number } | { kind: "b", s: string } = { kind: "a", n: 1 };
+        \\    const raw: { kind: "a"; n: number } | { kind: "b"; s: string } = { kind: "a", n: 1 };
         \\    if (isA(raw)) {
         \\        const a: A = raw;
         \\        return Response.json({ n: a.n });
@@ -13652,7 +13652,7 @@ test "discriminant guard: members sharing the discriminant value are all kept" {
     // `v.n` is not proven. The guard took the first match and read `n` as a
     // number.
     try expectOnlyDiagnostic(
-        \\function pick(v: { kind: "a", n: number } | { kind: "a", s: string }): number {
+        \\function pick(v: { kind: "a"; n: number } | { kind: "a"; s: string }): number {
         \\    if (v.kind === "a") {
         \\        const k: number = v.n;
         \\        return k;
@@ -13664,7 +13664,7 @@ test "discriminant guard: members sharing the discriminant value are all kept" {
 
 test "discriminant guard: a member with a wider field stays in the then-branch" {
     try expectOnlyDiagnostic(
-        \\function pick(v: { kind: "a", n: number } | { kind: string, s: string }): number {
+        \\function pick(v: { kind: "a"; n: number } | { kind: string; s: string }): number {
         \\    if (v.kind === "a") {
         \\        const k: number = v.n;
         \\        return k;
@@ -13678,7 +13678,7 @@ test "discriminant guard: a member with an optional discriminant stays in the el
     // `kind?: "a"` can be absent, so `v.kind === "a"` can be false for that
     // member, and the code after the early return can still hold it.
     try expectOnlyDiagnostic(
-        \\function pick(v: { kind?: "a", n: number } | { kind: "b", s: string }): number {
+        \\function pick(v: { kind?: "a"; n: number } | { kind: "b"; s: string }): number {
         \\    if (v.kind === "a") {
         \\        return 0;
         \\    }
@@ -13690,8 +13690,8 @@ test "discriminant guard: a member with an optional discriminant stays in the el
 
 test "discriminant guard: named records narrow in the then-branch" {
     try expectNoDiagnostics(
-        \\structural A = { kind: "a", n: number };
-        \\structural B = { kind: "b", s: string };
+        \\structural A = { kind: "a"; n: number };
+        \\structural B = { kind: "b"; s: string };
         \\function f(v: A | B): number {
         \\    if (v.kind === "a") {
         \\        const a: A = v;
@@ -13704,8 +13704,8 @@ test "discriminant guard: named records narrow in the then-branch" {
 
 test "discriminant guard: named records narrow after an early return" {
     try expectNoDiagnostics(
-        \\structural A = { kind: "a", n: number };
-        \\structural B = { kind: "b", s: string };
+        \\structural A = { kind: "a"; n: number };
+        \\structural B = { kind: "b"; s: string };
         \\function f(v: A | B): number {
         \\    if (v.kind === "a") {
         \\        return 1;
@@ -13718,8 +13718,8 @@ test "discriminant guard: named records narrow after an early return" {
 
 test "discriminant guard: an alias of a union of named records narrows" {
     try expectNoDiagnostics(
-        \\structural A = { kind: "a", n: number };
-        \\structural B = { kind: "b", s: string };
+        \\structural A = { kind: "a"; n: number };
+        \\structural B = { kind: "b"; s: string };
         \\structural AB = A | B;
         \\function f(v: AB): number {
         \\    if (v.kind === "a") {
@@ -13733,8 +13733,8 @@ test "discriminant guard: an alias of a union of named records narrows" {
 
 test "predicate claim: a discriminant test over named records is admitted and narrows" {
     try expectNoDiagnostics(
-        \\structural A = { kind: "a", n: number };
-        \\structural B = { kind: "b", s: string };
+        \\structural A = { kind: "a"; n: number };
+        \\structural B = { kind: "b"; s: string };
         \\function isA(v: A | B): v is A {
         \\    return v.kind === "a";
         \\}
@@ -13751,8 +13751,8 @@ test "predicate claim: a discriminant test over named records is admitted and na
 
 test "predicate claim: a discriminant shared by two members does not back a one-member claim" {
     try expectOnlyDiagnostic(
-        \\structural A1 = { kind: "a", n: number };
-        \\structural A2 = { kind: "a", s: string };
+        \\structural A1 = { kind: "a"; n: number };
+        \\structural A2 = { kind: "a"; s: string };
         \\function isA1(v: A1 | A2): v is A1 {
         \\    return v.kind === "a";
         \\}

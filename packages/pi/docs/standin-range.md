@@ -4,7 +4,7 @@
 
 Range version: `step-6-v2`
 
-Range hash: `ac74afe4501305dca931f0336aad10210cd96bc6d6304ad2cf61c6d65c87de56`
+Range hash: `e0bcabcd4bc66d058d3c4797fb1dd8910da36bfe3505e5497311894663fbf6d3`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 

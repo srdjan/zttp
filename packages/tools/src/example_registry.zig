@@ -134,7 +134,7 @@ pub const examples = [_]Example{
         \\
         \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Config = { host: string, port: number };
+        \\structural Config = { host: string; port: number };
         \\
         \\function defaults(): Config {
         \\  return { host: "localhost", port: 80 };
@@ -204,7 +204,7 @@ pub const examples = [_]Example{
         \\
         \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Profile = { name: string, city?: string };
+        \\structural Profile = { name: string; city?: string };
         \\
         \\function profile(): Profile {
         \\  return { name: "ada" };
@@ -225,7 +225,7 @@ pub const examples = [_]Example{
         \\
         \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Profile = { name: string, city?: string };
+        \\structural Profile = { name: string; city?: string };
         \\
         \\function profile(): Profile {
         \\  return { name: "ada" };
@@ -246,7 +246,7 @@ pub const examples = [_]Example{
         \\
         \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Command = { kind: "echo", text: string } | { kind: "ping" };
+        \\structural Command = { kind: "echo"; text: string } | { kind: "ping" };
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const command: Command = { kind: "ping" };
@@ -365,7 +365,7 @@ pub const examples = [_]Example{
         \\
         \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Config = { readonly port: number, host: string };
+        \\structural Config = { readonly port: number; host: string };
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const config: Config = { port: 3000, host: "localhost" };
@@ -425,7 +425,7 @@ pub const examples = [_]Example{
         \\
         \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Row = { id: number, note: string | null };
+        \\structural Row = { id: number; note: string | null };
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const row: Row = { id: 1, note: null };

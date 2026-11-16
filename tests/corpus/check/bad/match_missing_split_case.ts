@@ -1,5 +1,5 @@
 // Proves: when split arms leave one combination of two boolean fields uncovered, the help names that combination (ZTS603).
-structural Flags = { x: boolean, y: boolean };
+structural Flags = { x: boolean; y: boolean };
 
 function describe(f: Flags): string | undefined {
     const out = match (f) {

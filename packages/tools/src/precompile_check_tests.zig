@@ -4740,12 +4740,8 @@ test "CHECK preserves compound type diagnostics and semantic prefixes" {
         annotation: []const u8,
         message: []const u8,
     }{
-        .{ .annotation = "{ x: }", .message = "type 'undefined' is not assignable to type '{ x: unknown }'" },
         .{ .annotation = "{ /*c*/ x: number }", .message = "type 'undefined' is not assignable to type '{ x: number }'" },
         .{ .annotation = "{ x: number /*c*/ }", .message = "type 'undefined' is not assignable to type '{ x: number }'" },
-        .{ .annotation = "{ x: number y: string }", .message = "type 'undefined' is not assignable to type '{ x: number; y: string }'" },
-        .{ .annotation = "(x: number y: string) => number", .message = "type 'undefined' is not assignable to type '(x: number, y: string) => number'" },
-        .{ .annotation = "(x: number) =>", .message = "type 'undefined' is not assignable to type '(x: number) => void'" },
         .{ .annotation = "(number)", .message = "type 'undefined' is not assignable to type 'number'" },
         .{ .annotation = "() => number", .message = "type 'undefined' is not assignable to type '() => number'" },
         .{ .annotation = "number [ ]", .message = "type 'undefined' is not assignable to type 'number[]'" },
@@ -4790,7 +4786,7 @@ test "CHECK preserves compound type diagnostics and semantic prefixes" {
         try std.testing.expect(result.contract == null);
         observed += 1;
     }
-    try std.testing.expectEqual(@as(usize, 24), cases.len);
+    try std.testing.expectEqual(@as(usize, 20), cases.len);
     try std.testing.expectEqual(cases.len, observed);
 }
 
@@ -4807,6 +4803,10 @@ test "CHECK refuses compound type text outside the admitted grammar" {
         .{ .annotation = "(x: number) number", .column = 28 },
         .{ .annotation = "string | 1.5", .column = 25 },
         .{ .annotation = "string | 1_000", .column = 25 },
+        .{ .annotation = "{ x: }", .column = 21 },
+        .{ .annotation = "{ x: number y: string }", .column = 28 },
+        .{ .annotation = "(x: number y: string) => number", .column = 27 },
+        .{ .annotation = "(x: number) =>", .column = 16 },
     };
     var observed: usize = 0;
     for (cases) |case| {
@@ -4833,7 +4833,7 @@ test "CHECK refuses compound type text outside the admitted grammar" {
         try std.testing.expect(result.contract == null);
         observed += 1;
     }
-    try std.testing.expectEqual(@as(usize, 7), cases.len);
+    try std.testing.expectEqual(@as(usize, 11), cases.len);
     try std.testing.expectEqual(cases.len, observed);
 }
 
@@ -4915,7 +4915,7 @@ test "CHECK preserves compound unclosed syntax diagnostics" {
         } },
         .{ .annotation = "`a${number", .diagnostics = &.{ missing_initializer, unterminated } },
         .{ .annotation = "(x: number => number", .diagnostics = &.{
-            .{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 18, .suggestion = syntax_suggestion },
+            .{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 27, .suggestion = syntax_suggestion },
             missing_initializer,
             unterminated,
         } },
@@ -5863,9 +5863,9 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "comparison_shift_control", .source = "const a = 1;\nconst b = 2;\nconst c = 1;\nconst value = a < b >> c;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "bitwise operators are not supported", .line = 4, .column = 21, .suggestion = "use arithmetic or a comparison" }} },
         .{ .name = "comparison_unsigned_shift_control", .source = "const a = 1;\nconst b = 2;\nconst c = 1;\nconst value = a < b >>> c;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "bitwise operators are not supported", .line = 4, .column = 21, .suggestion = "use arithmetic or a comparison" }} },
         .{ .name = "triple_closer", .source = "structural Box<T> = { value: T };\nconst probe: Box<Box<Box<string>>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: { value: { value: string } } }'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "application_missing_comma", .source = "structural Box<T> = { value: T };\nconst probe: Box<string number> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Box<string, number>'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "application_missing_comma", .source = "structural Box<T> = { value: T };\nconst probe: Box<string number> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 25, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
         .{ .name = "application_missing_close", .source = "structural Box<T> = { value: T };\nconst probe: Box<string = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{ .{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 25, .suggestion = "write an admitted type from section 5.7 of the specification" }, .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 6, .column = 1, .suggestion = null }, .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 7, .suggestion = null } } },
-        .{ .name = "call_missing_comma", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<string number>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "call_missing_comma", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<string number>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 33, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
         .{ .name = "call_missing_close", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<string(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'boolean' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "user_alias_too_few", .source = "structural Duo<A,B> = { first: A; second: B };\nconst probe: Duo<string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Duo<string>'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "user_alias_too_many", .source = "structural Duo<A,B> = { first: A; second: B };\nconst probe: Duo<string,number,boolean> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Duo<string, number, boolean>'", .line = 2, .column = 1, .suggestion = null }} },
@@ -5883,9 +5883,9 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "utility_collision", .source = "structural Partial<T> = number;\nstructural User = { id: string };\nconst probe: Partial<User> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ id?: string }'", .line = 3, .column = 1, .suggestion = null }} },
         .{ .name = "void_constraint", .source = "function f<T extends void>(value: T): T { return value; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strip, .diagnostics = &.{.{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 22, .suggestion = "write `undefined`" }} },
         .{ .name = "array_call_argument", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<Array<string>>(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strip, .diagnostics = &.{.{ .code = "ZTS058", .message = "`Array<T>` is not a type spelling in this profile", .line = 2, .column = 26, .suggestion = "write `T[]`" }} },
-        .{ .name = "quoted_comma_one_call", .source = "function f<T>(x: T): T { return x; }\nconst probe: number = f<\"a,b\">(\"a\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS210", .message = "wrong number of type arguments: expected 1, got 2", .line = 2, .column = 31, .suggestion = "Give one type argument for each declared type parameter." }, .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
-        .{ .name = "quoted_comma_two_call", .source = "function f<T,U>(x: T,y: U): T { return x; }\nconst probe: number = f<\"a,b\">(\"a\",1);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected b, got 1", .line = 2, .column = 36, .suggestion = null }, .{ .code = "ZTS200", .message = "type '\"a\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
-        .{ .name = "comment_call", .source = "function f<T>(x: T): T { return x; }\nconst probe: number = f<string /* , */>(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS210", .message = "wrong number of type arguments: expected 1, got 2", .line = 2, .column = 40, .suggestion = "Give one type argument for each declared type parameter." }, .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
+        .{ .name = "quoted_comma_one_call", .source = "function f<T>(x: T): T { return x; }\nconst probe: number = f<\"a,b\">(\"a\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 30, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
+        .{ .name = "quoted_comma_two_call", .source = "function f<T,U>(x: T,y: U): T { return x; }\nconst probe: number = f<\"a,b\">(\"a\",1);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 30, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
+        .{ .name = "comment_call", .source = "function f<T>(x: T): T { return x; }\nconst probe: number = f<string /* , */>(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 39, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
         .{ .name = "comment_parameters", .source = "function f<T /* , */ ,U>(x: T,y: U): T { return x; }\nconst probe: number = f(\"x\",1);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS208", .message = "no argument determines type parameter '*/'", .line = 2, .column = 24, .suggestion = "Name the type argument at the call site." }, .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
         .{ .name = "dictkey_constraint", .source = "function f<T extends DictKey>(x: T): T { return x; }\nconst probe: string = f(1);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'number' is not assignable to type 'string'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "readonly_inline_record", .source = "const probe: { field: Readonly<{ id: number }> } = undefined;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ field: { id: number } }'", .line = 1, .column = 1, .suggestion = null }} },
@@ -7562,6 +7562,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "const f: () =>\r () =>\r any = value;\n",
             .parser_stage = true,
             .diagnostics = &.{
+                .{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 1, .column = 10, .suggestion = "write an admitted type from section 5.7 of the specification" },
                 .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 1, .column = 20 },
                 .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 7 },
             },
@@ -10797,7 +10798,7 @@ const absent_read_refused = [_]AbsentReadCase{
     },
     .{ .name = "r10_union3", .expect = "ZTS309@5,ZTS500@3", .source =
     \\structural P = { age: number };
-    \\structural Q = { age: number, name: string };
+    \\structural Q = { age: number; name: string };
     \\function handler(req: Request): Response {
     \\  const p: P | Q | undefined = undefined;
     \\  return Response.json({ a: p.age });

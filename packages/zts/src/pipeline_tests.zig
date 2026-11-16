@@ -2272,7 +2272,7 @@ fn expectBoolErrors(source: []const u8, comptime expected: u32) !void {
     }.run);
 }
 
-const guard_union_decl = "structural Ev = { kind: \"a\", flag: boolean } | { kind: \"b\", n: number };\n";
+const guard_union_decl = "structural Ev = { kind: \"a\"; flag: boolean } | { kind: \"b\"; n: number };\n";
 
 test "the right operand of && is typed under the left operand's guard" {
     // An optional boolean read after an undefined test.
@@ -2468,7 +2468,7 @@ test "isDict and isBytes are booleans in every boolean context" {
 }
 
 test "a member read through a record parameter's named field is typed" {
-    const todo = "structural Todo = { text: string, done: boolean };\n";
+    const todo = "structural Todo = { text: string; done: boolean };\n";
     try expectBoolErrors(
         todo ++ "const f = (p: { todo: Todo }): number => p.todo.done ? 1 : 0;",
         0,
@@ -2822,7 +2822,7 @@ test "arithmetic on a value proven to be a number is accepted" {
         0,
     );
     try expectArithCounts(
-        \\structural Msg = { kind: "n", value: number } | { kind: "s", text: string };
+        \\structural Msg = { kind: "n"; value: number } | { kind: "s"; text: string };
         \\function f(m: Msg): number {
         \\  return match (m) {
         \\    when { kind: "n", value }: value + 1

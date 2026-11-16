@@ -545,3 +545,18 @@ later.
   such as `<T extends number string>`. U3c owns them. U3c also checks that
   every type parse that can note a refusal is followed by a flush, so a
   noted refusal cannot be lost.
+- U3c refuses malformed text inside a type: a missing field type, a
+  missing return type, a missing separator, an unclosed bracket, comma
+  separators in a record type, `readonly` on a record, and leftover text in
+  an explicit call type argument and a generic constraint. A record type
+  with newline-only separators is now refused too, because the profile has
+  no automatic semicolon insertion. Three findings stay open for U3d:
+  - `()` as a type is admitted where a `>` or `]` follows it, as in
+    `Outer<()>` and `[()][]`. The checker then refuses the value (ZTS200),
+    so this fails closed.
+  - The explicit call type argument splitter splits at a comma inside a
+    string literal or a comment, so `f<"a,b">(x)` gets ZTS001. Before U3c
+    the same call got ZTS210 or ZTS200. Both refuse an admitted form. The
+    probable cause is that the splitter does not skip quotes and comments.
+    A test of `f<"a,b">` against a matching declaration can confirm it.
+  - An unclosed `number [` still gets the indexed access message.

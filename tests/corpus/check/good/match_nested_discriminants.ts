@@ -1,6 +1,6 @@
 // Proves: discriminants at two depths are covered arm by arm, so a union of nested records needs no default.
 structural Nested =
-    | { k: "x", inner: { t: "p" } | { t: "q" } }
+    | { k: "x"; inner: { t: "p" } | { t: "q" } }
     | { k: "y" };
 
 function describe(n: Nested): string {

@@ -1,8 +1,8 @@
 // Proves: a closed record union with one member uncovered is refused (ZTS603), and the help names that member.
 structural Cmd =
-    | { kind: "a", n: number }
+    | { kind: "a"; n: number }
     | { kind: "b" }
-    | { kind: "c", t: string };
+    | { kind: "c"; t: string };
 
 function describe(c: Cmd): string | undefined {
     const out = match (c) {

@@ -240,7 +240,7 @@ if (val === undefined) return Response.text("missing");
 Discriminated unions narrow through `if` conditions on tag fields:
 
 ```typescript
-structural Result = { kind: "ok", value: string } | { kind: "err", error: string };
+structural Result = { kind: "ok"; value: string } | { kind: "err"; error: string };
 
 if (r.kind === "err") {
     return Response.json({ error: r.error }, { status: 400 });
@@ -934,7 +934,7 @@ states unrepresentable. There is one absent-value sentinel, `undefined`, never
 `null`.
 
 ```typescript
-structural Result = { kind: "ok", value: string } | { kind: "err", error: string };
+structural Result = { kind: "ok"; value: string } | { kind: "err"; error: string };
 
 if (r.kind === "err") {
     return Response.json({ error: r.error }, { status: 400 });

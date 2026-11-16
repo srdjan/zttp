@@ -1,6 +1,6 @@
 // Proves: a missing nested discriminant is refused (ZTS603), and the help spells the nested case.
 structural Nested =
-    | { k: "x", inner: { t: "p" } | { t: "q" } }
+    | { k: "x"; inner: { t: "p" } | { t: "q" } }
     | { k: "y" };
 
 function describe(n: Nested): string | undefined {

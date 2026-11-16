@@ -274,7 +274,9 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | A type-position typeof, such as `typeof base` | ZTS001 | The type itself |
 | A quoted key in a record type, such as `{ "a": number }` | ZTS001 | The key as a name, such as `{ a: number }` |
 | A type form outside the admitted grammar, such as `new () => T`, `unique symbol`, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, and a call signature such as `{ (): number }` | ZTS001 | An admitted type form from section 5.7 of the specification |
-| An unrecognized type, such as `number number`, and an empty type, such as `structural L = ;` | ZTS001 | An admitted type from section 5.7 of the specification |
+| An unrecognized type, such as `number number`, an empty type, such as `structural L = ;`, a field with no type, such as `{ x: }`, a missing separator, such as `{ x: number y: string }`, `(x: number y: string) => number`, `B<string number>`, and `[number string]`, a function type with no return type, such as `(x: number) =>`, an unclosed bracket, such as `number [`, an explicit call type argument, such as `f<number number>(1)`, and a generic constraint, such as `T extends number string` | ZTS001 | An admitted type from section 5.7 of the specification |
+| A record type with comma separators, such as `{ a: number, b: string }` | ZTS001 | `{ a: number; b: string }` |
+| `readonly` on a record type, such as `readonly { a: number }` | ZTS001 | The record type |
 
 The admitted types are listed in section 5.7 of the
 [specification](spec/zts-model-1.md). The specification also excludes these
@@ -373,7 +375,6 @@ against the compiler.
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
 | A type name outside the admitted types, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error` | Accepted, exit 0 | A targeted refusal. Use an admitted type from section 5.7 of the specification |
-| A readonly record type, such as `readonly { a: number }`, and a record type with comma separators, such as `{ a: number, b: string }` | Accepted, exit 0 | ZTS001. Write an admitted type form. A record type separates its fields with `;` |
 | A `Dict` key type other than `string` or `number`, such as `Dict<boolean, string>` | Accepted, exit 0 | ZTS209. Use `string` or `number` as the key type |
 | `toReversed`, `Array.from`, `Array.of`, and a write to `xs.length` | Accepted, exit 0 | ZTS201 for the members and ZTS200 for the `length` write. Build a new array with `for...of` |
 | An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, `xs.indexOf(v, i)`, and a three-parameter `map` callback | Accepted, exit 0. A four-parameter callback reports ZTS203 | ZTS202. Pass the arguments that the specification gives |

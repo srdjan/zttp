@@ -101,7 +101,7 @@ const dict_reduce = "import { dictEmpty, dictSet, dictEntries } from \"zttp:coll
 
 const dict_bulk = "import { dictEmpty, dictSet, dictMapValues, dictFilter, dictFold } from \"zttp:collections\";\nfunction g(): number {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const m = dictMapValues(d, (v, k) => v * 2);\n  const f = dictFilter(m, (v, k) => v > 0);\n  return dictFold(f, (acc, v, k) => acc + v, 0);\n}\n" ++ tail;
 
-const command_type = "structural Cmd = { kind: \"a\", text: string } | { kind: \"b\", text: string };\n";
+const command_type = "structural Cmd = { kind: \"a\"; text: string } | { kind: \"b\"; text: string };\n";
 
 // ---------------------------------------------------------------------------
 // Refusal rows
@@ -1153,12 +1153,34 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(top("function g(a: [string]): number {\n  return 1;\n}")),
     },
     .{
-        .key = "An unrecognized type, such as `number number`, and an empty type, such as `structural L = ;`",
+        .key = "An unrecognized type, such as `number number`, an empty type, such as `structural L = ;`, a field with no type, such as `{ x: }`, a missing separator, such as `{ x: number y: string }`, `(x: number y: string) => number`, `B<string number>`, and `[number string]`, a function type with no return type, such as `(x: number) =>`, an unclosed bracket, such as `number [`, an explicit call type argument, such as `f<number number>(1)`, and a generic constraint, such as `T extends number string`",
         .refused = &.{
             r("number number", top("structural L = number number;")),
             r("structural L = ;", top("structural L = ;")),
+            r("{ x: }", top("structural L = { x: };")),
+            r("{ x: number y: string }", top("structural L = { x: number y: string };")),
+            r("(x: number y: string) => number", paramText("(x: number y: string) => number")),
+            r("B<string number>", top("structural B<T> = { v: T };\nfunction g(a: B<string number>): number {\n  return 1;\n}")),
+            r("[number string]", paramText("[number string]")),
+            r("(x: number) =>", paramText("(x: number) =>")),
+            r("number [", paramText("number [")),
+            r("f<number number>(1)", top("function f<T>(a: T): T {\n  return a;\n}\nfunction g(): number {\n  return f<number number>(1);\n}")),
+            r("T extends number string", top("function f<T extends number string>(a: T): T {\n  return a;\n}")),
         },
-        .clean = c(top("structural L = number;")),
+        .clean = c(top("structural L = { x: number; y: string };\nstructural B<T> = { v: T };\nfunction f<T extends string>(a: T): T {\n  return a;\n}\nfunction g(a: B<string>, h: (x: number, y: string) => number, t: [number, string], xs: number[]): number {\n  return f<string>(\"a\") === \"a\" ? 1 : 2;\n}")),
+    },
+    .{
+        .key = "A record type with comma separators, such as `{ a: number, b: string }`",
+        .refused = &.{r("{ a: number, b: string }", paramText("{ a: number, b: string }"))},
+        .clean = c(paramText("{ a: number; b: string }")),
+    },
+    .{
+        .key = "`readonly` on a record type, such as `readonly { a: number }`",
+        .refused = &.{
+            r("readonly", paramText("readonly { a: number }")),
+            r("readonly { a: number }", paramText("readonly { a: number }")),
+        },
+        .clean = c(paramText("{ a: number }")),
     },
     .{
         .key = "A declaration that binds two names, such as `const a = 1, b = 2;`",
@@ -1296,13 +1318,6 @@ pub const gap_rows = [_]GapRow{
             param("Date"),
             param("RegExp"),
             param("Error"),
-        },
-    },
-    .{
-        .key = "A readonly record type, such as `readonly { a: number }`, and a record type with comma separators, such as `{ a: number, b: string }`",
-        .sources = &.{
-            param("readonly { a: number }"),
-            param("{ a: number, b: string }"),
         },
     },
     .{

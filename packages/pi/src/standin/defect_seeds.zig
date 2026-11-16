@@ -211,7 +211,7 @@ const clean_nullable =
 ;
 
 const clean_match =
-    \\structural Msg = { kind: string, text: string };
+    \\structural Msg = { kind: string; text: string };
     \\
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const msg: Msg = { kind: "echo", text: "hi" };
@@ -1100,7 +1100,7 @@ pub const seeds = [_]DefectSeed{
         .class = .model_retry,
         .seed_source = clean_match,
         .bad_draft =
-        \\structural Msg = { kind: string, text: string };
+        \\structural Msg = { kind: string; text: string };
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const msg: Msg = { kind: "echo", text: "hi" };
@@ -1113,7 +1113,7 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .good_draft =
-        \\structural Msg = { kind: string, text: string };
+        \\structural Msg = { kind: string; text: string };
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const msg: Msg = { kind: "echo", text: "hey" };
@@ -1133,7 +1133,7 @@ pub const seeds = [_]DefectSeed{
         .class = .model_retry,
         .seed_source = clean_match,
         .bad_draft =
-        \\structural Msg = { kind: string, text: string };
+        \\structural Msg = { kind: string; text: string };
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const msg: Msg = { kind: "echo", text: "hi" };
@@ -1146,7 +1146,7 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .good_draft =
-        \\structural Msg = { kind: string, text: string };
+        \\structural Msg = { kind: string; text: string };
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const msg: Msg = { kind: "echo", text: "yo" };

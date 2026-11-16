@@ -1,5 +1,5 @@
 // Proves: arms that split one case across a second field cover a closed record type with no default.
-structural Flags = { x: boolean, y: boolean };
+structural Flags = { x: boolean; y: boolean };
 
 function describe(f: Flags): string {
     return match (f) {

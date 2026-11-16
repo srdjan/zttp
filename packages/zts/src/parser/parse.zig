@@ -1000,6 +1000,8 @@ pub const Parser = struct {
             .mapped => "a mapped type is not supported; write the record type",
             .conditional => "a conditional type is not supported; write the type",
             .typeof_query => "a type-position `typeof` is not supported; write the type",
+            .record_comma => "a record type separates its fields with `;`; write `{ a: number; b: string }`",
+            .readonly_record => "`readonly` applies to an array type only; write the record type",
             .unsupported => "this type syntax is not supported; write an admitted type from section 5.7 of the specification",
         };
         self.errors.addErrorAt(.unsupported_feature, type_syntax.tokenAtOffset(self.source, refusal.offset), message);
@@ -2441,6 +2443,7 @@ pub const Parser = struct {
     ) !FunctionGenericOwnerReservation {
         const selected = try self.selectFunctionGeneric(name, keyword_end);
         const pending = if (selected.options) |options| try self.type_store.reserveGenericOwner(options) else null;
+        self.flushTypeRefusal();
         if (selected.cursor) |cursor| self.adoptAdmissionCursor(cursor, selected.previous.?);
         return .{ .pending_owner = pending, .header_admission = selected.header_admission };
     }
@@ -2727,6 +2730,7 @@ pub const Parser = struct {
     fn tryReserveExplicitCall(self: *Parser) !?type_syntax.PendingExplicitCall {
         const selected = try self.selectExplicitCall() orelse return null;
         const pending = try self.type_store.reserveExplicitCall(selected.options);
+        self.flushTypeRefusal();
         self.adoptAdmissionCursor(selected.cursor, selected.previous);
         return pending;
     }

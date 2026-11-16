@@ -753,7 +753,7 @@ pub const Declaration = struct {
     authored_scope: u16,
 };
 
-pub const TypeRefusalKind = enum { keyof, indexed_access, index_signature, mapped, conditional, typeof_query, unsupported };
+pub const TypeRefusalKind = enum { keyof, indexed_access, index_signature, mapped, conditional, typeof_query, record_comma, readonly_record, unsupported };
 
 /// A type form that the source profile refuses. `offset` is the first byte of the form.
 pub const TypeRefusal = struct { kind: TypeRefusalKind, offset: u32 };

@@ -1336,7 +1336,7 @@ fn expectCoverage(decls: []const u8, param_type: []const u8, arms: []const u8, w
     try std.testing.expectEqual(want.redundant, cov.redundant);
 }
 
-const abc = "structural C = { kind: \"a\", n: number } | { kind: \"b\" } | { kind: \"c\", t: string };";
+const abc = "structural C = { kind: \"a\"; n: number } | { kind: \"b\" } | { kind: \"c\"; t: string };";
 
 test "split coverage across arms of a discriminated union is exhaustive" {
     try expectCoverage(abc, "C",
@@ -1361,7 +1361,7 @@ test "an arm that binds every field of one member covers that member only" {
 }
 
 test "nested discriminants must be covered at every depth" {
-    const decls = "structural N = { k: \"x\", inner: { t: \"p\" } | { t: \"q\" } } | { k: \"y\" };";
+    const decls = "structural N = { k: \"x\"; inner: { t: \"p\" } | { t: \"q\" } } | { k: \"y\" };";
     try expectCoverage(decls, "N",
         \\    when { k: "x", inner: { t: "p" } }: 1
         \\    when { k: "x", inner: { t: "q" } }: 2
@@ -1382,7 +1382,7 @@ test "booleans have two constructors and fields split on them" {
         \\    when true: 1
     , .{ .exhaustive = false, .witness = "when false" });
 
-    const decls = "structural Flags = { x: boolean, y: boolean };";
+    const decls = "structural Flags = { x: boolean; y: boolean };";
     try expectCoverage(decls, "Flags",
         \\    when { x: true, y: true }: 1
         \\    when { x: true, y: false }: 2

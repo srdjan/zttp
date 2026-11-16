@@ -488,6 +488,7 @@ pub fn parseSemanticFragmentAndStore(store: *Store, raw_span: Span) !u32 {
     var parser = SyntaxParser.init(store, store.source, raw_span.start, raw_span.end);
     defer parser.deinit();
     const parsed = try parser.parse();
+    store.noteRefusal(parser.refusal orelse leftoverRefusal(store.source, parsed.end, raw_span.end));
     const fragment: SemanticFragment = .{
         .raw_span = raw_span,
         .root = parsed.child,
@@ -1750,6 +1751,11 @@ const SyntaxParser = struct {
             .wait_base => {
                 frame.base = self.takeLast();
                 if (frame.readonly_modifier_pending) {
+                    switch (frame.base.child) {
+                        .present => |index| if (self.store.nodes.items[index].tag == .record)
+                            self.flag(.readonly_record, frame.start),
+                        .absent => {},
+                    }
                     const semantic_present = frame.base.semantic_present;
                     frame.base = try self.makeNode(
                         frame.start,
@@ -1773,7 +1779,7 @@ const SyntaxParser = struct {
                 if (self.pos < self.end and self.source[self.pos] == '[') {
                     const close: u32 = @intCast(skipTrivia(self.source, self.pos + 1, self.end));
                     if (close >= self.end or self.source[close] != ']') {
-                        self.flag(.indexed_access, self.pos);
+                        self.flag(if (close >= self.end) .unsupported else .indexed_access, self.pos);
                         return self.complete(frame.base);
                     }
                     self.pos = close + 1;
@@ -1801,7 +1807,10 @@ const SyntaxParser = struct {
             .loop => {
                 self.skipWhitespace();
                 if (self.matchByte('>')) return self.finishApplication(self.pos);
-                if (self.pos >= self.end) return self.finishApplication(self.pos);
+                if (self.pos >= self.end) {
+                    self.flag(.unsupported, frame.start);
+                    return self.finishApplication(self.pos);
+                }
                 frame.argument_start = self.pos;
                 frame.state = .wait_argument;
                 self.last = null;
@@ -1813,18 +1822,18 @@ const SyntaxParser = struct {
             .wait_argument => {
                 const parsed = self.takeLast();
                 if (!parsed.semantic_present or parsed.end <= frame.argument_start) {
-                    _ = self.matchByte('>');
+                    if (!self.matchByte('>')) self.flagNext(frame.start);
                     return self.finishApplication(self.pos);
                 }
                 switch (parsed.child) {
                     .absent => {
-                        _ = self.matchByte('>');
+                        if (!self.matchByte('>')) self.flagNext(frame.start);
                         return self.finishApplication(self.pos);
                     },
                     .present => try frame.arguments.append(self.allocator, parsed.child),
                 }
                 self.skipWhitespace();
-                _ = self.matchByte(',');
+                if (!self.matchByte(',') and self.pos < self.end and self.source[self.pos] != '>') self.flagNext(frame.start);
                 frame.state = .loop;
             },
         }
@@ -1871,7 +1880,10 @@ const SyntaxParser = struct {
                 self.skipWhitespace();
                 frame.pending_optional = self.matchByte('?');
                 self.skipWhitespace();
-                if (!self.matchByte(':')) return self.finishRecordAfterBreak();
+                if (!self.matchByte(':')) {
+                    self.flagNext(frame.pending_start);
+                    return self.finishRecordAfterBreak();
+                }
                 self.skipWhitespace();
                 frame.state = .wait_type;
                 self.last = null;
@@ -1882,6 +1894,7 @@ const SyntaxParser = struct {
             },
             .wait_type => {
                 const parsed = self.takeLast();
+                if (!parsed.semantic_present) self.flagNext(frame.pending_start);
                 try frame.fields.append(self.allocator, .{
                     .span = .{ .start = frame.pending_start, .end = parsed.end },
                     .name = frame.pending_name,
@@ -1890,7 +1903,15 @@ const SyntaxParser = struct {
                     .readonly = frame.pending_readonly,
                 });
                 self.skipWhitespace();
-                if (self.pos < self.end and (self.source[self.pos] == ';' or self.source[self.pos] == ',')) self.pos += 1;
+                if (self.pos < self.end) switch (self.source[self.pos]) {
+                    ';' => self.pos += 1,
+                    ',' => {
+                        self.flag(.record_comma, self.pos);
+                        self.pos += 1;
+                    },
+                    '}' => {},
+                    else => self.flag(.unsupported, self.pos),
+                };
                 frame.state = .loop;
             },
         }
@@ -1913,11 +1934,12 @@ const SyntaxParser = struct {
     }
 
     fn finishRecordAfterBreak(self: *SyntaxParser) !void {
+        const frame = &self.frames.items[self.frames.items.len - 1].record;
         self.skipWhitespace();
         if (self.pos < self.end and self.source[self.pos] == '[') {
             if (leftoverRefusal(self.source, self.pos, self.end)) |refusal| self.flag(refusal.kind, refusal.offset);
         }
-        _ = self.matchByte('}');
+        if (!self.matchByte('}')) self.flagNext(frame.start);
         return self.finishRecord();
     }
 
@@ -1938,13 +1960,13 @@ const SyntaxParser = struct {
                 const parsed = self.takeLast();
                 if (!parsed.semantic_present) {
                     self.skipWhitespace();
-                    _ = self.matchByte(']');
+                    if (!self.matchByte(']')) self.flagNext(frame.start);
                     return self.finishTuple();
                 }
                 const element = parsed.child;
                 try frame.elements.append(self.allocator, element);
                 self.skipWhitespace();
-                _ = self.matchByte(',');
+                if (!self.matchByte(',') and self.pos < self.end and self.source[self.pos] != ']') self.flagNext(frame.start);
                 frame.state = .loop;
             },
         }
@@ -1996,6 +2018,7 @@ const SyntaxParser = struct {
                         grouped.semantic_present = false;
                         self.complete(grouped);
                     } else {
+                        self.flagNext(frame.start);
                         try self.finishFunction(.absent, self.pos);
                     }
                     return;
@@ -2018,6 +2041,7 @@ const SyntaxParser = struct {
             },
             .wait_param_type => {
                 const parsed = self.takeLast();
+                if (!parsed.semantic_present) self.flagNext(frame.pending_start);
                 try frame.params.append(self.allocator, .{
                     .span = .{ .start = frame.pending_start, .end = parsed.end },
                     .name = frame.pending_name,
@@ -2025,17 +2049,18 @@ const SyntaxParser = struct {
                     .optional = frame.pending_optional,
                 });
                 self.skipWhitespace();
-                _ = self.matchByte(',');
+                if (!self.matchByte(',') and self.pos < self.end and self.source[self.pos] != ')') self.flagNext(frame.start);
                 frame.state = .next_param;
             },
             .wait_return => {
                 const parsed = self.takeLast();
+                if (!parsed.semantic_present) self.flagNext(frame.start);
                 try self.finishFunction(parsed.child, parsed.end);
             },
             .wait_group => {
                 const parsed = self.takeLast();
                 self.skipWhitespace();
-                _ = self.matchByte(')');
+                if (!self.matchByte(')')) self.flagNext(frame.start);
                 const grouped = try self.makeNode(
                     frame.start,
                     self.pos,
@@ -2251,6 +2276,13 @@ const SyntaxParser = struct {
 
     fn flag(self: *SyntaxParser, kind: TypeRefusalKind, offset: u32) void {
         if (self.refusal == null) self.refusal = .{ .kind = kind, .offset = offset };
+    }
+
+    /// Flags the first byte of the text that the parser cannot use. When the type text
+    /// ends first, the form is unclosed or incomplete and `fallback` names its opener.
+    fn flagNext(self: *SyntaxParser, fallback: u32) void {
+        const next: u32 = @intCast(skipTrivia(self.source, self.pos, self.end));
+        self.flag(.unsupported, if (next < self.end) next else fallback);
     }
 
     fn flagKeyword(self: *SyntaxParser, ident: Span) void {

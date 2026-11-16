@@ -1079,7 +1079,7 @@ test "proof identity binds ordered candidates and full read set" {
 /// Each handler carries one ZTS626 advisory: a front-end diagnostic that does
 /// not halt analysis, so the skip_contract fallback has something to report.
 const advisory_prefix =
-    "structural Command = { kind: \"echo\", text: string } | { kind: \"ping\", text: string };\n" ++
+    "structural Command = { kind: \"echo\"; text: string } | { kind: \"ping\"; text: string };\n" ++
     "function run(cmd: Command): string {\n" ++
     "  return match (cmd) {\n" ++
     "    when { kind: \"echo\" }: cmd.text\n" ++

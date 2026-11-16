@@ -10,7 +10,7 @@
 // reading it back off the scrutinee.
 
 
-structural Command = { kind: "echo", text: string } | { kind: "ping", text: string };
+structural Command = { kind: "echo"; text: string } | { kind: "ping"; text: string };
 
 structural Guardrails<T> = Proof<T,
     | "deterministic"
