@@ -5318,14 +5318,9 @@ test "a captured loop variable is read by a later activation's loop" {
 }
 
 test "a capture follows the parser's binding, not the name" {
-    // The parser binds a read to the first declaration of a name.
-    try expectSecret("function f(s) { let x = s; let x = \"c\"; return (() => x)(); }", &.{secret_value}, true);
-    try expectSecret("function f(s) { let x = \"c\"; let x = s; return (() => x)(); }", &.{secret_value}, false);
-
-    // An unbraced conditional declaration is a second binding of `x` in the
-    // function scope. The closure reads the first, which holds "c", so the
-    // secret written to the second never reaches it. A scan by name would join
-    // the two.
+    // A declaration in a nested block is a separate binding of `x`. The closure
+    // reads the outer binding, so a secret written to the inner one never
+    // reaches it. A scan by name would join the two.
     try expectSecret(
         "function f(c, s) { let x = \"c\"; if (c) { let x = s; } return (() => x)(); }",
         &c_secret,
@@ -5346,15 +5341,6 @@ test "a module-level function resolves only when it is the single fixed declarat
     try expectSecret("function f(s) { return help(s); } " ++ definition, &.{secret_value}, true);
     try expectSecret("const help = (x) => x; function f(s) { return help(s); }", &.{secret_value}, true);
     try expectSecret("export function help(x) { return x; } function f(s) { return help(s); }", &.{secret_value}, true);
-
-    // A second declaration of the name replaces the first at runtime.
-    const second = try analyzeSource(
-        definition ++ "let help = (x) => \"c\"; function f(s) { return help(s); }",
-        "f",
-        &.{secret_value},
-    );
-    defer second.deinit();
-    try expectUnresolved(second.result, .identifier, .module_state_unmodeled);
 
     // An assignment in another function may replace it.
     const assigned = try analyzeSource(

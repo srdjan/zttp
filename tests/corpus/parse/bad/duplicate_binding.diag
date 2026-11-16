@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS019","severity":"error","message":"this name is already declared in this scope","file":"parse/bad/duplicate_binding.ts","line":4,"column":11,"suggestion":"Write a different name.","repair_intent":null}

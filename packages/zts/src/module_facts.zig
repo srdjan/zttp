@@ -588,11 +588,11 @@ test "module facts merge two imports of one module into one entry" {
     try testing.expectEqualStrings("base64Encode", facts.functions.items[0].names.items[1]);
 }
 
-test "module facts deduplicate a name imported twice" {
+test "module facts deduplicate a name imported under two aliases" {
     const allocator = testing.allocator;
     const h = try Harness.init(allocator,
-        \\import { sha256 } from "zttp:crypto";
-        \\import { sha256 } from "zttp:crypto";
+        \\import { sha256 as a } from "zttp:crypto";
+        \\import { sha256 as b } from "zttp:crypto";
     );
     defer h.deinit(allocator);
 
@@ -603,109 +603,7 @@ test "module facts deduplicate a name imported twice" {
     // testing allocator reports the leak here and nowhere else.
     try testing.expectEqual(@as(usize, 1), facts.functions.items.len);
     try testing.expectEqual(@as(usize, 1), facts.functions.items[0].names.items.len);
-}
-
-test "filtered lookup skips an earlier unresolved import with the same slot" {
-    const allocator = testing.allocator;
-    const h = try Harness.init(allocator,
-        \\import { x as m } from "./x.ts";
-        \\import { routerMatch as m } from "zttp:router";
-        \\m({}, {});
-    );
-    defer h.deinit(allocator);
-
-    var facts = try ModuleFacts.build(allocator, h.view(), &h.atoms, null);
-    defer facts.deinit();
-    try testing.expectEqual(@as(usize, 2), facts.imports.items.len);
-    try testing.expectEqual(facts.imports.items[0].slot, facts.imports.items[1].slot);
-
-    var callee_binding: ?ir.BindingRef = null;
-    for (0..h.view().nodeCount()) |index| {
-        const node: NodeIndex = @intCast(index);
-        if (h.view().getTag(node) != .call) continue;
-        const call = h.view().getCall(node) orelse continue;
-        if (h.view().getTag(call.callee) != .identifier) continue;
-        callee_binding = h.view().getBinding(call.callee);
-    }
-    const binding = callee_binding orelse return error.CallBindingMissing;
-    const record = facts.importForReference(
-        binding,
-        .module_reference,
-        .builtin,
-        .first,
-    ) orelse return error.BuiltinImportMissing;
-    try testing.expectEqual(ImportRecord.Resolution.builtin, record.resolution);
-    try testing.expectEqualStrings("zttp:router", record.module_specifier);
-    try testing.expectEqualStrings("routerMatch", record.imported_name);
-
-    const last = facts.importForReference(
-        binding,
-        .module_reference,
-        .any,
-        .last,
-    ) orelse return error.ImportExpected;
-    try testing.expectEqual(ImportRecord.Resolution.builtin, last.resolution);
-    try testing.expectEqualStrings("routerMatch", last.imported_name);
-}
-
-test "category lookup checks every record with the same slot" {
-    const allocator = testing.allocator;
-    const h = try Harness.init(allocator,
-        \\import { cacheGet as m } from "zttp:cache";
-        \\import { validateJson as m } from "zttp:validate";
-        \\m("User", {});
-    );
-    defer h.deinit(allocator);
-
-    var facts = try ModuleFacts.build(allocator, h.view(), &h.atoms, null);
-    defer facts.deinit();
-    var callee_binding: ?ir.BindingRef = null;
-    for (0..h.view().nodeCount()) |index| {
-        const node: NodeIndex = @intCast(index);
-        if (h.view().getTag(node) != .call) continue;
-        const call = h.view().getCall(node) orelse continue;
-        if (h.view().getTag(call.callee) != .identifier) continue;
-        callee_binding = h.view().getBinding(call.callee);
-    }
-    const binding = callee_binding orelse return error.CallBindingMissing;
-    try testing.expect(facts.referenceHasCategory(
-        binding,
-        .module_reference,
-        .request_schema,
-    ));
-}
-
-test "first builtin lookup lets an earlier non-router import block a later router" {
-    const allocator = testing.allocator;
-    const h = try Harness.init(allocator,
-        \\import { cacheGet as m } from "zttp:cache";
-        \\import { routerMatch as m } from "zttp:router";
-        \\m({}, {});
-    );
-    defer h.deinit(allocator);
-
-    var facts = try ModuleFacts.build(allocator, h.view(), &h.atoms, null);
-    defer facts.deinit();
-    var callee_binding: ?ir.BindingRef = null;
-    for (0..h.view().nodeCount()) |index| {
-        const node: NodeIndex = @intCast(index);
-        if (h.view().getTag(node) != .call) continue;
-        const call = h.view().getCall(node) orelse continue;
-        if (h.view().getTag(call.callee) != .identifier) continue;
-        callee_binding = h.view().getBinding(call.callee);
-    }
-    const binding = callee_binding orelse return error.CallBindingMissing;
-    const first = facts.importForReference(
-        binding,
-        .module_reference,
-        .builtin,
-        .first,
-    ) orelse return error.BuiltinImportMissing;
-    try testing.expectEqualStrings("zttp:cache", first.module_specifier);
-    try testing.expectEqualStrings("cacheGet", first.imported_name);
-    const is_router = std.mem.eql(u8, first.module_specifier, "zttp:router") and
-        std.mem.eql(u8, first.imported_name, "routerMatch");
-    try testing.expect(!is_router);
+    try testing.expectEqualStrings("sha256", facts.functions.items[0].names.items[0]);
 }
 
 test "module facts skip a module that is neither builtin nor registered" {
@@ -936,7 +834,7 @@ test "module facts survive allocation failure at every step" {
     const source =
         \\import { sha256, base64Encode } from "zttp:crypto";
         \\import { env } from "zttp:env";
-        \\import { sha256 } from "zttp:crypto";
+        \\import { sha256 as digest } from "zttp:crypto";
     ;
     // Parse with the ordinary allocator and run the failing allocator over
     // `build` and the two clones only. The ladder is evidence about the code

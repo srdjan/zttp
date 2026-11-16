@@ -35,10 +35,10 @@ pub const cases = [_]Case{
         ,
     },
     .{
-        .label = "the same name imported twice",
+        .label = "one name imported under two aliases",
         .source =
-        \\import { sha256 } from "zttp:crypto";
-        \\import { sha256 } from "zttp:crypto";
+        \\import { sha256 as a } from "zttp:crypto";
+        \\import { sha256 as b } from "zttp:crypto";
         ,
     },
     .{

@@ -1761,40 +1761,6 @@ test "typed predicate arrow owns its exact header syntax" {
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
 }
 
-test "predicate arrows retain the first repeated parameter as target" {
-    const source = "const guard = (candidate, candidate: unknown): candidate is string => typeof candidate === \"string\";";
-    var atoms = AtomTable.init(std.testing.allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    try expectParsedStoreValid(source, &parser, root);
-
-    const view = parserIrView(&parser);
-    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.parameter_annotations.items.len);
-    const signature = parser.type_store.function_signatures.items[0];
-    const function = view.getFunction(signature.owner) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u8, 2), function.params_count);
-    const first = view.getListIndex(function.params_start, 0);
-    const second = view.getListIndex(function.params_start, 1);
-    try std.testing.expect(first != second);
-    try std.testing.expectEqual(second, parser.type_store.parameter_annotations.items[0].owner.pattern);
-    const return_syntax = signature.return_syntax orelse return error.TestUnexpectedResult;
-    const target = switch (return_syntax.structure) {
-        .predicate => |predicate| switch (predicate.target) {
-            .resolved => |target| target,
-            .unresolved => return error.TestUnexpectedResult,
-        },
-        .value => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqual(first, target.pattern);
-    try std.testing.expect(std.meta.eql(target.binding, view.paramBinding(first).?));
-    try expectFirstPredicateArrowLowering(&parser);
-}
-
 test "ordinary typed arrow owns parameter and return roots" {
     const source = "const echo = (value: string): string => value;";
     var atoms = AtomTable.init(std.testing.allocator);
@@ -2629,7 +2595,6 @@ const GenericAliasCase = enum {
     plain_then_generic,
     ambient_replacement,
     alias_before_parameter,
-    duplicate_parameter,
     nested_substitution,
     nested_application_projection,
     constraint_closer,
@@ -2654,7 +2619,6 @@ const generic_alias_fixtures = [_]GenericAliasFixture{
     .{ .case = .plain_then_generic, .source = "structural Both = number;\nstructural Both<T> = T;" },
     .{ .case = .ambient_replacement, .source = "structural Proof<T> = { value: T };\nconst value: Proof<number> = undefined;" },
     .{ .case = .alias_before_parameter, .source = "structural T = number;\nstructural Box<T> = T;\nconst value: Box<string> = undefined;" },
-    .{ .case = .duplicate_parameter, .source = "structural Box<T,T> = T;\nconst value: Box<string,number> = undefined;" },
     .{ .case = .nested_substitution, .source = "structural Box<T> = { values: T[] };\nconst value: Box<number> = undefined;" },
     .{ .case = .nested_application_projection, .source = "structural Inner<T> = { value: T };\nstructural Outer<U> = Inner<U>;\nconst value: Outer<number> = undefined;" },
     .{ .case = .constraint_closer, .source = "structural Box<T extends { value: Missing > }> = number;\nconst value: Box<string> = undefined;" },
@@ -3150,11 +3114,6 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
             const alias = env.generic_aliases.get("Box") orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(pool.idx_number, alias.body);
             try std.testing.expectEqual(pool.idx_number, value_type orelse return error.TestUnexpectedResult);
-        },
-        .duplicate_parameter => {
-            const alias = env.generic_aliases.get("Box") orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(u8, 2), alias.param_count);
-            try std.testing.expectEqual(pool.idx_string, value_type orelse return error.TestUnexpectedResult);
         },
         .nested_substitution => {
             const fields = pool.getRecordFields(value_type orelse return error.TestUnexpectedResult);
@@ -7169,90 +7128,6 @@ fn runtimeNodeAt(
     return result orelse error.TestUnexpectedResult;
 }
 
-test "global annotations retain exact repeated declaration owners" {
-    const Case = struct {
-        source: []const u8,
-        first_typed: bool,
-        second_typed: bool,
-    };
-    const cases = [_]Case{
-        .{
-            .source = "const value: number = 1;\nconst value: string = \"x\";",
-            .first_typed = true,
-            .second_typed = true,
-        },
-        .{
-            .source = "const value: number = 1;\nconst value = \"x\";",
-            .first_typed = true,
-            .second_typed = false,
-        },
-        .{
-            .source = "const value = 1;\nconst value: string = 2;",
-            .first_typed = false,
-            .second_typed = true,
-        },
-        .{
-            .source = "const value: number = \"x\";\nconst value: string = 2;",
-            .first_typed = true,
-            .second_typed = true,
-        },
-    };
-    for (cases) |case| {
-        var runtime_count = CountingAllocator.init(std.testing.allocator);
-        const runtime_allocator = runtime_count.allocator();
-        var atoms = AtomTable.init(runtime_allocator);
-        defer atoms.deinit();
-        var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, case.source, .compile);
-        defer parser.deinit();
-        parser.setAtomTable(&atoms);
-        const root = try parser.parse();
-        try expectParsedStoreValidWithAllocations(case.source, &parser, root, runtime_count);
-
-        const second_start: u32 = @intCast(std.mem.indexOf(u8, case.source, "\nconst") orelse
-            return error.TestUnexpectedResult);
-        const declarations = [_]NodeIndex{
-            try runtimeNodeAt(&parser, .var_decl, 0),
-            try runtimeNodeAt(&parser, .var_decl, second_start + 1),
-        };
-        const view = parserIrView(&parser);
-        try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-        const first = view.getVarDecl(declarations[0]) orelse return error.TestUnexpectedResult;
-        const second = view.getVarDecl(declarations[1]) orelse return error.TestUnexpectedResult;
-        try std.testing.expect(std.meta.eql(first.binding, second.binding));
-
-        const expected_count = @as(usize, @intFromBool(case.first_typed)) +
-            @as(usize, @intFromBool(case.second_typed));
-        try std.testing.expectEqual(expected_count, parser.type_store.annotations.items.len);
-        var annotation_index: usize = 0;
-        for ([_]bool{ case.first_typed, case.second_typed }, declarations, 0..) |
-            typed,
-            declaration_node,
-            declaration_index,
-        | {
-            if (!typed) continue;
-            const annotation = parser.type_store.annotations.items[annotation_index];
-            const owner = annotation.runtime_owner orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqual(declaration_node, owner.declaration);
-            try std.testing.expectEqual(
-                if (declaration_index == 0) @as(u32, 0) else second_start + 1,
-                owner.declaration_start,
-            );
-            const declaration = view.getVarDecl(declaration_node) orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expect(std.meta.eql(declaration.binding, annotation.binding));
-            annotation_index += 1;
-        }
-        if (expected_count == 2) {
-            const left = parser.type_store.annotations.items[0].runtime_owner orelse
-                return error.TestUnexpectedResult;
-            const right = parser.type_store.annotations.items[1].runtime_owner orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expect(left.declaration != right.declaration);
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 4), cases.len);
-}
-
 test "outer annotation keeps its index across a nested typed initializer" {
     const source =
         "const outer: number = (() => { const inner: string = \"x\"; return 1; })();";
@@ -7285,7 +7160,7 @@ test "outer annotation keeps its index across a nested typed initializer" {
 }
 
 test "annotation runtime owners reject missing forged and exchanged declarations" {
-    const source = "const value: number = 1;\nconst value: string = \"x\";";
+    const source = "const value: number = 1;\nconst other: string = \"x\";";
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
@@ -7598,7 +7473,6 @@ test "shadowed bindings and closure parameters retain their actual owners" {
 }
 
 const DirectGenericConsumerCase = enum {
-    duplicate_parameters,
     empty_callable,
     generic_only,
     ignored_callable,
@@ -7640,25 +7514,6 @@ fn expectDirectGenericConsumer(
     try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
 
     switch (case) {
-        .duplicate_parameters => {
-            try std.testing.expectEqual(prior_nodes + 2, direct_pool.nodes.items.len);
-            const owner = switch (direct.type_store.generic_owners.items[0].identity) {
-                .function => |node| node,
-                else => return error.TestUnexpectedResult,
-            };
-            const reference = direct_env.functionTypeRef(direct_view, owner) orelse
-                return error.TestUnexpectedResult;
-            const signature = direct_env.getFunctionSignature(reference) orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(u8, 2), signature.type_param_count);
-            try std.testing.expectEqualStrings("T", signature.type_params[0].name);
-            try std.testing.expectEqualStrings("T", signature.type_params[1].name);
-            try std.testing.expect(signature.type_params[0].idx != signature.type_params[1].idx);
-            try std.testing.expectEqual(direct_pool.idx_string, signature.type_params[0].constraint);
-            try std.testing.expectEqual(direct_pool.idx_number, signature.type_params[1].constraint);
-            try std.testing.expectEqual(signature.type_params[0].idx, signature.param_types[0]);
-            try std.testing.expectEqual(signature.type_params[0].idx, signature.return_type);
-        },
         .empty_callable => {
             try std.testing.expectEqual(prior_nodes, direct_pool.nodes.items.len);
             try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
@@ -7772,10 +7627,6 @@ test "direct phase two consumer matrix preserves generics and headers" {
         source: []const u8,
         case: DirectGenericConsumerCase,
     }{
-        .{
-            .source = "function duplicate<T extends string, T extends number>(value: T): T { return value; }",
-            .case = .duplicate_parameters,
-        },
         .{
             .source = "function identity<>(value: string): string { return value; }",
             .case = .empty_callable,
@@ -8247,7 +8098,6 @@ const DirectPredicateCase = enum {
     unresolved_target,
     mixed_untyped_target,
     compact_target_position,
-    repeated_target,
     target_after_sixteen,
     trailing_ordinary,
     quoted_marker_space,
@@ -8355,7 +8205,7 @@ fn expectDirectPredicateConsumerInner(
     }
 
     if (case == .mixed_untyped_target or case == .compact_target_position or
-        case == .repeated_target or case == .target_after_sixteen)
+        case == .target_after_sixteen)
     {
         const predicate = switch (return_syntax.structure) {
             .predicate => |value| value,
@@ -8368,7 +8218,7 @@ fn expectDirectPredicateConsumerInner(
         const function = direct_view.getFunction(syntax_signature.owner) orelse
             return error.TestUnexpectedResult;
         const expected_actual_position: u8 = switch (case) {
-            .mixed_untyped_target, .repeated_target => 0,
+            .mixed_untyped_target => 0,
             .compact_target_position => 2,
             .target_after_sixteen => 16,
             else => unreachable,
@@ -8380,7 +8230,7 @@ fn expectDirectPredicateConsumerInner(
         try std.testing.expectEqual(
             switch (case) {
                 .mixed_untyped_target => @as(u8, 1),
-                .compact_target_position, .repeated_target => 2,
+                .compact_target_position => 2,
                 .target_after_sixteen => 16,
                 else => unreachable,
             },
@@ -8485,7 +8335,6 @@ fn expectDirectPredicateConsumerInner(
         .arrow_guard_unverified,
         .mixed_untyped_target,
         .compact_target_position,
-        .repeated_target,
         .target_after_sixteen,
         => {
             switch (return_syntax.structure) {
@@ -8506,7 +8355,7 @@ fn expectDirectPredicateConsumerInner(
     direct_checker.scopes = &direct.scopes;
     const type_ok = try direct_checker.check(direct_root);
     const expected_type: []const type_checker_mod.DiagnosticKind = switch (case) {
-        .named_guard_unverified, .arrow_guard_unverified, .arrow_ordinary_tab, .compact_target_position, .repeated_target, .unresolved_target, .mixed_untyped_target, .target_after_sixteen, .quoted_marker_space, .quoted_marker_tab, .ordinary_tab, .readonly_tab => &.{.invalid_type_predicate},
+        .named_guard_unverified, .arrow_guard_unverified, .arrow_ordinary_tab, .compact_target_position, .unresolved_target, .mixed_untyped_target, .target_after_sixteen, .quoted_marker_space, .quoted_marker_tab, .ordinary_tab, .readonly_tab => &.{.invalid_type_predicate},
         .quoted_value => &.{.return_type_mismatch},
         else => &.{},
     };
@@ -8526,7 +8375,7 @@ fn expectDirectPredicateConsumerInner(
     defer direct_strict.deinit();
     const strict_ok = try direct_strict.check(direct_root);
     const expected_strict: []const strict_checker_mod.DiagnosticKind = switch (case) {
-        .mixed_untyped_target, .compact_target_position, .repeated_target, .target_after_sixteen => &.{.missing_public_annotation},
+        .mixed_untyped_target, .compact_target_position, .target_after_sixteen => &.{.missing_public_annotation},
         else => &.{},
     };
     try std.testing.expectEqual(@as(u32, @intCast(expected_strict.len)), strict_ok);
@@ -8556,7 +8405,6 @@ test "direct predicates preserve construction and checker behavior" {
         .{ .case = .unresolved_target, .source = "function guard(candidate: unknown): missing is string[] { return true; }\n", .predicate = .absent, .return_spelling = null },
         .{ .case = .mixed_untyped_target, .source = "function guard(candidate, marker: unknown): candidate is string[] { return true; }\n", .predicate = .absent, .return_spelling = null },
         .{ .case = .compact_target_position, .source = "const guard = (lead, marker: unknown, candidate: unknown): candidate is string => true;", .predicate = .{ .parameter = 1 }, .return_spelling = null },
-        .{ .case = .repeated_target, .source = "const guard = (candidate, candidate: number, candidate: string): candidate is string => true;", .predicate = .{ .parameter = 0 }, .return_spelling = null },
         .{ .case = .target_after_sixteen, .source = "const guard = (p0: unknown, p1: unknown, p2: unknown, p3: unknown, p4: unknown, p5: unknown, p6: unknown, p7: unknown, p8: unknown, p9: unknown, p10: unknown, p11: unknown, p12: unknown, p13: unknown, p14: unknown, p15: unknown, target: unknown): target is string[] => true;\n", .predicate = .absent, .return_spelling = null },
         .{ .case = .trailing_ordinary, .source = "function echo(value: string): string   { return value; }", .predicate = .absent, .return_spelling = "string   " },
         .{ .case = .quoted_marker_space, .source = "function guard(candidate: unknown): candidate is \"a is b\" { return true; }\n", .predicate = .{ .literal = "a is b" }, .return_spelling = null },
@@ -9444,55 +9292,6 @@ test "direct declarations preserve namespace contractivity and diagnostics" {
         "Loop",
         false,
     );
-}
-
-const RepeatedGlobalBindingCase = enum {
-    two_typed,
-    typed_untyped,
-    untyped_typed_bad,
-    two_typed_bad,
-};
-
-test "direct declaration consumer preserves repeated global bindings" {
-    const cases = [_]struct {
-        case: RepeatedGlobalBindingCase,
-        source: []const u8,
-        diagnostics: []const ExpectedDeclarationDiagnostic,
-    }{
-        .{
-            .case = .two_typed,
-            .source = "const value: number = 1;\n" ++
-                "const value: string = \"x\";\n",
-            .diagnostics = &.{},
-        },
-        .{
-            .case = .typed_untyped,
-            .source = "const value: number = 1;\n" ++
-                "const value = \"x\";\n",
-            .diagnostics = &.{},
-        },
-        .{
-            .case = .untyped_typed_bad,
-            .source = "const value = 1;\n" ++
-                "const value: string = 2;\n",
-            .diagnostics = &.{.{ .kind = .type_mismatch }},
-        },
-        .{
-            .case = .two_typed_bad,
-            .source = "const value: number = \"x\";\n" ++
-                "const value: string = 2;\n",
-            .diagnostics = &.{
-                .{ .kind = .type_mismatch, .line = 1 },
-                .{ .kind = .type_mismatch },
-            },
-        },
-    };
-    var seen = std.EnumSet(RepeatedGlobalBindingCase).empty;
-    for (cases) |case| {
-        try expectDirectDeclarationConsumer(case.source, case.diagnostics, "", false);
-        seen.insert(case.case);
-    }
-    try std.testing.expectEqual(@typeInfo(RepeatedGlobalBindingCase).@"enum".field_names.len, seen.count());
 }
 
 const GenericDeclarationFactCase = enum {
@@ -10650,8 +10449,6 @@ const ContractConsumerCase = enum {
     simple,
     nested_first,
     outer_first,
-    repeated_holes,
-    repeated_capsules,
     nested_hole,
     module_arrow,
     nonliteral_effect,
@@ -10675,42 +10472,6 @@ fn expectContractConsumerFacts(
             const capsule = contract.function_capsules.items[0];
             try std.testing.expectEqualStrings("wrapper", capsule.function);
             try std.testing.expectEqual(if (kind == .nested_first) @as(u32, 1) else 4, capsule.line);
-        },
-        .repeated_holes => {
-            try std.testing.expectEqual(@as(usize, 2), contract.holes.items.len);
-            for (contract.holes.items, 0..) |hole, index| {
-                try std.testing.expectEqualStrings("helper", hole.function);
-                try std.testing.expectEqualStrings("string", hole.expected_type);
-                try std.testing.expectEqual(@as(u32, @intCast(index + 1)), hole.line);
-                try std.testing.expectEqual(if (index == 0) @as(u32, 36) else 49, hole.column);
-                try std.testing.expectEqual(index, hole.in_scope.items.len);
-                if (index == 1) {
-                    try std.testing.expectEqualStrings("value", hole.in_scope.items[0].name);
-                    try std.testing.expectEqualStrings("string", hole.in_scope.items[0].type_name);
-                }
-                try std.testing.expect(!hole.budget_declared);
-                try std.testing.expectEqual(@as(usize, 0), hole.remaining_budget.items.len);
-                try std.testing.expectEqual(@as(usize, 0), hole.undischarged.items.len);
-            }
-            try std.testing.expectEqual(@as(usize, 2), contract.function_capsules.items.len);
-            for (contract.function_capsules.items) |capsule| {
-                try std.testing.expectEqual(@as(usize, 0), capsule.declared.items.len);
-                try std.testing.expect(!capsule.discharged);
-            }
-        },
-        .repeated_capsules => {
-            try std.testing.expectEqual(@as(usize, 2), contract.function_capsules.items.len);
-            for (contract.function_capsules.items, 0..) |capsule, index| {
-                try std.testing.expectEqualStrings("helper", capsule.function);
-                try std.testing.expectEqual(@as(u32, @intCast(index + 1)), capsule.line);
-                try std.testing.expectEqual(@as(usize, 1), capsule.declared.items.len);
-                try std.testing.expectEqualStrings(if (index == 0) "pure" else "deterministic", capsule.declared.items[0]);
-                try std.testing.expect(capsule.proven_total);
-                try std.testing.expect(capsule.proven_pure);
-                try std.testing.expect(capsule.proven_read_only);
-                try std.testing.expect(capsule.proven_deterministic);
-                try std.testing.expect(capsule.discharged);
-            }
         },
         .nonliteral_effect, .unknown_capability => {
             const expected_kind: contract_types.SpecDiagnostic.Kind = if (kind == .nonliteral_effect)
@@ -10745,14 +10506,6 @@ fn expectContractConsumerFacts(
                 try std.testing.expectEqualStrings("string", hole.in_scope.items[0].type_name);
             }
         },
-    }
-    if (kind == .repeated_holes or kind == .repeated_capsules) {
-        try std.testing.expectEqual(@as(usize, 2), contract.function_effect_capsules.items.len);
-        for (contract.function_effect_capsules.items) |capsule| {
-            try std.testing.expectEqual(@as(usize, 0), capsule.declared.items.len);
-            try std.testing.expectEqual(@as(usize, 0), capsule.inferred.items.len);
-            try std.testing.expect(!capsule.discharged);
-        }
     }
 }
 
@@ -10830,15 +10583,13 @@ test "direct single-module full and sound extraction preserve contract bytes" {
         .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0x330ac470c7235091 },
         .{ .kind = .nested_first, .source = "function wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\nfunction handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\n", .json_hash = 0x95a6b6a9834365cc },
         .{ .kind = .outer_first, .source = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\nfunction wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\n", .json_hash = 0x530f1a2e607b9952 },
-        .{ .kind = .repeated_holes, .source = "function helper(): number { return hole(); }\nfunction helper(value: string): string { return hole(); }\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0xd024e44c1bfbceed },
-        .{ .kind = .repeated_capsules, .source = "function helper(): Proof<string, \"pure\"> { return \"a\"; }\nfunction helper(value: string): Proof<string, \"deterministic\"> { return value; }\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0xd024e44c1bfbceed },
         .{ .kind = .nested_hole, .source = "function outer(): string {\n  function inner(): number { return hole(); }\n  return \"ok\";\n}\nfunction handler(req: Request): Response { return Response.text(outer()); }\n", .json_hash = 0x4719ff0bc326b557 },
         .{ .kind = .module_arrow, .source = "const helper = (value: string): string => hole();\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0x1e476912c574b50a },
         .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0x42cc6047d5278516 },
         .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0x1d5d7268e9f6599a },
     };
     const fields = @typeInfo(ContractConsumerCase).@"enum".field_names;
-    try std.testing.expectEqual(@as(usize, 9), fixtures.len);
+    try std.testing.expectEqual(@as(usize, 7), fixtures.len);
     try std.testing.expectEqual(fields.len, fixtures.len);
     var seen: [fields.len]bool = @splat(false);
     for (fixtures) |fixture| {

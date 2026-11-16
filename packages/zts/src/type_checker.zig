@@ -10562,7 +10562,7 @@ test "TypeChecker: a module export is called with its declared arguments" {
     , 0, 0);
 }
 
-test "TypeChecker import diagnostics preserve aliases shadows and first successful export" {
+test "TypeChecker import diagnostics preserve aliases and shadows" {
     const allocator = std.testing.allocator;
     const Case = struct { source: []const u8, errors: usize, message: []const u8 = "expected 1, got 2" };
     const cases = [_]Case{
@@ -10570,9 +10570,6 @@ test "TypeChecker import diagnostics preserve aliases shadows and first successf
         .{ .source = "import { sha256 as digest } from 'zttp-ext:unknown'; digest('a', 'b');", .errors = 0 },
         .{ .source = "function sha256(a, b) { return a; } sha256('a', 'b');", .errors = 0 },
         .{ .source = "import { sha256 as digest } from 'zttp:crypto'; function run(digest) { return digest('a', 'b'); }", .errors = 0 },
-        .{ .source = "import { missing as digest } from 'zttp:crypto'; import { sha256 as digest } from 'zttp:crypto'; digest('a', 'b');", .errors = 1 },
-        .{ .source = "import { missing as digest } from 'zttp-ext:unknown'; import { sha256 as digest } from 'zttp:crypto'; digest('a', 'b');", .errors = 1 },
-        .{ .source = "import { sha256 as digest } from 'zttp:crypto'; import { jwtVerify as digest } from 'zttp:auth'; digest('a', 'b', 'c');", .errors = 1, .message = "expected 1, got 3" },
     };
     for ([_]bool{ false, true }) |borrow_imports| {
         for (cases) |case| {

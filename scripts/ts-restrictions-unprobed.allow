@@ -25,8 +25,6 @@ ZTS030 a compiler resource limit that the meta payload does not publish: the Lim
 ZTS031 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
 ZTS032 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
 ZTS017 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `const [a, b] = [1, 2];` reports ZTS001
-ZTS018 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `function f(a: number, a: number)` reports no error
-ZTS019 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `const a = 1; const a = 2;` reports no error (gap table)
 ZTS020 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `const a = zzz;` reports ZTS629
 ZTS024 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `return 1;` at the top level reports ZTS002
 ZTS025 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `yield 1;` reports ZTS001

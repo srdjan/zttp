@@ -534,14 +534,15 @@ pub fn appendAuthoredGenericParameters(store: *Store, list_span: Span) !void {
     try eachGenericPiece(store.source, list_span, store, appendAuthoredGenericParameter);
 }
 
-pub const GenericListRefusalKind = enum { default, modifier, too_many, empty };
+pub const GenericListRefusalKind = enum { default, modifier, too_many, empty, duplicate };
 
 /// Calls `report(context, kind, offset)` for each generic default, each
-/// `in`, `out`, or `const` modifier, the ninth parameter, and each empty
-/// parameter between commas, that the source profile refuses. `offset` is the
-/// `=` of a default, the first byte of the modifier word, the first byte of the
-/// ninth parameter, or the `,` or `<` before an empty parameter. An empty list
-/// `<>` emits no piece, so this walk does not refuse it.
+/// `in`, `out`, or `const` modifier, the ninth parameter, each empty
+/// parameter between commas, and each second use of a parameter name, that
+/// the source profile refuses. `offset` is the `=` of a default, the first
+/// byte of the modifier word, the first byte of the ninth parameter, the `,`
+/// or `<` before an empty parameter, or the first byte of the repeated name.
+/// An empty list `<>` emits no piece, so this walk does not refuse it.
 pub fn eachGenericListRefusal(
     source: []const u8,
     list_span: Span,
@@ -553,6 +554,7 @@ pub fn eachGenericListRefusal(
         source: []const u8,
         context: Context,
         count: usize = 0,
+        names: [max_type_parameters][]const u8 = undefined,
         fn visit(self: *@This(), raw_span: Span) error{}!void {
             const span = trimSpan(self.source, raw_span);
             if (span.start == span.end) {
@@ -560,6 +562,11 @@ pub fn eachGenericListRefusal(
                 return;
             }
             if (self.count == max_type_parameters) report(self.context, .too_many, span.start);
+            const name = leadingName(self.source, span);
+            for (self.names[0..@min(self.count, max_type_parameters)]) |seen| {
+                if (name.len != 0 and std.mem.eql(u8, seen, name)) report(self.context, .duplicate, span.start);
+            }
+            if (self.count < max_type_parameters) self.names[self.count] = name;
             self.count += 1;
             if (genericModifierOffset(self.source, span)) |offset| report(self.context, .modifier, offset);
             if (findTopLevelEquals(self.source, span.start, span.end)) |offset| report(self.context, .default, offset);
@@ -567,6 +574,14 @@ pub fn eachGenericListRefusal(
     };
     var piece = Piece{ .source = source, .context = context };
     eachGenericPiece(source, list_span, &piece, Piece.visit) catch |err| switch (err) {};
+}
+
+/// The name at the start of a trimmed type parameter, or an empty slice.
+fn leadingName(source: []const u8, span: Span) []const u8 {
+    var end = span.start;
+    while (end < span.end and isIdentifierContinue(source[end])) end += 1;
+    if (end == span.start or !isIdentifierStart(source[span.start])) return "";
+    return source[span.start..end];
 }
 
 fn genericModifierOffset(source: []const u8, span: Span) ?u32 {

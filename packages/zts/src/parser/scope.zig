@@ -221,6 +221,10 @@ pub const ScopeAnalyzer = struct {
     ) !BindingRef {
         const scope = &self.scopes.items[self.current_scope];
 
+        // Spec 5.2: one declaration of a name in one scope. A parameter, a
+        // `const`, a function, an import, and a pattern binding share the rule.
+        if (scope.findLocalMutByAtom(name_atom) != null) return error.DuplicateBinding;
+
         // Global scope - use atom index as slot, no local allocation
         if (scope.kind == .global) {
             try scope.bindings.append(self.allocator, .{

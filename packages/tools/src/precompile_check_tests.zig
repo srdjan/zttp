@@ -5875,7 +5875,7 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "nongeneric_then_generic", .source = "structural Box = number;\nstructural Box<T> = T;\nconst bare: Box = \"x\";\nconst applied: Box<string> = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null }, .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 4, .column = 1, .suggestion = null } } },
         .{ .name = "generic_then_nongeneric", .source = "structural Box<T> = T;\nstructural Box = number;\nconst bare: Box = \"x\";\nconst applied: Box<string> = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null }, .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 4, .column = 1, .suggestion = null } } },
         .{ .name = "alias_before_parameter", .source = "structural T = number;\nfunction f<T>(x: T): T { return x; }\nconst probe: string = f(1);\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS208", .message = "no argument determines type parameter 'T'", .line = 3, .column = 24, .suggestion = "Name the type argument at the call site." }, .{ .code = "ZTS200", .message = "type 'number' is not assignable to type 'string'", .line = 3, .column = 1, .suggestion = null } } },
-        .{ .name = "duplicate_parameters", .source = "function f<T,T>(x: T): T { return x; }\nconst probe: string = f(1);\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS208", .message = "no argument determines type parameter 'T'", .line = 2, .column = 24, .suggestion = "Name the type argument at the call site." }, .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'string'", .line = 2, .column = 1, .suggestion = null } } },
+        .{ .name = "duplicate_parameters", .source = "function f<T,T>(x: T): T { return x; }\nconst probe: string = f(1);\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS018", .message = "this type parameter name is already declared", .line = 1, .column = 14, .suggestion = "Write a different name." }} },
         .{ .name = "repeated_generic_alias", .source = "structural Box<T> = { value: T };\nstructural Box<T> = T;\nconst probe: Box<string> = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 3, .column = 1, .suggestion = null }} },
         .{ .name = "repeated_nongeneric_alias", .source = "structural Box = string;\nstructural Box = number;\nconst probe: Box = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null }} },
         .{ .name = "application_array", .source = "structural Box<T> = { value: T };\nconst probe: Box<string>[] = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Box<string>[]'", .line = 2, .column = 1, .suggestion = null }} },
@@ -6553,112 +6553,6 @@ test "CHECK preserves typed generic arrows and comment classification" {
     }
     try std.testing.expectEqual(@as(usize, 3), cases.len);
     try std.testing.expectEqual(cases.len, observed);
-}
-
-test "CHECK preserves repeated global declaration bindings" {
-    const Case = enum {
-        two_typed,
-        typed_untyped,
-        untyped_typed_bad,
-        two_typed_bad,
-    };
-    const proof_suggestion =
-        "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, " ++
-        "but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, injection_safe, input_validated, no_credential_leakage, no_secret_leakage, optional_safe, pii_contained, result_safe, state_isolated. " ++
-        "Return a narrow Proof capsule with only the properties it holds, e.g. " ++
-        "`function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | " ++
-        "\"pure\" | \"stateless\" | \"canonical\">`.";
-    const cases = [_]struct {
-        case: Case,
-        source: []const u8,
-        type_errors: u32,
-        has_contract: bool,
-        diagnostics: []const CompoundDiagnostic,
-    }{
-        .{
-            .case = .two_typed,
-            .source = "const value: number = 1;\n" ++
-                "const value: string = \"x\";\n",
-            .type_errors = 0,
-            .has_contract = true,
-            .diagnostics = &.{.{
-                .code = "ZTS500",
-                .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
-                .line = 1,
-                .column = 1,
-                .suggestion = proof_suggestion,
-            }},
-        },
-        .{
-            .case = .typed_untyped,
-            .source = "const value: number = 1;\n" ++
-                "const value = \"x\";\n",
-            .type_errors = 0,
-            .has_contract = true,
-            .diagnostics = &.{.{
-                .code = "ZTS500",
-                .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
-                .line = 1,
-                .column = 1,
-                .suggestion = proof_suggestion,
-            }},
-        },
-        .{
-            .case = .untyped_typed_bad,
-            .source = "const value = 1;\n" ++
-                "const value: string = 2;\n",
-            .type_errors = 1,
-            .has_contract = false,
-            .diagnostics = &.{.{
-                .code = "ZTS200",
-                .message = "type '2' is not assignable to type 'string'",
-                .line = 2,
-                .column = 1,
-            }},
-        },
-        .{
-            .case = .two_typed_bad,
-            .source = "const value: number = \"x\";\n" ++
-                "const value: string = 2;\n",
-            .type_errors = 2,
-            .has_contract = false,
-            .diagnostics = &.{
-                .{
-                    .code = "ZTS200",
-                    .message = "type '\"x\"' is not assignable to type 'number'",
-                    .line = 1,
-                    .column = 1,
-                },
-                .{
-                    .code = "ZTS200",
-                    .message = "type '2' is not assignable to type 'string'",
-                    .line = 2,
-                    .column = 1,
-                },
-            },
-        },
-    };
-    var seen = std.EnumSet(Case).empty;
-    for (cases) |case| {
-        var result = try runCheckOnlyFromSourceWithOptions(
-            std.testing.allocator,
-            case.source,
-            "handler.ts",
-            .{ .json_mode = true },
-        );
-        defer result.deinit(std.testing.allocator);
-        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
-        try std.testing.expectEqual(case.type_errors, result.type_errors);
-        try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
-        try std.testing.expectEqual(@as(u32, @intCast(case.diagnostics.len)), result.totalErrors());
-        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
-        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectCompoundDiagnostic(actual, expected);
-        }
-        try std.testing.expectEqual(case.has_contract, result.contract != null);
-        seen.insert(case.case);
-    }
-    try std.testing.expectEqual(@typeInfo(Case).@"enum".field_names.len, seen.count());
 }
 
 test "CHECK preserves nominal generic diagnostic order before scalar refusal" {

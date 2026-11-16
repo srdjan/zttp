@@ -181,6 +181,7 @@ pub const ErrorList = struct {
             .string_line_continuation => "Join the string onto one line, or write the newline as \\n.",
             .missing_semicolon => "Add a semicolon at the end of the statement.",
             .invalid_await => "Remove await. Handlers run synchronously, so call the function directly.",
+            .duplicate_parameter, .duplicate_binding => "Write a different name.",
             else => null,
         };
     }

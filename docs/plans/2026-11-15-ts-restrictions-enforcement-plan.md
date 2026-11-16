@@ -160,6 +160,21 @@ The rejected options were (b), which admits generic arrows in
 `docs/ts-restrictions.md`, and (c), which refuses the arrow but keeps the
 machinery.
 
+### Decision 11: the code that handles a duplicate declaration
+
+U4b-3 refuses a second declaration of a name in one scope. After that
+refusal, no parsed input reaches the code that handles a duplicate. That
+code merges a name imported twice in `module_facts.zig` and selects the
+first or last import record for one slot. It also resolves a module-level
+function only when one declaration exists in `flow_interp.zig`, and it tracks
+repeated declaration owners in the typed frontend. The owner chose option (a)
+on 2026-11-16. U4b-3 deletes the test cases whose subject is a duplicate and
+moves each outcome pin to the ZTS018 or ZTS019 refusal. A separate unit,
+U4b-3b, deletes the code with its own gate.
+
+The rejected options were (b), which deletes the code in the U4b-3 commit,
+and (c), which keeps the code as defense in depth.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -324,9 +339,10 @@ string with ZTS200, and extends the member census of the gate to the
 namespaces. U4a-3 takes X24 and X25. U4a-4 takes X31. U4a-5 refuses a number
 literal type that is not an integer in -32768..32767 (Decision 10 a).
 
-U4b runs as seven commits, one for each rule. U4b-1 takes X16 for record
+U4b runs as eight commits, one for each rule. U4b-1 takes X16 for record
 literal keys and the read `r["a"]`. U4b-2 takes X13, U4b-3 X14, U4b-4 X15,
-U4b-5 X18, U4b-6 G12 with N16, and U4b-7 N11 and N12.
+U4b-5 X18, U4b-6 G12 with N16, and U4b-7 N11 and N12. U4b-3b deletes the
+code that handles a duplicate declaration (Decision 11).
 
 ### U2: parser refusals that move no hash (Sonnet, 3 sequential parts)
 
@@ -724,3 +740,22 @@ later.
   field at run time: `Object.keys(o)` gave `["a","z"]`, and the response
   carried a field that the type does not name. No existing test or example
   wrote such a field.
+- U4b-3 refuses a second declaration of a name in one scope with ZTS019.
+  This covers a second `const`, a `function` and a `const` of one name, and
+  an import and a declaration of one name. It refuses a repeated parameter
+  name and a repeated type parameter, such as `<T, T>`, with ZTS018. Both
+  codes give the help "Write a different name." Two corpus cases prove the
+  codes, so the two DEFECT rows in `scripts/corpus-uncovered.allow` are
+  deleted. Under Decision 11, U4b-3 deletes 7 tests, 8 table cases, and 3
+  flow assertions whose subject is a duplicate. It moves the generic
+  admission pin to ZTS018. The `module_facts` dedup of an imported name
+  stays, because one name imported under two aliases still reaches it. Its
+  test and one shared import corpus case now use that legal form.
+  These findings stay open:
+  - A body `const` with the name of a parameter, such as
+    `function f(a: number) { const a = 2; }`, is admitted. The parser gives
+    the body its own scope, so this is shadowing. N12 in U4b-7 refuses it.
+  - By reading `ModuleFacts.build`: when one declaration imports one name
+    twice, such as `import { sha256 as a, sha256 as b } from "zttp:crypto";`,
+    and no earlier entry exists for the module, the new entry keeps both
+    names. This needs a test to confirm. The defect is older than U4b-3.

@@ -86,6 +86,7 @@ pure.
 | Object or array declaration destructuring, and destructuring renames | ZTS001 | Bind the source to one name, then read each member into a `const` |
 | A declaration with no initializer, such as `let a: number;` and `const a: number;` | ZTS021 | Write `const a: number = 1;`, or give the `let` an initializer |
 | A declaration that binds two names, such as `const a = 1, b = 2;` | ZTS001 | Write one `const` for each name |
+| A second declaration of a name in one scope, such as `const a = 1; const a = 2;`, a `function` and a `const` of one name, and an import and a declaration of one name | ZTS019 | A different name |
 | `class` declarations and `class` expressions | ZTS001 | Plain records and functions |
 | `declare` declarations | ZTS001 | Import the value from a module |
 | `abstract class` | ZTS001 | Plain records and functions |
@@ -117,6 +118,7 @@ Declaration merging, open interfaces, and inheritance are excluded.
 | Rest parameters `...args` | ZTS001 | An explicit array parameter |
 | Type parameters on an arrow, such as `<T>(x: T) => x` | ZTS001 | The arrow without type parameters, or a module-level generic function |
 | An empty type parameter, such as `<A, ,B>` and `<A,>` | ZTS001 | Remove the extra comma |
+| A duplicate parameter name, such as `function f(a: number, a: number)`, and a duplicate type parameter, such as `function f<T, T>(a: T): T` and `structural Box<T, T> = T;` | ZTS018 | A different name |
 | Call-site spread `f(...args)` | ZTS616 | Positional arguments |
 | A named function without parameter or return annotations | ZTS601 | Annotate every parameter and the return type |
 | A call with too few or too many arguments | ZTS202 | Supply every declared argument, and no more |
@@ -403,9 +405,6 @@ against the compiler.
 | A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
-| A second `const` of the same name in one scope | Accepted, exit 0 | ZTS019. Write a different name |
-| A duplicate parameter name, such as `function f(a: number, a: number)` | Accepted, exit 0 | ZTS018. Write a different name |
-| A duplicate type parameter, such as `function f<T, T>(a: T): T` | Refused with ZTS208, "no argument determines type parameter" | A targeted refusal. Write a different name |
 | A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | Accepted, exit 0 | ZTS209. Pass a type argument that satisfies the constraint |
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |

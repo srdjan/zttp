@@ -427,6 +427,16 @@ const refusal_rows_a = [_]RefusalRow{
         .clean = c(top("function f<A, B>(a: A): A {\n  return a;\n}")),
     },
     .{
+        .key = "A duplicate parameter name, such as `function f(a: number, a: number)`, and a duplicate type parameter, such as `function f<T, T>(a: T): T` and `structural Box<T, T> = T;`",
+        .refused = &.{
+            r("function f(a: number, a: number)", top("function g(a: number, a: number): number {\n  return a;\n}")),
+            r("function f(a: number, a: number)", body("  const xs: number[] = [1];\n  const ys = xs.map((a, a) => a);")),
+            r("function f<T, T>(a: T): T", top("function g<T, T>(a: T): T {\n  return a;\n}")),
+            r("structural Box<T, T> = T;", top("structural Box<T, T> = T;")),
+        },
+        .clean = c(top("structural Box<T, U> = T;\nfunction g<T, U>(a: T, b: U): T {\n  return a;\n}")),
+    },
+    .{
         .key = "Call-site spread `f(...args)`",
         .refused = &.{r("f(...args)", top("function f(a: number): number {\n  return a;\n}\nfunction g(args: number[]): number {\n  return f(...args);\n}"))},
         .clean = c(top("function f(a: number): number {\n  return a;\n}\nfunction g(args: number[]): number {\n  return f(1);\n}")),
@@ -1334,6 +1344,15 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(body("  const a = 1;\n  const b = 2;")),
     },
     .{
+        .key = "A second declaration of a name in one scope, such as `const a = 1; const a = 2;`, a `function` and a `const` of one name, and an import and a declaration of one name",
+        .refused = &.{
+            r("const a = 1; const a = 2;", body("  const a = 1;\n  const a = 2;")),
+            r("function", top("function g(): number {\n  return 1;\n}\nconst g = 2;")),
+            r("const", top("import { dictEmpty } from \"zttp:collections\";\nconst dictEmpty = 1;")),
+        },
+        .clean = c(body("  const a = 1;\n  const b = 2;")),
+    },
+    .{
         .key = "Destructuring in a `for...of` head",
         .refused = &.{
             r("for...of", top("function g(xs: number[][]): number {\n  for (const [a, b] of xs) {\n  }\n  return 1;\n}")),
@@ -1436,18 +1455,6 @@ pub const gap_rows = [_]GapRow{
             c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) {\n    return 1;\n  } else g();\n  return 2;\n}")),
             c(top(g_fn ++ "function h(xs: number[]): number {\n  for (const k of xs) g();\n  return 2;\n}")),
         },
-    },
-    .{
-        .key = "A second `const` of the same name in one scope",
-        .sources = &.{c(top("function g(): number {\n  const a = 1;\n  const a = 2;\n  return a;\n}"))},
-    },
-    .{
-        .key = "A duplicate parameter name, such as `function f(a: number, a: number)`",
-        .sources = &.{c(top("function f(a: number, a: number): number {\n  return a;\n}"))},
-    },
-    .{
-        .key = "A duplicate type parameter, such as `function f<T, T>(a: T): T`",
-        .sources = &.{c(top("function f<T, T>(a: T): T {\n  return a;\n}\nfunction g(): string {\n  return String(f(1));\n}"))},
     },
     .{
         .key = "A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };`",

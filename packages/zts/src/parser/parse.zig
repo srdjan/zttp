@@ -987,6 +987,7 @@ pub const Parser = struct {
             .modifier => self.errors.addErrorAt(.unsupported_feature, token, "a type-parameter modifier is not supported; remove the `in`, `out`, or `const` modifier"),
             .too_many => self.errors.addErrorAt(.too_many_parameters, token, "a generic declaration has at most eight type parameters; remove a type parameter"),
             .empty => self.errors.addErrorAt(.unsupported_feature, token, "an empty type parameter is not supported; remove the extra comma"),
+            .duplicate => self.errors.addErrorAt(.duplicate_parameter, token, "this type parameter name is already declared"),
         }
     }
 
@@ -2051,6 +2052,7 @@ pub const Parser = struct {
             .variable,
             kind == .@"const",
         ) catch |err| {
+            if (err == error.DuplicateBinding) return self.bindingFailure(err, name.location(), .duplicate_binding);
             if (self.admission != null) switch (err) {
                 error.OutOfMemory => return err,
                 else => {},
@@ -2365,6 +2367,7 @@ pub const Parser = struct {
             .function,
             false,
         ) catch |err| {
+            if (err == error.DuplicateBinding) return self.bindingFailure(err, name.location(), .duplicate_binding);
             if (self.admission != null) switch (err) {
                 error.OutOfMemory => return err,
                 else => {},
@@ -3296,6 +3299,10 @@ pub const Parser = struct {
                     false,
                 ) catch |err| switch (kind) {
                     .named => {
+                        if (err == error.DuplicateBinding) return self.selectAdmissionHeaderFailure(
+                            self.bindingFailure(err, param_name.location(), .duplicate_parameter),
+                            saved_failure,
+                        );
                         if (self.admission != null) switch (err) {
                             error.OutOfMemory => return err,
                             else => {},
@@ -3307,7 +3314,7 @@ pub const Parser = struct {
                         );
                     },
                     .arrow => return self.selectAdmissionHeaderFailure(
-                        self.bindingFailure(err),
+                        self.bindingFailure(err, param_name.location(), .duplicate_parameter),
                         saved_failure,
                     ),
                 };
@@ -3636,7 +3643,7 @@ pub const Parser = struct {
                     name_atom,
                     .variable,
                     is_const,
-                ) catch |err| return self.bindingFailure(err);
+                ) catch |err| return self.bindingFailure(err, name.location(), .duplicate_binding);
 
                 // Check for for-in/for-of
                 if (self.check(.kw_in)) {
@@ -4020,7 +4027,7 @@ pub const Parser = struct {
             name_atom,
             .variable,
             true,
-        ) catch |err| return self.bindingFailure(err);
+        ) catch |err| return self.bindingFailure(err, loc, .duplicate_binding);
         return try self.nodes.addIdentifier(loc, binding);
     }
 
@@ -4319,8 +4326,9 @@ pub const Parser = struct {
                 true, // imports are const
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
+                error.DuplicateBinding => return self.bindingFailure(err, spec_loc, .duplicate_binding),
                 else => {
-                    self.errorAt(spec_loc, "duplicate import binding");
+                    self.errorAt(spec_loc, "too many local variables");
                     return error.ParseError;
                 },
             };
@@ -5616,7 +5624,7 @@ pub const Parser = struct {
                 param_atom,
                 .parameter,
                 false,
-            ) catch |err| return self.bindingFailure(err);
+            ) catch |err| return self.bindingFailure(err, param_name.location(), .duplicate_parameter);
 
             const param_node = try self.nodes.addPatternElem(.pattern_element, param_name.location(), .{
                 .kind = .simple,
@@ -6184,13 +6192,26 @@ pub const Parser = struct {
     }
 
     /// The error to return when `declareBinding` fails. It fails on an
-    /// allocation, or when a scope has no local slot left. The slot failure
-    /// must be recorded here: `parse` recovers from an error that recorded
-    /// nothing by skipping the statement, which drops it without a trace.
-    fn bindingFailure(self: *Parser, err: anyerror) anyerror {
-        if (err == error.OutOfMemory) return err;
-        self.errorAtCurrent("too many local variables");
-        return error.TooManyLocals;
+    /// allocation, on a name that the scope already declares (spec 5.2), or
+    /// when a scope has no local slot left. Each refusal must be recorded
+    /// here: `parse` recovers from an error that recorded nothing by
+    /// skipping the statement, which drops it without a trace.
+    fn bindingFailure(self: *Parser, err: anyerror, loc: SourceLocation, duplicate: error_mod.ErrorKind) anyerror {
+        switch (err) {
+            error.OutOfMemory => return err,
+            error.DuplicateBinding => {
+                const message = if (duplicate == .duplicate_parameter)
+                    "this parameter name is already declared"
+                else
+                    "this name is already declared in this scope";
+                self.errors.addError(duplicate, loc, message);
+                return error.ParseError;
+            },
+            else => {
+                self.errorAtCurrent("too many local variables");
+                return error.TooManyLocals;
+            },
+        }
     }
 
     fn errorAt(self: *Parser, loc: SourceLocation, message: []const u8) void {

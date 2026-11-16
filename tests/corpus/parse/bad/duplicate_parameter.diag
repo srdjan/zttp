@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS018","severity":"error","message":"this parameter name is already declared","file":"parse/bad/duplicate_parameter.ts","line":2,"column":26,"suggestion":"Write a different name.","repair_intent":null}
