@@ -55,6 +55,7 @@ pub const ErrorKind = enum {
     const_without_initializer,
     const_assignment,
     reserved_word_name,
+    parameter_assignment,
     invalid_break,
     invalid_continue,
     invalid_return,
@@ -186,6 +187,7 @@ pub const ErrorList = struct {
             .duplicate_parameter, .duplicate_binding => "Write a different name.",
             .const_assignment => "Declare the name with `let`, or bind the new value to a new name.",
             .reserved_word_name => "Write another name. A reserved word stays valid as a record key and after a dot.",
+            .parameter_assignment => "Bind the new value to a new `const`.",
             else => null,
         };
     }

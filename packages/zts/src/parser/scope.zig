@@ -274,15 +274,15 @@ pub const ScopeAnalyzer = struct {
         };
     }
 
-    /// Whether the nearest declaration of the name, seen from the current
-    /// scope, is a `const`. An undeclared name is not. Unlike
-    /// `resolveBinding`, this creates no upvalue.
-    pub fn isConstBinding(self: *ScopeAnalyzer, name_atom: u16) bool {
+    /// The nearest declaration of the name, seen from the current scope, or
+    /// null for an undeclared name. Unlike `resolveBinding`, this creates no
+    /// upvalue.
+    pub fn nearestBinding(self: *ScopeAnalyzer, name_atom: u16) ?Binding {
         var scope_id = self.current_scope;
         while (true) {
             const scope = &self.scopes.items[scope_id];
-            if (scope.findLocalMutByAtom(name_atom)) |binding| return binding.is_const;
-            scope_id = scope.parent orelse return false;
+            if (scope.findLocalMutByAtom(name_atom)) |binding| return binding.*;
+            scope_id = scope.parent orelse return null;
         }
     }
 

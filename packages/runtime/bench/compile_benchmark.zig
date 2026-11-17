@@ -229,9 +229,9 @@ const GeneratedFixture = enum {
         switch (self) {
             .dense_expressions => {
                 for (0..128) |i| {
-                    try w.print("function dense{d}(x: number): number {{\n", .{i});
-                    for (0..32) |_| try w.writeAll("x = (x + 1) * (x - 2) + (x + 3) * (x - 4);\n");
-                    try w.writeAll("return x;\n}\n");
+                    try w.print("function dense{d}(x: number): number {{\nlet v: number = x;\n", .{i});
+                    for (0..32) |_| try w.writeAll("v = (v + 1) * (v - 2) + (v + 3) * (v - 4);\n");
+                    try w.writeAll("return v;\n}\n");
                 }
                 try w.writeAll("function handler(req: Request): Response { return Response.text(String(dense0(1))); }\n");
             },

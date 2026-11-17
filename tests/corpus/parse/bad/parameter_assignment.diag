@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS068","severity":"error","message":"a parameter cannot be assigned","file":"parse/bad/parameter_assignment.ts","line":3,"column":5,"suggestion":"Bind the new value to a new `const`.","repair_intent":null}

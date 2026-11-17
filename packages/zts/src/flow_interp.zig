@@ -5592,7 +5592,7 @@ test "call-site spread is refused by the strict checker" {
 }
 
 test "a nested root seeds the cells of the bindings it captures with top" {
-    const source = "function outer(s) { function inner(c) { if (c) { s = \"c\"; } return s; } return inner; }";
+    const source = "function outer(p) { let s = p; function inner(c) { if (c) { s = \"c\"; } return s; } return inner; }";
     const h = try Harness.create(testing.allocator, source);
     defer h.destroy();
     const result = try h.analyze("inner", &.{Value.clean});

@@ -437,6 +437,14 @@ const refusal_rows_a = [_]RefusalRow{
         .clean = c(top("structural Box<T, U> = T;\nfunction g<T, U>(a: T, b: U): T {\n  return a;\n}")),
     },
     .{
+        .key = "An assignment to a parameter, such as `a = a + 1` for a function parameter and `x = 0` for an arrow parameter",
+        .refused = &.{
+            r("a = a + 1", top("function g(a: number): number {\n  a = a + 1;\n  return a;\n}")),
+            r("x = 0", body("  const xs: number[] = [1, 2];\n  const ys = xs.map((x: number): number => {\n    x = 0;\n    return x;\n  });\n  assert ys.length > 0;")),
+        },
+        .clean = c(top("function g(a: number): number {\n  const b: number = a + 1;\n  return b;\n}")),
+    },
+    .{
         .key = "Call-site spread `f(...args)`",
         .refused = &.{r("f(...args)", top("function f(a: number): number {\n  return a;\n}\nfunction g(args: number[]): number {\n  return f(...args);\n}"))},
         .clean = c(top("function f(a: number): number {\n  return a;\n}\nfunction g(args: number[]): number {\n  return f(1);\n}")),

@@ -388,7 +388,7 @@ literal type that is not an integer in -32768..32767 (Decision 10 a).
 
 U4b runs as eight commits, one for each rule. U4b-1 takes X16 for record
 literal keys and the read `r["a"]`. U4b-2 takes X13, U4b-3 X14, U4b-4 X15,
-U4b-5 X18, U4b-6 G12 with N16, and U4b-7 N11 and N12. U4b-3b deletes the
+U4b-5 X18, U4b-6 G12 with N16, U4b-7a N11, and U4b-7b N12. U4b-3b deletes the
 code that handles a duplicate declaration (Decision 11).
 U4b-6b takes N18 (Decision 13). U4b-6c deletes the untracked-root code
 (Decisions 12 and 13). R1 fixes the closure-capture hole (Decision 14).
@@ -907,3 +907,15 @@ later.
   - A later use of a refused name, such as `set > 0`, cascades a ZTS002.
   - `const enum = 1` reports the TypeScript `const enum` refusal, not
     ZTS067, so the census uses `let`.
+- U4b-7 is split by measured fallout. In a full `zig build test`, N11
+  breaks 6 tests. N12 breaks about 24 more when it covers function and
+  block scopes, and about 29 more when it also covers module-level names.
+  Neither form occurs in the 281 tracked `.ts` files.
+- U4b-7a refuses an assignment to a parameter with ZTS068 (N11), for a
+  function parameter and an arrow parameter, inside a closure too. Each
+  test whose parameter assignment was incidental now assigns a `let` copy:
+  two narrowing tests, a flow test, and the dense-expressions benchmark
+  generator. The test of a captured-parameter assignment is deleted, and
+  the parameter-assignment type test keeps only its `let` control, because
+  their subject is now refused. `TypeChecker.typeOfDeclaration` keeps its
+  parameter fallback, because reads use it.

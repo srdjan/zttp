@@ -5563,8 +5563,9 @@ pub const TypeChecker = struct {
 
     /// The type a value assigned to `target` must satisfy, or `null_type_idx`
     /// when the target has none. One lookup for every identifier target: a
-    /// captured target resolves to its declaration first, so a `let` or a
-    /// parameter is checked the same way inside a closure and outside it.
+    /// captured target resolves to its declaration first, so a `let` is checked
+    /// the same way inside a closure and outside it. The parser refuses an
+    /// assignment to a parameter (ZTS068).
     fn assignmentTargetType(self: *const TypeChecker, target: ir.BindingRef) TypeIndex {
         const declaration = self.captureSource(target) orelse return null_type_idx;
         return self.typeOfDeclaration(declaration);
@@ -9488,19 +9489,21 @@ test "narrowing: an assignment kills the narrowing it invalidates" {
     // the pair below would pass while checking nothing.
     try checkTypedSource(
         \\function kept(v: string | undefined): string {
-        \\  if (v === undefined) {
+        \\  let u: string | undefined = v;
+        \\  if (u === undefined) {
         \\    return "d";
         \\  }
-        \\  return v;
+        \\  return u;
         \\}
     , 0, null);
     try checkTypedSource(
         \\function reassigned(v: string | undefined, w: string | undefined): string {
-        \\  if (v === undefined) {
+        \\  let u: string | undefined = v;
+        \\  if (u === undefined) {
         \\    return "d";
         \\  }
-        \\  v = w;
-        \\  return v;
+        \\  u = w;
+        \\  return u;
         \\}
     , 1, null);
 }
@@ -9514,23 +9517,25 @@ test "narrowing: a loop body that reassigns kills the narrowing at entry" {
     // second assertion is about the assignment rather than about loops.
     try checkTypedSource(
         \\function readOnly(xs: string[], v: string | undefined): string {
-        \\  if (v === undefined) {
+        \\  let u: string | undefined = v;
+        \\  if (u === undefined) {
         \\    return "d";
         \\  }
         \\  for (const x of xs) {
-        \\    const y: string = v;
+        \\    const y: string = u;
         \\  }
         \\  return "ok";
         \\}
     , 0, null);
     try checkTypedSource(
         \\function looped(xs: string[], v: string | undefined): string {
-        \\  if (v === undefined) {
+        \\  let u: string | undefined = v;
+        \\  if (u === undefined) {
         \\    return "d";
         \\  }
         \\  for (const x of xs) {
-        \\    const y: string = v;
-        \\    v = undefined;
+        \\    const y: string = u;
+        \\    u = undefined;
         \\  }
         \\  return "ok";
         \\}
@@ -12923,39 +12928,18 @@ test "capture: an assignment through a transitive capture is checked" {
     try expectTypeMismatches(withMarker(source, "VALUE", "\"b\""), 0);
 }
 
-test "capture: an assignment to a captured parameter is checked" {
+test "assignment: a let is checked against its declared type" {
+    // p16_ctrl.ts. The parser refuses an assignment to a parameter (ZTS068),
+    // so p16_param_assign.ts no longer reaches this check.
     const source =
-        \\function run(x: string, input: string | undefined): number {
-        \\  const f = (): number => {
-        \\    x = VALUE;
-        \\    return 1;
-        \\  };
-        \\  return f();
-        \\}
-    ;
-    try expectTypeMismatches(withMarker(source, "VALUE", "input"), 1);
-    try expectTypeMismatches(withMarker(source, "VALUE", "\"b\""), 0);
-}
-
-test "assignment: a parameter is checked against its declared type" {
-    // p16_param_assign.ts. The assignment arm read `binding_types`, which holds
-    // no parameter, so the check was skipped.
-    const source =
-        \\function run(x: string, input: string | undefined): number {
+        \\function run(input: string | undefined): number {
+        \\  let x: string = "a";
         \\  x = VALUE;
         \\  return 1;
         \\}
     ;
     try expectTypeMismatches(withMarker(source, "VALUE", "input"), 1);
     try expectTypeMismatches(withMarker(source, "VALUE", "\"b\""), 0);
-    // Control p16_ctrl.ts: a `let` with the same declared type.
-    try expectTypeMismatches(
-        \\function run(input: string | undefined): number {
-        \\  let x: string = "a";
-        \\  x = input;
-        \\  return 1;
-        \\}
-    , 1);
 }
 
 /// Replace the first `marker` in `source` with `value`.

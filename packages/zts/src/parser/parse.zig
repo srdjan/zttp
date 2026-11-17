@@ -5008,8 +5008,13 @@ pub const Parser = struct {
         }
         if (self.nodes.getTag(target) != .identifier) return;
         const binding = ir.IrView.fromIRStore(&self.nodes, &self.constants).getBinding(target) orelse return;
-        if (self.scopes.isConstBinding(binding.name_atom)) {
+        const declared = self.scopes.nearestBinding(binding.name_atom) orelse return;
+        if (declared.is_const) {
             self.errors.addError(.const_assignment, self.nodes.getLoc(target), "this name is declared `const` and cannot be assigned");
+            return error.ParseError;
+        }
+        if (declared.kind == .parameter) {
+            self.errors.addError(.parameter_assignment, self.nodes.getLoc(target), "a parameter cannot be assigned");
             return error.ParseError;
         }
     }
