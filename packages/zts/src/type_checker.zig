@@ -9338,7 +9338,7 @@ fn recordWithStringField(pool: *TypePool, allocator: std.mem.Allocator, name: []
 }
 
 test "narrowing: a bare boolean discriminant read, and its negation" {
-    // The Result idiom is written `if (!r.ok) return ...` at least as often as
+    // The Result idiom is written `if (!r.ok) { return ...; }` at least as often as
     // it is written `r.ok === false`, and only the second form narrowed.
     //
     // The union members are written inline rather than as two named aliases.

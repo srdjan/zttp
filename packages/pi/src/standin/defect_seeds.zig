@@ -95,7 +95,7 @@ const clean_checked_result =
     \\
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const result = validateJson("item", req.body ?? "");
-    \\  if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
+    \\  if (!result.ok) { return Response.json({ error: result.error }, { status: 400 }); }
     \\  const data = result.value;
     \\  return Response.json({ data: data });
     \\}
@@ -107,7 +107,7 @@ const clean_checked_optional =
     \\
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const appName = env("APP_NAME");
-    \\  if (appName === undefined) return Response.json({ error: "missing value" }, { status: 400 });
+    \\  if (appName === undefined) { return Response.json({ error: "missing value" }, { status: 400 }); }
     \\  return Response.json({ appName: appName });
     \\}
     \\
@@ -628,7 +628,7 @@ const clean_open_schema =
     \\
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const result = validateJson("Order", req.body ?? "");
-    \\  if (!result.ok) return Response.json({ error: "invalid order" }, { status: 400 });
+    \\  if (!result.ok) { return Response.json({ error: "invalid order" }, { status: 400 }); }
     \\  const order = result.value;
     \\  return Response.json({ id: order.id });
     \\}
@@ -834,7 +834,7 @@ pub const seeds = [_]DefectSeed{
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("item", req.body ?? "");
-        \\  if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
+        \\  if (!result.ok) { return Response.json({ error: result.error }, { status: 400 }); }
         \\  const data = result.value;
         \\  return Response.json({ data: data, updated: true });
         \\}
@@ -861,7 +861,7 @@ pub const seeds = [_]DefectSeed{
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const appName = env("APP_NAME");
-        \\  if (appName === undefined) return Response.json({ error: "missing value" }, { status: 400 });
+        \\  if (appName === undefined) { return Response.json({ error: "missing value" }, { status: 400 }); }
         \\  return Response.json({ appName: appName, updated: true });
         \\}
         \\
@@ -1355,7 +1355,7 @@ pub const seeds = [_]DefectSeed{
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const name = env("APP_NAME");
-        \\  if (name === undefined) return Response.json({ error: "missing value" }, { status: 400 });
+        \\  if (name === undefined) { return Response.json({ error: "missing value" }, { status: 400 }); }
         \\  return Response.json({ n: name.length });
         \\}
         \\
@@ -2423,7 +2423,7 @@ pub const seeds = [_]DefectSeed{
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("Order", req.body ?? "");
-        \\  if (!result.ok) return Response.json({ error: "invalid order" }, { status: 400 });
+        \\  if (!result.ok) { return Response.json({ error: "invalid order" }, { status: 400 }); }
         \\  const order = result.value;
         \\  return Response.json({ id: order.id });
         \\}
@@ -2436,7 +2436,7 @@ pub const seeds = [_]DefectSeed{
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("Order", req.body ?? "");
-        \\  if (!result.ok) return Response.json({ error: "not an order" }, { status: 400 });
+        \\  if (!result.ok) { return Response.json({ error: "not an order" }, { status: 400 }); }
         \\  const order = result.value;
         \\  return Response.json({ id: order.id });
         \\}

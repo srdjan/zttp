@@ -15,8 +15,12 @@ function rangeProbe() {
   let total = 0;
 
   for (const i of range(8)) {
-    if (i === 1) continue;
-    if (i === 5) break;
+    if (i === 1) {
+      continue;
+    }
+    if (i === 5) {
+      break;
+    }
     seen = [seen, String(i)].join("");
     total = total + i;
   }
@@ -105,14 +109,30 @@ function forOfClosureProbe() {
 }
 
 function handler(req) {
-  if (req.url === "/spread") return spreadProbe();
-  if (req.url === "/range") return rangeProbe();
-  if (req.url === "/optional") return optionalProbe();
-  if (req.url === "/assert") return assertProbe(req);
-  if (req.url === "/closure") return closureProbe();
-  if (req.url === "/tail") return tailProbe();
-  if (req.url === "/helpers") return helpersProbe();
-  if (req.url === "/for-of-closure") return forOfClosureProbe();
+  if (req.url === "/spread") {
+    return spreadProbe();
+  }
+  if (req.url === "/range") {
+    return rangeProbe();
+  }
+  if (req.url === "/optional") {
+    return optionalProbe();
+  }
+  if (req.url === "/assert") {
+    return assertProbe(req);
+  }
+  if (req.url === "/closure") {
+    return closureProbe();
+  }
+  if (req.url === "/tail") {
+    return tailProbe();
+  }
+  if (req.url === "/helpers") {
+    return helpersProbe();
+  }
+  if (req.url === "/for-of-closure") {
+    return forOfClosureProbe();
+  }
 
   return Response.json({ error: "not found" }, { status: 404 });
 }

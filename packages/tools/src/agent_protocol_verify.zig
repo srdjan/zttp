@@ -603,7 +603,7 @@ test "verify answers only the properties it was asked about" {
         \\import { env } from "zttp:env";
         \\function handler(req: Request): Response {
         \\  const secret = env("SECRET");
-        \\  if (secret === undefined) return Response.json({ ok: true });
+        \\  if (secret === undefined) { return Response.json({ ok: true }); }
         \\  return Response.json({ k: secret });
         \\}
         \\

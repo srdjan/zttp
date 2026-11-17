@@ -543,7 +543,7 @@ test "insertTemplateBeforeLine preserves target indentation" {
             .plan_id = "rp_001",
             .intent_kind = "insert_guard_before_line",
             .line = 2,
-            .template = "if (!auth.ok) return Response.json({ error: auth.error }, { status: 400 });",
+            .template = "if (!auth.ok) { return Response.json({ error: auth.error }, { status: 400 }); }",
         },
     );
     defer testing.allocator.free(out);
@@ -643,7 +643,7 @@ test "execute returns typed failure for unsupported intent" {
 
 test "execute dry-runs a source-backed guard insertion" {
     const input =
-        \\{"path":"handler.ts","source":"function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const data = auth.value;\n  return Response.json({ data: data });\n}","plan":{"id":"rp_001","edit_intent":{"kind":"insert_guard_before_line","line":2,"column":14,"template":"if (!auth.ok) return Response.json({ error: auth.error }, { status: 400 });"}}}
+        \\{"path":"handler.ts","source":"function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const data = auth.value;\n  return Response.json({ data: data });\n}","plan":{"id":"rp_001","edit_intent":{"kind":"insert_guard_before_line","line":2,"column":14,"template":"if (!auth.ok) { return Response.json({ error: auth.error }, { status: 400 }); }"}}}
     ;
     var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
@@ -704,7 +704,7 @@ test "census: the source that a repair template yields passes the real check" {
         .{
             .name = "check_result_before_value/default_guard",
             .goals = &.{},
-            .inserted = "if (!result.ok) return Response.json({ error: result.error }, { status: 400 });",
+            .inserted = "if (!result.ok) { return Response.json({ error: result.error }, { status: 400 }); }",
             .source =
             \\import { parseJson } from "zttp:json";
             \\
@@ -718,7 +718,7 @@ test "census: the source that a repair template yields passes the real check" {
         .{
             .name = "check_result_before_value/error_on_ok_path",
             .goals = &.{},
-            .inserted = "if (r.ok) return Response.json({ ok: true });",
+            .inserted = "if (r.ok) { return Response.json({ ok: true }); }",
             .source =
             \\import { parseJson } from "zttp:json";
             \\
@@ -734,7 +734,7 @@ test "census: the source that a repair template yields passes the real check" {
         .{
             .name = "narrow_optional_before_use/named_guard",
             .goals = &.{},
-            .inserted = "if (first === undefined) return Response.json({ error: \"missing value\" }, { status: 400 });",
+            .inserted = "if (first === undefined) { return Response.json({ error: \"missing value\" }, { status: 400 }); }",
             .source =
             \\function handler(req: Request): Proof<Response, "deterministic"> {
             \\  const xs: string[] = ["a"];

@@ -5685,7 +5685,7 @@ test "a status test that is not the complement of ok records no fork and takes i
             status_prefix,
             "function handler(req) {\n  const res = fetch(\"https://api.example.com/a\");\n  if (",
             row.expr,
-            ") return Response.text(\"taken\", { status: 502 });\n  return Response.text(\"ok\");\n}\n",
+            ") { return Response.text(\"taken\", { status: 502 }); }\n  return Response.text(\"ok\");\n}\n",
         });
         defer std.testing.allocator.free(source);
         var fixture = try generateFixture(std.testing.allocator, source);

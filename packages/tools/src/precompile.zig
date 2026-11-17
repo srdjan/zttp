@@ -2539,7 +2539,7 @@ const structural_rows = [_]StructuralRow{
     \\import { jwtVerify } from "zttp:auth";
     \\export function f(): string {
     \\  const result = jwtVerify("token", "secret");
-    \\  if (!result.ok) return "no";
+    \\  if (!result.ok) { return "no"; }
     \\  return "yes";
     \\}
     \\
@@ -2548,7 +2548,7 @@ const structural_rows = [_]StructuralRow{
     \\import { fetch } from "zttp:fetch";
     \\export function f(): string {
     \\  const result = fetch("https://example.com");
-    \\  if (!result.ok) return "no";
+    \\  if (!result.ok) { return "no"; }
     \\  return "yes";
     \\}
     \\
@@ -2723,7 +2723,7 @@ fn graphDependencyFixture(dep_source: []const u8) !CompileGraphFixture {
 test "compileHandler graph refuses a dependency that fails the boolean check" {
     var fixture = try graphDependencyFixture(
         \\export function value(): number {
-        \\  if (5) return 1;
+        \\  if (5) { return 1; }
         \\  return 2;
         \\}
         \\
@@ -2889,7 +2889,7 @@ test "compileHandler graph refuses an entry that fails the boolean check" {
     const entry_source =
         \\import { value } from "./dep.ts";
         \\export function handler(req: Request): Response {
-        \\  if (5) return Response.text("five");
+        \\  if (5) { return Response.text("five"); }
         \\  return Response.text(String(value()));
         \\}
         \\
@@ -3665,7 +3665,7 @@ test "compileHandler preserves fanout order shared dependencies and imported rou
         \\const routes = { "GET /shared": status };
         \\export function shared(req: Request): Response {
         \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
+        \\  if (found !== undefined) { return found.handler(req); }
         \\  return Response.text("missing", { status: 404 });
         \\}
         \\
@@ -3822,7 +3822,7 @@ test "compileHandler emits result_unsafe counterexample when jwtVerify result is
         \\
         \\function handler(req: Request): Response {
         \\  const token = parseBearer(req.headers.get("authorization") ?? "");
-        \\  if (token === undefined) return Response.json({ error: "no token" }, { status: 401 });
+        \\  if (token === undefined) { return Response.json({ error: "no token" }, { status: 401 }); }
         \\  const result = jwtVerify(token, "secret");
         \\  return Response.json({ user: result.value });
         \\}
@@ -3854,9 +3854,9 @@ test "compileHandler projects verifier properties only when verification runs" {
         \\
         \\function handler(req: Request): Response {
         \\  const token = parseBearer(req.headers.get("authorization") ?? "");
-        \\  if (token === undefined) return Response.text("no token", { status: 401 });
+        \\  if (token === undefined) { return Response.text("no token", { status: 401 }); }
         \\  const result = jwtVerify(token, "secret");
-        \\  if (!result.ok) return Response.text(result.error, { status: 401 });
+        \\  if (!result.ok) { return Response.text(result.error, { status: 401 }); }
         \\  const name = env("NAME") ?? "world";
         \\  return Response.text(name);
         \\}

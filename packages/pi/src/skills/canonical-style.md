@@ -202,7 +202,7 @@ if (user === undefined) {
 return Response.text(user.name);
 ```
 
-Bind an index read to a `const` first: `const first = ps[0];`, then `if (first === undefined) return ...;`. The check does not cover a read on an `unknown` value, `req.headers`, `req.query`, `req.params`, or a `null` value.
+Bind an index read to a `const` first: `const first = ps[0];`, then `if (first === undefined) { return ...; }`. The check does not cover a read on an `unknown` value, `req.headers`, `req.query`, `req.params`, or a `null` value.
 
 ## Reading a parsed JSON value (ZTS201)
 

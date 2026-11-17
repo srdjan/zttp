@@ -796,14 +796,14 @@ test "simulate preserves sibling module proof context" {
     const before =
         \\import { apiToken, displayName } from "./lib/settings.ts";
         \\function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "retry_safe" | "idempotent" | "state_isolated" | "no_secret_leakage"> {
-        \\  if (apiToken() === undefined) return Response.json({ error: "unconfigured" }, { status: 503 });
+        \\  if (apiToken() === undefined) { return Response.json({ error: "unconfigured" }, { status: 503 }); }
         \\  return hole();
         \\}
     ;
     const after =
         \\import { apiToken, displayName } from "./lib/settings.ts";
         \\function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "retry_safe" | "idempotent" | "state_isolated" | "no_secret_leakage"> {
-        \\  if (apiToken() === undefined) return Response.json({ error: "unconfigured" }, { status: 503 });
+        \\  if (apiToken() === undefined) { return Response.json({ error: "unconfigured" }, { status: 503 }); }
         \\  return Response.json({ name: displayName() });
         \\}
     ;

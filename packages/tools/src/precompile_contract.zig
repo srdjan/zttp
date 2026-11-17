@@ -1046,7 +1046,7 @@ test "buildTestContractForSource keeps decodeQuery schemas out of request bodies
         \\
         \\export function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
+        \\  if (found !== undefined) { return found.handler(req); }
         \\  return Response.json({ error: "not found" }, { status: 404 });
         \\}
     ;
@@ -1279,7 +1279,7 @@ test "contract-only extraction without source types preserves verifier propertie
     const source =
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
-        \\  if (5) return Response.text(jwtVerify("token", "secret").value);
+        \\  if (5) { return Response.text(jwtVerify("token", "secret").value); }
         \\  return Response.text(process.env.NAME);
         \\}
     ;

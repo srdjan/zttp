@@ -1102,7 +1102,7 @@ fn appendRouteHandler(
         try out.print(
             allocator,
             "    const body = validateJson(\"{s}\", req.body);\n" ++
-                "    if (!body.ok) return Response.json({{ errors: body.errors }}, {{ status: 400 }});\n" ++
+                "    if (!body.ok) {{ return Response.json({{ errors: body.errors }}, {{ status: 400 }}); }}\n" ++
                 "    return Response.json({{ ok: true, data: body.value }}, {{ status: {d} }});\n",
             .{ schema, spec.status },
         );

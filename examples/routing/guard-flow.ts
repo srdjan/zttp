@@ -17,17 +17,18 @@ function answerOptions(req: Request): Response | undefined {
 function requireAuth(req: Request): Response | undefined {
   const header = req.headers.authorization ?? "";
   const token = parseBearer(header);
-  if (token === undefined) return Response.json({ error: "unauthorized" }, { status: 401 });
+  if (token === undefined) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
   const secret = env("JWT_SECRET");
-  if (
-    secret === undefined
-  ) return Response.json({ error: "server misconfigured" }, { status: 500 });
+  if (secret === undefined) {
+    return Response.json({ error: "server misconfigured" }, { status: 500 });
+  }
 
   const result = jwtVerify(token, secret);
-  if (!result.ok) return Response.json(
-    { error: "forbidden" },
-    { status: 403 },
-  );
+  if (!result.ok) {
+    return Response.json({ error: "forbidden" }, { status: 403 });
+  }
 }
 
 // Route handlers

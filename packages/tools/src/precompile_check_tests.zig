@@ -1007,7 +1007,7 @@ test "holes: each site reports the properties its own function has not discharge
         \\}
         \\
         \\function handler(req: Request): Response {
-        \\  if (req.method === "GET") return Response.json({ id: mint() });
+        \\  if (req.method === "GET") { return Response.json({ id: mint() }); }
         \\  return hole();
         \\}
     ;
@@ -3483,7 +3483,7 @@ fn routedPropertySource(allocator: std.mem.Allocator, probe: RoutedPropertyProbe
         "const routes = {{ \"GET /probe\": route }};\n" ++
         "function handler(req: Request): Proof<Response, \"{s}\"> {{\n" ++
         "const found = routerMatch(routes, req);\n" ++
-        "if (found === undefined) return Response.text(\"not found\", {{ status: 404 }});\n" ++
+        "if (found === undefined) {{ return Response.text(\"not found\", {{ status: 404 }}); }}\n" ++
         "return found.handler(req);\n}}\n", .{ probe.imports, probe.globals, probe.body, annotation });
 }
 
@@ -3503,7 +3503,7 @@ fn routedProbeHolds(comptime property: []const u8, result: CheckResult) !bool {
 test "router property census observes direct and routed violations for every obligation" {
     const allocator = std.testing.allocator;
     const probes = [_]RoutedPropertyProbe{
-        .{ .property = "response_total", .proof_property = .response_total, .body = "if (req.method === \"GET\") return Response.text(\"ok\");" },
+        .{ .property = "response_total", .proof_property = .response_total, .body = "if (req.method === \"GET\") { return Response.text(\"ok\"); }" },
         .{ .property = "result_safe", .proof_property = .results_checked, .imports = "import { jwtVerify } from \"zttp:auth\";", .body = "const result = jwtVerify(req.url, \"secret\"); return Response.json({ claims: result.value });" },
         .{ .property = "state_isolated", .proof_property = .state_isolated, .globals = "let counter: number = 0;", .body = "counter = counter + 1; return Response.json({ counter: counter });" },
         .{ .property = "deterministic", .proof_property = .deterministic, .body = "return Response.json({ now: Date.now() });" },
@@ -3514,7 +3514,7 @@ test "router property census observes direct and routed violations for every obl
         .{ .property = "input_validated", .flow_property = .input_validated, .imports = "import { fetch } from \"zttp:fetch\";", .body = "fetch(\"https://api.example.com/collect\", { body: req.body ?? \"\" }); return Response.text(\"ok\");" },
         .{ .property = "pii_contained", .flow_property = .pii_contained, .imports = "import { fetch } from \"zttp:fetch\";", .body = "fetch(\"https://example.com\", { method: \"POST\", body: req.url }); return Response.text(\"ok\");" },
         .{ .property = "injection_safe", .flow_property = .injection_safe, .body = "return Response.html(req.url);" },
-        .{ .property = "fault_covered", .imports = "import { jwtVerify } from \"zttp:auth\";", .body = "const result = jwtVerify(req.url, \"secret\"); if (!result.ok) return Response.text(\"accepted failure\", { status: 200 }); return Response.text(\"ok\");" },
+        .{ .property = "fault_covered", .imports = "import { jwtVerify } from \"zttp:auth\";", .body = "const result = jwtVerify(req.url, \"secret\"); if (!result.ok) { return Response.text(\"accepted failure\", { status: 200 }); } return Response.text(\"ok\");" },
         .{ .property = "optional_safe", .imports = "import { env } from \"zttp:env\";", .body = "const value = env(\"HOME\"); return Response.json({ length: value.length });" },
     };
     var proof_observed = std.enums.EnumSet(pcc.proof_system.Property).empty;
@@ -3606,7 +3606,7 @@ test "router public checks prove clean routes and fail closed on unresolved disp
         \\routes["GET /probe"] = route;
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -10796,7 +10796,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\structural R = { ok: boolean; value?: P; error?: string };
     \\function other(): number {
     \\  const r = parseJson("{}");
-    \\  if (!r.ok) return 0;
+    \\  if (!r.ok) { return 0; }
     \\  return 1;
     \\}
     \\function handler(req: Request): Response {
@@ -10819,7 +10819,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\structural N = { first: string };
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  return match (parsed.value) {
     \\    when { name: n }: Response.json({ a: n.first })
     \\    default: Response.json({ a: "none" })
@@ -10830,7 +10830,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  return match (parsed.value) {
     \\    when { name: { first: f } }: Response.json({ a: f.len })
     \\    default: Response.json({ a: "none" })
@@ -10841,7 +10841,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  return match (parsed.value) {
     \\    when { name }: Response.json({ a: name.first })
     \\    default: Response.json({ a: "none" })
@@ -10852,7 +10852,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  return match (parsed.value) {
     \\    when [{ name: n }]: Response.json({ a: n.len })
     \\    default: Response.json({ a: "none" })
@@ -10908,7 +10908,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     .{ .name = "d5_requestjson", .expect = "ZTS201@5,ZTS201@5", .source =
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
     \\  return Response.json({ isd: isDict(f), idxUndef: f["a"] === undefined, memUndef: f.a === undefined });
     \\}
@@ -10990,7 +10990,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     .{ .name = "n13b_helper_guard_proof", .expect = "clean", .source =
     \\structural P = { age: number };
     \\function f(p: P | undefined): number {
-    \\  if (p === undefined) return 0;
+    \\  if (p === undefined) { return 0; }
     \\  return p.age;
     \\}
     \\function handler(req: Request): Proof<Response, "optional_safe"> {
@@ -11011,7 +11011,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     .{ .name = "n16_req_body_guard", .expect = "clean", .source =
     \\function handler(req: Request): Response {
     \\  const b = req.body;
-    \\  if (b === undefined) return Response.json({ a: 0 });
+    \\  if (b === undefined) { return Response.json({ a: 0 }); }
     \\  return Response.json({ a: b.length });
     \\}
     },
@@ -11036,7 +11036,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
-    \\  if (p === undefined) return Response.json({ a: 0 });
+    \\  if (p === undefined) { return Response.json({ a: 0 }); }
     \\  const f = (): number => p.age;
     \\  return Response.json({ a: f() });
     \\}
@@ -11082,7 +11082,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\structural P = { age: number };
     \\function handler(req: Request): Response {
     \\  const p: P | undefined = { age: 1 };
-    \\  if (p === undefined) return Response.json({ a: 0 });
+    \\  if (p === undefined) { return Response.json({ a: 0 }); }
     \\  return Response.json({ a: p.age });
     \\}
     },
@@ -11118,7 +11118,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\    when undefined: 0
     \\    default: 1
     \\  };
-    \\  if (p === undefined) return Response.json({ a: a });
+    \\  if (p === undefined) { return Response.json({ a: a }); }
     \\  return Response.json({ a: a, b: p.age });
     \\}
     },
@@ -11169,7 +11169,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\function mk(): R { return { ok: false, error: "x" }; }
     \\function handler(req: Request): Response {
     \\  const r = mk();
-    \\  if (!r.ok) return Response.json({ e: r.error }, { status: 400 });
+    \\  if (!r.ok) { return Response.json({ e: r.error }, { status: 400 }); }
     \\  return Response.json({ a: r.value.age });
     \\}
     },
@@ -11179,7 +11179,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\function mk(): R { return { ok: false, error: "x" }; }
     \\function handler(req: Request): Response {
     \\  const r = mk();
-    \\  if (!r.ok) return Response.json({ e: r.error }, { status: 400 });
+    \\  if (!r.ok) { return Response.json({ e: r.error }, { status: 400 }); }
     \\  const v: P = r.value;
     \\  return Response.json({ a: v.age });
     \\}
@@ -11199,9 +11199,9 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\import { dictGet } from "zttp:collections";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{\"a\":1}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "nd" }, { status: 502 }); }
     \\  const v = dictGet(f, "zz");
     \\  return Response.json({ a: v.age });
     \\}
@@ -11219,11 +11219,11 @@ const absent_read_dict = [_]AbsentReadCase{
     \\import { dictGet } from "zttp:collections";
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: parsed.error.kind }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: parsed.error.kind }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "not_dict" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "not_dict" }, { status: 502 }); }
     \\  const c = dictGet(f, "b");
-    \\  if (!isDict(c)) return Response.json({ error: "no_b" }, { status: 502 });
+    \\  if (!isDict(c)) { return Response.json({ error: "no_b" }, { status: 502 }); }
     \\  return Response.json({ a: dictGet(f, "a"), c: dictGet(c, "c") });
     \\}
     },
@@ -11231,9 +11231,9 @@ const absent_read_dict = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "nd" }, { status: 502 }); }
     \\  const k = "a";
     \\  return Response.json({ v: f[k] });
     \\}
@@ -11242,9 +11242,9 @@ const absent_read_dict = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "nd" }, { status: 502 }); }
     \\  return Response.json({ v: f["a"] ?? 0 });
     \\}
     },
@@ -11252,9 +11252,9 @@ const absent_read_dict = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "nd" }, { status: 502 }); }
     \\  return Response.json({ v: f.b.c });
     \\}
     },
@@ -11262,9 +11262,9 @@ const absent_read_dict = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "nd" }, { status: 502 }); }
     \\  const rec = { d: f, n: 1 };
     \\  return Response.json({ v: rec.d.a, n: rec.n });
     \\}
@@ -11282,9 +11282,9 @@ const absent_read_dict = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "nd" }, { status: 502 }); }
     \\  const d = req.method === "GET" ? f : undefined;
     \\  return Response.json({ v: d?.a });
     \\}
@@ -11293,11 +11293,11 @@ const absent_read_dict = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "nd" }, { status: 502 }); }
     \\  const d = req.method === "GET" ? f : undefined;
-    \\  if (d === undefined) return Response.json({ v: 0 });
+    \\  if (d === undefined) { return Response.json({ v: 0 }); }
     \\  return Response.json({ v: d.a });
     \\}
     },
@@ -11305,9 +11305,9 @@ const absent_read_dict = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "nd" }, { status: 502 }); }
     \\  return Response.json({ v: f["a"] === undefined ? "absent" : "present" });
     \\}
     },
@@ -11316,14 +11316,14 @@ const absent_read_dict = [_]AbsentReadCase{
     \\function handler(req: Request): Response {
     \\  const d: Dict<string, P> = {};
     \\  const p = d["k"];
-    \\  if (p === undefined) return Response.json({ a: 0 });
+    \\  if (p === undefined) { return Response.json({ a: 0 }); }
     \\  return Response.json({ a: p.age });
     \\}
     },
     .{ .name = "n30_unknown_isdict", .expect = "ZTS201@4", .source =
     \\function handler(req: Request): Response {
     \\  const f: unknown = req.json();
-    \\  if (!isDict(f)) return Response.json({ error: "bad" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "bad" }, { status: 502 }); }
     \\  return Response.json({ a: f.latitude });
     \\}
     },
@@ -11337,36 +11337,36 @@ const absent_read_dict = [_]AbsentReadCase{
     .{ .name = "q30_isdict_member_vs_index", .expect = "ZTS201@4,ZTS201@4,ZTS201@4", .source =
     \\function handler(req: Request): Response {
     \\  const f: unknown = req.json();
-    \\  if (!isDict(f)) return Response.json({ error: "bad" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "bad" }, { status: 502 }); }
     \\  return Response.json({ a: f.latitude, b: f["latitude"], c: f.current.time });
     \\}
     },
     .{ .name = "q34_requestjson_isdict_runtime", .expect = "ZTS201@6,ZTS201@6", .source =
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "not_dict" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "not_dict" }, { status: 502 }); }
     \\  return Response.json({ t: f.current.time, lat: f.latitude });
     \\}
     },
     .{ .name = "q34b_requestjson_isdict_index", .expect = "ZTS201@6,ZTS201@8,ZTS605@8", .source =
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "not_dict" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "not_dict" }, { status: 502 }); }
     \\  const c = f["current"];
-    \\  if (!isDict(c)) return Response.json({ error: "no_current" }, { status: 502 });
+    \\  if (!isDict(c)) { return Response.json({ error: "no_current" }, { status: 502 }); }
     \\  return Response.json({ t: c["time"], lat: f["latitude"] });
     \\}
     },
     .{ .name = "q35_dict_contents", .expect = "ZTS201@6,ZTS201@6,ZTS201@6", .source =
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "not_dict" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "not_dict" }, { status: 502 }); }
     \\  return Response.json({ a: f["latitude"], b: f["current"], c: isDict(f["current"]) });
     \\}
     },
@@ -11374,9 +11374,9 @@ const absent_read_dict = [_]AbsentReadCase{
     \\import { dictGet } from "zttp:collections";
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "not_dict" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "not_dict" }, { status: 502 }); }
     \\  return Response.json({ a: dictGet(f, "latitude"), b: f["latitude"] });
     \\}
     },
@@ -11391,9 +11391,9 @@ const absent_read_dict = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const f = parsed.value;
-    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  if (!isDict(f)) { return Response.json({ error: "nd" }, { status: 502 }); }
     \\  return Response.json({ v: f.b.c });
     \\}
     },
@@ -11407,7 +11407,7 @@ const absent_read_json_value = [_]AbsentReadCase{
     .{ .name = "requestjson_member", .expect = "ZTS201@4", .source =
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  return Response.json({ a: parsed.value.name });
     \\}
     },
@@ -11415,14 +11415,14 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  return Response.json({ a: parsed.value["name"] });
     \\}
     },
     .{ .name = "requestjson_optional_chain", .expect = "ZTS201@5", .source =
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const v = parsed.value;
     \\  return Response.json({ a: v?.name });
     \\}
@@ -11431,7 +11431,7 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const v = parsed.value;
     \\  const k = "name";
     \\  return Response.json({ a: v[k] });
@@ -11440,7 +11440,7 @@ const absent_read_json_value = [_]AbsentReadCase{
     .{ .name = "requestjson_nested_member", .expect = "ZTS201@5", .source =
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const v = parsed.value;
     \\  return Response.json({ a: v.a.b });
     \\}
@@ -11449,7 +11449,7 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) return Response.json({ error: parsed.error.kind }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: parsed.error.kind }, { status: 400 }); }
     \\  return Response.json({ a: parsed.value.name });
     \\}
     },
@@ -11457,7 +11457,7 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  return Response.json({ a: parsed.value.name.first });
     \\}
     },
@@ -11465,7 +11465,7 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\import { parseJsonBytes } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJsonBytes(requestBody(req));
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  return Response.json({ a: parsed.value.name });
     \\}
     },
@@ -11474,16 +11474,16 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\import { dictGet } from "zttp:collections";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJsonBytes(requestBody(req));
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const v = parsed.value;
-    \\  if (!isDict(v)) return Response.json({ error: "not_dict" }, { status: 400 });
+    \\  if (!isDict(v)) { return Response.json({ error: "not_dict" }, { status: 400 }); }
     \\  return Response.json({ a: dictGet(v, "name") });
     \\}
     },
     .{ .name = "json_value_in_ternary_union", .expect = "ZTS201@7", .source =
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const other: string = "x";
     \\  const flag = req.method === "GET";
     \\  const v = flag ? parsed.value : other;
@@ -11493,7 +11493,7 @@ const absent_read_json_value = [_]AbsentReadCase{
     .{ .name = "json_value_or_undefined", .expect = "ZTS201@5", .source =
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const v = req.method === "GET" ? parsed.value : undefined;
     \\  return Response.json({ a: v.name });
     \\}
@@ -11502,7 +11502,7 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\structural R = { n: number };
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const r: R = { n: 1 };
     \\  const v = req.method === "GET" ? r : parsed.value;
     \\  return Response.json({ a: v.n });
@@ -11522,9 +11522,9 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\import { dictGet } from "zttp:collections";
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const v = parsed.value;
-    \\  if (!isDict(v)) return Response.json({ error: "not_dict" }, { status: 400 });
+    \\  if (!isDict(v)) { return Response.json({ error: "not_dict" }, { status: 400 }); }
     \\  return Response.json({ a: dictGet(v, "name") });
     \\}
     },
@@ -11532,9 +11532,9 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Response {
     \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const v = parsed.value;
-    \\  if (typeof v === "string") return Response.json({ a: v.length });
+    \\  if (typeof v === "string") { return Response.json({ a: v.length }); }
     \\  return Response.json({ a: 0 });
     \\}
     },
@@ -11543,9 +11543,9 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\schemaCompile("todo", "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"}},\"required\":[\"title\"]}");
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  const checked = validateJson("todo", JSON.stringify(parsed.value));
-    \\  if (!checked.ok) return Response.json({ error: "invalid" }, { status: 400 });
+    \\  if (!checked.ok) { return Response.json({ error: "invalid" }, { status: 400 }); }
     \\  return Response.json({ a: checked.value.title });
     \\}
     },
@@ -11553,7 +11553,7 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\import { decodeJson } from "zttp:decode";
     \\function handler(req: Request): Response {
     \\  const decoded = decodeJson("todo", "{}");
-    \\  if (!decoded.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  if (!decoded.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
     \\  return Response.json({ a: decoded.value.title });
     \\}
     },
@@ -11561,7 +11561,7 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\import { jwtVerify } from "zttp:auth";
     \\function handler(req: Request): Response {
     \\  const r = jwtVerify("token", "secret");
-    \\  if (!r.ok) return Response.json({ error: "bad" }, { status: 401 });
+    \\  if (!r.ok) { return Response.json({ error: "bad" }, { status: 401 }); }
     \\  return Response.json({ claims: r.value });
     \\}
     },
@@ -11569,7 +11569,7 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\import { fetch } from "zttp:fetch";
     \\function handler(req: Request): Response {
     \\  const res = fetch("https://api.example.com/a");
-    \\  if (!res.ok) return Response.json({ error: "upstream" }, { status: 502 });
+    \\  if (!res.ok) { return Response.json({ error: "upstream" }, { status: 502 }); }
     \\  const j = res.json();
     \\  return Response.json({ a: j.name });
     \\}
@@ -11584,7 +11584,7 @@ test "A3 part 2a: the ZTS201 repair on a parsed JSON value names decodeJson and 
     const source =
         \\function handler(req: Request): Response {
         \\  const parsed = requestJson(req);
-        \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+        \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
         \\  return Response.json({ a: parsed.value.name });
         \\}
     ;

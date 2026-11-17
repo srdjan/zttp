@@ -460,7 +460,7 @@ const t_route_direct =
     \\const routes = { "GET /leak": leak };
     \\function handler(req: Request): Claim<Response> {
     \\  const found = routerMatch(routes, req);
-    \\  if (found === undefined) return Response.json({ error: "nf" }, { status: 404 });
+    \\  if (found === undefined) { return Response.json({ error: "nf" }, { status: 404 }); }
     \\  return found.handler(req);
     \\}
 ;
@@ -476,7 +476,7 @@ const t_route_helper =
     \\const routes = { "GET /leak": leak };
     \\function handler(req: Request): Claim<Response> {
     \\  const found = routerMatch(routes, req);
-    \\  if (found === undefined) return Response.json({ error: "nf" }, { status: 404 });
+    \\  if (found === undefined) { return Response.json({ error: "nf" }, { status: 404 }); }
     \\  return found.handler(req);
     \\}
 ;
@@ -920,7 +920,7 @@ const hand_written = [_]Hand{
         \\schemaCompile("todo", "{\"type\":\"object\"}");
         \\function forward(body: string): number {
         \\  const parsed = validateJson("todo", body);
-        \\  if (!parsed.ok) return 0;
+        \\  if (!parsed.ok) { return 0; }
         \\  const r = fetch("https://api.example.com/x", { method: "POST", body: JSON.stringify(parsed.value) });
         \\  return 1;
         \\}
@@ -939,7 +939,7 @@ const hand_written = [_]Hand{
         \\schemaCompile("todo", "{\"type\":\"object\"}");
         \\function handler(req: Request): Claim<Response> {
         \\  const parsed = validateJson("todo", req.body ?? "");
-        \\  if (!parsed.ok) return Response.json({ ok: 0 });
+        \\  if (!parsed.ok) { return Response.json({ ok: 0 }); }
         \\  const r = fetch("https://api.example.com/x", { method: "POST", body: JSON.stringify(parsed.value) });
         \\  return Response.json({ ok: 1 });
         \\}
@@ -1122,7 +1122,7 @@ const hand_written = [_]Hand{
         \\function handler(req: Request): Claim<Response> {
         \\  const t = env("API_TOKEN") ?? "";
         \\  const parsed = validateJson("todo", t);
-        \\  if (!parsed.ok) return Response.json({ ok: 0 });
+        \\  if (!parsed.ok) { return Response.json({ ok: 0 }); }
         \\  const r = fetch("https://api.example.com/x", { method: "POST", body: JSON.stringify(parsed.value) });
         \\  return Response.json({ ok: 1 });
         \\}
@@ -1137,7 +1137,7 @@ const hand_written = [_]Hand{
         \\schemaCompile("todo", "{\"type\":\"object\"}");
         \\function forward(body: string): number {
         \\  const parsed = validateJson("todo", body);
-        \\  if (!parsed.ok) return 0;
+        \\  if (!parsed.ok) { return 0; }
         \\  const r = fetch("https://api.example.com/x", { method: "POST", body: JSON.stringify(parsed.value) });
         \\  return 1;
         \\}

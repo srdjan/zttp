@@ -231,7 +231,9 @@ if (val !== undefined) {
     sha256(val);
 }
 
-if (val === undefined) return Response.text("missing");
+if (val === undefined) {
+  return Response.text("missing");
+}
 // val is string here (early return pattern)
 ```
 

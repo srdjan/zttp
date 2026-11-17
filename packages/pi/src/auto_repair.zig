@@ -177,7 +177,7 @@ test "buildRetryBlock surfaces compiler templates and smallest witness" {
         \\{"ok":false,"plans":[
         \\{"id":"rp_001","kind":"check_result_before_value","target":{"line":5,"column":3},
         \\"edit_intent":{"kind":"insert_guard_before_line","line":5,"column":3,
-        \\"template":"if (!result.ok) return Response.json({ error: result.error }, { status: 400 });"}}
+        \\"template":"if (!result.ok) { return Response.json({ error: result.error }, { status: 400 }); }"}}
         \\],"witnesses":[
         \\{"id":"wit_001","property":"injection_safe","summary":"tainted body reaches sql",
         \\"request":{"method":"POST","url":"/items","has_auth_header":false},

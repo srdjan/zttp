@@ -11,7 +11,9 @@ structural WebhookPayload = {
 
 function verifyWebhook(body: string, signature: string): boolean {
   const secret = env("WEBHOOK_SECRET");
-  if (secret === undefined) return false;
+  if (secret === undefined) {
+    return false;
+  }
   const expected = ["sha256=", hmacSha256(secret, body)].join("");
   return expected === signature;
 }

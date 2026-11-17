@@ -320,7 +320,7 @@ test "insert guard intent preserves target indentation" {
         .plan_id = "rp_001",
         .intent_kind = "insert_guard_before_line",
         .line = 2,
-        .template = "if (!auth.ok) return Response.json({ error: auth.error }, { status: 400 });",
+        .template = "if (!auth.ok) { return Response.json({ error: auth.error }, { status: 400 }); }",
     });
     defer testing.allocator.free(out);
     try testing.expect(std.mem.indexOf(u8, out, "  if (!auth.ok)") != null);

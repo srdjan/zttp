@@ -5360,15 +5360,6 @@ test "a module-level function resolves only when it is the single fixed declarat
     defer assigned.deinit();
     try expectUnresolved(assigned.result, .identifier, .module_state_unmodeled);
 
-    // An unbraced declaration under an `if` runs only when the condition holds.
-    const conditional = try analyzeSource(
-        "if (false) function help(x) { return \"c\"; } function f(s) { return help(s); }",
-        "f",
-        &.{secret_value},
-    );
-    defer conditional.deinit();
-    try expectUnresolved(conditional.result, .identifier, .module_state_unmodeled);
-
     // A `let` arrow is not a fixed function.
     const mutable = try analyzeSource("let help = (x) => x; function f(s) { return help(s); }", "f", &.{secret_value});
     defer mutable.deinit();
@@ -9161,7 +9152,7 @@ test "pure AND predicates retain a constrained constructive branch" {
 }
 
 test "short circuit writes cannot lend another branch their data witness" {
-    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { let value = \"public\"; const ignored = req.method === \"POST\" && (() => { value = env(\"API_TOKEN\"); return true; })(); if (req.method !== \"POST\") return Response.text(value); return \"public\"; }");
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { let value = \"public\"; const ignored = req.method === \"POST\" && (() => { value = env(\"API_TOKEN\"); return true; })(); if (req.method !== \"POST\") { return Response.text(value); } return \"public\"; }");
     defer h.destroy();
     const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
     try testing.expect(!report.properties.no_secret_leakage);

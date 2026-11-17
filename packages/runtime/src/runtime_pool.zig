@@ -1447,7 +1447,7 @@ test "HandlerPool cached pattern dispatch transfers ownership without leaks" {
     const handler_code =
         \\function handler(request) {
         \\  const url = request.url;
-        \\  if (url === "/api/a") return Response.text("alpha");
+        \\  if (url === "/api/a") { return Response.text("alpha"); }
         \\  return Response.text("fallback");
         \\}
     ;

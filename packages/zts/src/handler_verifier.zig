@@ -145,7 +145,7 @@ pub const ResultShape = enum {
         return switch (self) {
             .unchecked_value => "check result.ok before accessing result.value:\n           if (result.ok) { ... result.value ... }",
             .unchecked_error => "read result.error after if (!result.ok), or write result.error ?? fallback",
-            .error_on_ok_path => "result.error is undefined when ok is true: read it after if (result.ok) return ..., or write result.error ?? fallback",
+            .error_on_ok_path => "result.error is undefined when ok is true: read it after if (result.ok) { return ...; }, or write result.error ?? fallback",
             .unrecognized_guard => "use exactly if (result.ok) or if (!result.ok) on the const bound to the Result call: === true, isOk(), isErr(), and match are not checks",
             .closure_read => "a check outside a closure does not reach it: check result.ok inside the closure before the read",
             .flat_guard => "a check inside such a statement covers nothing: check result.ok in an if statement before the statement",
@@ -3613,7 +3613,7 @@ test "ZTS303 guard inside a nested block does not clear the code after the block
     const bare = try routeVerifierCounts(result_import ++
         \\function handler(req) {
         \\  const result = jwtVerify("token", "key");
-        \\  if (req.method === "GET") { if (!result.ok) return Response.text("no"); }
+        \\  if (req.method === "GET") { if (!result.ok) { return Response.text("no"); } }
         \\  return Response.text(String(result.value));
         \\}
     );

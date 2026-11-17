@@ -521,20 +521,20 @@ pub fn concreteTemplate(
             // inserted line can repair gets a comment, which is valid code and
             // carries the advice to the next retry.
             if (plan.result_shape) |shape| switch (shape) {
-                .error_on_ok_path => return allocator.print("if ({s}.ok) return Response.json({{ ok: true }});", .{name_text}),
+                .error_on_ok_path => return allocator.print("if ({s}.ok) {{ return Response.json({{ ok: true }}); }}", .{name_text}),
                 .function_alias => return allocator.dupe(u8, "// call the Result function directly and bind the call to a const"),
                 .unbound_call => return allocator.dupe(u8, "// bind the call to a const, then check its ok before you read its value"),
                 .ambiguous_upvalue => return allocator.dupe(u8, "// give each Result binding in the file a unique name"),
                 .depth_limit => return allocator.dupe(u8, "// split the expression into const bindings"),
                 else => {},
             };
-            return allocator.print("if (!{s}.ok) return Response.json({{ error: {s}.error }}, {{ status: 400 }});", .{ name_text, name_text });
+            return allocator.print("if (!{s}.ok) {{ return Response.json({{ error: {s}.error }}, {{ status: 400 }}); }}", .{ name_text, name_text });
         },
         .narrow_optional_before_use => {
             // No name: an inserted line cannot guard a variable that does not
             // exist, so the template is a comment that carries the advice.
             const name_text = subject_name orelse return allocator.dupe(u8, "// bind the value to a const, then check it for undefined before you read it");
-            return allocator.print("if ({s} === undefined) return Response.json({{ error: \"missing value\" }}, {{ status: 400 }});", .{name_text});
+            return allocator.print("if ({s} === undefined) {{ return Response.json({{ error: \"missing value\" }}, {{ status: 400 }}); }}", .{name_text});
         },
         else => allocator.dupe(u8, plan.edit_intent.template),
     };
@@ -838,7 +838,7 @@ test "the expert tools agree with the production check on a public env name" {
     try testing.expect(unlisted.narrow_reports_witness);
 }
 
-const shape_guard = "if (!r.ok) return Response.json({ error: r.error }, { status: 400 });";
+const shape_guard = "if (!r.ok) { return Response.json({ error: r.error }, { status: 400 }); }";
 
 const plan_head =
     \\import { parseJson } from "zttp:json";
@@ -905,7 +905,7 @@ test "repair plan: an error read on the ok path gets an ok-first guard" {
         \\  }
         \\  return Response.text("no");
         \\}
-    , "Result.error is undefined on the ok path. Read it after if (result.ok) return ..., or write result.error ?? fallback.", "if (r.ok) return Response.json({ ok: true });");
+    , "Result.error is undefined on the ok path. Read it after if (result.ok) { return ...; }, or write result.error ?? fallback.", "if (r.ok) { return Response.json({ ok: true }); }");
 }
 
 test "repair plan: a comparison of ok with true gets ZTS620 and a Result plan before the verifier" {
@@ -915,7 +915,7 @@ test "repair plan: a comparison of ok with true gets ZTS620 and a Result plan be
         \\  }
         \\  return Response.text("no");
         \\}
-    , "ZTS620", "Replace this check with if (!result.ok) return ... . The proof does not accept === true, isOk(), isErr(), or match as a check.");
+    , "ZTS620", "Replace this check with if (!result.ok) { return ...; }. The proof does not accept === true, isOk(), isErr(), or match as a check.");
 }
 
 test "repair plan: a closure read gets a check inside the closure" {
@@ -960,7 +960,7 @@ test "repair plan: a Result method call gets ZTS100 and a Result plan before the
         \\  }
         \\  return Response.text("no");
         \\}
-    , "ZTS100", "Use result.ok. A Result has no methods, so replace the method call with if (!result.ok) return ... .");
+    , "ZTS100", "Use result.ok. A Result has no methods, so replace the method call with if (!result.ok) { return ...; }.");
 }
 
 test "repair plan: an alias asks for a check and result.value" {
@@ -1018,7 +1018,7 @@ test "repair plan: a match on a Result gets the failure guard" {
         \\  const v = match (r) { when { ok: true, value: x }: x default: 0 };
         \\  return Response.json({ v: v });
         \\}
-    , "Replace match with if (!result.ok) return ... , then read result.value.", shape_guard);
+    , "Replace match with if (!result.ok) { return ...; }, then read result.value.", shape_guard);
 }
 
 test "repair plan: an unbound call asks for a binding" {
@@ -1095,7 +1095,7 @@ test "a plan for an optional read on a named binding keeps the guard line" {
     const text = try text_buf.toOwnedSlice();
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "\"summary\":\"Narrow the optional value, provide a fallback, or return before using it.\"") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\"template\":\"if (appName === undefined) return Response.json({ error: \\\"missing value\\\" }, { status: 400 });\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"template\":\"if (appName === undefined) { return Response.json({ error: \\\"missing value\\\" }, { status: 400 }); }\"") != null);
 }
 
 test "repair plan: an unguarded read of a possibly undefined value gets ZTS309 and one plan" {
