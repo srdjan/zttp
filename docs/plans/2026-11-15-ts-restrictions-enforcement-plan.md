@@ -1052,11 +1052,17 @@ later.
   `exported-arrow-const` now target ZTS072 and stay salvaged. The skill
   text, the policy hash, and the stand-in seeds change, so U7 re-records
   the corpus. These findings stay open:
-  - A named closure stays expressible through an identity function:
-    `function id(g) { return g; }` and `const g = id(() => s);` are
-    legal. Whether Decision 4 should also refuse a function value that is
-    returned and bound to a name is an owner decision. Until then, the
-    audit must probe each site with this form before it deletes code.
+  - Decision 20 (open, owner): a local name can still hold a function
+    value. Probes on 2026-11-17 at e49cf29b passed parse, types, sound
+    mode, and strict mode for two forms: a capturing closure through an
+    identity function, `const tag = id((x: string): string => ...);`,
+    and an alias of a module-level function, `const tag = helper;`. The
+    flow census uses the first form for 145 probes. The options are (a)
+    refuse a local `const` or `let` whose type is a function type, with a
+    new restriction row; (b) accept both forms and document them; and (c)
+    defer to U6. The recommendation is (a), measured first, as the next
+    unit. Until the owner decides, the audit must probe each site with
+    both forms before it deletes code.
   - The audit unit of Decision 4 starts from this list of code that
     probably only a refused arrow reaches. The implementers named the sites
     from the deleted tests and did not confirm them:
