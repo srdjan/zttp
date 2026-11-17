@@ -3986,40 +3986,22 @@ test "readonly on an array alias survives to the resolved type" {
     try std.testing.expect(!pool.isReadonlyArray(env.resolveType("Items")));
 }
 
-test "functions on one line and nested functions of one name keep separate signatures" {
+test "a function declaration inside a function body is refused with ZTS071" {
     const allocator = std.testing.allocator;
     const source = "function a(x: number): number { function h(p: number): number { return p; } return h(x); }\n" ++
         "function b(): number { function h(p: number, q: number): number { return p + q; } return h(1, 2); }\n";
     var frontend: engine.source_frontend.DirectCheckSource = undefined;
     try frontend.initCompileInPlace(allocator, allocator, source, "owners.ts");
     defer frontend.deinit();
-    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
-    const parser = &frontend.parser;
-
-    var pool = TypePool.init(allocator);
-    defer pool.deinit(allocator);
-    var env = TypeEnv.init(allocator, &pool);
-    defer env.deinit();
-    try env.populateSourceTypes(.{ .direct = .{
-        .store = accepted.type_store,
-        .ir_view = accepted.ir_view,
-        .atoms = accepted.atoms,
-    } });
-
-    // Every function node finds its own signature: `a` and its `h` share a
-    // line, and the two `h` share a name.
-    var counts: [8]u8 = undefined;
-    var seen: usize = 0;
-    for (parser.nodes.tags.items, 0..) |tag, idx| {
-        if (tag != .function_expr) continue;
-        const reference = env.functionTypeRef(accepted.ir_view, @intCast(idx)) orelse return error.TestUnexpectedResult;
-        const sig = env.getFunctionSignature(reference) orelse return error.TestUnexpectedResult;
-        counts[seen] = sig.param_count;
-        seen += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 4), seen);
-    // Parse order is inner-first: a's h, a, b's h, b.
-    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 2, 0 }, counts[0..seen]);
+    try std.testing.expectEqual(.parser_refused, std.meta.activeTag(frontend.outcome().*));
+    const errors = frontend.parser.getProjectedErrors();
+    try std.testing.expectEqual(@as(usize, 2), errors.len);
+    try std.testing.expectEqualStrings("ZTS071", @import("diagnostic_catalog.zig").parserCode(errors[0].kind));
+    try std.testing.expectEqual(@as(u32, 1), errors[0].location.line);
+    try std.testing.expectEqual(@as(u32, 33), errors[0].location.column);
+    try std.testing.expectEqualStrings("ZTS071", @import("diagnostic_catalog.zig").parserCode(errors[1].kind));
+    try std.testing.expectEqual(@as(u32, 2), errors[1].location.line);
+    try std.testing.expectEqual(@as(u32, 24), errors[1].location.column);
 }
 
 const GrowthCountingAllocator = struct {
@@ -4314,10 +4296,10 @@ fn growthExpectFinalSignatures(
 
 const growth_source_plain =
     "function useNumber(value: number): number {\n" ++
-    "  inner(value);\n" ++
-    "  function inner(item: number): number { return item; }\n" ++
+    "  innerNumber(value);\n" ++
     "  return value;\n" ++
     "}\n" ++
+    "function innerNumber(item: number): number { return item; }\n" ++
     "function padding0(value: number): number { return value; }\n" ++
     "function padding1(value: number): number { return value; }\n" ++
     "function padding2(value: number): number { return value; }\n" ++
@@ -4327,20 +4309,20 @@ const growth_source_plain =
     "function padding6(value: number): number { return value; }\n" ++
     "function padding7(value: number): number { return value; }\n" ++
     "function useText(value: string): string {\n" ++
-    "  inner(value, \"\");\n" ++
-    "  function inner(item: string, suffix: string): string { return item; }\n" ++
+    "  innerText(value, \"\");\n" ++
     "  return value;\n" ++
     "}\n" ++
+    "function innerText(item: string, suffix: string): string { return item; }\n" ++
     "export function handler(req: Request): Response {\n" ++
     "  return Response.json({ number: useNumber(1), text: useText(\"x\") });\n" ++
     "}\n";
 
 const growth_source_reordered =
     "function useText(value: string): string {\n" ++
-    "  inner(value, \"\");\n" ++
-    "  function inner(item: string, suffix: string): string { return item; }\n" ++
+    "  innerText(value, \"\");\n" ++
     "  return value;\n" ++
     "}\n" ++
+    "function innerText(item: string, suffix: string): string { return item; }\n" ++
     "function padding0(value: number): number { return value; }\n" ++
     "function padding1(value: number): number { return value; }\n" ++
     "function padding2(value: number): number { return value; }\n" ++
@@ -4350,15 +4332,15 @@ const growth_source_reordered =
     "function padding6(value: number): number { return value; }\n" ++
     "function padding7(value: number): number { return value; }\n" ++
     "function useNumber(value: number): number {\n" ++
-    "  inner(value);\n" ++
-    "  function inner(item: number): number { return item; }\n" ++
+    "  innerNumber(value);\n" ++
     "  return value;\n" ++
     "}\n" ++
+    "function innerNumber(item: number): number { return item; }\n" ++
     "export function handler(req: Request): Response {\n" ++
     "  return Response.json({ number: useNumber(1), text: useText(\"x\") });\n" ++
     "}\n";
 
-const growth_source_same_line = "function useNumber(value: number): number {   inner(value);   function inner(item: number): number { return item; }   return value; } function padding0(value: number): number { return value; } function padding1(value: number): number { return value; } function padding2(value: number): number { return value; } function padding3(value: number): number { return value; } function padding4(value: number): number { return value; } function padding5(value: number): number { return value; } function padding6(value: number): number { return value; } function padding7(value: number): number { return value; } function useText(value: string): string {   inner(value, \"\");   function inner(item: string, suffix: string): string { return item; }   return value; } export function handler(req: Request): Response {   return Response.json({ number: useNumber(1), text: useText(\"x\") }); } ";
+const growth_source_same_line = "function useNumber(value: number): number {   innerNumber(value);   return value; } function innerNumber(item: number): number { return item; } function padding0(value: number): number { return value; } function padding1(value: number): number { return value; } function padding2(value: number): number { return value; } function padding3(value: number): number { return value; } function padding4(value: number): number { return value; } function padding5(value: number): number { return value; } function padding6(value: number): number { return value; } function padding7(value: number): number { return value; } function useText(value: string): string {   innerText(value, \"\");   return value; } function innerText(item: string, suffix: string): string { return item; } export function handler(req: Request): Response {   return Response.json({ number: useNumber(1), text: useText(\"x\") }); } ";
 
 const GrowthCase = enum { plain, reordered, same_line };
 
@@ -4372,16 +4354,16 @@ fn growthSource(case: GrowthCase) []const u8 {
 
 // Recorded annotation events, including repeated events for the same signature.
 const growth_keys_plain = [_]u32{
-    18,  18,  76,  76,  151, 151, 210, 210, 269, 269, 328, 328, 387, 387,
-    446, 446, 505, 505, 564, 564, 622, 622, 684, 684, 684, 781, 781,
+    18,  18,  104, 104, 161, 161, 220, 220, 279, 279, 338, 338, 397, 397,
+    456, 456, 515, 515, 574, 574, 632, 632, 718, 718, 718, 797, 797,
 };
 const growth_keys_reordered = [_]u32{
-    16,  16,  78,  78,  78,  169, 169, 228, 228, 287, 287, 346, 346, 405,
-    405, 464, 464, 523, 523, 582, 582, 642, 642, 700, 700, 781, 781,
+    16,  16,  102, 102, 102, 175, 175, 234, 234, 293, 293, 352, 352, 411,
+    411, 470, 470, 529, 529, 588, 588, 648, 648, 734, 734, 797, 797,
 };
 const growth_keys_same_line = [_]u32{
-    18,  18,  76,  76,  151, 151, 210, 210, 269, 269, 328, 328, 387, 387,
-    446, 446, 505, 505, 564, 564, 622, 622, 684, 684, 684, 781, 781,
+    18,  18,  104, 104, 161, 161, 220, 220, 279, 279, 338, 338, 397, 397,
+    456, 456, 515, 515, 574, 574, 632, 632, 718, 718, 718, 797, 797,
 };
 
 fn growthEventKeys(case: GrowthCase) []const u32 {
@@ -4406,18 +4388,18 @@ fn growthExpectTraceSignatures(
 ) !void {
     const view = growthParserView(parser);
     const names = [_][]const u8{
-        if (case == .reordered) "useText" else "useNumber", "inner",
+        if (case == .reordered) "useText" else "useNumber", if (case == .reordered) "innerText" else "innerNumber",
         "padding0",                                         "padding1",
         "padding2",                                         "padding3",
         "padding4",                                         "padding5",
         "padding6",                                         "padding7",
-        if (case == .reordered) "useNumber" else "useText", "inner",
+        if (case == .reordered) "useNumber" else "useText", if (case == .reordered) "innerNumber" else "innerText",
         "handler",
     };
     try std.testing.expectEqual(@as(usize, 13), parser.type_store.function_signatures.items.len);
     try std.testing.expectEqual(@as(usize, 13), env.direct_fn_signatures.count());
-    try std.testing.expectEqual(@as(usize, 12), env.fn_sigs_by_name.count());
-    try std.testing.expectEqual(@as(usize, 12), env.source_fn_sigs_by_name.count());
+    try std.testing.expectEqual(@as(usize, 13), env.fn_sigs_by_name.count());
+    try std.testing.expectEqual(@as(usize, 13), env.source_fn_sigs_by_name.count());
     const event_keys = growthEventKeys(case);
     var event_index: usize = 0;
     for (parser.type_store.function_signatures.items, names, 0..) |record, name, index| {
@@ -4428,7 +4410,7 @@ fn growthExpectTraceSignatures(
         const reference = env.functionTypeRef(view, record.owner) orelse return error.TestUnexpectedResult;
         const actual = env.getFunctionSignature(reference) orelse return error.TestUnexpectedResult;
         const text_signature = if (case == .reordered) index < 2 else index == 10 or index == 11;
-        const param_count: usize = if (text_signature and std.mem.eql(u8, name, "inner")) 2 else 1;
+        const param_count: usize = if (std.mem.eql(u8, name, "innerText")) 2 else 1;
         var parameter_type = if (text_signature) env.pool.idx_string else env.pool.idx_number;
         var return_type = parameter_type;
         if (index == 12) {
@@ -4443,16 +4425,11 @@ fn growthExpectTraceSignatures(
         const params = [_]TypeIndex{ parameter_type, parameter_type };
         const expected = growthSignature(params[0..param_count], return_type);
         try growthExpectExactSignature(expected, actual);
-        if (!std.mem.eql(u8, name, "inner")) {
-            try growthExpectExactSignature(expected, env.getFnSigByName(name).?);
-            try growthExpectExactSignature(expected, env.source_fn_sigs_by_name.get(name).?);
-        }
+        try growthExpectExactSignature(expected, env.getFnSigByName(name).?);
+        try growthExpectExactSignature(expected, env.source_fn_sigs_by_name.get(name).?);
         event_index += param_count + 1;
     }
     try std.testing.expectEqual(event_keys.len, event_index);
-    const inner = env.getFnSigByName("inner") orelse return error.TestUnexpectedResult;
-    try growthExpectExactSignature(growthSignature(&.{env.pool.idx_number}, env.pool.idx_number), inner);
-    try growthExpectExactSignature(inner, env.source_fn_sigs_by_name.get("inner").?);
 }
 
 fn growthExpectTraceCase(case: GrowthCase) ![2]usize {
@@ -4470,13 +4447,10 @@ fn growthExpectTraceCase(case: GrowthCase) ![2]usize {
     direct_parser.setAtomTable(&direct_atoms);
     const direct_root = try direct_parser.parse();
     try growthExpectRuntime(&direct_parser, direct_root);
-    const allocation_shape: [5]usize = switch (case) {
-        // Parser scratch now retains one allocation through the parser's
-        // lifetime. Signature replay's capacity/order assertions below remain
-        // independent of this deliberately changed parser allocation shape.
-        .plain, .same_line => .{ 56, 0, 0, 10, 16505 },
-        .reordered => .{ 56, 0, 0, 10, 16489 },
-    };
+    // Parser scratch retains one allocation through the parser's lifetime.
+    // Signature replay's capacity/order assertions below remain independent of
+    // this parser allocation shape, which is the same for all three layouts.
+    const allocation_shape: [5]usize = .{ 55, 0, 0, 10, 16348 };
     try std.testing.expectEqual(allocation_shape, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);
 
@@ -4537,108 +4511,6 @@ test "direct signature replay preserves capacity and bucket order at two growth 
     try std.testing.expectEqual([2]usize{ 11, 23 }, plain);
     try std.testing.expectEqual([2]usize{ 12, 24 }, reordered);
     try std.testing.expectEqual([2]usize{ 11, 23 }, same_line);
-}
-
-test "direct signature replay retains exact nested generic function and same-line owners" {
-    const allocator = std.testing.allocator;
-    const source = "function outer<T extends number>(value: T): T { " ++
-        "function same(item: number): number { return item; } return value; } " ++
-        "function second<U extends string>(value: U): U { " ++
-        "function same(item: string): string { return item; } return value; }";
-    var direct_count = GrowthCountingAllocator.init(allocator);
-    var direct_atoms = AtomTable.init(direct_count.allocator());
-    defer direct_atoms.deinit();
-    var direct_parser = try engine.parser.JsParser.initAdmission(direct_count.allocator(), allocator, source, .compile);
-    defer direct_parser.deinit();
-    direct_parser.setAtomTable(&direct_atoms);
-    const direct_root = try direct_parser.parse();
-    try growthExpectRuntime(&direct_parser, direct_root);
-    try std.testing.expectEqual([5]usize{ 24, 0, 0, 2, 6022 }, direct_count.shape());
-    const direct_view = growthParserView(&direct_parser);
-    var direct_pool = TypePool.init(allocator);
-    defer direct_pool.deinit(allocator);
-    var direct_env = TypeEnv.init(allocator, &direct_pool);
-    defer direct_env.deinit();
-    try direct_env.populateSourceTypes(.{ .direct = .{
-        .store = &direct_parser.type_store,
-        .ir_view = direct_view,
-        .atoms = &direct_atoms,
-    } });
-    try std.testing.expectEqual(@as(usize, 4), direct_env.direct_fn_signatures.count());
-    try std.testing.expectEqual(@as(usize, 3), direct_env.fn_sigs_by_name.count());
-    try std.testing.expectEqual(@as(usize, 3), direct_env.source_fn_sigs_by_name.count());
-    try std.testing.expectEqual(@as(usize, 4), direct_parser.type_store.function_signatures.items.len);
-    var owners: [4]NodeIndex = undefined;
-    var repeated_same: [2]NodeIndex = undefined;
-    var same_count: usize = 0;
-    for (direct_parser.type_store.function_signatures.items, 0..) |record, index| {
-        owners[index] = record.owner;
-        const expected_offsets = [_]u32{ 32, 61, 150, 179 };
-        try std.testing.expectEqual(expected_offsets[index], direct_view.signatureOffset(record.owner).?);
-        const reference = direct_env.functionTypeRef(direct_view, record.owner) orelse return error.TestUnexpectedResult;
-        const signature = direct_env.getFunctionSignature(reference) orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqual(@as(u8, 1), signature.param_count);
-        if (index == 1 or index == 3) {
-            const expected_type = if (index == 1) direct_pool.idx_number else direct_pool.idx_string;
-            try growthExpectExactSignature(growthSignature(&.{expected_type}, expected_type), signature);
-        }
-        const function = direct_view.getFunction(record.owner) orelse return error.TestUnexpectedResult;
-        const name = TypeEnv.runtimeAtomName(&direct_atoms, function.name_atom);
-        if (name != null and std.mem.eql(u8, name.?, "same")) {
-            if (same_count >= repeated_same.len) return error.TestUnexpectedResult;
-            repeated_same[same_count] = record.owner;
-            same_count += 1;
-        }
-        try std.testing.expectEqual(@as(u32, 1), direct_view.getLoc(record.owner).?.line);
-    }
-    try std.testing.expectEqual(@as(usize, 2), same_count);
-    try std.testing.expect(repeated_same[0] != repeated_same[1]);
-    for (owners, 0..) |owner, index| {
-        for (owners[index + 1 ..]) |other| {
-            try std.testing.expect(owner != other);
-        }
-    }
-    const outer = direct_view.getFunction(owners[0]) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("outer", TypeEnv.runtimeAtomName(&direct_atoms, outer.name_atom).?);
-    try std.testing.expectEqual(engine.parser.NodeTag.block, direct_view.getTag(outer.body).?);
-    const outer_body = direct_view.getBlock(outer.body) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u16, 2), outer_body.stmts_count);
-    const inner_declaration = direct_view.getListIndex(outer_body.stmts_start, 0);
-    try std.testing.expectEqual(engine.parser.NodeTag.function_decl, direct_view.getTag(inner_declaration).?);
-    const inner_binding = direct_view.getVarDecl(inner_declaration) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(repeated_same[0], inner_binding.init);
-    try std.testing.expectEqual(@as(usize, 2), direct_parser.type_store.generic_owners.items.len);
-    for (direct_parser.type_store.generic_owners.items) |generic_owner| {
-        const owner = switch (generic_owner.identity) {
-            .function => |node| node,
-            else => return error.TestUnexpectedResult,
-        };
-        const reference = direct_env.functionTypeRef(direct_view, owner) orelse
-            return error.TestUnexpectedResult;
-        const signature = direct_env.getFunctionSignature(reference) orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expectEqual(@as(u8, 1), signature.type_param_count);
-        try std.testing.expectEqual(@as(?u8, null), signature.required_param_count);
-        try std.testing.expectEqual(@as(?u8, null), signature.max_arg_count);
-        try std.testing.expect(signature.type_predicate == null);
-        const is_outer = owner == owners[0];
-        const expected_name = if (is_outer) "T" else "U";
-        try std.testing.expectEqualStrings(expected_name, signature.type_params[0].name);
-        try std.testing.expectEqualStrings(expected_name, direct_pool.getRefName(signature.type_params[0].idx));
-        try std.testing.expectEqual(type_pool_mod.TypeTag.t_generic_param, direct_pool.getTag(signature.type_params[0].idx).?);
-        try std.testing.expectEqual(
-            if (is_outer) direct_pool.idx_number else direct_pool.idx_string,
-            signature.type_params[0].constraint,
-        );
-        try std.testing.expect(signature.type_params[0].idx == signature.param_types[0]);
-        try std.testing.expect(signature.type_params[0].idx == signature.return_type);
-    }
-    const same = direct_env.getFnSigByName("same") orelse return error.TestUnexpectedResult;
-    try growthExpectExactSignature(growthSignature(&.{direct_pool.idx_string}, direct_pool.idx_string), same);
-    try growthExpectExactSignature(same, direct_env.source_fn_sigs_by_name.get("same").?);
-    const outer_reference = direct_env.functionTypeRef(direct_view, owners[0]).?;
-    try growthExpectExactSignature(direct_env.getFunctionSignature(outer_reference).?, direct_env.getFnSigByName("outer").?);
-    try growthExpectExactSignature(direct_env.getFnSigByName("outer").?, direct_env.source_fn_sigs_by_name.get("outer").?);
 }
 
 const GrowthSignatureCase = enum { parameter, return_value, guard, arrow, generic_only };

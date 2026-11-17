@@ -543,8 +543,8 @@ test "typed compatibility refusals consume the parse attempt" {
 test "typed generation failures clean published float and nested function payloads" {
     const source =
         "const top: number = 1.25;\n" ++
+        "function inner(input: number): number { return input + 2.5; }\n" ++
         "function outer(value: number): number {\n" ++
-        "  function inner(input: number): number { return input + 2.5; }\n" ++
         "  const local: number = 3.75;\n" ++
         "  return inner(value) + local;\n" ++
         "}\n" ++

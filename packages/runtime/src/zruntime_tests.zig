@@ -3717,15 +3717,15 @@ test "constant folding matches runtime arithmetic and preserves short circuit ef
     const rt = try HandlerInstance.init(arena.allocator(), .{});
     defer rt.deinit();
     try rt.loadCodeNoHandler(
+        \\function touch(box: number[]): boolean { box.push(1); return true; }
         \\function run() {
-        \\  let count = 0;
-        \\  function touch() { count = count + 1; return true; }
-        \\  const a = false && touch();
-        \\  const b = true || touch();
-        \\  const c = true && touch();
-        \\  const d = false || touch();
+        \\  const box: number[] = [];
+        \\  const a = false && touch(box);
+        \\  const b = true || touch(box);
+        \\  const c = true && touch(box);
+        \\  const d = false || touch(box);
         \\  const truth = !(5 < 2) && !!true;
-        \\  return truth ? count : -1;
+        \\  return truth ? box.length : -1;
         \\}
     , "<bench>");
     const result = try rt.callGlobalFunction("run", &.{});

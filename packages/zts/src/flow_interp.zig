@@ -4646,21 +4646,24 @@ test "the exit state joins a returning branch's writes with the fallthrough" {
     try testing.expect(unseen.labels.isEmpty());
 }
 
-test "a function declaration binds in statement order" {
-    const after = try analyzeSource("function f() { function g() { return 1; } const r = g; return r; }", "f", &.{});
-    defer after.deinit();
-    try testing.expect(!after.result.cleared);
-    try testing.expectEqual(@as(usize, 1), after.result.returned.?.callables.len);
+/// Require that the parser refuses `source` with one ZTS071 at `column` of line 1.
+fn expectLocalFunctionRefused(source: []const u8, column: u32) !void {
+    var atoms = atom_table.AtomTable.init(testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    try testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try testing.expectEqual(@as(usize, 1), errors.len);
+    try testing.expectEqualStrings("ZTS071", diagnostic_catalog.parserCode(errors[0].kind));
+    try testing.expectEqual(@as(u32, 1), errors[0].location.line);
+    try testing.expectEqual(column, errors[0].location.column);
+}
 
-    const before = try analyzeSource("function f() { const r = g; function g() { return 1; } return r; }", "f", &.{});
-    defer before.deinit();
-    try testing.expect(before.result.cleared);
-    try testing.expect(before.result.returned.?.labels.unknown);
-    try testing.expectEqual(NodeTag.identifier, before.result.unresolved[0].tag);
-    // The parser resolves a name only to an earlier declaration, so the read of
-    // `g` is an undeclared global when it is parsed. The module level never
-    // binds `g`, and `g` is no builtin, so the strict checker refuses it.
-    try testing.expectEqual(Owner.refused_by_strict, before.result.unresolved[0].owner);
+test "a function declaration inside a function body is refused with ZTS071" {
+    try expectLocalFunctionRefused("function f() { function g() { return 1; } const r = g; return r; }", 16);
+    try expectLocalFunctionRefused("function f() { const r = g; function g() { return 1; } return r; }", 29);
 }
 
 test "a local read with no declaration behind it is unresolved" {
@@ -4694,7 +4697,7 @@ fn expectUnresolved(result: FunctionResult, tag: NodeTag, owner: Owner) !void {
     return error.UnresolvedEntryNotFound;
 }
 
-test "a call and an upvalue read clear the result with their owner, and a nested pattern does not" {
+test "a call clears the result with its owner, and a nested pattern does not" {
     // A callee with no function in it is the runtime's `NotCallable`, which
     // has no operation rule.
     const call = try analyzeSource("function f(g) { return g(1); }", "f", &.{Value.clean});
@@ -4702,30 +4705,15 @@ test "a call and an upvalue read clear the result with their owner, and a nested
     try expectUnresolved(call.result, .call, .no_operation_rule);
     try testing.expect(call.result.returned.?.labels.unknown);
 
-    // Without a capture table no closure read has a cell to read.
-    const closure = "function outer() { const k = 1; function inner() { return k; } return inner; }";
-    const unplaced = try Harness.createWith(testing.allocator, closure, false);
-    defer unplaced.destroy();
-    try expectUnresolved(try unplaced.analyze("inner", &.{}), .identifier, .capture_unplaced);
-
-    // With one, the analyzed function is a root whose captures nothing seeded.
-    const upvalue = try analyzeSource(closure, "inner", &.{});
-    defer upvalue.deinit();
-    try expectUnresolved(upvalue.result, .function_decl, .capture_unseeded);
-
     // A nested pattern binds below the first level, so it resolves.
     const nested = "function f(s) { const o = { a: { b: s } }; return match (o) { when { a: { b: v } }: v default: 0 }; }";
     try expectSecret(nested, &.{secret_value}, true);
     try expectSecret(nested, &.{Value.clean}, false);
 
-    // The contrast: the same shapes without the construct stay resolved, and
-    // the whole of `outer` creates the capture it reads.
+    // The contrast: the same shapes without the construct stay resolved.
     const plain = try analyzeSource("function f(x) { return x; }", "f", &.{Value.clean});
     defer plain.deinit();
     try testing.expect(!plain.result.cleared);
-    const whole = try analyzeSource(closure, "outer", &.{});
-    defer whole.deinit();
-    try testing.expect(!whole.result.cleared);
 }
 
 test "match arms join and a record pattern binding reads its own field" {
@@ -5142,18 +5130,18 @@ test "state equality ignores insertion order and tells bottom from a reachable s
 const c_secret = [_]Value{ Value.clean, secret_value };
 
 test "a local call returns the callee's value" {
-    try expectSecret("function f(s) { function id(x) { return x; } return id(s); }", &.{secret_value}, true);
-    try expectSecret("function f(s) { function id(x) { return x; } return id(\"c\"); }", &.{secret_value}, false);
+    try expectSecret("function id(x) { return x; } function f(s) { return id(s); }", &.{secret_value}, true);
+    try expectSecret("function id(x) { return x; } function f(s) { return id(\"c\"); }", &.{secret_value}, false);
 }
 
 test "call operands keep runtime evaluation order" {
     try expectSecret(
-        "function f(s) { let g = () => \"c\"; function replace() { g = () => s; return 0; } return g(replace()); }",
+        "function f(s) { let g = () => \"c\"; const replace = () => { g = () => s; return 0; }; return g(replace()); }",
         &.{secret_value},
         false,
     );
     try expectSecret(
-        "function f(s) { const o = { m: () => \"c\" }; function replace() { o.m = () => s; return 0; } return o.m(replace()); }",
+        "function f(s) { const o = { m: () => \"c\" }; const replace = () => { o.m = () => s; return 0; }; return o.m(replace()); }",
         &.{secret_value},
         true,
     );
@@ -5161,7 +5149,7 @@ test "call operands keep runtime evaluation order" {
 
 test "nested call sites keep allocated results distinct" {
     try expectSecret(
-        "function f(s) { function make(x) { return [x]; } function pass(x) { return x; } const a = pass(make(\"c\")); const b = pass(make(s)); b[0] = s; return a[0]; }",
+        "function make(x) { return [x]; } function pass(x) { return x; } function f(s) { const a = pass(make(\"c\")); const b = pass(make(s)); b[0] = s; return a[0]; }",
         &.{secret_value},
         false,
     );
@@ -5169,18 +5157,18 @@ test "nested call sites keep allocated results distinct" {
 
 test "a call joins every return of the callee" {
     try expectSecret(
-        "function f(c, s) { function g(d) { if (d) { return \"c\"; } return s; } return g(c); }",
+        "function g(d, t) { if (d) { return \"c\"; } return t; } function f(c, s) { return g(c, s); }",
         &c_secret,
         true,
     );
     try expectSecret(
-        "function f(c, s) { function g(d) { if (d) { return \"c\"; } return \"d\"; } return g(c); }",
+        "function g(d) { if (d) { return \"c\"; } return \"d\"; } function f(c, s) { return g(c); }",
         &c_secret,
         false,
     );
     // The first return alone would be clean, and so would the last alone.
     try expectSecret(
-        "function f(c, s) { function g(d) { if (d) { return s; } return \"c\"; } return g(c); }",
+        "function g(d, t) { if (d) { return t; } return \"c\"; } function f(c, s) { return g(c, s); }",
         &c_secret,
         true,
     );
@@ -5188,12 +5176,12 @@ test "a call joins every return of the callee" {
 
 test "a callee's write through its argument reaches the caller's object" {
     try expectSecret(
-        "function f(s) { const o = { x: \"c\" }; function w(t) { t.x = s; return 0; } w(o); return o.x; }",
+        "function w(t, u) { t.x = u; return 0; } function f(s) { const o = { x: \"c\" }; w(o, s); return o.x; }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { const o = { x: \"c\" }; function w(t) { t.x = \"d\"; return 0; } w(o); return o.x; }",
+        "function w(t) { t.x = \"d\"; return 0; } function f(s) { const o = { x: \"c\" }; w(o); return o.x; }",
         &.{secret_value},
         false,
     );
@@ -5201,7 +5189,7 @@ test "a callee's write through its argument reaches the caller's object" {
 
 test "a callee that never returns leaves no returned value and an unreachable exit" {
     const r = try analyzeSource(
-        "function f(s) { function spin() { return spin(); } spin(); return s; }",
+        "function spin() { return spin(); } function f(s) { spin(); return s; }",
         "f",
         &.{secret_value},
     );
@@ -5212,11 +5200,11 @@ test "a callee that never returns leaves no returned value and an unreachable ex
     try testing.expectEqual(@as(usize, 0), r.result.completions.len);
 
     // The contrast: a callee that returns lets the caller go on.
-    try expectSecret("function f(s) { function spin() { return 1; } spin(); return s; }", &.{secret_value}, true);
+    try expectSecret("function spin() { return 1; } function f(s) { spin(); return s; }", &.{secret_value}, true);
 
     // A `return` whose own expression holds the call returns nothing either.
     const inline_call = try analyzeSource(
-        "function f(s) { function spin() { return spin(); } return spin() + s; }",
+        "function spin() { return spin(); } function f(s) { return spin() + s; }",
         "f",
         &.{secret_value},
     );
@@ -5228,20 +5216,20 @@ test "a callee that never returns leaves no returned value and an unreachable ex
 
 test "a callee that falls off its end returns to the caller" {
     try expectSecret(
-        "function f(s) { const o = { x: \"c\" }; function w(t) { t.x = s; } w(o); return o.x; }",
+        "function w(t, u) { t.x = u; } function f(s) { const o = { x: \"c\" }; w(o, s); return o.x; }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { const o = { x: \"c\" }; function w(t) { t.x = \"d\"; } w(o); return o.x; }",
+        "function w(t) { t.x = \"d\"; } function f(s) { const o = { x: \"c\" }; w(o); return o.x; }",
         &.{secret_value},
         false,
     );
 }
 
 test "a bare helper assert returns clean undefined to the caller" {
-    try expectSecret("function f(c, s) { function g() { assert c; return s; } return g(); }", &c_secret, true);
-    try expectSecret("function f(c, s) { function g() { assert c; return \"c\"; } return g(); }", &c_secret, false);
+    try expectSecret("function g(d, t) { assert d; return t; } function f(c, s) { return g(c, s); }", &c_secret, true);
+    try expectSecret("function g(d) { assert d; return \"c\"; } function f(c, s) { return g(c); }", &c_secret, false);
 }
 
 test "a callable set runs every function in both node orders" {
@@ -5282,12 +5270,12 @@ test "a closure writes the owner's binding" {
 
 test "two activations of a captured const share one weak cell" {
     try expectSecret(
-        "function f(s) { function mk(v) { const x = v; return () => x; } const a = mk(s); const b = mk(\"c\"); return a(); }",
+        "function mk(v) { const x = v; return () => x; } function f(s) { const a = mk(s); const b = mk(\"c\"); return a(); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { function mk(v) { const x = v; return () => x; } const a = mk(\"d\"); const b = mk(\"c\"); return a(); }",
+        "function mk(v) { const x = v; return () => x; } function f(s) { const a = mk(\"d\"); const b = mk(\"c\"); return a(); }",
         &.{secret_value},
         false,
     );
@@ -5295,12 +5283,12 @@ test "two activations of a captured const share one weak cell" {
 
 test "two activations of a captured parameter share one weak cell" {
     try expectSecret(
-        "function f(s) { function mk(v) { return () => v; } const a = mk(s); mk(\"c\"); return a(); }",
+        "function mk(v) { return () => v; } function f(s) { const a = mk(s); mk(\"c\"); return a(); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { function mk(v) { return () => v; } const a = mk(\"d\"); mk(\"c\"); return a(); }",
+        "function mk(v) { return () => v; } function f(s) { const a = mk(\"d\"); mk(\"c\"); return a(); }",
         &.{secret_value},
         false,
     );
@@ -5320,8 +5308,8 @@ test "a captured match binding lives in its cell" {
 }
 
 test "a captured loop variable is read by a later activation's loop" {
-    const carried = "function f(s) { let first = () => \"c\"; let seen = \"c\"; function mk(xs) { let last = () => \"c\"; for (const v of xs) { seen = first(); last = () => v; } return last; } first = mk([s]); mk([\"c\"]); return seen; }";
-    const clean = "function f(s) { let first = () => \"c\"; let seen = \"c\"; function mk(xs) { let last = () => \"c\"; for (const v of xs) { seen = first(); last = () => v; } return last; } first = mk([\"d\"]); mk([\"c\"]); return seen; }";
+    const carried = "function f(s) { let first = () => \"c\"; let seen = \"c\"; const mk = (xs) => { let last = () => \"c\"; for (const v of xs) { seen = first(); last = () => v; } return last; }; first = mk([s]); mk([\"c\"]); return seen; }";
+    const clean = "function f(s) { let first = () => \"c\"; let seen = \"c\"; const mk = (xs) => { let last = () => \"c\"; for (const v of xs) { seen = first(); last = () => v; } return last; }; first = mk([\"d\"]); mk([\"c\"]); return seen; }";
     try expectSecret(carried, &.{secret_value}, true);
     try expectSecret(clean, &.{secret_value}, false);
 }
@@ -5367,34 +5355,34 @@ test "a module-level function resolves only when it is the single fixed declarat
 }
 
 test "a recursive call feeds its arguments into the entry" {
-    const source = "function f(s) { function r(n, acc) { if (n) { return acc; } return r(true, s); } return r(false, \"c\"); }";
+    const source = "function r(n, acc, t) { if (n) { return acc; } return r(true, t, t); } function f(s) { return r(false, \"c\", s); }";
     try expectSecret(source, &.{secret_value}, true);
     try expectSecret(
-        "function f(s) { function r(n, acc) { if (n) { return acc; } return r(true, \"d\"); } return r(false, \"c\"); }",
+        "function r(n, acc) { if (n) { return acc; } return r(true, \"d\"); } function f(s) { return r(false, \"c\"); }",
         &.{secret_value},
         false,
     );
     // The entry keeps the first call's input: a recursive call that passes a
     // clean value does not replace the secret the first call passed.
     try expectSecret(
-        "function f(s) { function r(n, acc) { if (n) { return acc; } return r(true, \"c\"); } return r(false, s); }",
+        "function r(n, acc) { if (n) { return acc; } return r(true, \"c\"); } function f(s) { return r(false, s); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { function r(n, acc) { if (n) { return acc; } return r(true, \"c\"); } return r(false, \"d\"); }",
+        "function r(n, acc) { if (n) { return acc; } return r(true, \"c\"); } function f(s) { return r(false, \"d\"); }",
         &.{secret_value},
         false,
     );
     // The same when the result of the recursive call is not returned, so the
     // earlier summary cannot carry the first call's input to the last pass.
     try expectSecret(
-        "function f(s) { function r(n, acc) { if (n) { return acc; } r(true, \"c\"); return acc; } return r(false, s); }",
+        "function r(n, acc) { if (n) { return acc; } r(true, \"c\"); return acc; } function f(s) { return r(false, s); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { function r(n, acc) { if (n) { return acc; } r(true, \"c\"); return acc; } return r(false, \"d\"); }",
+        "function r(n, acc) { if (n) { return acc; } r(true, \"c\"); return acc; } function f(s) { return r(false, \"d\"); }",
         &.{secret_value},
         false,
     );
@@ -5406,12 +5394,12 @@ test "a recursive call feeds its arguments into the entry" {
 test "a recursive call returns the summary's write through a seeded parameter" {
     const origins_top: Value = .{ .origins_top = true };
     try expectSecret(
-        "function f(p, s) { function r(q, n, x, y) { if (n) { q.out = x; return 0; } r(q, true, y, y); return q.out; } return r(p, false, \"c\", s); }",
+        "function r(q, n, x, y) { if (n) { q.out = x; return 0; } r(q, true, y, y); return q.out; } function f(p, s) { return r(p, false, \"c\", s); }",
         &.{ origins_top, secret_value },
         true,
     );
     try expectSecret(
-        "function f(p, s) { function r(q, n, x, y) { if (n) { q.out = x; return 0; } r(q, true, y, y); return q.out; } return r(p, false, \"c\", \"d\"); }",
+        "function r(q, n, x, y) { if (n) { q.out = x; return 0; } r(q, true, y, y); return q.out; } function f(p, s) { return r(p, false, \"c\", \"d\"); }",
         &.{ origins_top, secret_value },
         false,
     );
@@ -5419,12 +5407,12 @@ test "a recursive call returns the summary's write through a seeded parameter" {
 
 test "a recursive call returns the summary's write through a local object" {
     try expectSecret(
-        "function f(s) { const o = { out: \"c\" }; function r(p, n, x, y) { if (n) { p.out = x; return 0; } r(p, true, y, y); return p.out; } return r(o, false, \"c\", s); }",
+        "function r(p, n, x, y) { if (n) { p.out = x; return 0; } r(p, true, y, y); return p.out; } function f(s) { const o = { out: \"c\" }; return r(o, false, \"c\", s); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { const o = { out: \"c\" }; function r(p, n, x, y) { if (n) { p.out = x; return 0; } r(p, true, y, y); return p.out; } return r(o, false, \"c\", \"d\"); }",
+        "function r(p, n, x, y) { if (n) { p.out = x; return 0; } r(p, true, y, y); return p.out; } function f(s) { const o = { out: \"c\" }; return r(o, false, \"c\", \"d\"); }",
         &.{secret_value},
         false,
     );
@@ -5432,12 +5420,12 @@ test "a recursive call returns the summary's write through a local object" {
 
 test "a recursive call returns the summary's write through a captured binding" {
     try expectSecret(
-        "function f(s) { let out = \"c\"; function r(n, x, y) { if (n) { out = x; return 0; } r(true, y, y); return out; } return r(false, \"c\", s); }",
+        "function f(s) { let out = \"c\"; const r = (n, x, y) => { if (n) { out = x; return 0; } r(true, y, y); return out; }; return r(false, \"c\", s); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { let out = \"c\"; function r(n, x, y) { if (n) { out = x; return 0; } r(true, y, y); return out; } return r(false, \"c\", \"d\"); }",
+        "function f(s) { let out = \"c\"; const r = (n, x, y) => { if (n) { out = x; return 0; } r(true, y, y); return out; }; return r(false, \"c\", \"d\"); }",
         &.{secret_value},
         false,
     );
@@ -5445,12 +5433,12 @@ test "a recursive call returns the summary's write through a captured binding" {
 
 test "a capture written in one recursive pass is read in a later one" {
     try expectSecret(
-        "function f(s) { let r = \"c\"; function rec(n) { const out = r; if (n) { return out; } r = s; return rec(true); } return rec(false); }",
+        "function f(s) { let r = \"c\"; const rec = (n) => { const out = r; if (n) { return out; } r = s; return rec(true); }; return rec(false); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { let r = \"c\"; function rec(n) { const out = r; if (n) { return out; } r = \"d\"; return rec(true); } return rec(false); }",
+        "function f(s) { let r = \"c\"; const rec = (n) => { const out = r; if (n) { return out; } r = \"d\"; return rec(true); }; return rec(false); }",
         &.{secret_value},
         false,
     );
@@ -5458,12 +5446,12 @@ test "a capture written in one recursive pass is read in a later one" {
 
 test "mutual recursion through a captured binding converges" {
     try expectSecret(
-        "function f(s) { let b = undefined; function a(n, x) { if (n) { return x; } return b(true, s); } b = (n, x) => a(n, x); return a(false, \"c\"); }",
+        "function f(s) { let b = undefined; const a = (n, x) => { if (n) { return x; } return b(true, s); }; b = (n, x) => a(n, x); return a(false, \"c\"); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { let b = undefined; function a(n, x) { if (n) { return x; } return b(true, \"d\"); } b = (n, x) => a(n, x); return a(false, \"c\"); }",
+        "function f(s) { let b = undefined; const a = (n, x) => { if (n) { return x; } return b(true, \"d\"); }; b = (n, x) => a(n, x); return a(false, \"c\"); }",
         &.{secret_value},
         false,
     );
@@ -5471,12 +5459,12 @@ test "mutual recursion through a captured binding converges" {
 
 test "recursion through a callable set converges" {
     try expectSecret(
-        "function f(c, s) { let g = (n, x) => \"c\"; function a(n, x) { if (n) { return x; } return g(true, s); } g = c ? a : g; return g(false, \"c\"); }",
+        "function f(c, s) { let g = (n, x) => \"c\"; const a = (n, x) => { if (n) { return x; } return g(true, s); }; g = c ? a : g; return g(false, \"c\"); }",
         &c_secret,
         true,
     );
     try expectSecret(
-        "function f(c, s) { let g = (n, x) => \"c\"; function a(n, x) { if (n) { return x; } return g(true, \"d\"); } g = c ? a : g; return g(false, \"c\"); }",
+        "function f(c, s) { let g = (n, x) => \"c\"; const a = (n, x) => { if (n) { return x; } return g(true, \"d\"); }; g = c ? a : g; return g(false, \"c\"); }",
         &c_secret,
         false,
     );
@@ -5484,12 +5472,12 @@ test "recursion through a callable set converges" {
 
 test "recursion inside a loop with break and continue after it" {
     try expectSecret(
-        "function f(s) { function r(n, x) { if (n) { return x; } return r(true, s); } let out = \"c\"; for (const v of [false, true]) { out = r(false, \"c\"); if (v) { break; } continue; } return out; }",
+        "function r(n, x, t) { if (n) { return x; } return r(true, t, t); } function f(s) { let out = \"c\"; for (const v of [false, true]) { out = r(false, \"c\", s); if (v) { break; } continue; } return out; }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { function r(n, x) { if (n) { return x; } return r(true, \"d\"); } let out = \"c\"; for (const v of [false, true]) { out = r(false, \"c\"); if (v) { break; } continue; } return out; }",
+        "function r(n, x) { if (n) { return x; } return r(true, \"d\"); } function f(s) { let out = \"c\"; for (const v of [false, true]) { out = r(false, \"c\"); if (v) { break; } continue; } return out; }",
         &.{secret_value},
         false,
     );
@@ -5558,7 +5546,7 @@ test "a call with no callable has no operation rule" {
     defer empty.deinit();
     try expectUnresolved(empty.result, .call, .no_operation_rule);
 
-    try expectSecret("function f(x) { function id(y) { return y; } return id(1); }", &.{Value.clean}, false);
+    try expectSecret("function id(y) { return y; } function f(x) { return id(1); }", &.{Value.clean}, false);
 }
 
 test "call-site spread is refused by the strict checker" {
@@ -5569,16 +5557,16 @@ test "call-site spread is refused by the strict checker" {
     // The same call with a local callee is refused too, and a plain argument
     // to that callee is not.
     const local = try analyzeSource(
-        "function f(xs) { function id(y) { return y; } return id(...xs); }",
+        "function id(y) { return y; } function f(xs) { return id(...xs); }",
         "f",
         &.{Value.clean},
     );
     defer local.deinit();
     try expectUnresolved(local.result, .spread, .refused_by_strict);
-    try expectSecret("function f(xs) { function id(y) { return y; } return id(xs); }", &.{Value.clean}, false);
+    try expectSecret("function id(y) { return y; } function f(xs) { return id(xs); }", &.{Value.clean}, false);
 
     const later = try analyzeSource(
-        "function f(s) { let x = \"c\"; function g(a, b) { return 0; } g(...[], (() => { x = s; return \"c\"; })()); return x; }",
+        "function g(a, b) { return 0; } function f(s) { let x = \"c\"; g(...[], (() => { x = s; return \"c\"; })()); return x; }",
         "f",
         &.{secret_value},
     );
@@ -5594,26 +5582,6 @@ test "call-site spread is refused by the strict checker" {
     defer optional.deinit();
     try expectUnresolved(optional.result, .spread, .refused_by_strict);
     try testing.expect(optional.returnedLabels().secret);
-}
-
-test "a nested root seeds the cells of the bindings it captures with top" {
-    const source = "function outer(p) { let s = p; function inner(c) { if (c) { s = \"c\"; } return s; } return inner; }";
-    const h = try Harness.create(testing.allocator, source);
-    defer h.destroy();
-    const result = try h.analyze("inner", &.{Value.clean});
-    try expectUnresolved(result, .function_decl, .capture_unseeded);
-    try testing.expect(result.returned.?.labels.unknown);
-
-    // The record is made once, however many captures the root has.
-    var seeded: usize = 0;
-    for (result.unresolved) |entry| {
-        if (entry.owner == .capture_unseeded) seeded += 1;
-    }
-    try testing.expectEqual(@as(usize, 1), seeded);
-
-    // The contrast: the function that declares the capture seeds it itself.
-    const whole = try h.analyze("outer", &.{secret_value});
-    try testing.expect(!whole.cleared);
 }
 
 test "the step budget is per root and fails closed" {
@@ -5653,11 +5621,11 @@ test "the step budget is per root and fails closed" {
 test "calls that double at every level exhaust the default budget and fail closed" {
     const levels = 24;
     const source = comptime blk: {
-        var text: []const u8 = "function f(s) { function g0(x) { return x; } ";
+        var text: []const u8 = "function g0(x) { return x; } ";
         for (1..levels) |i| {
             text = text ++ std.fmt.comptimePrint("function g{d}(x) {{ return g{d}(x) + g{d}(x); }} ", .{ i, i - 1, i - 1 });
         }
-        break :blk text ++ std.fmt.comptimePrint("return g{d}(s); }}", .{levels - 1});
+        break :blk text ++ std.fmt.comptimePrint("function f(s) {{ return g{d}(s); }}", .{levels - 1});
     };
     const r = try analyzeSource(source, "f", &.{secret_value});
     defer r.deinit();
@@ -5738,7 +5706,7 @@ test "nested call sites in a call chain evaluate without native recursion" {
 }
 
 test "the recursion cap clears the result and convergence beats the cap" {
-    const source = "function f(s) { function r(n, acc) { if (n) { return acc; } return r(true, s); } return r(false, \"c\"); }";
+    const source = "function r(n, acc, t) { if (n) { return acc; } return r(true, t, t); } function f(s) { return r(false, \"c\", s); }";
     const h = try Harness.create(testing.allocator, source);
     defer h.destroy();
     const roomy = try h.analyze("f", &.{secret_value});
@@ -7778,7 +7746,7 @@ const resolved_corpus = [_][]const u8{
     "function f(p, q) { return p ? p.x : q[\"y\"]; }",
     "function f(p, q) { let x = p?.x; x = q; p.k = x; p[q] = x; p.k += 1; return p; }",
     "function f(p, q) { const a = [p, ...q]; const o = { k: p, ...q }; return o.k; }",
-    "function f(p, q) { const g = () => p; const h = (z) => q; function inner() { return 1; } return inner; }",
+    "function inner() { return 1; } function f(p, q) { const g = () => p; const h = (z) => q; return inner; }",
     "function f(p, q) { if (p) { return 1; } else { return 2; } }",
     "function f(p, q) { assert p; assert q; return 1; }",
     "function f(p, q) { return match (p) { when { kind: \"a\", text }: text when \"x\": q when string: q default: 0 }; }",
@@ -7787,8 +7755,8 @@ const resolved_corpus = [_][]const u8{
     "function f(p, q) { let r = p; for (const v of q) { if (v) { r = v; break; } if (r) { continue; } r = q; } return r; }",
     // Calls: a local callee, a captured binding read and written through a
     // closure, recursion, a callable set, and a module-level function.
-    "function f(p, q) { function id(x) { return x; } const g = (a) => id(a); let r = p; const w = () => { r = q; return r; }; return g(w()); }",
-    "function f(p, q) { function rec(n) { if (n) { return 1; } return rec(true); } return rec(p); }",
+    "function id(x) { return x; } function f(p, q) { const g = (a) => id(a); let r = p; const w = () => { r = q; return r; }; return g(w()); }",
+    "function rec(n) { if (n) { return 1; } return rec(true); } function f(p, q) { return rec(p); }",
     "function f(p, q) { const a = () => p; const b = () => q; return (p ? a : b)(); }",
     "function help(x) { return x; } function f(p, q) { return help(p); }",
 };
@@ -7825,6 +7793,20 @@ test "tagPlan agrees with eval and exec for every tag" {
         defer h.destroy();
         const result = try h.analyze("f", &.{ Value.clean, Value.clean });
         census.absorb(&h.interp, result);
+    }
+    // A module-level function declaration is the root of an analysis, not a
+    // statement that the interpreter executes, and its `function_expr` init is
+    // never evaluated as an expression. No source reaches either tag now that
+    // a function declaration must be at module level. Execute one directly.
+    {
+        const h = try Harness.create(testing.allocator, "function f(p, q) { return p; }");
+        defer h.destroy();
+        const declaration_node = try h.find("f");
+        const declaration = h.interp.ir_view.getVarDecl(declaration_node) orelse return error.FunctionNotFound;
+        var st: State = .{};
+        _ = try h.interp.eval(declaration.init, &st);
+        try h.interp.exec(declaration_node, &st);
+        census.absorb(&h.interp, null);
     }
 
     // A tag the corpora did not record as unresolved is probed with a node

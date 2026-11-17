@@ -14,6 +14,7 @@ const std = @import("std");
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const atom_table = @import("zts-engine").atom_table;
+const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const module_binding = @import("zts-engine").module_binding;
 const builtin_modules = @import("zts-engine").builtin_modules;
 const manifest_registry_mod = @import("manifest_registry.zig");
@@ -4929,17 +4930,6 @@ test "a closure declared in a body is charged to that body" {
     try testing.expect(arrow.writes);
     try testing.expect(!arrow.readOnly());
 
-    const declared = try analyzeHandlerRow(
-        \\import { cacheSet } from "zttp:cache";
-        \\function handler(items) {
-        \\  function w(k) { cacheSet("ns", k, "v", 10); return 1; }
-        \\  items.forEach(w);
-        \\  return 1;
-        \\}
-    );
-    try testing.expect(declared.writes);
-    try testing.expect(!declared.readOnly());
-
     // A call to a body-local closure stays an unresolved callee, and its
     // body's write is now in the row as well.
     const called = try analyzeHandlerRow(
@@ -5378,7 +5368,6 @@ test "a function value outside the closed positions sets the escape flag" {
         .{ .name = "down", .source = "function down(n) { for (const f of [down]) { return f(n); } return n; }" },
         // A body-local function has no call-graph edge, so a callback slot
         // does not close it: recursion through `map` would leave no cycle.
-        .{ .name = "g", .source = "function handler(k) { function g(x) { return [x].map(g)[0]; } return [k].map(g); }" },
         .{ .name = "g", .source = "function handler(k) { const g = (x) => [x].map(g)[0]; return [k].map(g); }" },
         // A combinator returns a first argument that is not a Result
         // unchanged, so only its callback slot is closed.
@@ -5392,7 +5381,6 @@ test "function values in the closed positions leave the escape flag clear" {
         // P0 and P1: a literal bound once, and calls by name.
         "function fmt(x) { return x + 1; }\nfunction handler(k) { return fmt(k); }",
         "const fmt = (x) => x + 1;\nfunction handler(k) { return fmt(k); }",
-        "function handler(k) { function g(x) { return x; } return g(k); }",
         // P2: a builtin that calls its first argument.
         "function fmt(x) { return x + 1; }\nfunction handler(items) { return items.map(fmt); }",
         "function handler(items) { return items.filter((x) => x > 1).map(String); }",
@@ -5430,14 +5418,23 @@ test "a function handed to a call inside its own body is recursive" {
     try testing.expect(!ok.recursive);
 }
 
-test "a call by name to a nested closure is a lower bound" {
-    const row = try analyzeHandlerRow(
+test "a function declaration in a body is refused with ZTS071" {
+    var atoms = atom_table.AtomTable.init(testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(testing.allocator, testing.allocator,
         \\function handler(req) {
         \\  function g(x) { return g(x); }
         \\  return g(3);
         \\}
-    );
-    try testing.expect(row.lower_bound);
+    , .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    try testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try testing.expectEqual(@as(usize, 1), errors.len);
+    try testing.expectEqualStrings("ZTS071", diagnostic_catalog.parserCode(errors[0].kind));
+    try testing.expectEqual(@as(u32, 2), errors[0].location.line);
+    try testing.expectEqual(@as(u32, 3), errors[0].location.column);
 }
 
 test "a sibling module's escaped function value reaches every function of the importer" {

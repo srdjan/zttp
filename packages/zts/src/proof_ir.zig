@@ -25,6 +25,7 @@
 const std = @import("std");
 const ir = @import("zts-engine").parser.ir;
 const translation_witness = @import("zts-engine").translation_witness;
+const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const handler_function_mod = @import("handler_function.zig");
 const module_facts_mod = @import("module_facts.zig");
 const builtin_modules = @import("zts-engine").builtin_modules;
@@ -1915,23 +1916,23 @@ test "an if without an else does not establish totality" {
     try testing.expect(!total[function_id]);
 }
 
-test "declaring a returning helper does not return from its enclosing handler" {
-    for ([_][]const u8{
-        "function handler(req) { function helper() { return Response.text(\"helper\"); } }",
-        "function handler(req) { if (req.method === \"GET\") { function a() { return Response.text(\"a\"); } } else { function b() { return Response.text(\"b\"); } } }",
-    }) |source| {
-        var lowered = try parseAndLower(testing.allocator, source);
-        defer lowered.deinit();
-        const proof = lowered.proof;
-        const total = try deriveTotality(testing.allocator, proof, &.{});
-        defer testing.allocator.free(total);
-        const handler = proof.handler_function orelse return error.TestUnexpectedResult;
-        try testing.expect(!total[handler]);
-        try testing.expectEqual(@as(?Rule, null), ruleAt(proof, total, proof.nodes[handler].first_child));
-        for (proof.nodes) |node| {
-            if (node.tag == .function and node.id != handler) try testing.expect(total[node.id]);
-        }
-    }
+fn expectLocalFunctionRefused(source: []const u8, count: usize, column: u32) !void {
+    var atoms = engine_context.AtomTable.init(testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    try testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try testing.expectEqual(count, errors.len);
+    try testing.expectEqualStrings("ZTS071", diagnostic_catalog.parserCode(errors[0].kind));
+    try testing.expectEqual(@as(u32, 1), errors[0].location.line);
+    try testing.expectEqual(column, errors[0].location.column);
+}
+
+test "a function declaration in a handler body or block is refused with ZTS071" {
+    try expectLocalFunctionRefused("function handler(req) { function helper() { return Response.text(\"helper\"); } }", 1, 25);
+    try expectLocalFunctionRefused("function handler(req) { if (req.method === \"GET\") { function a() { return Response.text(\"a\"); } } else { function b() { return Response.text(\"b\"); } } }", 2, 53);
 }
 
 test "an if with both arms returning is total" {

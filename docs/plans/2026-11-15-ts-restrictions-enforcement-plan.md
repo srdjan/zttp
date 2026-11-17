@@ -241,6 +241,34 @@ when its subject needs nesting, and its outcome pin moves to the ZTS069
 refusal. The rejected option was (b), which follows Decision 11: delete the
 tests, then delete the analyzer code in a later unit.
 
+### Decision 18: the tests and code for a nested function declaration (N10)
+
+N10 refuses a function declaration inside a function body or a block. In
+a full `zig build test`, that breaks 76 distinct tests, and many have a
+nested declaration as their subject. The owner chose option (a) on
+2026-11-17, which follows Decisions 9 and 11. Each test whose subject is a
+nested declaration becomes a ZTS071 refusal pin, or is deleted when its
+file already has one. Each test that nests only incidentally moves the
+function to module level. A later unit audits the analyzer code that only
+a nested `function` reaches, with a probe for each site, and deletes it.
+Some of that code probably also serves arrow callbacks. The rejected
+option was (b), which follows Decision 17 and keeps the code.
+
+### Decision 19: Decisions 3 and 4 at the measured cost
+
+A measurement-only parser for each rule ran the aggregate on 2026-11-17.
+Decision 3 breaks 124 distinct tests, smoke-v1, and the example script.
+Decision 4 breaks 287 distinct tests (3 of them in test-zruntime),
+smoke-v1, and the example script, and it moves 21 tracked `.ts` files.
+N10 breaks 76 distinct tests. The plan had counted only the tracked
+files. The owner chose option (a): proceed in the order N10,
+Decision 4, callback purity, U5, Decision 3, X2, in units of at most 40
+broken tests. Callback purity follows Decision 4 because every arrow is
+then a callback argument, so the rule becomes a parser rule. Decision 3
+follows U5 because five registrations pass `JSON.stringify(...)`, which is
+not a literal argument. The rejected option was (b), which moves
+Decisions 3 and 4 into a separate plan after U6.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -974,3 +1002,39 @@ later.
     `sibling-helper`, and `validate-body`) write `if (...) return ...;`.
     X19 refuses those drafts, so the U7 re-record measures what the
     refusal costs the model.
+- U4c-N10 refuses a function declaration inside a function body or a block
+  with ZTS071 (Decision 18 a). The parser still parses the refused
+  declaration, so recovery resumes after it and reports no cascade. Two
+  Sonnet units moved the 76 broken tests. A test that nested a function
+  only incidentally now declares it at module level. A test whose subject
+  is a nested declaration became a ZTS071 pin, one for each file and
+  surface, or was deleted. The corpus case `nested_functions_with_one_name`
+  is deleted, `bool_condition_in_nested_function` now uses an arrow
+  callback, and the flow census loses its two nested-function templates
+  and one hand probe (floors 504 to 448 and 30 to 29). The type_env growth
+  tests now use module-level names. These findings stay open:
+  - The audit unit of Decision 18 starts from this list of code that
+    probably only a nested `function` reaches. The implementers named most
+    sites from the deleted tests and did not confirm them:
+    `packages/zts/src/effect_inference.zig#Analyzer.walkBaseStmt`,
+    `packages/zts/src/effect_inference.zig#Analyzer.collectFunctionsIn`,
+    `packages/zts/src/path_generator.zig#PathGenerator.walkPaths`,
+    `packages/zts/src/handler_verifier.zig#HandlerVerifier.walkForResultsAndRefs`,
+    `packages/zts/src/handler_verifier.zig#HandlerVerifier.walkResultNode`,
+    `packages/zts/src/proof_ir.zig#deriveTotality`, the `.function_decl`
+    arm of `packages/zts/src/flow_interp.zig#FlowInterp.exec` and the `.function_expr`
+    arm of `packages/zts/src/flow_interp.zig#FlowInterp.eval` (the tagPlan census now
+    runs both directly),
+    `packages/zts/src/flow_interp.zig#FlowInterp.analyzeRoot` for `.capture_unseeded`, the
+    nested-body walks of fault coverage, the flow checker, the boolean
+    checker, and the strict checker, the nested-signature lookup by name and
+    the surplus-argument and predicate checks of the type checker, the
+    header publication of nested signatures in the typed parser, the hole
+    owner attribution of `zts check`, the call-path expansion of
+    prove-behavior, the slot lookup that a local function shared with an
+    import atom, and the repeated-name merge of the type_env signature
+    tables.
+  - 10 tests express a capture or an arrow helper with a `const`-bound
+    arrow: 7 that the N10 units moved there, and 3 strict-checker tests
+    whose subject is the arrow helper. Decision 4 refuses that form, and its
+    unit classifies them.

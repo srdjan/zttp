@@ -25,7 +25,7 @@ test "candidate facade owns captures and retains warning diagnostics" {
     const allocator = std.testing.allocator;
     var atoms = engine.atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try engine.parser.JsParser.initAdmission(allocator, allocator, "function handler(req) { function read() { return req.headers.authorization; } return read(); }", .compile);
+    var parser = try engine.parser.JsParser.initAdmission(allocator, allocator, "function handler(req) { const read = () => req.headers.authorization; return read(); }", .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -1250,14 +1250,14 @@ test "selection predicates and bounds contribute their own defenses" {
 }
 
 test "selection callbacks carry writes into selected elements" {
-    const cases = [_]struct { setup: []const u8 = "", callback: []const u8, safe: bool }{
+    const cases = [_]struct { top: []const u8 = "", setup: []const u8 = "", callback: []const u8, safe: bool }{
         .{ .callback = "(v) => { parts[1] = req.url; return req.url !== \"\"; }", .safe = false },
         .{ .callback = "(v) => { parts[1] = req.url; return true; }", .safe = false },
         .{ .setup = "const alias = parts;", .callback = "(v) => { alias[1] = req.url; return true; }", .safe = false },
         .{ .setup = "const holder = { items: parts };", .callback = "(v) => { holder.items[1] = req.url; return true; }", .safe = false },
         .{ .setup = "const holder = [parts];", .callback = "(v) => { holder[0].push(req.url); return true; }", .safe = false },
         .{ .callback = "(v, i, all) => { all[1] = req.url; return true; }", .safe = false },
-        .{ .setup = "function replace(xs) { xs[1] = req.url; }", .callback = "(v) => { replace(parts); return true; }", .safe = false },
+        .{ .top = "function replace(xs, u) { xs[1] = u; }", .callback = "(v) => { replace(parts, req.url); return true; }", .safe = false },
         .{ .callback = "(v) => { parts.push(req.url); return true; }", .safe = false },
         .{ .callback = "(v) => { [\"x\"].filter((x) => { parts[1] = req.url; return true; }); return true; }", .safe = false },
         .{ .callback = "(v) => { parts[1] = escapeHtml(req.url); return req.url !== \"\"; }", .safe = false },
@@ -1268,13 +1268,14 @@ test "selection callbacks carry writes into selected elements" {
     for (cases) |case| {
         const source = try std.testing.allocator.print(
             \\import {{ escapeHtml }} from "zttp:text";
+            \\{s}
             \\function handler(req) {{
             \\  const parts = [escapeHtml(req.url), escapeHtml(req.url)];
             \\  {s}
             \\  const out = parts.filter({s}).join("");
             \\  return Response.html(out);
             \\}}
-        , .{ case.setup, case.callback });
+        , .{ case.top, case.setup, case.callback });
         defer std.testing.allocator.free(source);
         var buf: [512]u8 = undefined;
         const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
@@ -3020,7 +3021,7 @@ test "FlowChecker labels credential reads on any binding that carries the reques
 
 test "FlowChecker walks a function passed by name to an array method" {
     // A callback literal is walked with the receiver's labels already; the
-    // same callback passed by name must be too, nested or top-level.
+    // same callback passed by name must be too.
     const top_level =
         \\import { env } from "zttp:env";
         \\function leak(s) {
@@ -3033,19 +3034,6 @@ test "FlowChecker walks a function passed by name to an array method" {
         \\}
     ;
     try std.testing.expect(!(try runFlowProperties(std.testing.allocator, top_level)).no_secret_leakage);
-
-    const nested =
-        \\import { env } from "zttp:env";
-        \\function handler(req) {
-        \\  function leak(s) {
-        \\    console.log(s);
-        \\    return 1;
-        \\  }
-        \\  const n = [env("SECRET_KEY")].map(leak);
-        \\  return Response.json({ n: n.length });
-        \\}
-    ;
-    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, nested)).no_secret_leakage);
 
     // The control: a clean receiver keeps the property.
     const clean =

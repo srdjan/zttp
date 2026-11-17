@@ -123,6 +123,7 @@ Declaration merging, open interfaces, and inheritance are excluded.
 | An empty type parameter, such as `<A, ,B>` and `<A,>` | ZTS001 | Remove the extra comma |
 | A duplicate parameter name, such as `function f(a: number, a: number)`, and a duplicate type parameter, such as `function f<T, T>(a: T): T` and `structural Box<T, T> = T;` | ZTS018 | A different name |
 | An assignment to a parameter, such as `a = a + 1` for a function parameter and `x = 0` for an arrow parameter | ZTS068 | Bind the new value to a new `const` |
+| A function declaration inside a function body or a block, such as `function inner(): number` | ZTS071 | A module-level function |
 | Call-site spread `f(...args)` | ZTS616 | Positional arguments |
 | A named function without parameter or return annotations | ZTS601 | Annotate every parameter and the return type |
 | A call with too few or too many arguments | ZTS202 | Supply every declared argument, and no more |

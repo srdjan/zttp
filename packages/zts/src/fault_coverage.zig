@@ -650,17 +650,6 @@ const fault_probes = [_]FaultProbe{
         \\  return Response.text("ok");
         \\}
     },
-    .{ .name = "second call in a nested function (f1)", .clean = false, .source = probe_prefix ++
-        \\function handler(req) {
-        \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
-        \\  function check() {
-        \\    return jwtVerify("t2", "secret");
-        \\  }
-        \\  const rows = [check()];
-        \\  return Response.json({ rows: rows });
-        \\}
-    },
     .{ .name = "second call inline (f2)", .clean = false, .source = probe_prefix ++
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
@@ -755,7 +744,7 @@ const fault_probes = [_]FaultProbe{
 
 test "a failable call in a position the walk cannot see blocks fault coverage" {
     // The census must run every probe: a loop that skipped them would pass.
-    try std.testing.expectEqual(@as(usize, 15), fault_probes.len);
+    try std.testing.expectEqual(@as(usize, 14), fault_probes.len);
     var held: usize = 0;
     var blocked: usize = 0;
     var mismatched: usize = 0;
@@ -769,7 +758,7 @@ test "a failable call in a position the walk cannot see blocks fault coverage" {
     }
     try std.testing.expectEqual(@as(usize, 0), mismatched);
     try std.testing.expectEqual(@as(usize, 3), held);
-    try std.testing.expectEqual(@as(usize, 12), blocked);
+    try std.testing.expectEqual(@as(usize, 11), blocked);
 }
 
 test "empty test list produces a report that holds vacuously" {
@@ -1214,17 +1203,6 @@ const fetch_probes = [_]FaultProbe{
         \\}
         \\
     ++ routed_tail },
-    .{ .name = "f1 second fetch in a nested function", .clean = false, .source = fetch_prefix ++
-        \\function handler(req) {
-        \\  const a = fetch("https://api.example.com/a");
-        \\  if (!a.ok) { return Response.text("a failed", { status: 502 }); }
-        \\  function load() {
-        \\    return fetch("https://api.example.com/b", {});
-        \\  }
-        \\  const rows = [load()];
-        \\  return Response.json({ rows: rows });
-        \\}
-    },
     .{ .name = "f2 second fetch inline", .clean = false, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const a = fetch("https://api.example.com/a");
@@ -1287,7 +1265,7 @@ const fetch_probes = [_]FaultProbe{
 
 test "a hidden or unchecked fetch never makes fault coverage true" {
     // The census must run every probe: a loop that skipped them would pass.
-    try std.testing.expectEqual(@as(usize, 25), fetch_probes.len);
+    try std.testing.expectEqual(@as(usize, 24), fetch_probes.len);
     var held: usize = 0;
     var blocked: usize = 0;
     var mismatched: usize = 0;
@@ -1308,7 +1286,7 @@ test "a hidden or unchecked fetch never makes fault coverage true" {
     }
     try std.testing.expectEqual(@as(usize, 0), mismatched);
     try std.testing.expectEqual(@as(usize, 10), held);
-    try std.testing.expectEqual(@as(usize, 15), blocked);
+    try std.testing.expectEqual(@as(usize, 14), blocked);
 }
 
 test "a 2xx fallback on an upstream failure is covered and counted" {

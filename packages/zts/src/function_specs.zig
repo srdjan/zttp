@@ -452,12 +452,6 @@ test "total is refused for a function that recurses through a function value" {
         },
         .{ .name = "h4", .source = "function down(n) { return [n].reduce((acc, x) => acc, down)(n); }" },
         .{ .name = "p2r", .source = "function down(n) { return down(n); }" },
-        .{ .name = "n1", .source =
-        \\function down(n) {
-        \\  function g(x) { return [x].map(g)[0]; }
-        \\  return [n].map(g)[0];
-        \\}
-        },
     };
     for (cases) |case| {
         const holds = try totalHolds(case.source, "down");

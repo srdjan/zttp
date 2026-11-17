@@ -2579,12 +2579,6 @@ test "canonical_redundant_bool_compare fires on a captured unannotated boolean c
     // stack that is empty by then: the operand would have no type and the rule
     // would not fire. The control with the same comparison in the declaring function
     // fires either way.
-    var function_form = try checkSourceTyped(
-        "function handler(req) { const ready = req.method === \"GET\"; function g() { if (ready === false) { return \"no\"; } return \"yes\"; } return Response.text(g()); }",
-    );
-    defer function_form.deinit();
-    try expectKind(&function_form.checker, .canonical_redundant_bool_compare);
-
     var arrow_form = try checkSourceTyped(
         "function handler(req) { const ready = req.method === \"GET\"; const g = () => { if (ready === false) { return \"no\"; } return \"yes\"; }; return Response.text(g()); }",
     );
@@ -2592,7 +2586,7 @@ test "canonical_redundant_bool_compare fires on a captured unannotated boolean c
     try expectKind(&arrow_form.checker, .canonical_redundant_bool_compare);
 
     var local_form = try checkSourceTyped(
-        "function handler(req) { function g() { const ready = req.method === \"GET\"; if (ready === false) { return \"no\"; } return \"yes\"; } return Response.text(g()); }",
+        "function g(req) { const ready = req.method === \"GET\"; if (ready === false) { return \"no\"; } return \"yes\"; } function handler(req) { return Response.text(g(req)); }",
     );
     defer local_form.deinit();
     try expectKind(&local_form.checker, .canonical_redundant_bool_compare);
@@ -2600,21 +2594,6 @@ test "canonical_redundant_bool_compare fires on a captured unannotated boolean c
 
 test "canonical_redundant_bool_compare fires on a captured annotated boolean" {
     // w9 bc_closure_upvalue.ts and bc_arrow_upvalue.ts, with the annotation.
-    var function_form = try checkDirect(
-        \\export function handler(req: Request): Response {
-        \\  const ready: boolean = req.method === "GET";
-        \\  function g(): string {
-        \\    if (ready === false) {
-        \\      return "no";
-        \\    }
-        \\    return "yes";
-        \\  }
-        \\  return Response.text(g());
-        \\}
-    );
-    defer function_form.deinit();
-    try expectKind(&function_form.checker, .canonical_redundant_bool_compare);
-
     var arrow_form = try checkDirect(
         \\export function handler(req: Request): Response {
         \\  const ready: boolean = req.method === "GET";
@@ -2635,7 +2614,7 @@ test "canonical_redundant_bool_compare does not fire on a captured non-boolean" 
     // Control: a captured number compared with a literal is not a boolean
     // comparison, so typing the capture must not make the rule fire on it.
     var h = try checkSourceTyped(
-        "function handler(req) { const n = 1; function g() { if (n === 1) { return \"a\"; } return \"b\"; } return Response.text(g()); }",
+        "function handler(req) { const n = 1; const xs = [0].map((x) => { if (n === 1) { return \"a\"; } return \"b\"; }); return Response.json({ xs: xs }); }",
     );
     defer h.deinit();
     try expectNoKind(&h.checker, .canonical_redundant_bool_compare);
@@ -2772,9 +2751,9 @@ test "a function declaration does not leak function scope to later module code" 
         "function noop(): undefined { return; }\nconst statement = JSON.stringify({});\nsql(\"q\", statement);\nfunction handler(req: Request): Response { return Response.json({}); }\n", false);
 }
 
-test "a nested function body keeps function scope after an inner function ends" {
+test "a function body keeps function scope after an inner arrow callback ends" {
     try expectRegistrationVerdict(sql_import ++
-        "function handler(req: Request): Response {\n  function inner(): undefined { return; }\n  sql(\"q\", req.url);\n  return Response.json({});\n}\n", true);
+        "function handler(req: Request): Response {\n  const ids = [1].map((n: number): number => n);\n  sql(\"q\", req.url);\n  return Response.json({ ids: ids });\n}\n", true);
 }
 
 test "a static constant statement inside a handler is accepted" {
@@ -3692,7 +3671,7 @@ test "a call from a closure is not counted for a helper name a sibling scope dec
     // Two sibling scopes declare the name `h`, so the upvalue call cannot be
     // attributed to the first one. The first `h` is called once.
     var checker = try checkSource(
-        "function handler(req) { function first() { const h = () => 1; return h(); } function other() { const h = () => 2; const g = () => h(); return g(); } return Response.json({ a: first(), b: other() }); }",
+        "function first() { const h = () => 1; return h(); } function other() { const h = () => 2; const g = () => h(); return g(); } function handler(req) { return Response.json({ a: first(), b: other() }); }",
     );
     defer checker.deinit();
     try expectNoKind(&checker, .canonical_arrow_helper);
@@ -3702,7 +3681,7 @@ test "a call from a closure is not counted for a helper name a sibling parameter
     // The closure calls the parameter `h`, not the arrow `h` of the sibling
     // function, which is called once.
     var checker = try checkSource(
-        "function handler(req) { function first() { const h = () => 1; return h(); } function outer(h) { const g = () => h(); return g() + h(); } return Response.json({ a: first(), b: outer(() => 3) }); }",
+        "function first() { const h = () => 1; return h(); } function outer(h) { const g = () => h(); return g() + h(); } function handler(req) { return Response.json({ a: first(), b: outer(() => 3) }); }",
     );
     defer checker.deinit();
     try expectNoKind(&checker, .canonical_arrow_helper);
@@ -3710,7 +3689,7 @@ test "a call from a closure is not counted for a helper name a sibling parameter
 
 test "a call from a closure is not counted for a helper name a sibling loop binding declares" {
     var checker = try checkSource(
-        "function handler(req) { function first() { const h = () => 1; return h(); } const fs = [first]; let n = 0; for (const h of fs) { const g = () => h(); n = n + g(); } return Response.json({ a: first(), n: n }); }",
+        "function first() { const h = () => 1; return h(); } function handler(req) { const fs = [first]; let n = 0; for (const h of fs) { const g = () => h(); n = n + g(); } return Response.json({ a: first(), n: n }); }",
     );
     defer checker.deinit();
     try expectNoKind(&checker, .canonical_arrow_helper);
@@ -3776,12 +3755,16 @@ test "mutable_live_iteration does not fire on a spread of a different collection
     try expectNoKind(&checker, .mutable_live_iteration);
 }
 
-test "canonical_redundant_bool_compare fires inside a nested function" {
-    var h = try checkSourceTyped(
-        "function handler(req) { function g() { const ready = req.method === \"GET\"; if (ready === false) { return \"no\"; } return \"yes\"; } return Response.text(g()); }",
-    );
-    defer h.deinit();
-    try expectKind(&h.checker, .canonical_redundant_bool_compare);
+test "a function declaration inside a function body is refused with ZTS071" {
+    const source = "function handler(req) { function g() { return 1; } return Response.text(String(g())); }";
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
+    defer parser.deinit();
+    try testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try testing.expectEqual(@as(usize, 1), errors.len);
+    try testing.expectEqualStrings("ZTS071", @import("diagnostic_catalog.zig").parserCode(errors[0].kind));
+    try testing.expectEqual(@as(u32, 1), errors[0].location.line);
+    try testing.expectEqual(@as(u32, 25), errors[0].location.column);
 }
 
 test "canonical_redundant_bool_compare fires inside an arrow callback" {

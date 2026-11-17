@@ -3864,15 +3864,6 @@ test "ZTS303 reports an unchecked Result read inside a closure" {
         \\}
     );
     try std.testing.expectEqual(@as(u32, 1), arrow_block.unchecked_result);
-
-    const declared = try routeVerifierCounts(result_import ++
-        \\function handler(req) {
-        \\  const result = jwtVerify("token", "key");
-        \\  function g() { return String(result.value); }
-        \\  return Response.text(g());
-        \\}
-    );
-    try std.testing.expectEqual(@as(u32, 1), declared.unchecked_result);
 }
 
 test "ZTS303 reports an unchecked Result read through a spread" {
@@ -3887,19 +3878,6 @@ test "ZTS303 reports an unchecked Result read through a spread" {
 }
 
 test "ZTS303 a guard inside a closure does not clear the enclosing read" {
-    const declared = try routeVerifierCounts(result_import ++
-        \\function handler(req) {
-        \\  const result = jwtVerify("token", "key");
-        \\  function g() {
-        \\    if (result.ok === false) { return "no"; }
-        \\    return "yes";
-        \\  }
-        \\  const t = g();
-        \\  return Response.text([String(result.value), t].join(""));
-        \\}
-    );
-    try std.testing.expectEqual(@as(u32, 1), declared.unchecked_result);
-
     const arrow = try routeVerifierCounts(result_import ++
         \\function handler(req) {
         \\  const result = jwtVerify("token", "key");

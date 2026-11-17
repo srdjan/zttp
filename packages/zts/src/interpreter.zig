@@ -3245,12 +3245,12 @@ test "End-to-end: function declaration" {
     var ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
 
-    // Test: nested function declaration and call
+    // Test: function declaration and call from another function
     // Note: Expression statements drop values, so we verify execution completes
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();
 
-    const code_str = "function outer() { function add(a, b) { return a + b; } return add(3, 4); } outer();";
+    const code_str = "function add(a, b) { return a + b; } function outer() { return add(3, 4); } outer();";
     var p = try parser_mod.Parser.initTyped(allocator, allocator, code_str, &strings, null);
     defer p.deinit();
 
@@ -3280,7 +3280,7 @@ test "End-to-end: function declaration" {
         allocator,
         ctx,
         &strings,
-        "function outer() { function add(a, b) { return a + b; } return add(3, 4); } let result = outer();",
+        "function add(a, b) { return a + b; } function outer() { return add(3, 4); } let result = outer();",
     )) orelse return error.TestUnexpectedResult;
     try std.testing.expect(result_value.isInt());
     try std.testing.expectEqual(@as(i32, 7), result_value.getInt());

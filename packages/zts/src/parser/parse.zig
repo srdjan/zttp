@@ -1875,7 +1875,18 @@ pub const Parser = struct {
         }
         return switch (self.current.type) {
             .kw_var, .kw_let, .kw_const => self.parseVarDeclaration(),
-            .kw_function => self.parseFunctionDeclaration(),
+            .kw_function => {
+                // Spec 5.2: a named function is a module-level declaration.
+                // The module is scope 0, and every body and block opens a scope.
+                // The refused declaration is still parsed, so that recovery
+                // resumes after it and reports no cascade.
+                if (self.scopes.current_scope != 0) {
+                    self.errors.addErrorAt(.local_function_declaration, self.current, "a function declaration must be at module level");
+                    _ = try self.parseFunctionDeclaration();
+                    return error.ParseError;
+                }
+                return self.parseFunctionDeclaration();
+            },
             .kw_if => self.parseIfStatement(),
             .kw_while => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'while' is not supported; use 'for-of' with a finite collection instead");
@@ -7850,35 +7861,6 @@ test "admission generic scanner stops before an unreachable later quote" {
     try std.testing.expectEqual(type_syntax.AdmissionKind.nesting_too_deep, last.kind);
 }
 
-test "admission header recovery retains later nested block errors" {
-    const cases = [_]struct { source: []const u8, while_offset: u32 }{
-        .{ .source = "function outer(): number { function inner({ x }) { return 1; } while (true) {} return 1; }\n", .while_offset = 63 },
-        .{ .source = "function outer(): number { function inner({ x }: /* gap */ number) { return 1; } while (true) {} return 1; }\n", .while_offset = 81 },
-    };
-    try std.testing.expectEqual(@as(usize, 2), cases.len);
-    for (cases) |case| {
-        var parser = try Parser.initAdmission(
-            std.testing.allocator,
-            std.testing.allocator,
-            case.source,
-            .collect,
-        );
-        defer parser.deinit();
-        switch (try parser.parseAdmission()) {
-            .parser_refused => {},
-            else => return error.TestUnexpectedResult,
-        }
-        const errors = parser.getProjectedErrors();
-        try std.testing.expectEqual(@as(usize, 2), errors.len);
-        try std.testing.expectEqual(@as(u32, 42), errors[0].location.offset);
-        try std.testing.expectEqual(case.while_offset, errors[1].location.offset);
-        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
-        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[1].kind);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.parameter_annotations.items.len);
-    }
-}
-
 test "admission header recovery propagates allocation failures after refusal" {
     const frame_count = type_syntax.max_type_depth + 1;
     const source = "function f({ x } = `outer${\"open\n" ++
@@ -7982,7 +7964,6 @@ test "break and continue in a function nested in a loop are refused" {
     const refused = [_][]const u8{
         "function f(xs) { for (const x of xs) { const g = () => { break; }; } }",
         "function f(xs) { for (const x of xs) { const g = () => { continue; }; } }",
-        "function f(xs) { for (const x of xs) { function g() { break; } } }",
         "function f(xs) { for (const x of xs) { const g = (y) => { if (y) { continue; } return y; }; } }",
     };
     for (refused) |source| {
@@ -7998,7 +7979,6 @@ test "break and continue in a function nested in a loop are refused" {
     // loop's own `break` and `continue` still parse.
     const accepted = [_][]const u8{
         "function f(xs) { for (const x of xs) { const g = () => 1; break; } }",
-        "function f(xs) { for (const x of xs) { function g() { return 1; } continue; } }",
         "function f(xs) { for (const x of xs) { const g = () => { for (const y of xs) { break; } return 1; }; continue; } }",
     };
     for (accepted) |source| {

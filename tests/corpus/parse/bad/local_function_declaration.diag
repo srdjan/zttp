@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS071","severity":"error","message":"a function declaration must be at module level","file":"parse/bad/local_function_declaration.ts","line":3,"column":5,"suggestion":"Move the function to module level.","repair_intent":null}

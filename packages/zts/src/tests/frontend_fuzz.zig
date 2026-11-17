@@ -807,7 +807,7 @@ const value_shapes = [_]Shape{
     .{ .name = "unary", .prefix = "const x = ", .open = "!", .core = "1", .close = "", .suffix = ";" },
     .{ .name = "ternary", .prefix = "const x = ", .open = "a ? b : ", .core = "1", .close = "", .suffix = ";" },
     .{ .name = "if", .open = "if (a) { ", .core = "a;", .close = "}" },
-    .{ .name = "function", .open = "function f#() { ", .core = "", .close = "}" },
+    .{ .name = "callback body", .open = "f(() => { ", .core = "a;", .close = "});" },
     .{ .name = "template", .prefix = "const x = ", .open = "`${", .core = "1", .close = "}`", .suffix = ";" },
     .{ .name = "match", .prefix = "const x = ", .open = "match (a) { when 1: ", .core = "1", .close = " default: 2 }", .suffix = ";" },
     .{ .name = "spread object", .prefix = "const x = ", .open = "{ ...", .core = "a", .close = "}", .suffix = ";" },

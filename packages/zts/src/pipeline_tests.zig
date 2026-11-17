@@ -654,32 +654,6 @@ test "ambient egress summary follows inline callbacks but not named callback val
     try testing.expect(capsule.handler_reachable);
 }
 
-test "a local function sharing a slot with an import atom still reports its egress" {
-    const allocator = testing.allocator;
-    const source =
-        \\import { env as length } from "zttp:env";
-        \\function handler(req) {
-        \\  const a = 1;
-        \\  const b = 2;
-        \\  const c = 3;
-        \\  function leaky() { return fetchSync("https://legacy.example/a"); }
-        \\  leaky();
-        \\  return Response.text("ok");
-        \\}
-    ;
-    var extraction = try extractSessionContractForTest(
-        allocator,
-        source,
-        "generic-precedence.ts",
-        .{ .strict = false },
-    );
-    defer extraction.deinit(allocator);
-
-    const props = extraction.contract.properties orelse return error.MissingProperties;
-    // A slot-only lookup would take `leaky` for the `env` import and hide the fetchSync.
-    try testing.expect(props.has_egress);
-}
-
 test "no-handler properties include every unused builtin import" {
     const allocator = testing.allocator;
     const cases = [_]struct {

@@ -6170,12 +6170,6 @@ test "cost is unbounded when the handler reaches a recursion through a function 
         \\function down(n) { return apply(down, n); }
         \\export function handler(req) { return Response.json({ v: down(3) }); }
         },
-        .{ .name = "f1b", .source =
-        \\export function handler(req) {
-        \\  function g(x) { return g(x); }
-        \\  return Response.json({ v: g(3) });
-        \\}
-        },
         .{ .name = "f3", .source =
         \\let cb = (x) => x + 1;
         \\function down(n) { return cb(n); }

@@ -445,6 +445,14 @@ const refusal_rows_a = [_]RefusalRow{
         .clean = c(top("function g(a: number): number {\n  const b: number = a + 1;\n  return b;\n}")),
     },
     .{
+        .key = "A function declaration inside a function body or a block, such as `function inner(): number`",
+        .refused = &.{
+            r("function inner(): number", body("  function inner(): number {\n    return 1;\n  }\n  assert inner() > 0;")),
+            r("function inner(): number", top("function outer(c: boolean): number {\n  if (c) {\n    function inner(): number {\n      return 1;\n    }\n    return inner();\n  }\n  return 0;\n}")),
+        },
+        .clean = c(top("function inner(): number {\n  return 1;\n}\nfunction outer(): number {\n  return inner();\n}")),
+    },
+    .{
         .key = "Call-site spread `f(...args)`",
         .refused = &.{r("f(...args)", top("function f(a: number): number {\n  return a;\n}\nfunction g(args: number[]): number {\n  return f(...args);\n}"))},
         .clean = c(top("function f(a: number): number {\n  return a;\n}\nfunction g(args: number[]): number {\n  return f(1);\n}")),

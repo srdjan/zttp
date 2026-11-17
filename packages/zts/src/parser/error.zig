@@ -58,6 +58,7 @@ pub const ErrorKind = enum {
     parameter_assignment,
     shadowed_binding,
     statement_body_not_block,
+    local_function_declaration,
     invalid_break,
     invalid_continue,
     invalid_return,
@@ -191,6 +192,7 @@ pub const ErrorList = struct {
             .reserved_word_name => "Write another name. A reserved word stays valid as a record key and after a dot.",
             .parameter_assignment => "Bind the new value to a new `const`.",
             .statement_body_not_block => "Write the body as a block, such as `if (c) { g(); }`.",
+            .local_function_declaration => "Move the function to module level.",
             else => null,
         };
     }

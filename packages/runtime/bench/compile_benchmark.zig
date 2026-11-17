@@ -246,10 +246,14 @@ const GeneratedFixture = enum {
                 try w.writeAll("]; return Response.json(values); }\n");
             },
             .nested_functions => {
-                for (0..24) |i| try w.print("function nested{d}(x{d}: number): number {{\n", .{ i, i });
-                try w.writeAll("return x23 + 1;\n}\n");
-                var depth: usize = 23;
-                while (depth > 0) : (depth -= 1) try w.print("return nested{d}(x{d});\n}}\n", .{ depth, depth - 1 });
+                // A function declaration is legal only at module level, so the
+                // chain is one module-level function around 23 nested arrow
+                // callbacks, each passed directly to `map`.
+                try w.writeAll("function nested0(x0: number): number {\n");
+                for (1..24) |i| try w.print("return [x{d}].map((x{d}: number): number => {{\n", .{ i - 1, i });
+                try w.writeAll("return x23 + 1;\n");
+                for (0..23) |_| try w.writeAll("})[0] ?? 0;\n");
+                try w.writeAll("}\n");
                 try w.writeAll("function handler(req: Request): Response { return Response.text(String(nested0(1))); }\n");
             },
             .typed_declarations => {

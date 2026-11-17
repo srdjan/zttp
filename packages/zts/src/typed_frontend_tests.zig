@@ -2208,41 +2208,6 @@ test "recovered predicate blocks retain surrounding annotations" {
     try std.testing.expectEqual(@as(usize, 2), cases.len);
 }
 
-test "nested function signatures publish in header order" {
-    const source =
-        "const seed: number = 1;\n" ++
-        "function outer(value: string): string {\n" ++
-        "  function inner(count: number): number { return count; }\n" ++
-        "  return value;\n" ++
-        "}\n";
-    var atoms = AtomTable.init(std.testing.allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    try expectParsedStoreValid(source, &parser, root);
-    const view = engine.parser.IrView.fromIRStore(&parser.nodes, &parser.constants);
-    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-    try std.testing.expectEqual(@as(usize, 2), parser.type_store.function_signatures.items.len);
-    try std.testing.expectEqual(@as(usize, 2), parser.type_store.parameter_annotations.items.len);
-    const outer = parser.type_store.function_signatures.items[0];
-    const inner = parser.type_store.function_signatures.items[1];
-    try std.testing.expectEqual(@as(u32, 0), outer.parameters.start);
-    try std.testing.expectEqual(@as(u32, 1), outer.parameters.count);
-    try std.testing.expectEqual(@as(u32, 1), inner.parameters.start);
-    try std.testing.expectEqual(@as(u32, 1), inner.parameters.count);
-    try std.testing.expect(outer.source_span.start < inner.source_span.start);
-    try std.testing.expectEqual(
-        @as(u32, @intCast(std.mem.indexOf(u8, source, "(value").?)),
-        outer.source_span.start,
-    );
-    try std.testing.expectEqual(
-        @as(u32, @intCast(std.mem.indexOf(u8, source, "(count").?)),
-        inner.source_span.start,
-    );
-}
-
 test "generic-only function creates no function signature" {
     const source = "function identity<T>(value) { return value; }\n";
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -2281,30 +2246,6 @@ test "recovered typed function body retains only prior syntax" {
     const function = view.getFunction(function_node orelse return error.TestUnexpectedResult) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(engine.parser.NodeTag.block, view.getTag(function.body).?);
-}
-
-test "recovered outer body removes completed inner function syntax" {
-    const source =
-        "const seed: number = 1;\n" ++
-        "function outer(value: string): string {\n" ++
-        "  function inner(count: number): number { return count; }\n" ++
-        "  const broken = ;\n" ++
-        "  return value;\n" ++
-        "}\n" ++
-        "const after = 2;\n";
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    try std.testing.expectError(error.ParseError, parser.parse());
-    try std.testing.expectEqual(TokenType.eof, parser.current.type);
-    try parser.type_store.validate();
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.nodes.items.len);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.parameter_annotations.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
-    try std.testing.expectEqual(@as(usize, 2), countRuntimeTag(&parser, .function_expr));
-    try std.testing.expectEqual(@as(usize, 2), countRuntimeTag(&parser, .function_decl));
-    try std.testing.expectEqual(@as(usize, 2), countRuntimeTag(&parser, .return_stmt));
-    try std.testing.expectEqual(@as(usize, 2), countRuntimeTag(&parser, .var_decl));
 }
 
 test "function signature validation rejects wrong runtime tags" {
@@ -4374,8 +4315,8 @@ test "first generic function slice accepts only its bounded source shape" {
 
 test "iterative generic function preflight accepts a nonempty nested body" {
     const source =
-        "const seed: number = 1; function outer<T>(value) { " ++
-        "function inner<U>(item) { return item; } return value; }";
+        "const seed: number = 1; function outer<T>(value) { return value; } " ++
+        "function inner<U>(item) { return item; }";
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
@@ -7406,8 +7347,7 @@ test "sibling bindings and closure parameters retain their actual owners" {
         "  if (value === \"\") { const shared: number = 1; }\n" ++
         "  if (value !== \"\") {\n" ++
         "    const shared: string = value;\n" ++
-        "    function inner(item: number): string { return shared; }\n" ++
-        "    return shared;\n" ++
+        "    return [1].map((item: number): string => { return shared; })[0] ?? shared;\n" ++
         "  }\n" ++
         "  return value;\n" ++
         "}";
@@ -7440,9 +7380,9 @@ test "sibling bindings and closure parameters retain their actual owners" {
     }
     try std.testing.expectEqual(@as(usize, 2), variables);
     for (store.function_signatures.items, 0..) |signature, index| {
-        try std.testing.expectEqual(engine.parser.NodeTag.function_expr, view.getTag(signature.owner).?);
+        try std.testing.expectEqual(if (index == 0) engine.parser.NodeTag.function_expr else engine.parser.NodeTag.arrow_function, view.getTag(signature.owner).?);
         const function = view.getFunction(signature.owner) orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings(if (index == 0) "outer" else "inner", atoms.getName(@fromBackingInt(@intCast(function.name_atom))).?);
+        if (index == 0) try std.testing.expectEqualStrings("outer", atoms.getName(@fromBackingInt(@intCast(function.name_atom))).?);
         try std.testing.expectEqual(@as(u8, 1), function.params_count);
         const parameter = store.parameter_annotations.items[index];
         try std.testing.expectEqual(parameter.owner.pattern, view.getListIndex(function.params_start, 0));
@@ -9928,8 +9868,6 @@ fn expectDirectConsumerMatrixCase(
 }
 
 const LookupConsumerCase = enum {
-    forward_repeated,
-    return_fallback,
     untyped_sibling_gap,
     sibling_capture,
     untyped_sibling_gap_mismatch,
@@ -9943,62 +9881,6 @@ test "direct consumers preserve measured lookup winners sibling scopes and captu
         type_diagnostics: []const ExpectedConsumerTypeDiagnostic,
         strict_diagnostics: []const ExpectedConsumerStrictDiagnostic,
     }{
-        .{
-            .case = .forward_repeated,
-            .source =
-            \\function useNumber(value: number): number {
-            \\  inner(value);
-            \\  function inner(item: number): number { return item; }
-            \\  return value;
-            \\}
-            \\function useText(value: string): string {
-            \\  inner(value, "");
-            \\  function inner(item: string, suffix: string): string { return item; }
-            \\  return value;
-            \\}
-            \\export function handler(req: Request): Response {
-            \\  return Response.json({ number: useNumber(1), text: useText("x") });
-            \\}
-            \\
-            ,
-            .type_diagnostics = &.{.{ .kind = .arg_type_mismatch, .line = 7, .column = 9 }},
-            .strict_diagnostics = &.{
-                .{ .kind = .unpublished_ambient_global, .line = 2, .column = 3 },
-                .{ .kind = .unpublished_ambient_global, .line = 7, .column = 3 },
-            },
-        },
-        .{
-            .case = .return_fallback,
-            .source =
-            \\function numericValue(): number {
-            \\  const value: number = make();
-            \\  function make(): number { return 1; }
-            \\  return value;
-            \\}
-            \\function textValue(): string {
-            \\  const value: string = make();
-            \\  function make(): string { return "text"; }
-            \\  return value;
-            \\}
-            \\export function handler(req: Request): Response {
-            \\  return Response.json({ number: numericValue(), text: textValue() });
-            \\}
-            \\
-            ,
-            .type_diagnostics = &.{.{ .kind = .type_mismatch, .line = 2, .column = 3 }},
-            .strict_diagnostics = &.{
-                .{
-                    .kind = .unpublished_ambient_global,
-                    .line = 2,
-                    .column = 25,
-                },
-                .{
-                    .kind = .unpublished_ambient_global,
-                    .line = 7,
-                    .column = 25,
-                },
-            },
-        },
         .{
             .case = .untyped_sibling_gap,
             .source =
@@ -10455,7 +10337,6 @@ test "direct function specifications preserve nonempty effects and helper select
 
 const ContractConsumerCase = enum {
     simple,
-    nested_hole,
     module_arrow,
     nonliteral_effect,
     unknown_capability,
@@ -10486,22 +10367,20 @@ fn expectContractConsumerFacts(
             try std.testing.expectEqual(@as(u32, 1), contract.handler.line);
             try std.testing.expectEqual(@as(u32, 17), contract.handler.column);
         },
-        .nested_hole, .module_arrow => {
+        .module_arrow => {
             try std.testing.expectEqual(@as(usize, 1), contract.function_capsules.items.len);
             try std.testing.expectEqual(@as(usize, 1), contract.function_effect_capsules.items.len);
             try std.testing.expectEqual(@as(usize, 0), contract.function_capsules.items[0].declared.items.len);
             try std.testing.expectEqual(@as(usize, 0), contract.function_effect_capsules.items[0].declared.items.len);
             try std.testing.expectEqual(@as(usize, 1), contract.holes.items.len);
             const hole = contract.holes.items[0];
-            try std.testing.expectEqualStrings(if (kind == .nested_hole) "outer" else "helper", hole.function);
-            try std.testing.expectEqualStrings(if (kind == .nested_hole) "number" else "unknown", hole.expected_type);
-            try std.testing.expectEqual(if (kind == .nested_hole) @as(u32, 2) else 1, hole.line);
-            try std.testing.expectEqual(if (kind == .nested_hole) @as(u32, 37) else 43, hole.column);
-            try std.testing.expectEqual(if (kind == .nested_hole) @as(usize, 0) else 1, hole.in_scope.items.len);
-            if (kind == .module_arrow) {
-                try std.testing.expectEqualStrings("value", hole.in_scope.items[0].name);
-                try std.testing.expectEqualStrings("string", hole.in_scope.items[0].type_name);
-            }
+            try std.testing.expectEqualStrings("helper", hole.function);
+            try std.testing.expectEqualStrings("unknown", hole.expected_type);
+            try std.testing.expectEqual(@as(u32, 1), hole.line);
+            try std.testing.expectEqual(@as(u32, 43), hole.column);
+            try std.testing.expectEqual(@as(usize, 1), hole.in_scope.items.len);
+            try std.testing.expectEqualStrings("value", hole.in_scope.items[0].name);
+            try std.testing.expectEqualStrings("string", hole.in_scope.items[0].type_name);
         },
     }
 }
@@ -10578,13 +10457,12 @@ fn expectDirectSingleModuleContract(
 test "direct single-module full and sound extraction preserve contract bytes" {
     const fixtures = [_]struct { kind: ContractConsumerCase, source: []const u8, json_hash: u64 }{
         .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0xc74330eb07540246 },
-        .{ .kind = .nested_hole, .source = "function outer(): string {\n  function inner(): number { return hole(); }\n  return \"ok\";\n}\nfunction handler(req: Request): Response { return Response.text(outer()); }\n", .json_hash = 0x94b5d097fa0d8614 },
         .{ .kind = .module_arrow, .source = "const helper = (value: string): string => hole();\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0xe4a861aaaaeabe30 },
         .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0x193f68b42a61756e },
         .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0x628d984b6e9a72bb },
     };
     const fields = @typeInfo(ContractConsumerCase).@"enum".field_names;
-    try std.testing.expectEqual(@as(usize, 5), fixtures.len);
+    try std.testing.expectEqual(@as(usize, 4), fixtures.len);
     try std.testing.expectEqual(fields.len, fixtures.len);
     var seen: [fields.len]bool = @splat(false);
     for (fixtures) |fixture| {
@@ -10600,7 +10478,7 @@ test "direct single-module full and sound extraction preserve contract bytes" {
     for (seen) |present| try std.testing.expect(present);
 }
 
-test "a nested function that reuses the handler name is refused with ZTS069" {
+test "a function declaration inside a function body is refused with ZTS071 even when it reuses the handler name" {
     const nested_first = "function wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\nfunction handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\n";
     var first_atoms = AtomTable.init(std.testing.allocator);
     defer first_atoms.deinit();
@@ -10609,8 +10487,9 @@ test "a nested function that reuses the handler name is refused with ZTS069" {
     first.setAtomTable(&first_atoms);
     try std.testing.expectError(error.ParseError, first.parse());
     const first_errors = first.getProjectedErrors();
-    try std.testing.expectEqual(@as(usize, 1), first_errors.len);
-    try std.testing.expectEqualStrings("ZTS069", diagnostic_catalog.parserCode(first_errors[0].kind));
+    try std.testing.expectEqualStrings("ZTS071", diagnostic_catalog.parserCode(first_errors[0].kind));
+    try std.testing.expectEqual(@as(u32, 2), first_errors[0].location.line);
+    try std.testing.expectEqual(@as(u32, 3), first_errors[0].location.column);
 
     const outer_first = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\nfunction wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\n";
     var second_atoms = AtomTable.init(std.testing.allocator);
@@ -10620,8 +10499,9 @@ test "a nested function that reuses the handler name is refused with ZTS069" {
     second.setAtomTable(&second_atoms);
     try std.testing.expectError(error.ParseError, second.parse());
     const second_errors = second.getProjectedErrors();
-    try std.testing.expectEqual(@as(usize, 1), second_errors.len);
-    try std.testing.expectEqualStrings("ZTS069", diagnostic_catalog.parserCode(second_errors[0].kind));
+    try std.testing.expectEqualStrings("ZTS071", diagnostic_catalog.parserCode(second_errors[0].kind));
+    try std.testing.expectEqual(@as(u32, 5), second_errors[0].location.line);
+    try std.testing.expectEqual(@as(u32, 3), second_errors[0].location.column);
 }
 
 const ExpectedCallbackCeiling = struct {

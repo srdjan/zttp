@@ -9604,15 +9604,7 @@ test "narrowing: a closure in a loop body that assigns the narrowed binding kill
         ),
         .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 },
     );
-    try expectKindCounts(
-        narrowedBeforeLoop(
-            \\    function g(): number {
-            \\      x = undefined;
-            \\      return 1;
-            \\    }
-        ),
-        .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 },
-    );
+    // A function declaration in the loop body is ZTS071, so only the arrow form exists.
     // Control: a closure that assigns only its own local leaves the narrowing.
     try expectKindCounts(
         narrowedBeforeLoop(
@@ -10413,43 +10405,25 @@ test "TypeChecker: a function and an arrow on one line keep separate signatures"
     , 0, 0);
 }
 
-test "TypeChecker: nested functions that share a name keep their own signatures" {
-    // The later declaration must not win the name for both, in either order.
-    try checkTypedSource(
+test "TypeChecker: a function declaration inside a function body is refused with ZTS071" {
+    const allocator = std.testing.allocator;
+    const source =
         \\function first(): number {
         \\  function inner(x: number): number { return x; }
         \\  return inner(1);
         \\}
-        \\function second(): number {
-        \\  function inner(x: number, y: number): number { return x + y; }
-        \\  return inner(1, 2);
-        \\}
-    , 0, 0);
-    try checkTypedSource(
-        \\function second(): number {
-        \\  function inner(x: number, y: number): number { return x + y; }
-        \\  return inner(1, 2);
-        \\}
-        \\function first(): number {
-        \\  function inner(x: number): number { return x; }
-        \\  return inner(1);
-        \\}
-    , 0, 0);
-}
-
-test "TypeChecker: each nested function of one name is still checked against its own signature" {
-    // Sharing a name must not loosen the check: the call that is wrong for its
-    // own function is still refused, and only that one.
-    try checkTypedSourceSaying(
-        \\function first(): number {
-        \\  function inner(x: number): number { return x; }
-        \\  return inner(1);
-        \\}
-        \\function second(): number {
-        \\  function inner(x: number, y: number): number { return x + y; }
-        \\  return inner(1);
-        \\}
-    , 1, "expected 2, got 1");
+    ;
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqualStrings("ZTS071", diagnostic_catalog.parserCode(errors[0].kind));
+    try std.testing.expectEqual(@as(u32, 2), errors[0].location.line);
+    try std.testing.expectEqual(@as(u32, 3), errors[0].location.column);
 }
 
 test "TypeChecker: surplus arguments to a declaration are refused" {
@@ -10476,15 +10450,6 @@ test "TypeChecker: surplus arguments to a const arrow are refused" {
         \\const inc = (x: number): number => x + 1;
         \\function handler(req: Request): Response {
         \\  return Response.json({ n: inc(1, 2) });
-        \\}
-    , 1, "expected 1, got 2");
-}
-
-test "TypeChecker: surplus arguments to a nested function are refused" {
-    try checkTypedSourceSaying(
-        \\function handler(req: Request): Response {
-        \\  function square(x: number): number { return x * x; }
-        \\  return Response.json({ n: square(2, 3) });
         \\}
     , 1, "expected 1, got 2");
 }
@@ -13984,17 +13949,6 @@ test "predicate position: a local const arrow predicate is ZTS211" {
     try expectOnlyDiagnostic(
         \\function handler(req: Request): Response {
         \\    const isStr = (x: unknown): x is string => typeof x === "string";
-        \\    return Response.json({ ok: true });
-        \\}
-    , .invalid_type_predicate);
-}
-
-test "predicate position: a function declaration nested in a function body is ZTS211" {
-    try expectOnlyDiagnostic(
-        \\function handler(req: Request): Response {
-        \\    function isStr(x: unknown): x is string {
-        \\        return typeof x === "string";
-        \\    }
         \\    return Response.json({ ok: true });
         \\}
     , .invalid_type_predicate);

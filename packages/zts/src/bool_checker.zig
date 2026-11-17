@@ -2513,13 +2513,22 @@ test "sound: if (5) in an export function fails" {
     try checkSource("export function f() { if (5) { let x = 1; } }", 1);
 }
 
-test "sound: if (5) in a function nested in a function fails" {
-    try checkSource(
+test "a function declaration nested in a function is refused with ZTS071" {
+    const allocator = std.testing.allocator;
+    const source =
         \\function outer() {
         \\  function inner() { if (5) { let x = 1; } }
         \\  return inner;
         \\}
-    , 1);
+    ;
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqualStrings("ZTS071", diagnostic_catalog.parserCode(errors[0].kind));
+    try std.testing.expectEqual(@as(u32, 2), errors[0].location.line);
+    try std.testing.expectEqual(@as(u32, 3), errors[0].location.column);
 }
 
 test "sound: if (5) in an arrow inside a function declaration fails" {
