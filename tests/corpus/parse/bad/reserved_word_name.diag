@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS067","severity":"error","message":"a reserved word cannot be a name","file":"parse/bad/reserved_word_name.ts","line":3,"column":11,"suggestion":"Write another name. A reserved word stays valid as a record key and after a dot.","repair_intent":null}

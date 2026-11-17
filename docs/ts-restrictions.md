@@ -88,6 +88,7 @@ pure.
 | A declaration that binds two names, such as `const a = 1, b = 2;` | ZTS001 | Write one `const` for each name |
 | A second declaration of a name in one scope, such as `const a = 1; const a = 2;`, a `function` and a `const` of one name, and an import and a declaration of one name | ZTS019 | A different name |
 | An assignment to a `const` binding, such as `const n: number = 1; n = 2;` and `for (const k of xs) { k = 1; }` | ZTS066 | Write `let`, or bind the new value to a new name |
+| A reserved word as a value name, such as `const set = 1;`, `function from(): number`, a parameter named `of`, an arrow parameter named `get`, the pattern binding `when { from }`, and `import { dictEmpty as match }` | ZTS067 | Another name. A reserved word stays valid as a record key, a type field, a pattern key, and a member name, such as `{ assert: 1 }`, `when { from: f }`, and `x.assert`. Spec Section 5.2 lists the reserved words |
 | `class` declarations and `class` expressions | ZTS001 | Plain records and functions |
 | `declare` declarations | ZTS001 | Import the value from a module |
 | `abstract class` | ZTS001 | Plain records and functions |

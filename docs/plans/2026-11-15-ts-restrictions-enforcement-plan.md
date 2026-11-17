@@ -213,6 +213,15 @@ option (a) on 2026-11-16: commit the reproducing test and fix the hole in
 its own unit, R1. The rejected options were (b), which records the hole for
 later, and (c), which fixes it inside U4b-6c.
 
+### Decision 15: a reserved word as a name
+
+The parser refused `get`, `set`, `of`, `as`, `from`, `match`, `assert`,
+`static`, `async`, `await`, and `yield` as binding names with a generic
+ZTS003. Neither `docs/ts-restrictions.md` nor the spec listed the refusal. The
+owner chose option (a) on 2026-11-16: reserve every keyword of the lexer
+as a value name, with a targeted code. The rejected option was (b), which
+admits the words as names through contextual-keyword parsing.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -383,6 +392,7 @@ U4b-5 X18, U4b-6 G12 with N16, and U4b-7 N11 and N12. U4b-3b deletes the
 code that handles a duplicate declaration (Decision 11).
 U4b-6b takes N18 (Decision 13). U4b-6c deletes the untracked-root code
 (Decisions 12 and 13). R1 fixes the closure-capture hole (Decision 14).
+U4b-8 reserves the keywords as value names (Decision 15).
 
 ### U2: parser refusals that move no hash (Sonnet, 3 sequential parts)
 
@@ -880,3 +890,20 @@ later.
   test can kill it: a subject that is an upvalue never yields a stable
   table, because `Resolver.resolveStableRouteTable` accepts only a global
   and `Resolver.findBindingDecl` is exact.
+- U4b-8 refuses a reserved word as a value name with ZTS067 (Decision 15):
+  a variable, a function, a parameter, an import alias, and a pattern
+  binding. Spec Section 5.2 lists the 54 reserved words, which are the
+  keyword table of `parser/token.zig`. A reserved word stays valid as a
+  record key, a type field, a pattern key, and a member name. Two defects
+  are fixed in the same unit. `assert` could not be a record key or a
+  member name, and after U4b-1 a quoted key could not spell it either. A
+  match record pattern could not name a field whose name is a reserved
+  word. A census test parses every keyword as a name and as a key. These
+  findings stay open:
+  - A type name may be a reserved word, such as `structural set = ...`,
+    because
+    `packages/zts/src/parser/type_syntax_scan.zig#tokenIsDeclarationName`
+    checks only spelling. Decision 15 covered value names.
+  - A later use of a refused name, such as `set > 0`, cascades a ZTS002.
+  - `const enum = 1` reports the TypeScript `const enum` refusal, not
+    ZTS067, so the census uses `let`.

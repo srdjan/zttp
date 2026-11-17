@@ -4044,19 +4044,20 @@ pub const Parser = struct {
             const prop_loc = self.current.location();
 
             var key_name: []const u8 = "";
-            const key = switch (self.current.type) {
-                .identifier => blk: {
-                    const text = self.current.text(self.source);
-                    key_name = text;
-                    const str_idx = try self.constants.addString(text);
-                    self.advance();
-                    break :blk try self.nodes.addString(prop_loc, str_idx);
-                },
-                .string_literal => try self.parseString(),
-                else => {
-                    self.errorAtCurrent("expected property name");
-                    return error.ParseError;
-                },
+            // A reserved word is a field name here, as in a record literal,
+            // but it cannot become a binding.
+            const key_is_reserved = self.isKeyword(self.current.type);
+            const key = if (self.check(.identifier) or key_is_reserved) blk: {
+                const text = self.current.text(self.source);
+                key_name = text;
+                const str_idx = try self.constants.addString(text);
+                self.advance();
+                break :blk try self.nodes.addString(prop_loc, str_idx);
+            } else if (self.check(.string_literal))
+                try self.parseString()
+            else {
+                self.errorAtCurrent("expected property name");
+                return error.ParseError;
             };
 
             // Spec 5.5: a record pattern field is a discriminant test, a
@@ -4071,10 +4072,18 @@ pub const Parser = struct {
                         self.errorAtCurrent("a string-keyed pattern field needs an explicit pattern or binding after ':'");
                         return error.ParseError;
                     }
+                    if (key_is_reserved) {
+                        self.errors.addError(.reserved_word_name, prop_loc, "a reserved word cannot be a name");
+                        return error.ParseError;
+                    }
                     shorthand = true;
                     break :blk try self.declarePatternBinding(key_name, prop_loc);
                 }
                 try self.expect(.colon, "':'");
+                if (self.isKeyword(self.current.type) and !isLiteralKeyword(self.current.type)) {
+                    self.errors.addError(.reserved_word_name, self.current.location(), "a reserved word cannot be a name");
+                    return error.ParseError;
+                }
                 if (self.check(.identifier)) {
                     const text = self.current.text(self.source);
                     if (!std.mem.eql(u8, text, "_")) {
@@ -6065,6 +6074,10 @@ pub const Parser = struct {
             self.advance();
             return tok;
         }
+        if (self.isKeyword(self.current.type)) {
+            self.errors.addError(.reserved_word_name, self.current.location(), "a reserved word cannot be a name");
+            return error.UnexpectedToken;
+        }
         self.errors.addExpectedError(self.current, ctx_label);
         return error.UnexpectedToken;
     }
@@ -6152,6 +6165,7 @@ pub const Parser = struct {
             // Match keywords (allowed as property names)
             .kw_match,
             .kw_when,
+            .kw_assert,
             // Literals that look like keywords
             .true_lit,
             .false_lit,
@@ -6161,6 +6175,14 @@ pub const Parser = struct {
             // as a name like the other literal keywords above.
             .undefined_lit,
             => true,
+            else => false,
+        };
+    }
+
+    /// The keywords that are also values, and so valid as a pattern.
+    fn isLiteralKeyword(token_type: TokenType) bool {
+        return switch (token_type) {
+            .true_lit, .false_lit, .null_lit, .undefined_lit => true,
             else => false,
         };
     }
@@ -9440,6 +9462,32 @@ test "export let is refused with an export const repair" {
     const diagnostic = parser.getAdmissionFailure().?.diagnostic;
     try std.testing.expectEqual(.mutable_export, diagnostic.kind);
     try std.testing.expectEqual(@as(u32, 0), diagnostic.span.start);
+}
+
+test "census: every keyword is refused as a name and admitted as a key and a member" {
+    const allocator = std.testing.allocator;
+    for (token_mod.keywords.keys()) |word| {
+        const refused = try std.mem.concat(allocator, u8, &.{ "let ", word, " = 1;\n" });
+        defer allocator.free(refused);
+        var refused_parser = try Parser.initAdmission(allocator, allocator, refused, .compile);
+        defer refused_parser.deinit();
+        _ = refused_parser.parse() catch {};
+        const errors = refused_parser.getErrors();
+        if (errors.len == 0 or errors[0].kind != .reserved_word_name) {
+            std.debug.print("keyword `{s}` as a name is not refused with reserved_word_name\n", .{word});
+            return error.TestUnexpectedResult;
+        }
+
+        const admitted = try std.mem.concat(allocator, u8, &.{ "const x = { ", word, ": 1 };\nconst y = x.", word, ";\n" });
+        defer allocator.free(admitted);
+        var admitted_parser = try Parser.initAdmission(allocator, allocator, admitted, .compile);
+        defer admitted_parser.deinit();
+        _ = admitted_parser.parse() catch {};
+        if (admitted_parser.hasErrors()) {
+            std.debug.print("keyword `{s}` as a record key or a member name is refused\n", .{word});
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 test "unsupported: export re-export braces" {

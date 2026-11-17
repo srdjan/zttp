@@ -1369,6 +1369,18 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("function g(): number {\n  let n: number = 1;\n  n = 2;\n  return n;\n}")),
     },
     .{
+        .key = "A reserved word as a value name, such as `const set = 1;`, `function from(): number`, a parameter named `of`, an arrow parameter named `get`, the pattern binding `when { from }`, and `import { dictEmpty as match }`",
+        .refused = &.{
+            r("const set = 1;", body("  const set = 1;")),
+            r("function from(): number", top("function from(): number {\n  return 1;\n}")),
+            r("of", top("function g(of: number): number {\n  return of;\n}")),
+            r("get", body("  const xs = [1, 2];\n  const ys = xs.map((get: number): number => get);\n  assert ys.length > 0;")),
+            r("import { dictEmpty as match }", top("import { dictEmpty as match } from \"zttp:collections\";")),
+            r("when { from }", top("structural M = { kind: \"a\"; from: number } | { kind: \"b\" };\nfunction g(m: M): number {\n  return match (m) {\n    when { kind: \"a\", from }: 1\n    when { kind: \"b\" }: 0\n  };\n}")),
+        },
+        .clean = c(top("structural M = { kind: \"a\"; from: number } | { kind: \"b\" };\nfunction g(m: M): number {\n  const x = { assert: 1, set: 2 };\n  assert x.assert + x.set > 0;\n  return match (m) {\n    when { kind: \"a\", from: f }: f\n    when { kind: \"b\" }: 0\n  };\n}")),
+    },
+    .{
         .key = "Destructuring in a `for...of` head",
         .refused = &.{
             r("for...of", top("function g(xs: number[][]): number {\n  for (const [a, b] of xs) {\n  }\n  return 1;\n}")),

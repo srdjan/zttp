@@ -54,6 +54,7 @@ pub const ErrorKind = enum {
     undeclared_variable,
     const_without_initializer,
     const_assignment,
+    reserved_word_name,
     invalid_break,
     invalid_continue,
     invalid_return,
@@ -184,6 +185,7 @@ pub const ErrorList = struct {
             .invalid_await => "Remove await. Handlers run synchronously, so call the function directly.",
             .duplicate_parameter, .duplicate_binding => "Write a different name.",
             .const_assignment => "Declare the name with `let`, or bind the new value to a new name.",
+            .reserved_word_name => "Write another name. A reserved word stays valid as a record key and after a dot.",
             else => null,
         };
     }

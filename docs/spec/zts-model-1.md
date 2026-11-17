@@ -760,6 +760,18 @@ not `{ value }`. A fixed-shape record uses literal field names; dynamic keyed
 data uses `Dict`. Reusable behavior is a named function with explicit inputs
 and outputs.
 
+A reserved word is never the name of a value: a variable, a function, a
+parameter, an import alias, or a pattern binding. A reserved word stays valid
+as a record key, a record type field, a pattern key, and a member name after
+`.`. The reserved words are `var`, `let`, `const`, `function`, `return`, `if`,
+`else`, `while`, `do`, `for`, `in`, `of`, `break`, `continue`, `switch`,
+`case`, `default`, `throw`, `try`, `catch`, `finally`, `new`, `this`,
+`typeof`, `void`, `delete`, `instanceof`, `yield`, `async`, `await`,
+`import`, `export`, `from`, `as`, `class`, `extends`, `super`, `static`,
+`get`, `set`, `debugger`, `with`, `enum`, `implements`, `public`, `private`,
+`protected`, `match`, `when`, `assert`, `true`, `false`, `null`, and
+`undefined`.
+
 A default is explicit in the parameter type, call, and function body:
 
 ```ts
@@ -1719,6 +1731,7 @@ the machine-readable registry together; the registry records, per rule,
 whether enforcement happens at parse time or at check time. Unexpanded
 leaves such as `Ident`, `String`, `Number`, `Literal`, and
 `TemplateLiteralType` are lexical or separately specified syntactic classes.
+An `Ident` that names a value is not a reserved word of Section 5.2.
 
 ```ebnf
 Module       ::= Import* TopDecl*
