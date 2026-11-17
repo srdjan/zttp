@@ -1437,6 +1437,15 @@ const refusal_rows_b = [_]RefusalRow{
         .refused = &.{r("10n", body("  const a = 10n;"))},
         .clean = c(body("  const a = 10;")),
     },
+    .{
+        .key = "A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();`",
+        .refused = &.{
+            r("if (c) g();", top(g_fn ++ "function h(c: boolean): number {\n  if (c) g();\n  return 2;\n}")),
+            r("else g();", top(g_fn ++ "function h(c: boolean): number {\n  if (c) {\n    return 1;\n  } else g();\n  return 2;\n}")),
+            r("for (const k of xs) g();", top(g_fn ++ "function h(xs: number[]): number {\n  for (const k of xs) g();\n  return 2;\n}")),
+        },
+        .clean = c(top(g_fn ++ "function h(c: boolean, d: boolean): number {\n  if (c) {\n    g();\n  } else if (d) {\n    g();\n  } else {\n    g();\n  }\n  return 2;\n}")),
+    },
 };
 
 pub const refusal_rows = refusal_rows_a ++ refusal_rows_b;
@@ -1512,14 +1521,6 @@ pub const gap_rows = [_]GapRow{
         .sources = &.{c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n  };\n}"))},
     },
     // ----- U1b rows, in the order of the row assignment of the plan -----
-    .{
-        .key = "A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();`",
-        .sources = &.{
-            c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) g();\n  return 2;\n}")),
-            c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) {\n    return 1;\n  } else g();\n  return 2;\n}")),
-            c(top(g_fn ++ "function h(xs: number[]): number {\n  for (const k of xs) g();\n  return 2;\n}")),
-        },
-    },
     .{
         .key = "A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };`",
         .sources = &.{c(top("structural Box<T extends string> = { value: T };\nfunction g(b: Box<number>): number {\n  return b.value;\n}"))},

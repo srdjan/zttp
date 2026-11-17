@@ -962,3 +962,15 @@ later.
     So N12 adds no measurable time, but the check itself grows faster
     than the file: 10 times the functions take about 71 times as long. The
     cause is older than N12 and is not measured.
+- U4c starts with X19 in two commits. The first commit moves every
+  non-block body of `if`, `else`, and `for...of` to a block. That covers
+  three examples, two doc lines, tests in zts, tools, runtime, and pi,
+  the repair templates, the stand-in seeds and playbook, two skill files,
+  and one verifier help string. The second commit refuses the form with
+  ZTS070, and `else if` stays legal. The model-visible text change moves
+  the corpus identity, so U7 re-records it (Decision 1 a). These findings
+  stay open:
+  - 4 recorded DeepSeek responses in 3 cases (`jwt-auth`,
+    `sibling-helper`, and `validate-body`) write `if (...) return ...;`.
+    X19 refuses those drafts, so the U7 re-record measures what the
+    refusal costs the model.

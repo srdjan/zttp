@@ -3552,10 +3552,14 @@ pub const Parser = struct {
         };
     }
 
-    /// The body of `if`, `else`, or `for...of`. A block is admitted only here
-    /// and as a function body, and it must hold a statement.
+    /// The body of `if`, `else`, or `for...of`. Spec 5.5: the body is a block,
+    /// and a block is admitted only here and as a function body. It must hold
+    /// a statement.
     fn parseStatementBody(self: *Parser) anyerror!NodeIndex {
-        if (!self.check(.lbrace)) return self.parseStatement();
+        if (!self.check(.lbrace)) {
+            self.errors.addErrorAt(.statement_body_not_block, self.current, "the body of `if`, `else`, or `for...of` must be a block");
+            return error.ParseError;
+        }
         const state = self.tokenizer.saveState();
         const next = self.tokenizer.next();
         self.tokenizer.restoreState(state);
@@ -3577,7 +3581,8 @@ pub const Parser = struct {
 
         var else_branch: NodeIndex = null_node;
         if (self.match(.kw_else)) {
-            else_branch = try self.parseStatementBody();
+            // `else if` chains a second `if`; every other `else` body is a block.
+            else_branch = if (self.check(.kw_if)) try self.parseIfStatement() else try self.parseStatementBody();
         }
 
         return try self.nodes.addIf(loc, .{

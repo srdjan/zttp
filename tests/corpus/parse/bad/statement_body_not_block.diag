@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS070","severity":"error","message":"the body of `if`, `else`, or `for...of` must be a block","file":"parse/bad/statement_body_not_block.ts","line":3,"column":31,"suggestion":"Write the body as a block, such as `if (c) { g(); }`.","repair_intent":null}

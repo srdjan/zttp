@@ -154,6 +154,7 @@ and local function declaration. A block is only the body of a function, `if`,
 | An empty statement `;` | ZTS001 | Remove the standalone semicolon |
 | A bare block statement, such as `{ const a = 1; }` | ZTS001 | Put its statements in the enclosing block |
 | An empty body of `if`, `else`, or `for...of`, such as `if (c) {}` | ZTS001 | Remove the statement, or invert the condition and drop the empty branch |
+| A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | ZTS070 | Write the body as a block, such as `if (c) { g(); }`. `else if` stays |
 | A fallback `assert` form | ZTS002 | `if (!predicate) { return fallback; }` |
 | A `for...of` body that mutates the collection that it iterates | ZTS622 | Read one collection and build the changed one separately |
 | `range(n).map(f)` and other array members on `range(n)` | ZTS201 | `for (const i of range(n))` |
@@ -411,7 +412,6 @@ against the compiler.
 | A write to a `readonly` field | Refused with ZTS200 | ZTS215. Write a new record |
 | A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
-| A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
 | A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | Accepted, exit 0 | ZTS209. Pass a type argument that satisfies the constraint |
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |

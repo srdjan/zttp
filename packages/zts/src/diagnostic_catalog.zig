@@ -149,6 +149,7 @@ pub fn parserCode(kind: ParserKind) []const u8 {
         .reserved_word_name => "ZTS067",
         .parameter_assignment => "ZTS068",
         .shadowed_binding => "ZTS069",
+        .statement_body_not_block => "ZTS070",
         .invalid_break => "ZTS022",
         .invalid_continue => "ZTS023",
         .invalid_return => "ZTS024",
