@@ -1791,16 +1791,13 @@ const lifetime_guard_cases = [_]LifetimeGuardCase{
         .expected_body = "/24000",
     },
     .{
-        .name = "callback writes a request string to a captured request variable in a loop",
+        .name = "callback returns a request string to a request variable in a loop",
         .handler =
         \\function handler(req) {
         \\  const base = req.url;
         \\  let last = "";
         \\  for (const i of range(2000)) {
-        \\    [1, 2].map((x) => {
-        \\      last = [base, String(x)].join("");
-        \\      return x;
-        \\    });
+        \\    last = [1, 2].reduce((acc, x) => [base, String(x)].join(""), "");
         \\  }
         \\  return Response.text(last);
         \\}

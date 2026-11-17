@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS073","severity":"error","message":"a callback cannot write a binding of an enclosing function","file":"parse/bad/captured_binding_write.ts","line":5,"column":9,"suggestion":"Return the value from the callback, or build the result with `for...of` in the enclosing function.","repair_intent":null}

@@ -1104,3 +1104,34 @@ later.
     `error at 1:22: ...`, with no ZTS code.
   - Several tests now hold a top-level bare call, such as `f((a) => a);`,
     or a top-level `const x = [0].map(...)`. Decision 3 and X2 measure them.
+- U4c-callback purity refuses, with ZTS073, an arrow that assigns a
+  binding of an enclosing function or calls `push` on one (spec 6.5). The
+  parser decides it from the scope analyzer, because every arrow is a
+  call argument and every function is at module level. The 19 tests that
+  the rule broke were migrated, and none was deleted. Three flow tests
+  had observed what a callback receives through a captured write. Control
+  probes showed that a return or a write through a parameter joins the
+  receiver's labels, so those cases could not fail. Their subjects moved
+  to log-sink tests in `packages/zts/src/flow_checker_tests.zig`, each
+  with a clean control. These findings stay open:
+  - An arrow can still write a module-level `let`, and the flow
+    interpreter then clears its result, which fails closed. Spec 6.5 says
+    that a callback must be pure. Whether ZTS073 also covers a
+    module-level binding is an owner decision.
+  - A callback can still write a record through its own parameter: an
+    element, an accumulator, or a payload. The analyzer gives the whole
+    record the written label. Spec 6.5 purity also forbids this write.
+  - Spec 6.5 also requires the checker to verify every helper that a
+    callback reaches, and to refuse an effect in an array callback. The
+    checker does not enforce either.
+  - A pure callback cannot change the output through its run count, so
+    the branch demotion at a higher-order call over an array of varying
+    length is now an over-approximation. The precompile rows
+    `d_some_range` and `c6b_tosorted_count` pin it.
+  - Flow tests write through a third callback parameter, such as
+    `(v, i, all) => { all[1] = x; }`, which the type checker refuses with
+    ZTS202. The audit checks which analyzer code only such a write
+    reaches.
+  - The audit of the callback purity sites listed above must probe each
+    site with a module-level `let` write and a parameter write before it
+    deletes code, because both forms stay legal.

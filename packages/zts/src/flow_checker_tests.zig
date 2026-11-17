@@ -1250,20 +1250,19 @@ test "selection predicates and bounds contribute their own defenses" {
 }
 
 test "selection callbacks carry writes into selected elements" {
-    const cases = [_]struct { top: []const u8 = "", setup: []const u8 = "", callback: []const u8, safe: bool }{
-        .{ .callback = "(v) => { parts[1] = req.url; return req.url !== \"\"; }", .safe = false },
-        .{ .callback = "(v) => { parts[1] = req.url; return true; }", .safe = false },
-        .{ .setup = "const alias = parts;", .callback = "(v) => { alias[1] = req.url; return true; }", .safe = false },
-        .{ .setup = "const holder = { items: parts };", .callback = "(v) => { holder.items[1] = req.url; return true; }", .safe = false },
-        .{ .setup = "const holder = [parts];", .callback = "(v) => { holder[0].push(req.url); return true; }", .safe = false },
+    const cases = [_]struct { top: []const u8 = "", callback: []const u8, safe: bool }{
+        .{ .callback = "(v, i, all) => { all[1] = req.url; return req.url !== \"\"; }", .safe = false },
         .{ .callback = "(v, i, all) => { all[1] = req.url; return true; }", .safe = false },
-        .{ .top = "function replace(xs, u) { xs[1] = u; }", .callback = "(v) => { replace(parts, req.url); return true; }", .safe = false },
-        .{ .callback = "(v) => { parts.push(req.url); return true; }", .safe = false },
-        .{ .callback = "(v) => { [\"x\"].filter((x) => { parts[1] = req.url; return true; }); return true; }", .safe = false },
-        .{ .callback = "(v) => { parts[1] = escapeHtml(req.url); return req.url !== \"\"; }", .safe = false },
-        .{ .setup = "const other = {};", .callback = "(v) => { other.raw = req.url; return req.url !== \"\"; }", .safe = false },
-        .{ .callback = "(v) => { parts[1] = escapeHtml(req.url); return true; }", .safe = true },
-        .{ .setup = "const other = {};", .callback = "(v) => { other.raw = req.url; return true; }", .safe = true },
+        .{ .callback = "(v, i, all) => { const alias = all; alias[1] = req.url; return true; }", .safe = false },
+        .{ .callback = "(v, i, all) => { const holder = { items: all }; holder.items[1] = req.url; return true; }", .safe = false },
+        .{ .callback = "(v, i, all) => { const holder = [all]; holder[0].push(req.url); return true; }", .safe = false },
+        .{ .top = "function replace(xs, u) { xs[1] = u; }", .callback = "(v, i, all) => { replace(all, req.url); return true; }", .safe = false },
+        .{ .callback = "(v, i, all) => { all.push(req.url); return true; }", .safe = false },
+        .{ .top = "function replace(xs, u) { xs[1] = u; }", .callback = "(v, i, all) => { [\"x\"].filter((x) => { replace(all, req.url); return true; }); return true; }", .safe = false },
+        .{ .callback = "(v, i, all) => { all[1] = escapeHtml(req.url); return req.url !== \"\"; }", .safe = false },
+        .{ .callback = "(v, i, all) => { const other = {}; other.raw = req.url; return req.url !== \"\"; }", .safe = false },
+        .{ .callback = "(v, i, all) => { all[1] = escapeHtml(req.url); return true; }", .safe = true },
+        .{ .callback = "(v, i, all) => { const other = {}; other.raw = req.url; return true; }", .safe = true },
     };
     for (cases) |case| {
         const source = try std.testing.allocator.print(
@@ -1271,11 +1270,10 @@ test "selection callbacks carry writes into selected elements" {
             \\{s}
             \\function handler(req) {{
             \\  const parts = [escapeHtml(req.url), escapeHtml(req.url)];
-            \\  {s}
             \\  const out = parts.filter({s}).join("");
             \\  return Response.html(out);
             \\}}
-        , .{ case.top, case.setup, case.callback });
+        , .{ case.top, case.callback });
         defer std.testing.allocator.free(source);
         var buf: [512]u8 = undefined;
         const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
@@ -1289,10 +1287,9 @@ test "selection callbacks carry writes into selected elements" {
 
 test "map callbacks see values written into later elements" {
     const cases = [_]struct { callback: []const u8, safe: bool }{
-        .{ .callback = "(v) => { parts[1] = req.url; return v; }", .safe = false },
         .{ .callback = "(v, i, all) => { all[1] = req.url; return v; }", .safe = false },
-        .{ .callback = "(v) => { parts[1] = req.url; return escapeHtml(v); }", .safe = true },
-        .{ .callback = "(v) => { parts[1] = req.url; return \"static\"; }", .safe = true },
+        .{ .callback = "(v, i, all) => { all[1] = req.url; return escapeHtml(v); }", .safe = true },
+        .{ .callback = "(v, i, all) => { all[1] = req.url; return \"static\"; }", .safe = true },
     };
     for (cases) |case| {
         const source = try std.testing.allocator.print(
@@ -1316,7 +1313,7 @@ test "later iteration writes reach callback sinks even when its result is discar
         \\function handler(req) {
         \\  const secret = env("SECRET_KEY");
         \\  const parts = ["a", "b"];
-        \\  parts.filter((v) => { parts[1] = secret; console.log(v); return true; });
+        \\  parts.filter((v, i, all) => { all[1] = secret; console.log(v); return true; });
         \\  return Response.json({ ok: true });
         \\}
     ;
@@ -5636,4 +5633,116 @@ test "FlowChecker exposes the persistent writes and the cleared flag of the last
     try std.testing.expectEqual(@as(usize, 1), checker.persistentWrites().len);
     try std.testing.expectEqual(@as(u32, 2), view.getLoc(checker.persistentWrites()[0].node).?.line);
     try std.testing.expectEqual(@as(usize, 2), checker.persistentWrites()[0].stack.len);
+}
+
+test "an export callback receives what its shape says" {
+    // Each callback logs what it receives, so the log sink shows which
+    // argument reached which parameter. A callback cannot write a binding
+    // of its enclosing function (ZTS073), and a return or a write through a
+    // parameter joins the receiver's labels, so the sink is the precise
+    // observation.
+    const head =
+        \\import { env } from "zttp:env";
+        \\import { ok, mapResult } from "zttp:result";
+        \\import { dictEmpty, dictMapValues, dictFold } from "zttp:collections";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\
+    ;
+    const tail =
+        \\
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const Case = struct { call: []const u8, leaks: usize, clean: bool };
+    const cases = [_]Case{
+        // The value and the key of each entry.
+        .{ .call = "  dictMapValues({ k: secret }, (v, k) => { console.log(v); return 1; });", .leaks = 1, .clean = false },
+        .{ .call = "  dictMapValues({ k: \"c\" }, (v, k) => { console.log(v); return 1; });", .leaks = 0, .clean = true },
+        .{ .call = "  dictMapValues({ k: secret }, (v, k) => { console.log(k); return 1; });", .leaks = 1, .clean = false },
+        .{ .call = "  dictMapValues({ k: secret }, (v, k) => { console.log(\"c\"); return 1; });", .leaks = 0, .clean = true },
+        // The accumulator starts as argument 2, and each entry follows it.
+        .{ .call = "  dictFold(dictEmpty(), (acc) => { console.log(acc); return 1; }, secret);", .leaks = 1, .clean = false },
+        .{ .call = "  dictFold(dictEmpty(), (acc) => { console.log(acc); return 1; }, \"c\");", .leaks = 0, .clean = true },
+        .{ .call = "  dictFold({ k: secret }, (acc, v) => { console.log(v); return 1; }, 0);", .leaks = 1, .clean = false },
+        .{ .call = "  dictFold({ k: \"c\" }, (acc, v) => { console.log(v); return 1; }, 0);", .leaks = 0, .clean = true },
+        // The payload of a Result.
+        .{ .call = "  mapResult(ok(secret), (v) => { console.log(v); return 1; });", .leaks = 1, .clean = false },
+        .{ .call = "  mapResult(ok(\"c\"), (v) => { console.log(v); return 1; });", .leaks = 0, .clean = true },
+    };
+    for (cases) |case| {
+        const source = try std.mem.concat(std.testing.allocator, u8, &.{ head, case.call, tail });
+        defer std.testing.allocator.free(source);
+        var buf: [512]u8 = undefined;
+        const report = try runFlowDiagnostics(std.testing.allocator, source, .secret_in_log, &buf);
+        try std.testing.expectEqual(case.leaks, report.count);
+        try std.testing.expectEqual(case.clean, report.properties.no_secret_leakage);
+    }
+}
+
+test "a comparator sees both elements" {
+    const head =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\
+    ;
+    const tail =
+        \\
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const Case = struct { call: []const u8, leaks: usize, clean: bool };
+    const cases = [_]Case{
+        .{ .call = "  [secret, \"c\"].toSorted((a, b) => { console.log(a); return 0; });", .leaks = 1, .clean = false },
+        .{ .call = "  [secret, \"c\"].toSorted((a, b) => { console.log(b); return 0; });", .leaks = 1, .clean = false },
+        .{ .call = "  [\"c\", \"c\"].toSorted((a, b) => { console.log(a); return 0; });", .leaks = 0, .clean = true },
+        .{ .call = "  [secret, \"c\"].toSorted((a, b) => { console.log(\"c\"); return 0; });", .leaks = 0, .clean = true },
+    };
+    for (cases) |case| {
+        const source = try std.mem.concat(std.testing.allocator, u8, &.{ head, case.call, tail });
+        defer std.testing.allocator.free(source);
+        var buf: [512]u8 = undefined;
+        const report = try runFlowDiagnostics(std.testing.allocator, source, .secret_in_log, &buf);
+        try std.testing.expectEqual(case.leaks, report.count);
+        try std.testing.expectEqual(case.clean, report.properties.no_secret_leakage);
+    }
+}
+
+test "the callback index carries the structure of the receiver" {
+    // A spread copies secret-derived elements into a receiver whose own
+    // labels are clean, and the index of each callback still carries them.
+    const head =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  const a = [...secret.split(",")];
+        \\  const b = ["c", "c"];
+        \\
+    ;
+    const tail =
+        \\
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const Case = struct { call: []const u8, leaks: usize, clean: bool };
+    const cases = [_]Case{
+        .{ .call = "  a.map((x, i) => { console.log(String(i)); return 1; });", .leaks = 1, .clean = false },
+        .{ .call = "  a.filter((x, i) => { console.log(String(i)); return true; });", .leaks = 1, .clean = false },
+        .{ .call = "  a.find((x, i) => { console.log(String(i)); return true; });", .leaks = 1, .clean = false },
+        .{ .call = "  a.every((x, i) => { console.log(String(i)); return true; });", .leaks = 1, .clean = false },
+        .{ .call = "  a.some((x, i) => { console.log(String(i)); return true; });", .leaks = 1, .clean = false },
+        .{ .call = "  a.findIndex((x, i) => { console.log(String(i)); return true; });", .leaks = 1, .clean = false },
+        .{ .call = "  a.reduce((acc, x, i) => { console.log(String(i)); return acc; }, 0);", .leaks = 1, .clean = false },
+        .{ .call = "  b.map((x, i) => { console.log(String(i)); return 1; });", .leaks = 0, .clean = true },
+        .{ .call = "  a.map((x, i) => { console.log(\"c\"); return 1; });", .leaks = 0, .clean = true },
+    };
+    for (cases) |case| {
+        const source = try std.mem.concat(std.testing.allocator, u8, &.{ head, case.call, tail });
+        defer std.testing.allocator.free(source);
+        var buf: [512]u8 = undefined;
+        const report = try runFlowDiagnostics(std.testing.allocator, source, .secret_in_log, &buf);
+        try std.testing.expectEqual(case.leaks, report.count);
+        try std.testing.expectEqual(case.clean, report.properties.no_secret_leakage);
+    }
 }

@@ -123,6 +123,7 @@ Declaration merging, open interfaces, and inheritance are excluded.
 | A duplicate parameter name, such as `function f(a: number, a: number)`, and a duplicate type parameter, such as `function f<T, T>(a: T): T` and `structural Box<T, T> = T;` | ZTS018 | A different name |
 | An assignment to a parameter, such as `a = a + 1` for a function parameter and `x = 0` for an arrow parameter | ZTS068 | Bind the new value to a new `const` |
 | A function declaration inside a function body or a block, such as `function inner(): number` | ZTS071 | A module-level function |
+| A callback that writes a binding of an enclosing function, such as `t = x`, `counts[0] = x`, or `out.push(x)` in an arrow whose enclosing function declares the name | ZTS073 | Return the value from the callback, or build the result with `for...of` |
 | Call-site spread `f(...args)` | ZTS616 | Positional arguments |
 | A named function without parameter or return annotations | ZTS601 | Annotate every parameter and the return type |
 | A call with too few or too many arguments | ZTS202 | Supply every declared argument, and no more |
@@ -415,7 +416,6 @@ against the compiler.
 | A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | Accepted, exit 0 | ZTS209. Pass a type argument that satisfies the constraint |
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |
-| A higher-order callback that calls `push`, or that assigns a captured binding | Accepted, exit 0 | A targeted refusal. Build the result with `for...of` |
 | A top-level statement other than a registration call, such as `f();` and `if (c) { f(); }` | Accepted, exit 0 | A targeted refusal. Move the statement into a function. A bare `schemaCompile(...)` or `sql(...)` call with literal arguments stays admitted |
 | A top-level initializer with an effect, such as `const t: number = Date.now();` | Accepted, exit 0 | A targeted refusal. Compute the value inside a function |
 | `for...of` over a number, such as `for (const k of 5)` | Accepted, exit 0 | A targeted refusal. Iterate an array, a string, or `range(n)` |

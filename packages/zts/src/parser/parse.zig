@@ -5032,17 +5032,27 @@ pub const Parser = struct {
                 return error.ParseError;
             },
         }
-        if (self.nodes.getTag(target) != .identifier) return;
-        const binding = ir.IrView.fromIRStore(&self.nodes, &self.constants).getBinding(target) orelse return;
+        const binding = ir.IrView.fromIRStore(&self.nodes, &self.constants).getBinding(root) orelse return;
         const declared = self.scopes.nearestBinding(binding.name_atom) orelse return;
-        if (declared.is_const) {
+        if (root == target and declared.is_const) {
             self.errors.addError(.const_assignment, self.nodes.getLoc(target), "this name is declared `const` and cannot be assigned");
             return error.ParseError;
         }
-        if (declared.kind == .parameter) {
+        if (root == target and declared.kind == .parameter) {
             self.errors.addError(.parameter_assignment, self.nodes.getLoc(target), "a parameter cannot be assigned");
             return error.ParseError;
         }
+        try self.checkCapturedWrite(root);
+    }
+
+    /// A callback is pure (spec 6.5): an arrow cannot write a binding that an
+    /// enclosing function declares, by assignment or by `push`.
+    fn checkCapturedWrite(self: *Parser, root: NodeIndex) anyerror!void {
+        if (self.nodes.getTag(root) != .identifier) return;
+        const binding = ir.IrView.fromIRStore(&self.nodes, &self.constants).getBinding(root) orelse return;
+        if (!self.scopes.capturesBinding(binding.name_atom)) return;
+        self.errors.addError(.captured_binding_write, self.nodes.getLoc(root), "a callback cannot write a binding of an enclosing function");
+        return error.ParseError;
     }
 
     /// The node at the base of the receiver chain of an assignment target,
@@ -5121,6 +5131,11 @@ pub const Parser = struct {
             .args_start = args_start,
             .args_count = args_count,
         });
+        if (self.nodes.getTag(callee) == .member_access) {
+            if (ir.IrView.fromIRStore(&self.nodes, &self.constants).getMember(callee)) |member| {
+                if (member.property == @backingInt(object.Atom.push)) try self.checkCapturedWrite(self.assignmentTargetRoot(member.object));
+            }
+        }
         if (pending_call) |pending| {
             if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
                 self.type_store.cancelExplicitCall(pending);

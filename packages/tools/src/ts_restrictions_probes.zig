@@ -455,6 +455,15 @@ const refusal_rows_a = [_]RefusalRow{
         .clean = c(top("function inner(): number {\n  return 1;\n}\nfunction outer(): number {\n  return inner();\n}")),
     },
     .{
+        .key = "A callback that writes a binding of an enclosing function, such as `t = x`, `counts[0] = x`, or `out.push(x)` in an arrow whose enclosing function declares the name",
+        .refused = &.{
+            r("t = x", top("function g(xs: number[]): number {\n  let t = 0;\n  const ys = xs.map((x: number): number => {\n    t = x;\n    return x;\n  });\n  return t + ys.length;\n}")),
+            r("counts[0] = x", top("function g(xs: number[]): number {\n  const counts: number[] = [0];\n  const ys = xs.map((x: number): number => {\n    counts[0] = x;\n    return x;\n  });\n  return counts.length + ys.length;\n}")),
+            r("out.push(x)", top("function g(xs: number[]): number[] {\n  const out: number[] = [];\n  const ys = xs.map((x: number): number => out.push(x));\n  return out;\n}")),
+        },
+        .clean = c(top("function g(xs: number[]): number[] {\n  const out: number[] = [];\n  for (const x of xs) {\n    out.push(x);\n  }\n  return out;\n}")),
+    },
+    .{
         .key = "Call-site spread `f(...args)`",
         .refused = &.{r("f(...args)", top("function f(a: number): number {\n  return a;\n}\nfunction g(args: number[]): number {\n  return f(...args);\n}"))},
         .clean = c(top("function f(a: number): number {\n  return a;\n}\nfunction g(args: number[]): number {\n  return f(1);\n}")),
@@ -1542,13 +1551,6 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "`DictKey` with no import, such as `<K extends DictKey>`",
         .sources = &.{c(top("function f<K extends DictKey>(k: K): K {\n  return k;\n}"))},
-    },
-    .{
-        .key = "A higher-order callback that calls `push`, or that assigns a captured binding",
-        .sources = &.{
-            c(top("function g(xs: number[]): number[] {\n  const out: number[] = [];\n  const ys = xs.map((x: number): number => out.push(x));\n  return out;\n}")),
-            c(top("function g(xs: number[]): number {\n  let t = 0;\n  const ys = xs.map((x: number): number => {\n    t = x;\n    return x;\n  });\n  return t;\n}")),
-        },
     },
     .{
         .key = "A top-level statement other than a registration call, such as `f();` and `if (c) { f(); }`",

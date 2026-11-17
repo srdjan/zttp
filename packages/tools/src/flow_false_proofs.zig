@@ -130,20 +130,20 @@ pub const fixtures = [_]Fixture{
     .{ .name = "iterated_array_write_foreach_html", .property = .injection_safe, .source =
     \\import { escapeHtml } from "zttp:text";
     \\function handler(req: Request): Proof<Response, "injection_safe"> {
-    \\  const parts: string[] = [escapeHtml(req.url), escapeHtml(req.url)];
-    \\  const acc: string[] = [];
-    \\  parts.map((v: string): string => { parts[1] = req.url; acc.push(v); return v; });
-    \\  return Response.html(acc.join(""));
+    \\  const shared: { t: string } = { t: escapeHtml(req.url) };
+    \\  const parts: { t: string }[] = [shared, shared];
+    \\  const out: string[] = parts.map((v: { t: string }): string => { const seen: string = v.t; v.t = req.url; return seen; });
+    \\  return Response.html(out.join(""));
     \\}
     },
     // runtime: known-limits row "A write into a later element of the array that a ... some ... callback iterates"
     .{ .name = "iterated_array_write_some_html", .property = .injection_safe, .source =
     \\import { escapeHtml } from "zttp:text";
     \\function handler(req: Request): Proof<Response, "injection_safe"> {
-    \\  const parts: string[] = [escapeHtml(req.url), escapeHtml(req.url)];
-    \\  const acc: string[] = [];
-    \\  parts.some((v: string): boolean => { parts[1] = req.url; acc.push(v); return false; });
-    \\  return Response.html(acc.join(""));
+    \\  const shared: { t: string; u: string } = { t: escapeHtml(req.url), u: "" };
+    \\  const parts: { t: string; u: string }[] = [shared, shared];
+    \\  parts.some((v: { t: string; u: string }): boolean => { v.u = v.t; v.t = req.url; return false; });
+    \\  return Response.html(shared.u);
     \\}
     },
     // runtime: known-limits row "A write into a later element of the array that a forEach ... callback iterates"
@@ -152,8 +152,9 @@ pub const fixtures = [_]Fixture{
     \\import { logInfo } from "zttp:log";
     \\function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const secret: string = env("SECRET_KEY") ?? "";
-    \\  const parts: string[] = ["a", "b"];
-    \\  parts.map((v: string): string => { parts[1] = secret; logInfo("m", { v: v }); return v; });
+    \\  const shared: { t: string } = { t: "a" };
+    \\  const parts: { t: string }[] = [shared, shared];
+    \\  parts.map((v: { t: string }): string => { logInfo("m", { v: v.t }); v.t = secret; return "m"; });
     \\  return Response.json({ ok: true });
     \\}
     },

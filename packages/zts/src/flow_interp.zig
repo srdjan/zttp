@@ -4660,6 +4660,11 @@ test "an arrow function bound to a name is refused with ZTS072" {
     try expectParserRefused("function f(s) { const g = () => s; return g(); }", "ZTS072", 27);
 }
 
+test "a callback that writes a binding of its enclosing function is refused with ZTS073" {
+    try expectParserRefused("function f(s) { const o = { v: \"c\" }; return [s].map((x) => { o.v = x; return x; }); }", "ZTS073", 63);
+    try expectParserRefused("function f(s) { const a = [\"c\"]; return [s].map((x) => { a.push(x); return x; }); }", "ZTS073", 58);
+}
+
 test "a local read with no declaration behind it is unresolved" {
     var store = ir.IRStore.init(testing.allocator);
     defer store.deinit();
@@ -6436,13 +6441,13 @@ test "fetch results have their declared upstream source and precise body methods
 
 test "a presumed callback loop runs again until its parameters stop growing" {
     // The first pass passes clean parameters and returns the secret. The
-    // second passes that secret to the callback, which stores it.
+    // second passes that secret to the callback.
     const collections = "import { dictEmpty, dictSet } from \"zttp:collections\"; ";
     const source = collections ++
-        "function f(s) { const o = { v: \"c\" }; dictSet(dictEmpty(), \"k\", (x) => { o.v = x; return s; }); return o.v; }";
+        "function f(s) { return dictSet(dictEmpty(), \"k\", (x) => s); }";
     try expectSecret(source, &.{secret_value}, true);
     const clean = collections ++
-        "function f(s) { const o = { v: \"c\" }; dictSet(dictEmpty(), \"k\", (x) => { o.v = x; return \"c\"; }); return o.v; }";
+        "function f(s) { return dictSet(dictEmpty(), \"k\", (x) => \"c\"); }";
     try expectSecret(clean, &.{secret_value}, false);
 
     // A cap below the need records the limit, and a cap equal to it converges.
@@ -6500,10 +6505,10 @@ test "find, map, every, some, and findIndex carry what their callback sees" {
     try expectSecret(held_secret ++ "return a.find((x) => true); }", &.{secret_value}, true);
     try expectSecret(held_clean ++ "return a.find((x) => true); }", &.{secret_value}, false);
 
-    // `map` runs its callback for its writes.
-    const each = "function f(s) { const o = { x: \"c\" }; ";
-    try expectSecret(each ++ "[s].map((x) => { o.x = x; return x; }); return o.x; }", &.{secret_value}, true);
-    try expectSecret(each ++ "[\"c\"].map((x) => { o.x = x; return x; }); return o.x; }", &.{secret_value}, false);
+    // `map` runs its callback for its writes into the receiver.
+    const each = "function f(s) { const a = [\"c\", \"c\"]; ";
+    try expectSecret(each ++ "a.map((x, i, y) => { y[1] = s; return x; }); return a[1]; }", &.{secret_value}, true);
+    try expectSecret(each ++ "a.map((x, i, y) => { y[1] = \"c\"; return x; }); return a[1]; }", &.{secret_value}, false);
 
     inline for (.{ "every", "some", "findIndex" }) |method| {
         try expectSecret("function f(s) { return [\"c\"]." ++ method ++ "(() => s); }", &.{secret_value}, true);
@@ -6516,12 +6521,12 @@ test "find, map, every, some, and findIndex carry what their callback sees" {
 // P5 specification test 42.
 test "a later pass of a callback loop sees the writes of an earlier one" {
     try expectSecret(
-        "function f(s) { const a = [\"c\"]; const out = a.map((x) => { a.push(s); return x; }); return out[\"0\"]; }",
+        "function f(s) { const a = [\"c\"]; const out = a.map((x, i, y) => { y.push(s); return x; }); return out[\"0\"]; }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { const a = [\"c\"]; const out = a.map((x) => { a.push(\"c\"); return x; }); return out[\"0\"]; }",
+        "function f(s) { const a = [\"c\"]; const out = a.map((x, i, y) => { y.push(\"c\"); return x; }); return out[\"0\"]; }",
         &.{secret_value},
         false,
     );
@@ -6539,11 +6544,9 @@ test "reduce joins every result into its accumulator" {
 }
 
 // P5 specification test 44.
-test "a comparator sees two elements and labels the sorted copy" {
-    const sort = "function f(s) { const o = { x: \"c\" }; ";
-    try expectSecret(sort ++ "[s].toSorted((a, b) => { o.x = a; return 0; }); return o.x; }", &.{secret_value}, true);
-    try expectSecret(sort ++ "[s].toSorted((a, b) => { o.x = b; return 0; }); return o.x; }", &.{secret_value}, true);
-    try expectSecret(sort ++ "[\"c\"].toSorted((a, b) => { o.x = b; return 0; }); return o.x; }", &.{secret_value}, false);
+test "a comparator labels the sorted copy" {
+    // What a comparator sees is tested through a log sink in
+    // flow_checker_tests.zig, "a comparator sees both elements".
     try expectSecret("function f(s) { return [\"c\"].toSorted(() => s)[0]; }", &.{secret_value}, true);
     try expectSecret("function f(s) { return [\"c\"].toSorted(() => 0)[0]; }", &.{secret_value}, false);
 }
@@ -6689,27 +6692,13 @@ test "census C2: each callback export runs its callback and only its callback" {
     try testing.expectError(error.RowWithoutCallbackParam, censusExports(&no_callback, &export_fixtures));
 }
 
-test "an export callback receives what its shape says" {
-    const imports = "import { ok, mapResult } from \"zttp:result\"; " ++
-        "import { dictEmpty, dictMapValues, dictFold } from \"zttp:collections\"; ";
-    const setup = imports ++ "function f(s) { const o = { x: \"c\" }; ";
-
-    // The value and the key of each entry.
-    try expectSecret(setup ++ "dictMapValues({ k: s }, (v, k) => { o.x = v; return 1; }); return o.x; }", &.{secret_value}, true);
-    try expectSecret(setup ++ "dictMapValues({ k: \"c\" }, (v, k) => { o.x = v; return 1; }); return o.x; }", &.{secret_value}, false);
-    try expectSecret(setup ++ "dictMapValues({ k: s }, (v, k) => { o.x = k; return 1; }); return o.x; }", &.{secret_value}, true);
-
-    // The accumulator starts as argument 2, and each entry follows it.
-    try expectSecret(setup ++ "dictFold(dictEmpty(), (acc) => { o.x = acc; return 1; }, s); return o.x; }", &.{secret_value}, true);
-    try expectSecret(setup ++ "dictFold(dictEmpty(), (acc) => { o.x = acc; return 1; }, \"c\"); return o.x; }", &.{secret_value}, false);
-    try expectSecret(setup ++ "dictFold({ k: s }, (acc, v) => { o.x = v; return 1; }, 0); return o.x; }", &.{secret_value}, true);
-
-    // The payload of a Result.
-    try expectSecret(setup ++ "mapResult(ok(s), (v) => { o.x = v; return 1; }); return o.x; }", &.{secret_value}, true);
-    try expectSecret(setup ++ "mapResult(ok(\"c\"), (v) => { o.x = v; return 1; }); return o.x; }", &.{secret_value}, false);
-
-    // A fold returns its accumulator, which holds every result.
+// What each export callback receives is tested through a log sink in
+// flow_checker_tests.zig, "an export callback receives what its shape says":
+// here a return or a write through a parameter joins the receiver's labels.
+test "a fold returns its accumulator, which holds every result" {
+    const imports = "import { dictEmpty, dictFold } from \"zttp:collections\"; ";
     try expectSecret(imports ++ "function f(s) { return dictFold(dictEmpty(), () => s, 0); }", &.{secret_value}, true);
+    try expectSecret(imports ++ "function f(s) { return dictFold(dictEmpty(), () => \"c\", 0); }", &.{secret_value}, false);
 }
 
 // P5 specification test 47.
@@ -6744,10 +6733,10 @@ test "a callback that may be any function is an unknown callee" {
 // P5 specification test 48.
 test "a callback loop records its passes and the cap" {
     const source =
-        "function f(s) { const o = { v: \"c\" }; [\"c\"].reduce((acc, x) => { o.v = acc; return s; }, \"c\"); return o.v; }";
+        "function f(s) { const o = { v: \"c\" }; [\"c\"].reduce((acc, x) => { acc.v = acc; return s; }, o); return o.v; }";
     try expectSecret(source, &.{secret_value}, true);
     try expectSecret(
-        "function f(s) { const o = { v: \"c\" }; [\"c\"].reduce((acc, x) => { o.v = acc; return \"c\"; }, \"c\"); return o.v; }",
+        "function f(s) { const o = { v: \"c\" }; [\"c\"].reduce((acc, x) => { acc.v = acc; return \"c\"; }, o); return o.v; }",
         &.{secret_value},
         false,
     );
@@ -6780,10 +6769,10 @@ test "a callback chosen through a labelled value labels what it returns" {
     // read back carries it. The second pass passes that label to the
     // accumulator, and the callback stores it where the caller reads it.
     const labelled =
-        "function put(t, k, fn) { t[k] = fn; return 0; } function f(s) { const o = {}; const sink = { w: \"c\" }; put(o, s, (acc, x) => { sink.w = acc; return \"c\"; }); [1].reduce(o.k, \"c\"); return sink.w; }";
+        "function put(t, k, fn) { t[k] = fn; return 0; } function f(s) { const o = {}; put(o, s, (acc, x) => \"c\"); return [1].reduce(o.k, \"c\"); }";
     try expectSecret(labelled, &.{secret_value}, true);
     const plain =
-        "function put(t, k, fn) { t[k] = fn; return 0; } function f(s) { const o = {}; const sink = { w: \"c\" }; put(o, \"k\", (acc, x) => { sink.w = acc; return \"c\"; }); [1].reduce(o.k, \"c\"); return sink.w; }";
+        "function put(t, k, fn) { t[k] = fn; return 0; } function f(s) { const o = {}; put(o, \"k\", (acc, x) => \"c\"); return [1].reduce(o.k, \"c\"); }";
     try expectSecret(plain, &.{secret_value}, false);
 }
 
@@ -7010,19 +6999,17 @@ test "a computed read and a computed write combine the key as data" {
 
 // P6 specification test 12.
 test "the callback index carries the structure of the receiver" {
-    const write = "o.w = \"c\".charAt(i);";
+    // A filter, a find, and a predicate return an element or a decision that
+    // already carries the receiver, so the log sink in flow_checker_tests.zig
+    // tests their index. Here the callback result is the only path.
+    const index = "\"c\".charAt(i)";
     const calls = [_][]const u8{
-        "a.map((x, i) => { " ++ write ++ " return x; })",
-        "a.filter((x, i) => { " ++ write ++ " return true; })",
-        "a.find((x, i) => { " ++ write ++ " return true; })",
-        "a.every((x, i) => { " ++ write ++ " return true; })",
-        "a.some((x, i) => { " ++ write ++ " return true; })",
-        "a.findIndex((x, i) => { " ++ write ++ " return true; })",
-        "a.reduce((acc, x, i) => { " ++ write ++ " return acc; }, \"c\")",
+        "a.map((x, i) => " ++ index ++ ")[0]",
+        "a.reduce((acc, x, i) => " ++ index ++ ", \"c\")",
     };
     inline for (calls) |call| {
-        const head = "function f(u) { const o = { w: \"c\" }; const a = ";
-        const tail = "; " ++ call ++ "; return o.w; }";
+        const head = "function f(u) { const a = ";
+        const tail = "; return " ++ call ++ "; }";
         // A spread copies request-derived elements into a receiver whose own
         // labels are clean.
         try expectUserInput(head ++ "[...u.split(\",\")]" ++ tail, &.{user_input_value}, true);
@@ -7294,7 +7281,7 @@ test "a loop that makes a value exposed converges" {
     try expectDefenses(head ++ "x = x + y; } return x; }", &params, no_defenses);
     // The same through a callback loop.
     try expectDefenses(
-        text_import ++ "function f(u) { let x = escapeHtml(\"c\"); [u].map((y) => { x = x + escapeHtml(y); return y; }); return x; }",
+        text_import ++ "function f(u) { return [u].reduce((x, y) => x + escapeHtml(y), escapeHtml(\"c\")); }",
         &params,
         html_only,
     );

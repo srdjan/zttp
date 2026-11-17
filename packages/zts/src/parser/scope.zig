@@ -322,6 +322,23 @@ pub const ScopeAnalyzer = struct {
         }
     }
 
+    /// The nearest declaration of the name belongs to a function that
+    /// encloses the current one, so the current function captures it. A
+    /// module-level declaration belongs to no function and is not captured.
+    pub fn capturesBinding(self: *ScopeAnalyzer, name_atom: u16) bool {
+        const current_function = self.scopes.items[self.current_scope].enclosing_function;
+        var scope_id = self.current_scope;
+        while (true) {
+            const scope = &self.scopes.items[scope_id];
+            if (scope.findLocalMutByAtom(name_atom) != null) {
+                const declaring_function = scope.enclosing_function;
+                return declaring_function != current_function and
+                    self.scopes.items[declaring_function].kind == .function;
+            }
+            scope_id = scope.parent orelse return false;
+        }
+    }
+
     /// Resolve a variable name, potentially creating upvalues
     pub fn resolveBinding(self: *ScopeAnalyzer, name: []const u8, name_atom: u16) !BindingRef {
         var scope_id = self.current_scope;

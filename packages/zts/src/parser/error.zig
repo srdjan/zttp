@@ -60,6 +60,7 @@ pub const ErrorKind = enum {
     statement_body_not_block,
     local_function_declaration,
     arrow_outside_call_argument,
+    captured_binding_write,
     invalid_break,
     invalid_continue,
     invalid_return,
@@ -195,6 +196,7 @@ pub const ErrorList = struct {
             .statement_body_not_block => "Write the body as a block, such as `if (c) { g(); }`.",
             .local_function_declaration => "Move the function to module level.",
             .arrow_outside_call_argument => "Write a module-level `function`, or pass the arrow directly as a call argument.",
+            .captured_binding_write => "Return the value from the callback, or build the result with `for...of` in the enclosing function.",
             else => null,
         };
     }
