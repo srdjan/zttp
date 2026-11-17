@@ -275,22 +275,6 @@ const strict_meta = [_]struct {
         .repair = null,
     },
     .{
-        .kind = .canonical_arrow_helper,
-        .code = "ZTS608",
-        .description = "A reused non-callback arrow helper is better represented as a named function.",
-        .example = "const parseUser = (input: Input): User => makeUser(input);",
-        .help = "Rewrite reusable helpers as named function declarations; keep arrows for callbacks and local one-off values.",
-        .repair = .replace_arrow_with_function,
-    },
-    .{
-        .kind = .canonical_export_function_const,
-        .code = "ZTS609",
-        .description = "An exported function-valued const hides that the public API is a function.",
-        .example = "export const handler = (req: Request): Response => Response.json({ok: true});",
-        .help = "Use `export function name(...) { ... }` unless the export is intentionally a first-class function value.",
-        .repair = .replace_export_arrow_with_function,
-    },
-    .{
         .kind = .canonical_public_helper_effects,
         .code = "ZTS610",
         .description = "A public helper that reaches capabilities should declare its Effects<...> ceiling.",

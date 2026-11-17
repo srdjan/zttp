@@ -3575,10 +3575,13 @@ test "ENG-2: zero-arg user-named method on object literal is callable" {
     defer rt.deinit();
 
     const handler_code =
+        \\function seven(){ return 7; }
+        \\function nine(){ return 9; }
+        \\function four(){ return 4; }
         \\function handler(req){
-        \\  const a = ({greet:()=>7}).greet();
-        \\  const b = ({x:1,wave:()=>9}).wave();
-        \\  const o = { hi: () => 4 };
+        \\  const a = ({greet:seven}).greet();
+        \\  const b = ({x:1,wave:nine}).wave();
+        \\  const o = { hi: four };
         \\  const c = o.hi();
         \\  return Response.text([String(a), '-', String(b), '-', String(c)].join(''));
         \\}

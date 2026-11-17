@@ -416,9 +416,6 @@ packages/zts/src/strict_checker.zig collectAssignments catch-multiline
 packages/zts/src/strict_checker.zig collectAssignments catch-multiline@2
 packages/zts/src/strict_checker.zig collectEntriesDerivedBindings catch-multiline
 packages/zts/src/strict_checker.zig collectStaticLiterals catch-poison
-packages/zts/src/strict_checker.zig countDeclaredName catch-block
-packages/zts/src/strict_checker.zig recordCall catch-block
-packages/zts/src/strict_checker.zig recordCall catch-block@2
 packages/zts/src/strict_checker.zig resolveFacts catch-block
 packages/zts/src/strict_checker.zig scanImports catch-poison
 

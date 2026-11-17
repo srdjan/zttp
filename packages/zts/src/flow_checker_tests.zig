@@ -3189,7 +3189,8 @@ test "FlowChecker keeps a property for a module-level clean constant or function
     // holds no datum that lacks a label.
     const function_valued =
         \\function twice(n) { return n + n; }
-        \\const thrice = (n) => n + n + n;
+        \\function id(g) { return g; }
+        \\const thrice = id((n) => n + n + n);
         \\function handler(req) {
         \\  const fns = [twice, thrice];
         \\  return Response.json({ n: fns.length });
@@ -4416,12 +4417,13 @@ test "FlowChecker flags a secret laundered through a const-bound arrow wrapper" 
     // A concise arrow `(x) => x` bound to a const is stored with a
     // `.return_stmt` body; the callee summary must collect its return value's
     // labels, not infer them on the return_stmt node (which yields empty and
-    // launders the taint).
+    // launders the taint). The arrow reaches the const as a call argument.
     const source =
         \\import { env } from "zttp:env";
+        \\function id(g) { return g; }
         \\function handler(req) {
         \\  const secret = env("SECRET_KEY");
-        \\  const echo = (x) => x;
+        \\  const echo = id((x) => x);
         \\  return Response.text(echo(secret));
         \\}
     ;

@@ -2900,7 +2900,8 @@ test "End-to-end: closure captures local" {
     defer strings.deinit();
 
     const source =
-        \\function make() { let x = 2; return () => x + 3; }
+        \\function make() { let x = 2; return id(() => x + 3); }
+        \\function id(g) { return g; }
         \\let f = make();
         \\let result = f();
     ;

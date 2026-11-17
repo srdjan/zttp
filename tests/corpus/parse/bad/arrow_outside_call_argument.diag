@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS072","severity":"error","message":"an arrow function must be a direct call argument","file":"parse/bad/arrow_outside_call_argument.ts","line":2,"column":16,"suggestion":"Write a module-level `function`, or pass the arrow directly as a call argument.","repair_intent":null}

@@ -186,8 +186,7 @@ const clean_named_helper =
 ;
 
 // The handler itself, exported. A helper would need a record alias on its
-// signature to clear ZTS061, and the exported handler is both simpler and the
-// exact shape rule_registry gives as ZTS609's example.
+// signature to clear ZTS061, and the exported handler is simpler.
 const clean_exported_handler =
     \\export function handler(req: Request): Proof<Response, "deterministic"> {
     \\  return Response.json({ ok: 1 });
@@ -576,8 +575,12 @@ const clean_resolvable_callee =
     \\
     \\structural Maker = { make: () => string };
     \\
+    \\function makeIt(): string {
+    \\  return sha256("zttp");
+    \\}
+    \\
     \\function build(): Maker {
-    \\  return { make: () => sha256("zttp") };
+    \\  return { make: makeIt };
     \\}
     \\
     \\function handler(req: Request): Proof<Effects<Response, "crypto">, "state_isolated"> {
@@ -929,7 +932,7 @@ pub const seeds = [_]DefectSeed{
     },
     .{
         .id = "arrow-helper",
-        .code = "ZTS608",
+        .code = "ZTS072",
         .class = .salvaged,
         .seed_source = clean_named_helper,
         .bad_draft =
@@ -954,11 +957,11 @@ pub const seeds = [_]DefectSeed{
         \\}
         \\
         ,
-        .ask = "Fix the ZTS608 compiler error in handler.ts",
+        .ask = "Fix the ZTS072 compiler error in handler.ts",
     },
     .{
         .id = "exported-arrow-const",
-        .code = "ZTS609",
+        .code = "ZTS072",
         .class = .salvaged,
         .seed_source = clean_exported_handler,
         .bad_draft =
@@ -971,7 +974,7 @@ pub const seeds = [_]DefectSeed{
         \\}
         \\
         ,
-        .ask = "Fix the ZTS609 compiler error in handler.ts",
+        .ask = "Fix the exported-arrow-const ZTS072 compiler error in handler.ts",
     },
     .{
         .id = "effectful-ternary",
@@ -1704,9 +1707,13 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { sha256 } from "zttp:crypto";
         \\
+        \\function thunk(f: () => unknown): unknown {
+        \\  return f();
+        \\}
+        \\
         \\function handler(req: Request): Proof<Effects<Response, "crypto">, "deterministic"> {
-        \\  const f = () => sha256("zttp");
-        \\  return Response.text(f());
+        \\  const s = thunk((): string => sha256("zttp"));
+        \\  return Response.text(String(s));
         \\}
         \\
         ,
@@ -2275,8 +2282,12 @@ pub const seeds = [_]DefectSeed{
         \\
         \\structural Maker = { make: () => string };
         \\
+        \\function makeIt(): string {
+        \\  return sha256("zttp");
+        \\}
+        \\
         \\function build(): Maker {
-        \\  return { make: () => sha256("zttp") };
+        \\  return { make: makeIt };
         \\}
         \\
         \\function handler(req: Request): Proof<Effects<Response, "crypto">, "state_isolated"> {
@@ -2291,8 +2302,12 @@ pub const seeds = [_]DefectSeed{
         \\
         \\structural Maker = { make: () => string };
         \\
+        \\function makeIt(): string {
+        \\  return sha256("zttp-ok");
+        \\}
+        \\
         \\function build(): Maker {
-        \\  return { make: () => sha256("zttp-ok") };
+        \\  return { make: makeIt };
         \\}
         \\
         \\function handler(req: Request): Proof<Effects<Response, "crypto">, "state_isolated"> {

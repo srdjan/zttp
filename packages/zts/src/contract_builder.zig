@@ -3737,11 +3737,12 @@ test "a local whose slot equals an import's atom index does not enter the env li
     // `mine` is the fifth local of `handler` and has the same slot number.
     var contract = try buildTestContract(
         \\import { env as length } from "zttp:env";
+        \\function id(f) { return f; }
         \\function handler(req) {
         \\  const p1 = 1;
         \\  const p2 = 2;
         \\  const p3 = 3;
-        \\  const mine = (k) => k;
+        \\  const mine = id((k) => k);
         \\  const x = mine("LOCAL_ONLY_NAME");
         \\  return Response.text(String(x));
         \\}

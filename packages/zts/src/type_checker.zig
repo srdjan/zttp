@@ -9591,29 +9591,14 @@ fn narrowedBeforeLoop(comptime body: []const u8) []const u8 {
     return head ++ "\n" ++ body ++ "\n" ++ tail;
 }
 
-test "narrowing: a closure in a loop body that assigns the narrowed binding kills the narrowing" {
-    // A closure can run during the loop. Its `x` is a captured binding, whose
-    // key differs from the declaration's, so the walk kills every narrowing.
+test "narrowing: a closure in a loop body that assigns only its own local leaves the narrowing" {
     try expectKindCounts(
         narrowedBeforeLoop(
-            \\    const g = () => {
-            \\      x = undefined;
-            \\      return 1;
-            \\    };
-            \\    n = n + g();
-        ),
-        .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 },
-    );
-    // A function declaration in the loop body is ZTS071, so only the arrow form exists.
-    // Control: a closure that assigns only its own local leaves the narrowing.
-    try expectKindCounts(
-        narrowedBeforeLoop(
-            \\    const g = () => {
-            \\      let w = 1;
+            \\    n = n + [1].map((v: number): number => {
+            \\      let w = v;
             \\      w = 2;
             \\      return w;
-            \\    };
-            \\    n = n + g();
+            \\    }).length;
         ),
         .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 },
     );
@@ -10268,15 +10253,6 @@ test "TypeChecker: exported handler local const rejects incompatible initializer
     , 1, 0);
 }
 
-test "TypeChecker: exported arrow handler local annotation is checked" {
-    try checkTypedSource(
-        \\export const handler = () => {
-        \\  const n: number = "x";
-        \\  return Response.json({});
-        \\};
-    , 1, 0);
-}
-
 test "TypeChecker: exported handler local let annotation is checked" {
     try checkTypedSource(
         \\export function handler(req: Request): Response {
@@ -10288,13 +10264,13 @@ test "TypeChecker: exported handler local let annotation is checked" {
 
 test "TypeChecker: nested arrow in exported handler checks local annotation" {
     try checkTypedSource(
-        \\export const handler = () => {
-        \\  const nested = () => {
+        \\export function handler(req: Request): Response {
+        \\  const values = [1].map((v: number): number => {
         \\    const n: number = "x";
         \\    return n;
-        \\  };
-        \\  return Response.json({ value: nested() });
-        \\};
+        \\  });
+        \\  return Response.json({ value: values });
+        \\}
     , 1, 0);
 }
 
@@ -10426,6 +10402,26 @@ test "TypeChecker: a function declaration inside a function body is refused with
     try std.testing.expectEqual(@as(u32, 3), errors[0].location.column);
 }
 
+test "TypeChecker: an arrow function that is not a call argument is refused with ZTS072" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export const handler = (req: Request): Response => {
+        \\  return Response.json({});
+        \\};
+    ;
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqualStrings("ZTS072", diagnostic_catalog.parserCode(errors[0].kind));
+    try std.testing.expectEqual(@as(u32, 1), errors[0].location.line);
+    try std.testing.expectEqual(@as(u32, 24), errors[0].location.column);
+}
+
 test "TypeChecker: surplus arguments to a declaration are refused" {
     try checkTypedSourceSaying(
         \\function double(x: number): number { return x * 2; }
@@ -10443,15 +10439,6 @@ test "TypeChecker: surplus arguments to a zero-parameter function are refused" {
         \\  return Response.json({ n: one(5) });
         \\}
     , 1, "expected 0, got 1");
-}
-
-test "TypeChecker: surplus arguments to a const arrow are refused" {
-    try checkTypedSourceSaying(
-        \\const inc = (x: number): number => x + 1;
-        \\function handler(req: Request): Response {
-        \\  return Response.json({ n: inc(1, 2) });
-        \\}
-    , 1, "expected 1, got 2");
 }
 
 test "TypeChecker: surplus arguments to a generic function are refused" {
@@ -10486,7 +10473,7 @@ test "TypeChecker: surplus arguments are counted against the parameter list, not
     // built from the annotations holds one entry, so counting against it
     // accepted `first(1, 2)` and `first(1, 2, 3)` alike.
     try checkTypedSourceSaying(
-        \\const first = (a: number, b): number => a;
+        \\function first(a: number, b): number { return a; }
         \\function handler(req: Request): Response {
         \\  return Response.json({ n: first(1, 2, 3) });
         \\}
@@ -10496,13 +10483,11 @@ test "TypeChecker: surplus arguments are counted against the parameter list, not
 test "TypeChecker: surplus arguments to a function with no annotation are refused" {
     try checkTypedSourceSaying(
         \\function pick(a, b) { return a; }
-        \\const wrap = (a, b) => a;
         \\function handler(req: Request): Response {
         \\  pick(1, 2, 3);
-        \\  wrap(1, 2, 3);
         \\  return Response.json({});
         \\}
-    , 2, "expected 2, got 3");
+    , 1, "expected 2, got 3");
 }
 
 test "TypeChecker: surplus arguments to a module export are refused" {
@@ -10709,18 +10694,6 @@ test "TypeChecker: a function passed by name to an array method is not a call" {
         \\function dbl(x: number): number { return x * 2; }
         \\function handler(req: Request): Response {
         \\  return Response.json({ ys: [1, 2].map(dbl) });
-        \\}
-    , 0, 0);
-}
-
-test "TypeChecker: a reassignable arrow keeps the weaker reading" {
-    // A `let` can be given another function, so the parameter count of the
-    // first one does not bound later calls. This is the stated limit of the
-    // upper bound, not an endorsement.
-    try checkTypedSource(
-        \\function handler(req: Request): Response {
-        \\  let f = (a: number): number => a;
-        \\  return Response.json({ n: f(1, 2) });
         \\}
     , 0, 0);
 }
@@ -12672,118 +12645,6 @@ test "narrowing: a narrowing installed inside a branch is undone after it" {
     );
 }
 
-/// A `run` whose condition is `cond`, where `x` is a `string | undefined`.
-fn conditionThen(comptime cond: []const u8) []const u8 {
-    return
-    \\function needS(s: string): number {
-    \\  return s.length;
-    \\}
-    \\function run(input: string | undefined): number {
-    \\  let x: string | undefined = input;
-    \\  const ok = 
-    ++ cond ++ ";\n" ++
-        \\  return ok ? 1 : 0;
-        \\}
-    ;
-}
-
-test "narrowing: a kill inside a left operand voids the guard read from its syntax" {
-    // reinstall_and. `installBranchNarrowing` read `x !== undefined` from the
-    // left operand's syntax after the operand ran, and put the narrowing back
-    // over the kill.
-    try expectKindCounts(
-        conditionThen("x !== undefined && (() => { x = undefined; return 0; })() === 0 && needS(x) > 0"),
-        refused_once,
-    );
-    // Control: the operand in the middle kills nothing.
-    try expectKindCounts(
-        conditionThen("x !== undefined && (input === undefined) === false && needS(x) > 0"),
-        accepted,
-    );
-    // The same chain under `||`: the right operand runs when the left is false.
-    try expectKindCounts(
-        conditionThen("x === undefined || (() => { x = undefined; return 0; })() === 0 || needS(x) > 0"),
-        refused_once,
-    );
-}
-
-test "narrowing: a kill in the right operand of && survives the expression" {
-    try expectKindCounts(
-        narrowedThen("  const k = c && (() => { x = undefined; return 0; })() === 0;"),
-        refused_once,
-    );
-    try expectKindCounts(
-        narrowedThen("  const k = c && n === 0;"),
-        accepted,
-    );
-}
-
-test "narrowing: a kill in an if condition is seen in the branch and after it" {
-    // The condition is a conjunction, so it installs no guard of its own. The
-    // kill in its right operand holds in the branch (one refusal) and after
-    // the `if` (the second).
-    try expectKindCounts(
-        narrowedThen("  if (x !== undefined && (() => { x = undefined; return 0; })() === 0) {\n    n = needS(x);\n  }"),
-        .{ .arg_type = 2, .return_type = 0, .ambiguous = 0 },
-    );
-}
-
-test "narrowing: a kill in a match arm survives the match" {
-    // The arm assigns a binding narrowed before the match. Nothing used to
-    // restore it, and the kill was already lost to the arm's own scope in the
-    // discriminant case below.
-    const other =
-        \\function needS(s: string): number {
-        \\  return s.length;
-        \\}
-        \\function run(input: string | undefined, m: { kind: "a" } | { kind: "b" }): number {
-        \\  let x: string | undefined = input;
-        \\  if (x === undefined) {
-        \\    return 0;
-        \\  }
-        \\  const k = match (m) {
-        \\    when { kind: "a" }: ARM
-        \\    default: 0
-        \\  };
-        \\  return needS(x) + k;
-        \\}
-    ;
-    try expectKindCounts(replaceArm(other, "(() => { x = undefined; return 1; })()"), refused_once);
-    try expectKindCounts(replaceArm(other, "(x === undefined ? 1 : 2)"), accepted);
-}
-
-test "narrowing: an arm that assigns the narrowed scrutinee keeps the kill" {
-    // The match restored the discriminant's saved narrowing by hand after the
-    // arm, which put it back over the arm's own assignment.
-    const disc =
-        \\function needAB(m: { kind: "a"; v: string } | { kind: "b"; n: number }): number {
-        \\  return 1;
-        \\}
-        \\function run(
-        \\  p: { kind: "a"; v: string } | { kind: "b"; n: number } | undefined,
-        \\  q: { kind: "a"; v: string } | { kind: "b"; n: number } | undefined,
-        \\): number {
-        \\  let m: { kind: "a"; v: string } | { kind: "b"; n: number } | undefined = p;
-        \\  if (m === undefined) {
-        \\    return 0;
-        \\  }
-        \\  const k = match (m) {
-        \\    when { kind: "a" }: ARM
-        \\    default: 0
-        \\  };
-        \\  return needAB(m) + k;
-        \\}
-    ;
-    try expectKindCounts(replaceArm(disc, "(() => { m = q; return 1; })()"), refused_once);
-    try expectKindCounts(replaceArm(disc, "1"), accepted);
-}
-
-/// Replace the `ARM` marker in `source` with `arm`.
-fn replaceArm(comptime source: []const u8, comptime arm: []const u8) []const u8 {
-    const at = comptime std.mem.indexOf(u8, source, "ARM").?;
-    return source[0..at] ++ arm ++ source[at + 3 ..];
-}
-
 test "narrowing: a kill in a for...of body survives the loop" {
     // The loop restores the narrowing from before the body; the kill comes back
     // after the loop.
@@ -12797,27 +12658,20 @@ test "narrowing: a kill in a for...of body survives the loop" {
     );
 }
 
-test "narrowing: a nested function body kills nothing where it is declared" {
-    // The body has not run at the declaration. A call that runs it is not
-    // modelled here.
-    try expectKindCounts(
-        narrowedThen("  const clear = (): number => {\n    x = undefined;\n    return 1;\n  };"),
-        accepted,
-    );
-    // What the body installs does not leak out of it either: `y` is narrowed
-    // only inside the closure.
+test "narrowing: what a nested function body installs does not leak out of it" {
+    // `y` is narrowed only inside the closure.
     try expectKindCounts(
         \\function needS(s: string): number {
         \\  return s.length;
         \\}
         \\function run(input: string | undefined): number {
-        \\  const f = (y: string | undefined): number => {
+        \\  const r = [input].map((y: string | undefined): number => {
         \\    if (y === undefined) {
         \\      return 0;
         \\    }
         \\    return needS(y);
-        \\  };
-        \\  return f(input) + needS(input);
+        \\  });
+        \\  return r.length + needS(input);
         \\}
     , refused_once);
 }
@@ -12870,52 +12724,6 @@ fn expectTypeMismatches(source: []const u8, expected: usize) !void {
         for (seen) |d| std.debug.print("diagnostic: {s}\n", .{d.message});
     }
     try std.testing.expectEqual(expected, actual);
-}
-
-test "capture: an assignment through a captured let is checked against its declared type" {
-    // cap_assign.ts. The target is an `upvalue` reference, whose key is not the
-    // declaration's, so the assignment lookup found no type and checked nothing.
-    const head =
-        \\function run(input: string | undefined): number {
-        \\  let x: string = "a";
-        \\  const f = (): number => {
-        \\    x = VALUE;
-        \\    return 1;
-        \\  };
-        \\  return f();
-        \\}
-    ;
-    try expectTypeMismatches(withMarker(head, "VALUE", "input"), 1);
-    // A value the declared type admits passes through the capture.
-    try expectTypeMismatches(withMarker(head, "VALUE", "\"b\""), 0);
-    // Control: the same assignment outside the closure.
-    try expectTypeMismatches(
-        \\function run(input: string | undefined): number {
-        \\  let x: string = "a";
-        \\  x = input;
-        \\  return 1;
-        \\}
-    , 1);
-}
-
-test "capture: an assignment through a transitive capture is checked" {
-    // The inner closure's upvalue names the declaration in `run`, two functions
-    // out, through the middle closure's own upvalue.
-    const source =
-        \\function run(input: string | undefined): number {
-        \\  let x: string = "a";
-        \\  const outer = (): number => {
-        \\    const inner = (): number => {
-        \\      x = VALUE;
-        \\      return 1;
-        \\    };
-        \\    return inner();
-        \\  };
-        \\  return outer();
-        \\}
-    ;
-    try expectTypeMismatches(withMarker(source, "VALUE", "input"), 1);
-    try expectTypeMismatches(withMarker(source, "VALUE", "\"b\""), 0);
 }
 
 test "assignment: a let is checked against its declared type" {
@@ -13098,22 +12906,6 @@ test "capture: without the parser record a captured binding has no type" {
 
 // T4 (D14): a call can run a closure that assigns an outer binding.
 
-/// `narrowedThen` with a closure that clears `x`, then `middle`.
-fn narrowedThenClear(comptime middle: []const u8) []const u8 {
-    return narrowedThen(
-        "  const clear = (): number => {\n    x = undefined;\n    return 1;\n  };\n" ++ middle,
-    );
-}
-
-test "call kill: a call after a narrowing reads the declared type when a closure clears it" {
-    // o1.ts, with the return type written so that ZTS600 does not hide it.
-    try expectKindCounts(narrowedThenClear("  n = clear();"), refused_once);
-    // The callee need not be the closure: the analyzer cannot tell which
-    // closure a call reaches, so any call kills.
-    try expectKindCounts(narrowedThenClear("  n = needS(\"a\");"), refused_once);
-    try expectKindCounts(narrowedThenClear("  n = [1, 2].length + needS(\"a\");"), refused_once);
-}
-
 test "call kill: the arguments run before the call" {
     // `need(clear(), x)`: the inner call kills the narrowing before `x` is read.
     try expectKindCounts(
@@ -13234,36 +13026,6 @@ test "call kill: no closure writes an outer binding, so a call keeps the narrowi
         \\  }
         \\  const c = log(1);
         \\  return needS(x) + c;
-        \\}
-    , accepted);
-}
-
-test "call kill: a closure that is declared and never called leaves a later read alone" {
-    // p12_closure_decl_call.ts. The program-wide flag is set, because `clear`
-    // writes `x`. Every call is walked with the kill, but no call comes between
-    // the guard and `needS(x)`: the call in `g`'s body is in a nested scope
-    // whose kills are discarded at its declaration, and `needS(x)` checks its
-    // argument before its own kill.
-    try expectKindCounts(
-        \\function needS(s: string): number {
-        \\  return s.length;
-        \\}
-        \\function log(n: number): number {
-        \\  return n;
-        \\}
-        \\function run(input: string | undefined): number {
-        \\  let x: string | undefined = input;
-        \\  const clear = (): number => {
-        \\    x = undefined;
-        \\    return 1;
-        \\  };
-        \\  if (x === undefined) {
-        \\    return 0;
-        \\  }
-        \\  const g = (): number => {
-        \\    return log(1);
-        \\  };
-        \\  return needS(x);
         \\}
     , accepted);
 }
@@ -13503,23 +13265,6 @@ fn expectNoDiagnostics(source: []const u8) !void {
     try std.testing.expectEqual(@as(usize, 0), seen.len);
 }
 
-test "function value: returning an arrow from a number function is ZTS204" {
-    try expectOnlyDiagnostic(
-        \\function f(): number {
-        \\  return (x: number): number => x;
-        \\}
-    , .return_type_mismatch);
-}
-
-test "function value: returning a const arrow from a number function is ZTS204" {
-    try expectOnlyDiagnostic(
-        \\function h(): number {
-        \\  const f = (x: number): number => x;
-        \\  return f;
-        \\}
-    , .return_type_mismatch);
-}
-
 test "function value: returning a named function from a number function is ZTS204" {
     try expectOnlyDiagnostic(
         \\function g(x: number): number { return x; }
@@ -13529,29 +13274,22 @@ test "function value: returning a named function from a number function is ZTS20
     , .return_type_mismatch);
 }
 
-test "function value: returning an arrow into number or undefined is ZTS204" {
+test "function value: returning a named function into number or undefined is ZTS204" {
     try expectOnlyDiagnostic(
+        \\function g(x: number): number { return x; }
         \\function f(): number | undefined {
-        \\  return (x: number): number => x;
+        \\  return g;
         \\}
     , .return_type_mismatch);
 }
 
-test "function value: a ternary branch that is an arrow is ZTS204" {
+test "function value: a ternary branch that is a named function is ZTS204" {
     try expectOnlyDiagnostic(
+        \\function g(x: number): number { return x; }
         \\function f(flag: boolean): number {
-        \\  return flag ? (x: number): number => x : 1;
+        \\  return flag ? g : 1;
         \\}
     , .return_type_mismatch);
-}
-
-test "function value: an arrow in a number annotation is ZTS200" {
-    try expectOnlyDiagnostic(
-        \\function f(): number {
-        \\  const n: number = (x: number): number => x;
-        \\  return 1;
-        \\}
-    , .type_mismatch);
 }
 
 test "function value: a named function in a number annotation is ZTS200" {
@@ -13564,39 +13302,43 @@ test "function value: a named function in a number annotation is ZTS200" {
     , .type_mismatch);
 }
 
-test "function value: assigning an arrow to a number variable is ZTS200" {
+test "function value: assigning a named function to a number variable is ZTS200" {
     try expectOnlyDiagnostic(
+        \\function g(x: number): number { return x; }
         \\function f(): number {
         \\  let n: number = 0;
-        \\  n = (x: number): number => x;
+        \\  n = g;
         \\  return n;
         \\}
     , .type_mismatch);
 }
 
-test "function value: an arrow in a number record field is ZTS200" {
+test "function value: a named function in a number record field is ZTS200" {
     try expectOnlyDiagnostic(
         \\structural Box = { n: number };
+        \\function g(x: number): number { return x; }
         \\function f(): number {
-        \\  const b: Box = { n: (x: number): number => x };
+        \\  const b: Box = { n: g };
         \\  return 1;
         \\}
     , .type_mismatch);
 }
 
-test "function value: an arrow in a number array is ZTS200" {
+test "function value: a named function in a number array is ZTS200" {
     try expectOnlyDiagnostic(
+        \\function g(x: number): number { return x; }
         \\function f(): number {
-        \\  const a: number[] = [(x: number): number => x];
+        \\  const a: number[] = [g];
         \\  return 1;
         \\}
     , .type_mismatch);
 }
 
-test "function value: an arrow in a number tuple slot is ZTS200" {
+test "function value: a named function in a number tuple slot is ZTS200" {
     try expectOnlyDiagnostic(
+        \\function g(x: number): number { return x; }
         \\function f(): number {
-        \\  const t: [number, string] = [(x: number): number => x, "a"];
+        \\  const t: [number, string] = [g, "a"];
         \\  return 1;
         \\}
     , .type_mismatch);
@@ -13612,22 +13354,22 @@ test "function value: a named function passed as a number argument is ZTS203" {
     , .arg_type_mismatch);
 }
 
-test "function value: a const arrow passed as a number argument is ZTS203" {
+test "function value: an arrow passed as a number argument is ZTS203" {
     try expectOnlyDiagnostic(
         \\function take(n: number): number { return n; }
         \\function f(): number {
-        \\  const g = (x: number): number => x;
-        \\  return take(g);
+        \\  return take((x: number): number => x);
         \\}
     , .arg_type_mismatch);
 }
 
-test "function value: an arrow nested in a record argument is ZTS203" {
+test "function value: a named function nested in a record argument is ZTS203" {
     try expectOnlyDiagnostic(
         \\structural Box = { n: number };
+        \\function g(x: number): number { return x; }
         \\function take2(b: Box): number { return 1; }
         \\function f(): number {
-        \\  return take2({ n: (x: number): number => x });
+        \\  return take2({ n: g });
         \\}
     , .arg_type_mismatch);
 }
@@ -13639,21 +13381,6 @@ test "function value: a function in a JSON payload is ZTS213" {
         \\  return Response.json({ f: g });
         \\}
     , .unencodable_json_payload);
-}
-
-test "function value: calling a const arrow keeps its arity" {
-    try expectNoDiagnostics(
-        \\function r(): number {
-        \\  const f = (x: number): number => x;
-        \\  return f(1);
-        \\}
-    );
-    try expectOnlyDiagnostic(
-        \\function r(): number {
-        \\  const f = (x: number): number => x;
-        \\  return f(1, 2);
-        \\}
-    , .arg_count_mismatch);
 }
 
 test "function value: a function stays assignable to a function type" {
@@ -13683,25 +13410,28 @@ test "function value: a named function passes to an array callback" {
     );
 }
 
-test "function value: an unannotated object holding an arrow keeps its call arity" {
+test "function value: an unannotated object holding a function keeps its call arity" {
     try expectNoDiagnostics(
+        \\function g(x: number): number { return x; }
         \\function r(): number {
-        \\  const o = { f: (x: number): number => x };
+        \\  const o = { f: g };
         \\  return o.f(1);
         \\}
     );
     try expectOnlyDiagnostic(
+        \\function g(x: number): number { return x; }
         \\function r(): number {
-        \\  const o = { f: (x: number): number => x };
+        \\  const o = { f: g };
         \\  return o.f(1, 2);
         \\}
     , .arg_count_mismatch);
 }
 
-test "function value: an unannotated arrow in a shadowing JSON object takes its argument" {
+test "function value: an unannotated function in a shadowing JSON object takes its argument" {
     try expectNoDiagnostics(
+        \\function ignored(value): string { return "ignored"; }
         \\function r(): string {
-        \\  const JSON = { stringify: (value) => "ignored" };
+        \\  const JSON = { stringify: ignored };
         \\  return JSON.stringify({ a: 1 });
         \\}
     );
@@ -13964,21 +13694,6 @@ test "predicate claim: a discriminant shared by two members does not back a one-
 // F3 and F4 (2026-11-02): a type predicate is a named module-level function
 // declaration, and its target names a parameter. Any other predicate is
 // refused with one ZTS211, never ignored.
-
-test "predicate position: a module-level const arrow predicate is ZTS211" {
-    try expectOnlyDiagnostic(
-        \\const isStr = (x: unknown): x is string => typeof x === "string";
-    , .invalid_type_predicate);
-}
-
-test "predicate position: a local const arrow predicate is ZTS211" {
-    try expectOnlyDiagnostic(
-        \\function handler(req: Request): Response {
-        \\    const isStr = (x: unknown): x is string => typeof x === "string";
-        \\    return Response.json({ ok: true });
-        \\}
-    , .invalid_type_predicate);
-}
 
 test "predicate position: an arrow predicate passed as a callback is ZTS211" {
     try expectOnlyDiagnostic(

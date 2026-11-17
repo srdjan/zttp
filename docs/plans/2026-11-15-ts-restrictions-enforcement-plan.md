@@ -1038,3 +1038,63 @@ later.
     arrow: 7 that the N10 units moved there, and 3 strict-checker tests
     whose subject is the arrow helper. Decision 4 refuses that form, and its
     unit classifies them.
+- U4c-Decision 4 refuses an arrow that is not a direct call argument with
+  ZTS072, in two commits. The first commit moved each test, fixture,
+  example, and corpus case whose arrow was incidental. The second commit
+  adds the refusal and deletes ZTS608 and ZTS609, which refused a subset
+  of the same forms later. The parser still parses the refused arrow, so
+  recovery reports no cascade. Five Sonnet units resolved the 110 tests
+  whose subject needed a refused form: each became a ZTS072 pin, one for
+  each file and surface, a migration to a legal form, or a deletion. The
+  normalizer keeps its arrow-to-`function` rewrite: the rewrite now fires
+  on ZTS072, and a pass may also turn a source that fails to parse into
+  one with no hard errors. The stand-in seeds `arrow-helper` and
+  `exported-arrow-const` now target ZTS072 and stay salvaged. The skill
+  text, the policy hash, and the stand-in seeds change, so U7 re-records
+  the corpus. These findings stay open:
+  - A named closure stays expressible through an identity function:
+    `function id(g) { return g; }` and `const g = id(() => s);` are
+    legal. Whether Decision 4 should also refuse a function value that is
+    returned and bound to a name is an owner decision. Until then, the
+    audit must probe each site with this form before it deletes code.
+  - The audit unit of Decision 4 starts from this list of code that
+    probably only a refused arrow reaches. The implementers named the sites
+    from the deleted tests and did not confirm them:
+    `packages/zts/src/type_checker.zig#TypeChecker.boundCallableMetadata`,
+    `packages/zts/src/type_checker.zig#TypeChecker.functionValueType` for
+    an arrow literal in a return, annotation, record, array, or tuple
+    position, `packages/zts/src/type_checker.zig#TypeChecker.admitTypePredicates`
+    for a `const`-bound arrow predicate,
+    `packages/zts/src/bool_checker.zig#BoolChecker.inferFunctionReturnType`
+    for a `const`-bound arrow, `packages/zts/src/effect_inference.zig#Analyzer.reachesRecursion`
+    for an inline arrow in a route table,
+    `packages/zts/src/effect_inference.zig#buildEffectFacts` for the escape
+    flag of an arrow in a record field, an immediately called arrow, and a
+    body-local arrow, `packages/zts/src/function_specs.zig#dischargeWithTypeSource`
+    for a capsule on an arrow helper, and
+    `packages/zts/src/path_generator.zig#PathGenerator.onlyReturned` for a
+    module call in a named closure.
+  - Callback purity probably makes this code dead, because each site
+    handles an arrow that writes a captured binding:
+    `packages/zts/src/type_checker.zig#TypeChecker.killNarrowingsAssignedIn`,
+    `packages/zts/src/type_checker.zig#TypeChecker.assignmentTargetType`,
+    `packages/zts/src/type_checker.zig#TypeChecker.scanClosureWrites`,
+    `packages/zts/src/type_checker.zig#TypeChecker.walkCallArgsThenKill`,
+    `packages/zts/src/flow_interp.zig#FlowInterp.recurse`,
+    `packages/zts/src/flow_interp.zig#FlowInterp.scheduleCall`,
+    `packages/zts/src/flow_interp.zig#FlowInterp.evalAssignment`,
+    `packages/zts/src/flow_interp.zig#FlowInterp.weakWriteCapture`,
+    `packages/zts/src/handler_verifier.zig#HandlerVerifier.sweepHelperMutations`,
+    `packages/zts/src/handler_verifier.zig#HandlerVerifier.killFlagsAssignedIn`,
+    `packages/zts/src/handler_verifier.zig#HandlerVerifier.checkModuleScopeMutationCall`,
+    `packages/zts/src/effect_inference.zig#Analyzer.holderWritesState`, and
+    `packages/zts/src/function_specs.zig#dischargeWithStateWriters`. The
+    tests of these paths were deleted with Decision 4, so the paths have
+    no test until callback purity lands.
+  - A named function held in a record and called as `ops.run()` gives
+    only `lower_bound` in effect inference, where an arrow in the same
+    field was charged.
+  - `zttp compile` prints a dependency that fails to parse as
+    `error at 1:22: ...`, with no ZTS code.
+  - Several tests now hold a top-level bare call, such as `f((a) => a);`,
+    or a top-level `const x = [0].map(...)`. Decision 3 and X2 measure them.

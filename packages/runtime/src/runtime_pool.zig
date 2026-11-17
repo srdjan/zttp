@@ -2590,33 +2590,6 @@ const escape_cases = [_]EscapeCase{
         \\}
         ,
     },
-    .{
-        .name = "request-time arrow stored in a module-level object",
-        .handler =
-        \\const store = { f: null };
-        \\function handler(req) {
-        \\  store.f = (x) => x + 1;
-        \\  return Response.text("ok");
-        \\}
-        ,
-    },
-    .{
-        .name = "request string written to a variable captured by a load-time closure",
-        .handler =
-        \\function makeStore() {
-        \\  let last = "start";
-        \\  return (v) => {
-        \\    const prev = last;
-        \\    last = v;
-        \\    return prev;
-        \\  };
-        \\}
-        \\const remember = makeStore();
-        \\function handler(req) {
-        \\  return Response.text(remember(["k", req.url].join("")));
-        \\}
-        ,
-    },
 };
 
 test "HandlerPool refuses a request-scoped builtin result stored in module state" {

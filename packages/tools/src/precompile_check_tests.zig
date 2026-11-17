@@ -290,7 +290,7 @@ test "runCheckOnlyFromSource: helper exceeding handler Effects budget gets ZTS60
     try std.testing.expectEqual(@as(u8, 1), contract.capability_budget.len);
 }
 
-test "runCheckOnlyFromSource: canonical reused arrow helper fails strict check" {
+test "an arrow function bound to a const is refused with ZTS072" {
     const allocator = std.testing.allocator;
     const source =
         \\const parse = (x: number): number => x;
@@ -306,16 +306,11 @@ test "runCheckOnlyFromSource: canonical reused arrow helper fails strict check" 
     });
     defer result.deinit(allocator);
 
-    var n608: u32 = 0;
-    for (result.json_diagnostics.items) |d| {
-        if (std.mem.eql(u8, d.code, "ZTS608")) {
-            n608 += 1;
-            try std.testing.expectEqualStrings("error", d.severity);
-        }
-    }
-    // One reused arrow helper, one diagnostic, counted as the only strict error.
-    try std.testing.expectEqual(@as(u32, 1), n608);
-    try std.testing.expectEqual(n608, result.strict_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS072", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqual(@as(u32, 1), result.json_diagnostics.items[0].line);
+    try std.testing.expectEqual(@as(u32, 15), result.json_diagnostics.items[0].column);
 }
 
 test "runCheckOnlyFromSource: one-way public helper effects diagnostic" {
@@ -816,12 +811,9 @@ test "a failed allocation while refreshing spec diagnostics leaks no kept helper
 test "formatProofCard: strict canonical diagnostics are visible in text mode" {
     const allocator = std.testing.allocator;
     const source =
-        \\const parse = (x: number): number => x;
-        \\
         \\function handler(req: Request): Response {
-        \\  const a = parse(1);
-        \\  const b = parse(2);
-        \\  return Response.json({ a: a, b: b });
+        \\  let a = 1;
+        \\  return Response.json({ a: a });
         \\}
     ;
     var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-arrow-text.ts", .{});
@@ -836,7 +828,7 @@ test "formatProofCard: strict canonical diagnostics are visible in text mode" {
     buf = aw.toArrayList();
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "Canonical diagnostics") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ZTS608") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ZTS604") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "one-way-arrow-text.ts") != null);
 }
 
@@ -6109,36 +6101,25 @@ test "CHECK preserves typed parameter refusals across function header comments" 
 test "CHECK preserves typed arrow return forms and parameter refusals" {
     const FailureStage = enum { strip, parse, types, strict, contract };
     const proof_diagnostic: CompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." };
-    // A module whose function value sits in a record or is returned by another function
-    // proves no termination claim, so `cost_bounded` leaves the demanded profile.
-    const proof_diagnostic_without_cost: CompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: cost_bounded, deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\">`." };
     const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostic: CompoundDiagnostic }{
-        .{ .source = "const guard = (candidate, marker: unknown): boolean => typeof candidate === \"string\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .strict, .diagnostic = .{ .code = "ZTS601", .message = "strict ZigTS requires explicit function parameter and return types", .line = 1, .column = 15, .suggestion = "annotate each parameter and the return type, for example `function handler(req: Request): Response`" } },
-        .{ .source = "const echo = (value: string): string => value;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
         .{ .source = "const echo = (value?: string): string => value;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS055", .message = "optional parameter shorthand is not part of this profile", .line = 1, .column = 20, .suggestion = "replace `name?: T` with `name: T | undefined`" } },
-        .{ .source = "const echo = (value?) => value;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 20, .suggestion = "')'" } },
         .{ .source = "function echo(value?: string): string { return value; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS055", .message = "optional parameter shorthand is not part of this profile", .line = 1, .column = 20, .suggestion = "replace `name?: T` with `name: T | undefined`" } },
         .{ .source = "function echo(value?) { return value; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 20, .suggestion = "')'" } },
         .{ .source = "const echo = (value: string = \"x\"): string => value;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 29, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" } },
         .{ .source = "const echo = async (value: string): string => value;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS001", .message = "'async' functions are not supported", .line = 1, .column = 14, .suggestion = "handlers run synchronously - use 'fetch' from zttp:fetch for outbound I/O" } },
         .{ .source = "const result = [\"a\"].map((value: string): string => value);\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
-        .{ .source = "const object = { echo: (value: string): string => value };\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic_without_cost },
-        .{ .source = "const echo = ((value: string): string => value);\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
-        .{ .source = "const make = (): (value: string) => string => (value: string): string => value;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic_without_cost },
-        .{ .source = "const guard = (value: unknown): missing is string => true;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS211", .message = "type predicate \x27guard\x27 must be a named module-level function declaration", .line = 1, .column = 1, .suggestion = "Declare the predicate as a function declaration at module level, or return boolean." } },
-        .{ .source = "const guard = (value: unknown): \"x is y\" => true;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 15, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
-        .{ .source = "const guard = (value: unknown): value\tis\tstring => true;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS211", .message = "type predicate \x27guard\x27 must be a named module-level function declaration", .line = 1, .column = 1, .suggestion = "Declare the predicate as a function declaration at module level, or return boolean." } },
-        .{ .source = "const guard = (readonly: unknown): readonly\tis\tstring => true;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS211", .message = "type predicate \x27guard\x27 must be a named module-level function declaration", .line = 1, .column = 1, .suggestion = "Declare the predicate as a function declaration at module level, or return boolean." } },
+        .{ .source = "const guard = [0].map((candidate, marker: unknown): boolean => typeof candidate === \"string\");\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .strict, .diagnostic = .{ .code = "ZTS601", .message = "strict ZigTS requires explicit function parameter and return types", .line = 1, .column = 23, .suggestion = "annotate each parameter and the return type, for example `function handler(req: Request): Response`" } },
+        .{ .source = "const echo = [0].map((value?) => value);\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 28, .suggestion = "')'" } },
+        .{ .source = "const guard = [0].map((value: unknown): \"x is y\" => true);\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 23, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
+        .{ .source = "const guard = [0].map((value: unknown): value is => true);\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 50, .suggestion = "type annotation" } },
+        .{ .source = "const guard = [0].map((value: unknown): value\tis => true);\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 50, .suggestion = "type annotation" } },
         .{ .source = "const echo = value: string => value;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 14, .suggestion = null } },
         .{ .source = "const choice = true ? \"a\" : \"b\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
         .{ .source = "const choice = true ? (1) : (2);\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
         .{ .source = "const make = (): (value: string) => string;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "unexpected ')'", .line = 1, .column = 16, .suggestion = null } },
         .{ .source = "function guard(value: unknown): value is { return true; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 42, .suggestion = "type annotation" } },
-        .{ .source = "const guard = (value: unknown): value is => true;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 42, .suggestion = "type annotation" } },
         .{ .source = "function guard(value: unknown): value\tis { return true; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 42, .suggestion = "type annotation" } },
-        .{ .source = "const guard = (value: unknown): value\tis => true;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 42, .suggestion = "type annotation" } },
         .{ .source = "function guard(value: unknown): value is string   { return true; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS211", .message = "type predicate 'guard' is not verified by its body", .line = 1, .column = 1, .suggestion = "Return one admitted narrowing test over the named parameter, combined with &&, || or !." } },
-        .{ .source = "const guard = (value: unknown): value is string   => true;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS211", .message = "type predicate \x27guard\x27 must be a named module-level function declaration", .line = 1, .column = 1, .suggestion = "Declare the predicate as a function declaration at module level, or return boolean." } },
     };
     var observed: usize = 0;
     for (cases) |case| {
@@ -6161,7 +6142,7 @@ test "CHECK preserves typed arrow return forms and parameter refusals" {
         try std.testing.expectEqual(case.stage == .contract, result.contract != null);
         observed += 1;
     }
-    try std.testing.expectEqual(@as(usize, 26), cases.len);
+    try std.testing.expectEqual(@as(usize, 18), cases.len);
     try std.testing.expectEqual(cases.len, observed);
 }
 
@@ -6434,10 +6415,11 @@ test "CHECK preserves measured lookup winners sibling scopes and captures" {
         "\"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`.";
     const capture_contract_suggestion =
         "this handler returns no Proof<T, P> capsule, so the compiler must prove the full " ++
-        "default profile, but it does not hold: cost_bounded, idempotent, pure, " ++
-        "read_only, retry_safe, stateless. Return a narrow Proof capsule with only the " ++
-        "properties it holds, e.g. `function handler(req: Request): Proof<Response, " ++
-        "\"state_isolated\" | \"fault_covered\" | \"result_safe\" | \"optional_safe\" | " ++
+        "default profile, but it does not hold: cost_bounded. Return a narrow Proof " ++
+        "capsule with only the properties it holds, e.g. `function handler(req: Request): " ++
+        "Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | " ++
+        "\"state_isolated\" | \"fault_covered\" | \"pure\" | \"stateless\" | " ++
+        "\"result_safe\" | \"optional_safe\" | " ++
         "\"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | " ++
         "\"pii_contained\" | \"injection_safe\" | \"canonical\">`.";
     const cases = [_]struct {
@@ -6475,16 +6457,20 @@ test "CHECK preserves measured lookup winners sibling scopes and captures" {
         },
         .{
             .source =
+            \\function thunkString(f: () => string): string {
+            \\  return f();
+            \\}
+            \\function thunkNumber(f: () => number): number {
+            \\  return f();
+            \\}
             \\function compute(): number {
             \\  if (true) {
             \\    const value: string = "inner";
-            \\    const readInner = (): string => value;
-            \\    const innerResult: string = readInner();
+            \\    const innerResult: string = thunkString((): string => value);
             \\  }
             \\  if (true) {
             \\    const value: number = 1;
-            \\    const readOuter = (): number => value;
-            \\    const outerResult: number = readOuter();
+            \\    const outerResult: number = thunkNumber((): number => value);
             \\    return outerResult;
             \\  }
             \\}
@@ -6496,36 +6482,13 @@ test "CHECK preserves measured lookup winners sibling scopes and captures" {
             .type_errors = 0,
             .strict_errors = 0,
             .has_contract = true,
-            .diagnostics = &.{
-                .{
-                    .code = "ZTS500",
-                    .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
-                    .line = 14,
-                    .column = 24,
-                    .suggestion = capture_contract_suggestion,
-                },
-                .{
-                    .code = "ZTS606",
-                    .message = "helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: pure)",
-                    .line = 1,
-                    .column = 1,
-                    .suggestion = "the handler returns no Proof<T, P> capsule, so the default profile demands `pure`, and `compute` breaks it: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or make `compute` hold `pure` and annotate it with `Proof<T, \"pure\">`.",
-                },
-                .{
-                    .code = "ZTS606",
-                    .message = "helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: read_only)",
-                    .line = 1,
-                    .column = 1,
-                    .suggestion = "the handler returns no Proof<T, P> capsule, so the default profile demands `read_only`, and `compute` breaks it: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or make `compute` hold `read_only` and annotate it with `Proof<T, \"read_only\">`.",
-                },
-                .{
-                    .code = "ZTS606",
-                    .message = "helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: deterministic)",
-                    .line = 1,
-                    .column = 1,
-                    .suggestion = "the handler returns no Proof<T, P> capsule, so the default profile demands `deterministic`, and `compute` breaks it: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or make `compute` hold `deterministic` and annotate it with `Proof<T, \"deterministic\">`.",
-                },
-            },
+            .diagnostics = &.{.{
+                .code = "ZTS500",
+                .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
+                .line = 18,
+                .column = 24,
+                .suggestion = capture_contract_suggestion,
+            }},
         },
         .{
             .source =
@@ -6554,16 +6517,17 @@ test "CHECK preserves measured lookup winners sibling scopes and captures" {
         },
         .{
             .source =
+            \\function thunkNumber(f: () => number): number {
+            \\  return f();
+            \\}
             \\function compute(): number {
             \\  if (true) {
             \\    const value: string = "inner";
-            \\    const readInner = (): number => value;
-            \\    const innerResult: number = readInner();
+            \\    const innerResult: number = thunkNumber((): number => value);
             \\  }
             \\  if (true) {
             \\    const value: number = 1;
-            \\    const readOuter = (): number => value;
-            \\    const outerResult: number = readOuter();
+            \\    const outerResult: number = thunkNumber((): number => value);
             \\    return outerResult;
             \\  }
             \\}
@@ -6578,8 +6542,8 @@ test "CHECK preserves measured lookup winners sibling scopes and captures" {
             .diagnostics = &.{.{
                 .code = "ZTS204",
                 .message = "return type does not match declared return type",
-                .line = 4,
-                .column = 23,
+                .line = 7,
+                .column = 45,
                 .suggestion = return_suggestion,
             }},
         },
@@ -7781,13 +7745,6 @@ test "CHECK refuses termination claims when a function value recurses without en
         \\  return Response.json({ v: down(3) });
         \\}
         },
-        .{ .name = "f6", .total_refused = false, .source =
-        \\structural Ops = { f: (n: number) => number };
-        \\const g: Ops = { f: (x: number): number => g.f(x) };
-        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
-        \\  return Response.json({ v: g.f(3) });
-        \\}
-        },
         // Local or module state.
         .{ .name = "f3", .total_refused = false, .source =
         \\structural Fn = (n: number) => number;
@@ -7809,7 +7766,10 @@ test "CHECK refuses termination claims when a function value recurses without en
         },
         .{ .name = "fc1", .total_refused = true, .source =
         \\structural Fn = (n: number) => number;
-        \\let slot: Fn = (n: number): number => n;
+        \\function same(n: number): number {
+        \\  return n;
+        \\}
+        \\let slot: Fn = same;
         \\function down(n: number): Proof<number, "total"> {
         \\  return slot(n);
         \\}
@@ -7823,12 +7783,18 @@ test "CHECK refuses termination claims when a function value recurses without en
         },
         .{ .name = "g1", .total_refused = true, .source =
         \\structural Fn = (n: number) => number;
-        \\let slot: Fn = (n: number): number => n;
+        \\function same(n: number): number {
+        \\  return n;
+        \\}
+        \\let slot: Fn = same;
         \\function down(items: number[], n: number): Proof<number, "total"> {
         \\  return items.map(slot)[0] ?? n;
         \\}
+        \\function viaDown(x: number): number {
+        \\  return down([x], x);
+        \\}
         \\function arm(n: number): number {
-        \\  slot = (x: number): number => down([x], x);
+        \\  slot = viaDown;
         \\  return n;
         \\}
         \\function handler(req: Request): Proof<Response, "cost_bounded"> {
@@ -9222,21 +9188,6 @@ const bound_let_reassigned =
     \\}
 ;
 
-const bound_written_in_closure_returned =
-    \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const r = match (req.method) {
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
-    \\  const fix = (): number => {
-    \\    r.status = 500;
-    \\    return 1;
-    \\  };
-    \\  const n = fix();
-    \\  return r;
-    \\}
-;
-
 const bound_written_through_alias =
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const r = match (req.method) {
@@ -9398,9 +9349,6 @@ test "contract: a bound match whose name is written or reassigned has an unknown
     const K = zts.handler_contract.ResponseStatus;
     try expectStatuses(bound_property_written, &[_]K{ .unknown, .unknown });
     try expectStatuses(bound_let_reassigned, &[_]K{ .unknown, .unknown });
-    // A closure writes `r` through an upvalue, whose binding key differs from
-    // the declaration's; the write still blocks resolution.
-    try expectStatuses(bound_written_in_closure_returned, &[_]K{ .unknown, .unknown });
     // An alias or a helper argument shares the object, so a write through it
     // changes the value of `r`.
     try expectStatuses(bound_written_through_alias, &[_]K{ .unknown, .unknown });
@@ -9423,20 +9371,6 @@ test "prove-behavior: bound match controls keep their verdicts" {
 
 const imp_cache = "import { cacheGet, cacheSet } from \"zttp:cache\";\n";
 
-const named_closure_a = imp_cache ++
-    \\function handler(req: Request): Response {
-    \\  const load = (): string | undefined => cacheGet("ns", "one");
-    \\  const x = load();
-    \\  return Response.json({ ok: true });
-    \\}
-;
-const named_closure_b = imp_cache ++
-    \\function handler(req: Request): Response {
-    \\  const load = (): string | undefined => cacheGet("ns", "two");
-    \\  const x = load();
-    \\  return Response.json({ ok: true });
-    \\}
-;
 const top_one = imp_cache ++
     \\function load(): string | undefined { return cacheGet("ns", "one"); }
     \\function handler(req: Request): Response {
@@ -9452,15 +9386,15 @@ const top_two = imp_cache ++
     \\}
 ;
 const byname_one = imp_cache ++
+    \\function load(k: string): string | undefined { return cacheGet("ns", "one"); }
     \\function handler(req: Request): Response {
-    \\  const load = (k: string): string | undefined => cacheGet("ns", "one");
     \\  const xs = ["a"].map(load);
     \\  return Response.json({ ok: true });
     \\}
 ;
 const byname_two = imp_cache ++
+    \\function load(k: string): string | undefined { return cacheGet("ns", "two"); }
     \\function handler(req: Request): Response {
-    \\  const load = (k: string): string | undefined => cacheGet("ns", "two");
     \\  const xs = ["a"].map(load);
     \\  return Response.json({ ok: true });
     \\}
@@ -9490,47 +9424,51 @@ const direct_two = imp_cache ++
     \\}
 ;
 const letfn_one = imp_cache ++
+    \\function first(): string | undefined { return cacheGet("ns", "one"); }
+    \\function other(): string | undefined { return cacheGet("ns", "z"); }
     \\function handler(req: Request): Response {
-    \\  let g = (): string | undefined => cacheGet("ns", "one");
-    \\  g = (): string | undefined => cacheGet("ns", "z");
+    \\  let g = first;
+    \\  g = other;
     \\  const x = g();
     \\  return Response.json({ ok: true });
     \\}
 ;
 const letfn_two = imp_cache ++
+    \\function first(): string | undefined { return cacheGet("ns", "two"); }
+    \\function other(): string | undefined { return cacheGet("ns", "z"); }
     \\function handler(req: Request): Response {
-    \\  let g = (): string | undefined => cacheGet("ns", "two");
-    \\  g = (): string | undefined => cacheGet("ns", "z");
+    \\  let g = first;
+    \\  g = other;
     \\  const x = g();
     \\  return Response.json({ ok: true });
     \\}
 ;
 const alias_one = imp_cache ++
+    \\function g(): string | undefined { return cacheGet("ns", "one"); }
     \\function handler(req: Request): Response {
-    \\  const g = (): string | undefined => cacheGet("ns", "one");
     \\  const h = g;
     \\  const x = h();
     \\  return Response.json({ ok: true });
     \\}
 ;
 const alias_two = imp_cache ++
+    \\function g(): string | undefined { return cacheGet("ns", "two"); }
     \\function handler(req: Request): Response {
-    \\  const g = (): string | undefined => cacheGet("ns", "two");
     \\  const h = g;
     \\  const x = h();
     \\  return Response.json({ ok: true });
     \\}
 ;
 const upvalue_one = imp_cache ++
+    \\function load(): string | undefined { return cacheGet("ns", "one"); }
     \\function handler(req: Request): Response {
-    \\  const load = (): string | undefined => cacheGet("ns", "one");
     \\  const xs = ["a"].map((k: string): string | undefined => load());
     \\  return Response.json({ ok: true });
     \\}
 ;
 const upvalue_two = imp_cache ++
+    \\function load(): string | undefined { return cacheGet("ns", "two"); }
     \\function handler(req: Request): Response {
-    \\  const load = (): string | undefined => cacheGet("ns", "two");
     \\  const xs = ["a"].map((k: string): string | undefined => load());
     \\  return Response.json({ ok: true });
     \\}
@@ -9672,19 +9610,15 @@ fn expectVerdict(
     try std.testing.expectEqual(expected, try proveBehaviorVerdict(std.testing.allocator, before_src, after_src));
 }
 
-test "prove-behavior: a module call in a named closure is on the path" {
-    try expectVerdict(.breaking, named_closure_a, named_closure_b);
-}
-
 test "prove-behavior: a module call in a module-level helper is on the path" {
     try expectVerdict(.breaking, top_one, top_two);
 }
 
-test "prove-behavior: a closure passed by name records its call" {
+test "prove-behavior: a function passed by name records its call" {
     try expectVerdict(.breaking, byname_one, byname_two);
 }
 
-test "prove-behavior: a closure called from inside an inline callback is on the path" {
+test "prove-behavior: a function called from inside an inline callback is on the path" {
     try expectVerdict(.breaking, upvalue_one, upvalue_two);
 }
 
@@ -9702,7 +9636,7 @@ test "prove-behavior: helper expansion controls keep their verdicts" {
     try expectVerdict(.equivalent, top_one, top_one);
 }
 
-test "prove-behavior: a closure bound with let or reached through an alias is not expanded" {
+test "prove-behavior: a function bound with let or reached through an alias is not expanded" {
     try expectVerdict(.equivalent, letfn_one, letfn_two);
     try expectVerdict(.equivalent, alias_one, alias_two);
 }
@@ -10177,18 +10111,6 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  return Response.json({ a: q.age });
     \\}
     },
-    .{ .name = "p08_ternary_cond_kill", .expect = "ZTS107@8,ZTS309@8,ZTS500@2", .source =
-    \\structural P = { age: number };
-    \\function handler(req: Request): Response {
-    \\  let p: P | undefined = { age: 1 };
-    \\  const reset = (): boolean => {
-    \\    p = undefined;
-    \\    return true;
-    \\  };
-    \\  const a: number = p !== undefined && reset() ? p.age : 0;
-    \\  return Response.json({ a: a });
-    \\}
-    },
     .{ .name = "p10_union_of_arrays", .expect = "ZTS309@5,ZTS500@3", .source =
     \\structural P = { age: number };
     \\structural Q = { age: number };
@@ -10216,15 +10138,6 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  };
     \\}
     },
-    .{ .name = "p28_ternary_assign_in_cond", .expect = "ZTS309@5,ZTS500@2", .source =
-    \\structural P = { age: number };
-    \\function handler(req: Request): Response {
-    \\  const ps: P[] = [];
-    \\  let p: P | undefined = ps[0];
-    \\  const a: number = p !== undefined && (() => { p = ps[1]; return 0; })() === 0 ? p.age : 0;
-    \\  return Response.json({ a: a });
-    \\}
-    },
     .{ .name = "p38_both_branches_assign", .expect = "ZTS309@6,ZTS500@2", .source =
     \\structural P = { age: number };
     \\function handler(req: Request): Response {
@@ -10232,15 +10145,6 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  let p: P | undefined = ps[0];
     \\  if (p === undefined) { p = { age: 0 }; } else { p = { age: 1 }; }
     \\  return Response.json({ a: p.age });
-    \\}
-    },
-    .{ .name = "p40_ternary_cond_kill_assign", .expect = "ZTS309@5,ZTS500@2", .source =
-    \\structural P = { age: number };
-    \\function handler(req: Request): Response {
-    \\  const ps: P[] = [];
-    \\  let p: P | undefined = ps[0];
-    \\  const a: number = p !== undefined && (() => { p = ps[1]; return p; })() === undefined ? p.age : 0;
-    \\  return Response.json({ a: a });
     \\}
     },
     .{ .name = "p42_match_nullable_scrutinee", .expect = "ZTS309@8,ZTS500@3", .source =
@@ -11723,9 +11627,6 @@ const absent_read_untyped_operand = [_]AbsentReadCase{
     \\  return Response.text("x");
     \\}
     },
-    .{ .name = "u3_unannotated_anonymous_arrow_gets_the_untyped_operand_refusal", .expect = "ZTS106@1", .source =
-    \\const handler = (req) => Response.text(String(req.url.length + 1));
-    },
 };
 
 test "untyped operand: strict code refuses an arithmetic operand with no type and keeps the other diagnostics" {
@@ -12056,9 +11957,6 @@ const absent_read_untyped_receiver = [_]AbsentReadCase{
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  return Response.text("x");
     \\}
-    },
-    .{ .name = "n1_unannotated_anonymous_arrow_gets_the_untyped_receiver_refusal_fr4", .expect = "ZTS201@1", .source =
-    \\const handler = (req) => Response.text(req.url.trim());
     },
     .{ .name = "n1_member_of_parsed_json_is_refused", .expect = "ZTS201@2", .source =
     \\function handler(req: Request): Proof<Response, "read_only"> {
@@ -12437,41 +12335,6 @@ test "state isolation across helper shapes" {
         \\function bump(): number {
         \\  count = count + 1;
         \\  return count;
-        \\}
-        },
-        .{ .name = "top-level arrow", .state_isolated = false, .source =
-        \\let count = 0;
-        \\const bump = (): number => {
-        \\  count = count + 1;
-        \\  return count;
-        \\};
-        \\export function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  return Response.text(String(bump()));
-        \\}
-        },
-        .{ .name = "function in an object literal", .state_isolated = false, .source =
-        \\let count = 0;
-        \\const ops = {
-        \\  bump: (): number => {
-        \\    count = count + 1;
-        \\    return count;
-        \\  },
-        \\};
-        \\export function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  return Response.text(String(ops.bump()));
-        \\}
-        },
-        .{ .name = "function nested in a helper", .state_isolated = false, .source =
-        \\let count = 0;
-        \\function outer(): number {
-        \\  const inner = (): number => {
-        \\    count = count + 1;
-        \\    return count;
-        \\  };
-        \\  return inner();
-        \\}
-        \\export function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  return Response.text(String(outer()));
         \\}
         },
         .{ .name = "member write through an alias of a module object", .state_isolated = false, .source =
@@ -13491,73 +13354,6 @@ test "formatProofCard: a helper ZTS500 line names the helper's declaration line"
     );
 }
 
-test "an arrow helper ZTS500 reports the helper's declaration line" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\const stamp = (): Proof<number, "pure"> => {
-        \\  return Date.now();
-        \\};
-        \\
-        \\export function handler(req: Request): Proof<Response, "read_only"> {
-        \\  const t = stamp();
-        \\  return Response.text(String(t));
-        \\}
-    ;
-    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "arrow-helper-site.ts", .{ .json_mode = true });
-    defer result.deinit(allocator);
-    const diagnostics = result.json_diagnostics.items;
-    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
-    try std.testing.expectEqualStrings("ZTS500", diagnostics[0].code);
-    try std.testing.expectEqualStrings("arrow-helper-site.ts", diagnostics[0].file);
-    try std.testing.expectEqual(@as(u32, 1), diagnostics[0].line);
-    try std.testing.expectEqual(@as(u16, 1), diagnostics[0].column);
-    try std.testing.expectEqualStrings(
-        "helper's declared Proof capsule does not hold (failing spec: pure)",
-        diagnostics[0].message,
-    );
-}
-
-test "an arrow helper with a true Proof capsule gives no diagnostic" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\const double = (x: number): Proof<number, "pure" | "total"> => x * 2;
-        \\
-        \\export function handler(req: Request): Proof<Response, "read_only"> {
-        \\  const t = double(21);
-        \\  return Response.text(String(t));
-        \\}
-    ;
-    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "arrow-helper-true.ts", .{ .json_mode = true });
-    defer result.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
-}
-
-test "an arrow helper that reaches a capability outside its Effects ceiling gives ZTS503" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { sha256 } from "zttp:crypto";
-        \\
-        \\const digest = (): Effects<string, "clock"> => {
-        \\  return sha256("a");
-        \\};
-        \\
-        \\export function handler(req: Request): Proof<Response, "read_only"> {
-        \\  const d = digest();
-        \\  return Response.text(d);
-        \\}
-    ;
-    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "arrow-helper-effects.ts", .{ .json_mode = true });
-    defer result.deinit(allocator);
-    const diagnostics = result.json_diagnostics.items;
-    try std.testing.expectEqual(@as(usize, 3), diagnostics.len);
-    try std.testing.expectEqualStrings("ZTS623", diagnostics[0].code);
-    try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
-    try std.testing.expectEqualStrings("ZTS503", diagnostics[1].code);
-    try std.testing.expectEqual(@as(u32, 3), diagnostics[1].line);
-    try std.testing.expectEqualStrings("ZTS505", diagnostics[2].code);
-    try std.testing.expectEqual(@as(u32, 3), diagnostics[2].line);
-}
-
 test "a handler ZTS500 keeps the handler's line" {
     const allocator = std.testing.allocator;
     const source =
@@ -14144,27 +13940,6 @@ test "CHECK refuses an Effects ceiling that a dependency helper breaks and warns
     try std.testing.expectEqual(@as(usize, 0), countDiagnosticsWithCode(&result, "ZTS611"));
 }
 
-test "CHECK refuses a false Proof capsule on an arrow helper of an imported module" {
-    var fixture = try SiblingFixture.init(capsule_stamp_handler);
-    defer fixture.deinit();
-    try fixture.add("dep.ts",
-        \\const clock = (): Proof<number, "pure"> => {
-        \\  return Date.now();
-        \\};
-        \\
-        \\export function stamp(): number {
-        \\  return clock();
-        \\}
-        \\
-    );
-
-    var result = try fixture.check();
-    defer result.deinit(std.testing.allocator);
-    const row = findingInFile(&result, "ZTS500", "/dep.ts") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u32, 1), row.line);
-    try std.testing.expectEqual(@as(usize, 1), countDiagnosticsWithCode(&result, "ZTS500"));
-}
-
 test "CHECK refuses a false Proof capsule on a dependency helper that no module calls" {
     var fixture = try SiblingFixture.init(
         \\import { one } from "./dep.ts";
@@ -14456,34 +14231,6 @@ test "CHECK refuses read_only on a dependency helper that calls a module-state w
     try std.testing.expectEqual(@as(u32, 3), row.line);
     try std.testing.expectEqual(@as(u32, 8), row.column);
     try std.testing.expectEqualStrings(cross_writer_suggestion, row.suggestion orelse return error.TestUnexpectedResult);
-}
-
-test "CHECK refuses read_only on a helper that calls an inline arrow writer held by an imported object" {
-    var fixture = try SiblingFixture.init(
-        \\import { api } from "./b.ts";
-        \\
-        \\function tally(): Proof<number, "read_only"> {
-        \\  return api.bump();
-        \\}
-        \\
-        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
-        \\  return Response.text("ok");
-        \\}
-        \\
-    );
-    defer fixture.deinit();
-    try fixture.add("b.ts",
-        \\let count = 0;
-        \\
-        \\export const api = { bump: (): number => { count = count + 1; return count; } };
-        \\
-    );
-
-    var result = try fixture.check();
-    defer result.deinit(std.testing.allocator);
-    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u32, 3), row.line);
-    try std.testing.expectEqual(@as(u32, 1), row.column);
 }
 
 test "CHECK refuses read_only on a helper that calls a named writer through an imported holder" {

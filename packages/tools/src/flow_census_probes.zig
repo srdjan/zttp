@@ -392,9 +392,10 @@ const t_top_fn_self =
 ;
 const t_top_arrow =
     \\@PRE@
-    \\const helper = (x: string): @RT@ => {
+    \\function id<F>(f: F): F { return f; }
+    \\const helper = id((x: string): @RT@ => {
     \\  @BODY@
-    \\};
+    \\});
     \\function handler(req: Request): Claim<Response> {
     \\  const s = @SRC@;
     \\  @USE{helper(s)}USE@
@@ -402,21 +403,23 @@ const t_top_arrow =
 ;
 const t_nested_arrow_param =
     \\@PRE@
+    \\function id<F>(f: F): F { return f; }
     \\function handler(req: Request): Claim<Response> {
-    \\  const inner = (x: string): @RT@ => {
+    \\  const inner = id((x: string): @RT@ => {
     \\    @BODY@
-    \\  };
+    \\  });
     \\  const s = @SRC@;
     \\  @USE{inner(s)}USE@
     \\}
 ;
 const t_nested_arrow_capture =
     \\@PRE@
+    \\function id<F>(f: F): F { return f; }
     \\function handler(req: Request): Claim<Response> {
     \\  const x = @SRC@;
-    \\  const inner = (): @RT@ => {
+    \\  const inner = id((): @RT@ => {
     \\    @BODY@
-    \\  };
+    \\  });
     \\  @USE{inner()}USE@
     \\}
 ;
@@ -597,11 +600,12 @@ const t_module_const_helper =
 const t_module_const_closure =
     \\@PRE@
     \\const token = @SRC@;
+    \\function id<F>(f: F): F { return f; }
     \\function handler(req: Request): Claim<Response> {
-    \\  const inner = (): @RT@ => {
+    \\  const inner = id((): @RT@ => {
     \\    const x = token;
     \\    @BODY@
-    \\  };
+    \\  });
     \\  @USE{inner()}USE@
     \\}
 ;
@@ -652,8 +656,9 @@ const t_apply_record =
     \\  const t = @SRC@;
     \\  return o.go(t);
     \\}
+    \\function id<F>(f: F): F { return f; }
     \\function handler(req: Request): Claim<Response> {
-    \\  @USE{via(req, { go: (x: string): @RT@ => { @BODY@ } })}USE@
+    \\  @USE{via(req, { go: id((x: string): @RT@ => { @BODY@ }) })}USE@
     \\}
 ;
 // The outer call passes a clean string. The recursive call passes the labelled
@@ -673,10 +678,18 @@ const t_recursion_taint =
 ;
 const t_concise_arrow =
     \\@PRE@
+    \\function id<F>(f: F): F { return f; }
     \\function handler(req: Request): Claim<Response> {
     \\  const s = @SRC@;
-    \\  const inner = (x: string): @CRT@ => @CEXPR@;
+    \\  const inner = id((x: string): @CRT@ => @CEXPR@);
     \\  @USE{inner(s)}USE@
+    \\}
+;
+const t_concise_arrow_hof =
+    \\@PRE@
+    \\function handler(req: Request): Claim<Response> {
+    \\  const s: string = @SRC@;
+    \\  @USE{[s].map((x: string): @CRT@ => @CEXPR@)}USE@
     \\}
 ;
 const t_import2_lib_b =
@@ -708,7 +721,10 @@ const env_labels = [_]Label{ .secret, .clean };
 const leaking_labels = [_]Label{ .secret, .credential, .user_input };
 const all_sinks = [_]Sink{ .log, .egress_url, .egress_body, .egress_headers, .egress_opaque, .response, .response_html };
 const effect_sinks = [_]Sink{ .log, .egress_url, .egress_body, .egress_headers, .egress_opaque };
-const concise_sinks = [_]Sink{ .log, .egress_url, .egress_body, .egress_headers, .response, .response_html };
+/// A call through a closure bound by name with an `unknown` result is ZTS600,
+/// so the effect sinks reach the flow stage through `.map` (`concise_arrow_hof`).
+const concise_sinks = [_]Sink{ .response, .response_html };
+const concise_hof_sinks = [_]Sink{ .log, .egress_url, .egress_body, .egress_headers };
 
 const Lib = struct { suffix: []const u8, template: []const u8 };
 
@@ -759,6 +775,7 @@ const specs = [_]Spec{
     .{ .name = "apply_record", .group = .extended, .labels = &leaking_labels, .template = t_apply_record, .unresolved = true },
     .{ .name = "recursion_taint", .group = .extended, .template = t_recursion_taint },
     .{ .name = "concise_arrow", .group = .extended, .sinks = &concise_sinks, .template = t_concise_arrow },
+    .{ .name = "concise_arrow_hof", .group = .extended, .sinks = &concise_hof_sinks, .template = t_concise_arrow_hof },
     .{
         .name = "import2",
         .group = .extended,
@@ -929,12 +946,13 @@ const hand_written = [_]Hand{
         .expect = .hold,
         .reason = "the helper logs its own clean x; the handler's secret x is only measured, never logged",
         .body =
+        \\function id<F>(f: F): F { return f; }
         \\function helperA(): number {
         \\  const x = "clean";
-        \\  const inner = (): number => {
+        \\  const inner = id((): number => {
         \\    logInfo(x, { n: 1 });
         \\    return 1;
-        \\  };
+        \\  });
         \\  return inner();
         \\}
         \\function handler(req: Request): Claim<Response> {
@@ -1154,8 +1172,9 @@ const hand_written = [_]Hand{
         .reason = "a closure in a record that a function returns logs the secret; the walk cannot resolve the method, so it can only fail closed",
         .body =
         \\structural Ops = { run: (s: string) => number };
+        \\function id<F>(f: F): F { return f; }
         \\function makeOps(): Ops {
-        \\  return { run: (s: string): number => { logInfo(s, { n: 1 }); return 1; } };
+        \\  return { run: id((s: string): number => { logInfo(s, { n: 1 }); return 1; }) };
         \\}
         \\function handler(req: Request): Claim<Response> {
         \\  const t = env("API_TOKEN") ?? "";

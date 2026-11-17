@@ -357,14 +357,16 @@ const refusal_rows_a = [_]RefusalRow{
         .clean = c(top("nominal X = string;")),
     },
     .{
-        .key = "A reused arrow helper, such as `const double = (x) => x * 2;`",
-        .refused = &.{r("const double = (x) => x * 2;", top("const double = (x: number): number => x * 2;\nfunction use(): number {\n  return double(1) + double(2);\n}"))},
-        .clean = c(top("function double(x: number): number {\n  return x * 2;\n}\nfunction use(): number {\n  return double(1) + double(2);\n}")),
-    },
-    .{
-        .key = "An exported function-valued `const`",
-        .refused = &.{r("const", top("export const f = (x: number): number => x;"))},
-        .clean = c(top("nominal N = number;\n" ++ boundary_proof ++ "export function f(x: N): Boundary<N> {\n  return x;\n}")),
+        .key = "An arrow outside a direct call argument: a bound arrow such as `const double = (x) => x * 2;`, an exported one such as `export const f = (x: number): number => x;`, a returned arrow such as `return (x) => x;`, an arrow in a record field such as `{ f: (x) => x }`, an immediately called arrow such as `((x) => x)(1)`, and an arrow as a `?:` arm",
+        .refused = &.{
+            r("const double = (x) => x * 2;", top("const double = (x: number): number => x * 2;\nfunction use(): number {\n  return double(1) + double(2);\n}")),
+            r("export const f = (x: number): number => x;", top("export const f = (x: number): number => x;")),
+            r("return (x) => x;", top("function g(): (x: number) => number {\n  return (x: number): number => x;\n}")),
+            r("{ f: (x) => x }", top("function g(): number {\n  const o = { f: (x: number): number => x };\n  return o.f(1);\n}")),
+            r("((x) => x)(1)", top("function g(): number {\n  return ((x: number): number => x)(1);\n}")),
+            r("?:", top("function g(c: boolean): number[] {\n  const xs: number[] = [1];\n  return xs.map(c ? (x: number): number => x : (x: number): number => x + 1);\n}")),
+        },
+        .clean = c(top("function g(): number[] {\n  const xs: number[] = [1];\n  return xs.map((x: number): number => x + 1);\n}")),
     },
     .{
         .key = "A nominal type called as a function, such as `Id(\"a\")`",
@@ -1553,16 +1555,6 @@ pub const gap_rows = [_]GapRow{
         .sources = &.{
             c(top("function f(): number {\n  return 1;\n}\nf();")),
             c(top("if (true) {\n  const y = 1;\n}")),
-        },
-    },
-    .{
-        .key = "An arrow outside a callback argument: a `const`-bound arrow, a returned arrow, an arrow in a record field, an immediately called arrow, and an arrow as a `?:` arm",
-        .sources = &.{
-            c(top("function g(): number {\n  const f = (x: number): number => x;\n  return f(1);\n}")),
-            c(top("function g(): (x: number) => number {\n  return (x: number): number => x;\n}")),
-            c(top("function g(): number {\n  const o = { f: (x: number): number => x };\n  return o.f(1);\n}")),
-            c(top("function g(): number {\n  return ((x: number): number => x)(1);\n}")),
-            c(top("function g(c: boolean): number {\n  const f = c ? (x: number): number => x : (x: number): number => x + 1;\n  return f(1);\n}")),
         },
     },
     .{

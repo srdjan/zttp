@@ -126,16 +126,16 @@ fn buildLineRepairs(
 ) !void {
     for (diagnostics) |diag| {
         const line = sourceLine(source, diag.line) orelse continue;
-        if (std.mem.eql(u8, diag.code, "ZTS608") or std.mem.eql(u8, diag.code, "ZTS609")) {
+        if (std.mem.eql(u8, diag.code, "ZTS072")) {
             const replacement = canonicalFunctionReplacement(allocator, line) catch |err| switch (err) {
                 error.UnsupportedRefactor => continue,
                 else => return err,
             };
             try appendRepairUnique(allocator, source, result, .{
-                .intent = if (std.mem.eql(u8, diag.code, "ZTS608"))
-                    .replace_arrow_with_function
+                .intent = if (std.mem.startsWith(u8, std.mem.trim(u8, line, " \t"), "export "))
+                    .replace_export_arrow_with_function
                 else
-                    .replace_export_arrow_with_function,
+                    .replace_arrow_with_function,
                 .diagnostic_code = diag.code,
                 .line = diag.line,
                 .column = diag.column,
@@ -1753,7 +1753,8 @@ pub fn normalizeSourceWithOptions(
         const hard_errors = next_check.parse_errors + next_check.link_errors + next_check.type_errors + next_check.bool_errors;
         const next_band = countBand(next_check.json_diagnostics.items);
         next_check.deinit(allocator);
-        if (hard_errors > 0 or next_band >= cur_band) {
+        const parse_fixed = check.parse_errors > 0 and hard_errors == 0;
+        if (hard_errors > 0 or (!parse_fixed and next_band >= cur_band)) {
             allocator.free(next);
             if (s.intents_owned) allocator.free(s.intents);
             break;
@@ -3783,25 +3784,26 @@ test "rewrite rows join in either order" {
             ,
         },
         .{
-            .name = "arrow to function beside a let-const",
+            // The arrow row stands alone: a source that holds a refused arrow
+            // fails to parse (ZTS072), so no other row can fire on it until the
+            // arrow row has run, and a `let` here would not join in either order.
+            .name = "arrow to function",
             .source =
             \\const parse = (x: number): number => x;
             \\function handler(req: Request): Response {
-            \\  let total = 0;
             \\  const a = parse(1);
             \\  const b = parse(2);
-            \\  return Response.json({ total: total, a: a, b: b });
+            \\  return Response.json({ a: a, b: b });
             \\}
             \\
             ,
         },
         .{
-            .name = "export arrow to function beside a let-const",
+            .name = "export arrow to function",
             .source =
             \\export const load = (id: string): Response => Response.text(id);
             \\function handler(req: Request): Response {
-            \\  let id = "x";
-            \\  return load(id);
+            \\  return load("x");
             \\}
             \\
             ,

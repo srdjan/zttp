@@ -527,7 +527,7 @@ test "ast rewrite: replace_export_arrow_with_function clears veto" {
     // The parameter carries a declared boundary type rather than a raw
     // `string`. ZTS061 refuses a raw built-in in an exported signature, so with
     // `id: string` this rewrite traded one diagnostic for another: the arrow
-    // form reported ZTS609 alone and the rewritten form reported ZTS061 alone,
+    // form reported ZTS072 alone and the rewritten form reported ZTS061 alone,
     // which is a new violation and exactly what the veto exists to refuse. The
     // test asserts the veto clears, so the fixture has to be a handler whose
     // only defect is the one the rewrite fixes.
@@ -690,8 +690,8 @@ test "ast rewrite: insert_guard_before_line is not an AST primitive" {
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "unsupported_repair_intent") != null);
 }
 
-test "ast rewrite: end-to-end ZTS608 → repair_intent → AST primitive → veto passes" {
-    // Slice G acceptance #3: a handler with a ZTS608 violation, simulate
+test "ast rewrite: end-to-end ZTS072 → repair_intent → AST primitive → veto passes" {
+    // Slice G acceptance #3: a handler with a ZTS072 violation, simulate
     // the diagnostic, read its repair_intent, dispatch the matching AST
     // primitive, veto passes. We exercise the canonical tag (no provider
     // round-trip needed) so the test stays offline.
@@ -710,7 +710,7 @@ test "ast rewrite: end-to-end ZTS608 → repair_intent → AST primitive → vet
 
     // Step 1: simulate the diagnostic via canonicalize.collect (the
     // compiler's veto-able diagnostic surface). The collected refactor
-    // mirrors what the strict checker would emit for ZTS608 with the
+    // mirrors what the strict checker would emit for ZTS072 with the
     // typed `replace_arrow_with_function` RepairIntent.
     var preview = try canonicalize.collect(testing.allocator, path);
     defer preview.deinit(testing.allocator);

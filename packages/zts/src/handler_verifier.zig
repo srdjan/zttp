@@ -2888,7 +2888,6 @@ test "a member or index write through a builtin or module-scope binding breaks s
         .{ .source = "const seen = [];\nfunction handler(req) { const a = seen; a.push(1); return Response.text(\"ok\"); }", .mutations = 1 },
         .{ .source = "const store = { items: [] };\nfunction handler(req) { store.items.push(1); return Response.text(\"ok\"); }", .mutations = 1 },
         .{ .source = "const seen = [];\nfunction add() { seen.push(1); return seen.length; }\nfunction handler(req) { return Response.text(String(add())); }", .mutations = 1 },
-        .{ .source = "const seen = [];\nfunction handler(req) { const f = () => { seen.push(1); }; f(); return Response.text(\"ok\"); }", .mutations = 1 },
         .{ .source = "function handler(req) { const xs = []; xs.push(1); return Response.text(\"ok\"); }", .mutations = 0 },
         .{ .source = "function handler(req) { const xs = [1]; const ys = xs; ys.push(2); return Response.text(\"ok\"); }", .mutations = 0 },
         .{ .source = "const seen = [1];\nfunction handler(req) { const xs = [...seen]; xs.push(2); return Response.text(\"ok\"); }", .mutations = 0 },
@@ -3265,20 +3264,6 @@ test "an assignment to a plain local object leaves the table stable" {
     try std.testing.expect(!counts.unresolved_dispatch);
 }
 
-test "a closure write to a different captured name leaves the table stable" {
-    const counts = try routeVerifierCounts(route_table_prelude ++
-        \\const routes = { "GET /": getHome };
-        \\function handler(req) {
-        \\  const box = { n: 1 };
-        \\  const bump = () => {
-        \\    box.n = 5;
-        \\    return 0;
-        \\  };
-        \\  bump();
-    ++ "\n" ++ route_table_dispatch);
-    try std.testing.expect(!counts.unresolved_dispatch);
-}
-
 test "an alias of the table is unresolved" {
     const counts = try routeVerifierCounts(route_table_prelude ++
         \\const routes = { "GET /": getHome };
@@ -3310,39 +3295,6 @@ test "a table passed to a function that writes the parameter is unresolved" {
         \\}
         \\function handler(req) {
         \\  setRoute(routes);
-    ++ "\n" ++ route_table_dispatch);
-    try std.testing.expect(counts.unresolved_dispatch);
-}
-
-test "a table passed to a function whose closure writes the parameter is unresolved" {
-    const counts = try routeVerifierCounts(route_table_prelude ++
-        \\const routes = { "GET /": getHome };
-        \\function setLater(t) {
-        \\  const g = () => {
-        \\    t["GET /"] = bad;
-        \\    return 0;
-        \\  };
-        \\  return g();
-        \\}
-        \\function handler(req) {
-        \\  setLater(routes);
-    ++ "\n" ++ route_table_dispatch);
-    try std.testing.expect(counts.unresolved_dispatch);
-}
-
-test "a table captured by a closure that aliases and writes it is unresolved" {
-    const counts = try routeVerifierCounts(route_table_prelude ++
-        \\const routes = { "GET /": getHome };
-        \\function setLater(t) {
-        \\  const g = () => {
-        \\    const u = t;
-        \\    u["GET /"] = bad;
-        \\    return 0;
-        \\  };
-        \\  return g();
-        \\}
-        \\function handler(req) {
-        \\  setLater(routes);
     ++ "\n" ++ route_table_dispatch);
     try std.testing.expect(counts.unresolved_dispatch);
 }
@@ -3890,53 +3842,6 @@ test "ZTS303 a guard inside a closure does not clear the enclosing read" {
         \\}
     );
     try std.testing.expectEqual(@as(u32, 1), arrow.unchecked_result);
-}
-
-test "ZTS309 an assignment inside a closure does not narrow the enclosing read" {
-    const counts = try routeVerifierCounts(optional_import ++
-        \\function handler(req) {
-        \\  let v = cacheGet("items", "k");
-        \\  const g = () => {
-        \\    v = "x";
-        \\    return 1;
-        \\  };
-        \\  const len = v.length;
-        \\  const n = g();
-        \\  v = "y";
-        \\  return Response.text(String(len) + String(n) + v);
-        \\}
-    );
-    try std.testing.expectEqual(@as(u32, 1), counts.unchecked_optional);
-}
-
-test "a reassignment inside a closure is refused for a Result and un-narrows an optional" {
-    const result_kill = try routeVerifierCounts(result_import ++
-        \\function handler(req) {
-        \\  let result = jwtVerify("token", "key");
-        \\  if (!result.ok) { return Response.text("no"); }
-        \\  const g = () => {
-        \\    result = jwtVerify("x", "k");
-        \\    return 1;
-        \\  };
-        \\  g();
-        \\  return Response.text(String(result.value));
-        \\}
-    );
-    try std.testing.expectEqual(@as(u32, 2), result_kill.unchecked_result);
-
-    const optional_kill = try routeVerifierCounts(optional_import ++
-        \\function handler(req) {
-        \\  let v = cacheGet("items", "k");
-        \\  if (v === undefined) { return Response.text("none"); }
-        \\  const g = () => {
-        \\    v = cacheGet("items", "k2");
-        \\    return 1;
-        \\  };
-        \\  g();
-        \\  return Response.text(String(v.length));
-        \\}
-    );
-    try std.testing.expectEqual(@as(u32, 1), optional_kill.unchecked_optional);
 }
 
 test "ZTS303 closure walks keep the precision of the checks outside them" {

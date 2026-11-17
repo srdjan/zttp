@@ -59,6 +59,7 @@ pub const ErrorKind = enum {
     shadowed_binding,
     statement_body_not_block,
     local_function_declaration,
+    arrow_outside_call_argument,
     invalid_break,
     invalid_continue,
     invalid_return,
@@ -193,6 +194,7 @@ pub const ErrorList = struct {
             .parameter_assignment => "Bind the new value to a new `const`.",
             .statement_body_not_block => "Write the body as a block, such as `if (c) { g(); }`.",
             .local_function_declaration => "Move the function to module level.",
+            .arrow_outside_call_argument => "Write a module-level `function`, or pass the arrow directly as a call argument.",
             else => null,
         };
     }

@@ -9,7 +9,7 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | Task | Canonical form |
 |---|---|
 | Handler / helper declaration | Named `function name(...): Return { ... }` with explicit parameter and return types |
-| Local callback | Arrow function only when passed directly as a value |
+| Local callback | Arrow function only when passed directly as a call argument |
 | Binding | `const` by default; `let` only when reassigned |
 | Absent value | `undefined` only |
 | Branching | `if`/`else` for guards, `match` for closed alternatives, `c ? a : b` for a two-way choice between pure values |
@@ -48,23 +48,17 @@ let x = 1; return x;
 const x = 1; return x;
 ```
 
-### Arrow helper that is reused (ZTS608)
+### Arrow outside a direct call argument (ZTS072)
 ```ts
 // before
 const parseUser = (input: Input): User => makeUser(input);
+export const handler = (req: Request): Response => Response.json({ok: true});
 
 // after
 function parseUser(input: Input): User {
   return makeUser(input);
 }
-```
 
-### Exported function-valued `const` (ZTS609)
-```ts
-// before
-export const handler = (req: Request): Response => Response.json({ok: true});
-
-// after
 export function handler(req: Request): Response {
   return Response.json({ok: true});
 }

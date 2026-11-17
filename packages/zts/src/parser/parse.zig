@@ -255,6 +255,9 @@ pub const Parser = struct {
     /// Set once the program has parsed a statement or type declaration that is
     /// not an import. An `import` after that point is refused (spec 5.5).
     declaration_seen: bool = false,
+    /// The source offset of the call argument that the parser reads now. An
+    /// arrow is admitted only when it starts there (spec 5.2).
+    call_argument_start: u32 = std.math.maxInt(u32),
 
     // Recursive-descent depth, shared across statement and expression nesting.
     // Bounds stack growth so pathological input (minified/generated JS with
@@ -4582,8 +4585,15 @@ pub const Parser = struct {
 
         try self.refuseGenericArrow();
 
-        // Check for arrow function
+        // Spec 5.2: an arrow is a direct call argument, and every other named
+        // behavior is a module-level function. The refused arrow is still
+        // parsed, so that recovery resumes after it and reports no cascade.
         if (self.isArrowFunction()) {
+            if (self.current.start != self.call_argument_start) {
+                self.errors.addErrorAt(.arrow_outside_call_argument, self.current, "an arrow function must be a direct call argument");
+                _ = try self.parseArrowFunction();
+                return error.ParseError;
+            }
             return self.parseArrowFunction();
         }
 
@@ -5090,6 +5100,7 @@ pub const Parser = struct {
                     const spread_node = try self.nodes.addOptValue(.spread, loc, spread_expr);
                     try args.append(spread_node);
                 } else {
+                    self.call_argument_start = self.current.start;
                     const arg = try self.parseExpression(.assignment);
                     try args.append(arg);
                 }

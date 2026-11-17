@@ -25,6 +25,7 @@ const std = @import("std");
 
 const rule_registry = @import("rule_registry.zig");
 const diagnostic_projection = @import("diagnostic_projection.zig");
+const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const profile_identity = @import("zts-base").profile_identity;
 
 /// The only core source profile implemented by this grammar.
@@ -234,7 +235,7 @@ pub const productions = [_]Production{
         .name = "ArrowExpr",
         .rhs = "\"(\" [ArrowParams] \")\" \"=>\" (Expr | Block)",
         .enforcement = .check_time,
-        .rule_code = "ZTS608",
+        .note = "ZTS072, the parser band, which is outside the policy-hashed registry: an arrow is admitted only as a direct call argument, and the grammar admits one in any expression position",
     },
     .{
         .name = "ArrowParams",
@@ -448,28 +449,28 @@ test "every check_time row names either a registry rule or the band that answers
 test "every noted row names a code the projection really emits" {
     // The note is prose, and prose is where a claim rots. `StructuralDecl`
     // admits a recursive alias no data constructor guards, and the refusal is
-    // ZTS212 from the type-checker band - a band the policy-hashed registry does
-    // not cover, which is why this row carries a note instead of a `rule_code`.
-    // Bound to the projection here so a renamed code fails the build rather
-    // than leaving a client chasing a code nothing emits.
+    // ZTS212 from the type-checker band. `ArrowExpr` admits an arrow in any
+    // expression position, and the refusal is ZTS072 from the parser band.
+    // Neither band is covered by the policy-hashed registry, which is why
+    // these rows carry a note instead of a `rule_code`. Each note is bound to
+    // the projection here so a renamed code fails the build rather than
+    // leaving a client chasing a code nothing emits.
     //
-    // Every noted row names ZTS212 today. A note that names some other code
-    // needs its own binding added here; the count assertion is what makes that
-    // a build failure rather than an unchecked sentence.
-    const emitted = diagnostic_projection.code(.type, .non_contractive_alias);
-    try testing.expectEqualStrings("ZTS212", emitted);
+    // Two rows carry a note today. A note that names some other code needs its
+    // own binding added here; the count assertion is what makes that a build
+    // failure rather than an unchecked sentence.
+    const type_code = diagnostic_projection.code(.type, .non_contractive_alias);
+    try testing.expectEqualStrings("ZTS212", type_code);
+    const parser_code = diagnostic_catalog.parserCode(.arrow_outside_call_argument);
+    try testing.expectEqualStrings("ZTS072", parser_code);
 
     var noted: usize = 0;
     for (&productions) |p| {
-        const note = p.note orelse continue;
-        noted += 1;
-        if (std.mem.indexOf(u8, note, emitted) == null) {
-            std.debug.print("noted row does not name {s}: {s}\n", .{ emitted, p.name });
-            return error.UnboundNote;
-        }
+        if (p.note != null) noted += 1;
     }
-    try testing.expectEqual(@as(usize, 1), noted);
-    try testing.expect(findByName("StructuralDecl").?.note != null);
+    try testing.expectEqual(@as(usize, 2), noted);
+    try testing.expect(std.mem.indexOf(u8, findByName("StructuralDecl").?.note.?, type_code) != null);
+    try testing.expect(std.mem.indexOf(u8, findByName("ArrowExpr").?.note.?, parser_code) != null);
 }
 
 test "the production names are unique, so a client can key on them" {

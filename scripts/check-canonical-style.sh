@@ -42,30 +42,37 @@ cd "$(dirname "$0")/.."
 skill="packages/pi/src/skills/canonical-style.md"
 rules="packages/zts/src/rule_registry.zig"
 restrictions="packages/zts/src/restriction_registry.zig"
+catalog="packages/zts/src/diagnostic_catalog.zig"
 
-# Measured 2026-08-26: 10 sections carry a code in the heading, and 9 of the
-# codes they cite have a rule_registry example (ZTS054 and ZTS055 are
-# restriction codes and carry none).
-MIN_SECTIONS=10
-MIN_EXAMPLES=9
+# Measured 2026-11-17: 9 sections carry a code in the heading, and 7 of them
+# cite one code with a rule_registry example. ZTS054 and ZTS055 are
+# restriction codes, and ZTS072 is a parser code, so they carry none. The
+# ZTS608 and ZTS609 sections, each with an example, became the one ZTS072
+# section (Decision 4).
+MIN_SECTIONS=9
+MIN_EXAMPLES=7
 
 fail() {
   printf 'canonical-style drift: %s\n' "$1" >&2
   exit 1
 }
 
-for f in "$skill" "$rules" "$restrictions"; do
+for f in "$skill" "$rules" "$restrictions" "$catalog"; do
   [[ -f "$f" ]] || fail "missing $f"
 done
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# Every code the registries define. rule_registry rows carry `.code = "ZTSnnn"`;
-# restriction_registry rows name theirs in `.enforced_by = &.{"ZTSnnn"}`.
+# Every code the registries define, and every code the diagnostic catalog
+# maps a parser or checker kind to. rule_registry rows carry `.code = "ZTSnnn"`;
+# restriction_registry rows name theirs in `.enforced_by = &.{"ZTSnnn"}`; the
+# catalog maps each kind with `=> "ZTSnnn"`. A parser code such as ZTS072 has
+# no registry row, so only the catalog names it.
 {
   grep -oE '\.code = "ZTS[0-9]+"' "$rules" | grep -oE 'ZTS[0-9]+'
   grep -oE '"ZTS[0-9]+"' "$restrictions" | grep -oE 'ZTS[0-9]+'
+  grep -oE '=> "ZTS[0-9]+"' "$catalog" | grep -oE 'ZTS[0-9]+'
 } | sort -u > "$work/known.txt"
 
 [[ -s "$work/known.txt" ]] ||

@@ -320,9 +320,12 @@ export function value() {
 TS
 dep_check_case strict "strict error[ZTS601]: strict ZigTS requires explicit function parameter and return types"
 cat > "$TMP_DIR/dep-check-app/dep.ts" <<'TS'
-export const value = (): number => 1;
+export function value(): number {
+  let n = 1;
+  return n;
+}
 TS
-dep_check_case canonical-export "strict error[ZTS609]: exported function-valued const should be an export function declaration"
+dep_check_case canonical "strict error[ZTS604]: let binding is never reassigned"
 cat > "$TMP_DIR/dep-check-app/dep.ts" <<'TS'
 import { jwtVerify } from "zttp:auth";
 export function value(): string {

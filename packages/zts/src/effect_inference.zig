@@ -3182,7 +3182,8 @@ test "module holders retain their effects without an atom table" {
     }
     try output.writer.writeAll(
         \\];
-        \\const ops = { run: () => Math.random() };
+        \\const ops = { run: id(() => Math.random()) };
+        \\function id(g) { return g; }
         \\function handler() { return ops.run(); }
     );
     const source = try output.toOwnedSlice();
@@ -3192,7 +3193,7 @@ test "module holders retain their effects without an atom table" {
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const program = view.getBlock(root) orelse return error.ProgramMissing;
-    try testing.expectEqual(@as(u32, 3), program.stmts_count);
+    try testing.expectEqual(@as(u32, 4), program.stmts_count);
     const holder = view.getVarDecl(view.getListIndex(program.stmts_start, 1)) orelse
         return error.HolderMissing;
     try testing.expect(holder.binding.name_atom >= object.Atom.FIRST_DYNAMIC);
@@ -4234,27 +4235,6 @@ test "unresolved router dispatch leaves the effect row a lower bound" {
     try testing.expect(row.lower_bound);
 }
 
-test "recursive inline route dispatch fails closed without recursing the analyzer" {
-    const row = try analyzeHandlerRow(
-        \\import { routerMatch } from "zttp:router";
-        \\const routes = {
-        \\  "GET /loop": (req) => {
-        \\    const found = routerMatch(routes, req);
-        \\    if (found === undefined) { return Response.text("not found", { status: 404 }); }
-        \\    return found.handler(req);
-        \\  }
-        \\};
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
-        \\  return found.handler(req);
-        \\}
-    );
-
-    try testing.expect(row.recursive);
-    try testing.expect(row.lower_bound);
-}
-
 test "partner write-classified import marks function and callers as writing" {
     const allocator = testing.allocator;
 
@@ -4921,8 +4901,9 @@ test "a closure declared in a body is charged to that body" {
     // that body where it is created, as an inline callback already is.
     const arrow = try analyzeHandlerRow(
         \\import { cacheSet } from "zttp:cache";
+        \\function id(g) { return g; }
         \\function handler(items) {
-        \\  const w = (k) => { cacheSet("ns", k, "v", 10); return 1; };
+        \\  const w = id((k) => { cacheSet("ns", k, "v", 10); return 1; });
         \\  items.forEach(w);
         \\  return 1;
         \\}
@@ -4934,8 +4915,9 @@ test "a closure declared in a body is charged to that body" {
     // body's write is now in the row as well.
     const called = try analyzeHandlerRow(
         \\import { cacheSet } from "zttp:cache";
+        \\function id(g) { return g; }
         \\function handler(k) {
-        \\  const w = (x) => { cacheSet("ns", x, "v", 10); return 1; };
+        \\  const w = id((x) => { cacheSet("ns", x, "v", 10); return 1; });
         \\  return w(k);
         \\}
     );
@@ -4944,8 +4926,9 @@ test "a closure declared in a body is charged to that body" {
 
     // Control: a pure local closure charges nothing.
     const pure = try analyzeHandlerRow(
+        \\function id(g) { return g; }
         \\function handler(items) {
-        \\  const w = (k) => k + 1;
+        \\  const w = id((k) => k + 1);
         \\  return items.map(w);
         \\}
     );
@@ -5137,7 +5120,8 @@ test "a closure inside a module-level initializer is charged for its own calls" 
     // the initializer like a function body.
     const row = try analyzeHandlerRow(
         \\import { cacheSet } from "zttp:cache";
-        \\const ops = { save: (k) => { cacheSet("ns", k, "v", 10); return 1; } };
+        \\function id(g) { return g; }
+        \\const ops = { save: id((k) => { cacheSet("ns", k, "v", 10); return 1; }) };
         \\function handler(req) { return ops.save("k"); }
     );
     try testing.expect(row.writes);
@@ -5146,7 +5130,8 @@ test "a closure inside a module-level initializer is charged for its own calls" 
     // An exported binding is a module binding too.
     const exported = try analyzeHandlerRow(
         \\import { cacheSet } from "zttp:cache";
-        \\export const ops = { save: (k) => { cacheSet("ns", k, "v", 10); return 1; } };
+        \\function id(g) { return g; }
+        \\export const ops = { save: id((k) => { cacheSet("ns", k, "v", 10); return 1; }) };
         \\function handler(req) { return ops.save("k"); }
     );
     try testing.expect(exported.writes);
@@ -5314,8 +5299,9 @@ test "a local colliding with a pure import keeps a pure closure read only" {
     // to charge for it.
     const row = try analyzeHandlerRow(
         \\import { parseBearer as length } from "zttp:auth";
+        \\function id(g) { return g; }
         \\function handler(a, b, c, d) {
-        \\  const f = (x) => x + 1;
+        \\  const f = id((x) => x + 1);
         \\  return f(a);
         \\}
     );
@@ -5395,22 +5381,6 @@ test "function values in the closed positions leave the escape flag clear" {
     for (cases) |source| try expectEscape(source, null);
 }
 
-// Rule 2 of the ZTS072 migration: each source holds an arrow form that the
-// parser refuses, so these cases cannot run once the refusal lands. They
-// moved here unchanged from the two tests above for phase 2 to pin or delete.
-test "a function value in a refused arrow form is classified by the escape flag" {
-    const escapes = [_]struct { name: []const u8, source: []const u8 }{
-        .{ .name = "an anonymous function", .source = "const ops = { a: (n) => n };\nfunction handler(k) { return k; }" },
-        .{ .name = "an anonymous function", .source = "function handler(k) { return ((n) => n)(k); }" },
-        // A body-local function has no call-graph edge, so a callback slot
-        // does not close it: recursion through `map` would leave no cycle.
-        .{ .name = "g", .source = "function handler(k) { const g = (x) => [x].map(g)[0]; return [k].map(g); }" },
-    };
-    for (escapes) |case| try expectEscape(case.source, case.name);
-    // P0 and P1: a literal bound once, and calls by name.
-    try expectEscape("const fmt = (x) => x + 1;\nfunction handler(k) { return fmt(k); }", null);
-}
-
 test "a route table that anything else reads is not a closed position" {
     const shared = "import { routerMatch } from \"zttp:router\";\n" ++
         "function getHealth(req) { return Response.text(\"ok\"); }\n" ++
@@ -5449,6 +5419,25 @@ test "a function declaration in a body is refused with ZTS071" {
     try testing.expectEqualStrings("ZTS071", diagnostic_catalog.parserCode(errors[0].kind));
     try testing.expectEqual(@as(u32, 2), errors[0].location.line);
     try testing.expectEqual(@as(u32, 3), errors[0].location.column);
+}
+
+test "an arrow function bound to a name is refused with ZTS072" {
+    var atoms = atom_table.AtomTable.init(testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(testing.allocator, testing.allocator,
+        \\function handler(req) {
+        \\  const g = (x) => x;
+        \\  return g(3);
+        \\}
+    , .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    try testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try testing.expectEqual(@as(usize, 1), errors.len);
+    try testing.expectEqualStrings("ZTS072", diagnostic_catalog.parserCode(errors[0].kind));
+    try testing.expectEqual(@as(u32, 2), errors[0].location.line);
+    try testing.expectEqual(@as(u32, 13), errors[0].location.column);
 }
 
 test "a sibling module's escaped function value reaches every function of the importer" {

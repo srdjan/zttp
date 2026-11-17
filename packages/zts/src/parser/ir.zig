@@ -1311,7 +1311,7 @@ pub const IrView = struct {
     ///
     /// This is a pure structural descent with no analysis state and no ordering
     /// policy beyond source order. It does not enter expressions. An
-    /// expression-walking analysis (`collectCallCounts`, `collectAssignments`)
+    /// expression-walking analysis (`collectAssignments`)
     /// uses `expressionChildren`, and a flow-sensitive one (`bool_checker`,
     /// `flow_checker`) keeps its own arms; do not route them through here.
     pub fn forEachChild(

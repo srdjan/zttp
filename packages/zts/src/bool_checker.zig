@@ -2027,18 +2027,22 @@ test "sound: let reassigned to number fails in if" {
 
 // Function return type inference
 
-test "sound: arrow function returning boolean - call site passes" {
-    try checkSource(
-        \\const isPositive = (n) => n > 0;
-        \\if (isPositive(5)) { let x = 1; }
-    , 0);
-}
-
-test "sound: arrow function returning number fails in if" {
-    try checkSource(
-        \\const double = (n) => n * 2;
-        \\if (double(5)) { let x = 1; }
-    , 1);
+test "an arrow function that is not a call argument is refused with ZTS072" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function outer() {
+        \\  const isPositive = (n) => n > 0;
+        \\  return isPositive(5);
+        \\}
+    ;
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqualStrings("ZTS072", diagnostic_catalog.parserCode(errors[0].kind));
+    try std.testing.expectEqual(@as(u32, 2), errors[0].location.line);
+    try std.testing.expectEqual(@as(u32, 22), errors[0].location.column);
 }
 
 test "sound: block function returning boolean passes" {

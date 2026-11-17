@@ -1,11 +1,8 @@
 import { env } from "zttp:env";
 
-export const load = (req: Request): Response => Response.text(req.path);
-
-const parse = (x: number): number => x;
-
-structural Loader = (id: string) => Response;
-export const typed: Loader = (id: string): Response => Response.text(id);
+function parse(x: number): number {
+  return x;
+}
 
 function handler(req: Request): Proof<Response, "state_isolated"> {
   let key = "API_KEY";

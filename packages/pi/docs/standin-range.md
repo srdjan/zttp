@@ -4,7 +4,7 @@
 
 Range version: `step-6-v2`
 
-Range hash: `78eab4a78eeccdac2c9ccd79d4e333507a2eb42534c4d66b3cdee5d31c1b7cc8`
+Range hash: `766166b02ce5e08e6b62686438c16af25abbb784cfb07a18bd30445df3306d55`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
@@ -104,8 +104,8 @@ Drafts the stand-in emits expecting the veto to reject them, so the rejection ha
 | `unchecked-optional` | `ZTS308` | compiler_repair |
 | `redundant-bool-compare` | `ZTS620` | salvaged |
 | `chained-ternary` | `ZTS621` | salvaged |
-| `arrow-helper` | `ZTS608` | salvaged |
-| `exported-arrow-const` | `ZTS609` | salvaged |
+| `arrow-helper` | `ZTS072` | salvaged |
+| `exported-arrow-const` | `ZTS072` | salvaged |
 | `effectful-ternary` | `ZTS612` | model_retry |
 | `non-leading-spread` | `ZTS614` | model_retry |
 | `call-spread` | `ZTS616` | model_retry |

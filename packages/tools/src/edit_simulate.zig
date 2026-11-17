@@ -752,19 +752,15 @@ test "runWithArgs accepts redundant --json flag" {
 
 test "simulate flags newly introduced canonical diagnostics" {
     const before =
-        \\function parse(x: number): number { return x; }
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
-        \\  const a = parse(1);
-        \\  const b = parse(2);
-        \\  return Response.json({ a: a, b: b });
+        \\  const a = 1;
+        \\  return Response.json({ a: a });
         \\}
     ;
     const after =
-        \\const parse = (x: number): number => x;
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
-        \\  const a = parse(1);
-        \\  const b = parse(2);
-        \\  return Response.json({ a: a, b: b });
+        \\  let a = 1;
+        \\  return Response.json({ a: a });
         \\}
     ;
 
@@ -775,16 +771,16 @@ test "simulate flags newly introduced canonical diagnostics" {
     });
     defer result.deinit(std.testing.allocator);
 
-    var saw_608 = false;
+    var saw_604 = false;
     var introduced: u32 = 0;
     for (result.violations.items) |v| {
         if (v.introduced_by_patch) introduced += 1;
-        if (std.mem.eql(u8, v.code, "ZTS608")) {
-            saw_608 = true;
+        if (std.mem.eql(u8, v.code, "ZTS604")) {
+            saw_604 = true;
             try std.testing.expect(v.introduced_by_patch);
         }
     }
-    try std.testing.expect(saw_608);
+    try std.testing.expect(saw_604);
     try std.testing.expect(introduced > 0);
     try std.testing.expectEqual(introduced, result.new_count);
 }

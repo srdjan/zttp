@@ -103,8 +103,7 @@ pure.
 | `type X = ...;` | ZTS050 | `structural X = ...;`. `import type` and `export type { ... }` keep the keyword |
 | `distinct type X = string;` | ZTS051 | `nominal X = string;` |
 | A `nominal` type over a record, tuple, union, or function | ZTS048 | `nominal` over `string`, `number`, or `boolean`. Use `structural` for other shapes |
-| A reused arrow helper, such as `const double = (x) => x * 2;` | ZTS608 | A named `function` declaration |
-| An exported function-valued `const` | ZTS609 | `export function name(...) { ... }` |
+| An arrow outside a direct call argument: a bound arrow such as `const double = (x) => x * 2;`, an exported one such as `export const f = (x: number): number => x;`, a returned arrow such as `return (x) => x;`, an arrow in a record field such as `{ f: (x) => x }`, an immediately called arrow such as `((x) => x)(1)`, and an arrow as a `?:` arm | ZTS072 | A module-level `function`. Pass an arrow only as a direct call argument, such as `xs.map((x: number): number => x + 1)` |
 | A nominal type called as a function, such as `Id("a")` | ZTS214 | An annotated declaration: `const x: Id = "a";` |
 
 Declaration merging, open interfaces, and inheritance are excluded.
@@ -418,7 +417,6 @@ against the compiler.
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |
 | A higher-order callback that calls `push`, or that assigns a captured binding | Accepted, exit 0 | A targeted refusal. Build the result with `for...of` |
 | A top-level statement other than a registration call, such as `f();` and `if (c) { f(); }` | Accepted, exit 0 | A targeted refusal. Move the statement into a function. A bare `schemaCompile(...)` or `sql(...)` call with literal arguments stays admitted |
-| An arrow outside a callback argument: a `const`-bound arrow, a returned arrow, an arrow in a record field, an immediately called arrow, and an arrow as a `?:` arm | Accepted, exit 0. ZTS608 refuses only a reused helper | A targeted refusal. Write a module-level `function` |
 | A top-level initializer with an effect, such as `const t: number = Date.now();` | Accepted, exit 0 | A targeted refusal. Compute the value inside a function |
 | `for...of` over a number, such as `for (const k of 5)` | Accepted, exit 0 | A targeted refusal. Iterate an array, a string, or `range(n)` |
 | `stringifyJson` of a value that JSON cannot carry, such as a function or a `Dict<number, string>` | Accepted, exit 0. `Response.json` refuses the same payload with ZTS213 | ZTS213. Pass a string-keyed payload |

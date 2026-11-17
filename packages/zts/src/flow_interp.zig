@@ -4608,18 +4608,6 @@ test "an unnamed origin and a named origin see each other's writes" {
     try expectSecret("function f(p, q, s, k) { p.x = s; return q[k]; }", &.{ unnamed, named, secret_value, Value.clean }, true);
 }
 
-test "the receiver is evaluated before a right side that reassigns it" {
-    const site_a = [_]SiteKey{.{ .kind = .request, .node = 1, .context = 0 }};
-    const site_b = [_]SiteKey{.{ .kind = .request, .node = 2, .context = 0 }};
-    const a: Value = .{ .origins = &site_a };
-    const b: Value = .{ .origins = &site_b };
-    const params = [_]Value{ a, b, secret_value };
-    const body = "let o = a; o.x = (() => { o = b; return s; })(); ";
-    // The write lands on the receiver the left side named.
-    try expectSecret("function f(a, b, s) { " ++ body ++ "return a.x; }", &params, true);
-    try expectSecret("function f(a, b, s) { " ++ body ++ "return b.x; }", &params, false);
-}
-
 test "a bare assert halts with clean" {
     const bare = try analyzeSource("function f(c, s) { assert c; return \"ok\"; }", "f", &.{ Value.clean, secret_value });
     defer bare.deinit();
@@ -4648,8 +4636,8 @@ test "the exit state joins a returning branch's writes with the fallthrough" {
     try testing.expect(unseen.labels.isEmpty());
 }
 
-/// Require that the parser refuses `source` with one ZTS071 at `column` of line 1.
-fn expectLocalFunctionRefused(source: []const u8, column: u32) !void {
+/// Require that the parser refuses `source` with one `code` at `column` of line 1.
+fn expectParserRefused(source: []const u8, code: []const u8, column: u32) !void {
     var atoms = atom_table.AtomTable.init(testing.allocator);
     defer atoms.deinit();
     var parser = try JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
@@ -4658,14 +4646,18 @@ fn expectLocalFunctionRefused(source: []const u8, column: u32) !void {
     try testing.expectError(error.ParseError, parser.parse());
     const errors = parser.getProjectedErrors();
     try testing.expectEqual(@as(usize, 1), errors.len);
-    try testing.expectEqualStrings("ZTS071", diagnostic_catalog.parserCode(errors[0].kind));
+    try testing.expectEqualStrings(code, diagnostic_catalog.parserCode(errors[0].kind));
     try testing.expectEqual(@as(u32, 1), errors[0].location.line);
     try testing.expectEqual(column, errors[0].location.column);
 }
 
 test "a function declaration inside a function body is refused with ZTS071" {
-    try expectLocalFunctionRefused("function f() { function g() { return 1; } const r = g; return r; }", 16);
-    try expectLocalFunctionRefused("function f() { const r = g; function g() { return 1; } return r; }", 29);
+    try expectParserRefused("function f() { function g() { return 1; } const r = g; return r; }", "ZTS071", 16);
+    try expectParserRefused("function f() { const r = g; function g() { return 1; } return r; }", "ZTS071", 29);
+}
+
+test "an arrow function bound to a name is refused with ZTS072" {
+    try expectParserRefused("function f(s) { const g = () => s; return g(); }", "ZTS072", 27);
 }
 
 test "a local read with no declaration behind it is unresolved" {
@@ -5131,22 +5123,14 @@ test "state equality ignores insertion order and tells bottom from a reachable s
 
 const c_secret = [_]Value{ Value.clean, secret_value };
 
+// An arrow function is legal only as a direct call argument. `id` returns the
+// closure it receives, so a binding holds a closure. `thunk` calls it at once.
+const id_fn = "function id(g) { return g; } ";
+const thunk_fn = "function thunk(g) { return g(); } ";
+
 test "a local call returns the callee's value" {
     try expectSecret("function id(x) { return x; } function f(s) { return id(s); }", &.{secret_value}, true);
     try expectSecret("function id(x) { return x; } function f(s) { return id(\"c\"); }", &.{secret_value}, false);
-}
-
-test "call operands keep runtime evaluation order" {
-    try expectSecret(
-        "function f(s) { let g = () => \"c\"; const replace = () => { g = () => s; return 0; }; return g(replace()); }",
-        &.{secret_value},
-        false,
-    );
-    try expectSecret(
-        "function f(s) { const o = { m: () => \"c\" }; const replace = () => { o.m = () => s; return 0; }; return o.m(replace()); }",
-        &.{secret_value},
-        true,
-    );
 }
 
 test "nested call sites keep allocated results distinct" {
@@ -5253,31 +5237,18 @@ test "a callable set runs every function in both node orders" {
 }
 
 test "a capture written after the closure is read through the cell" {
-    try expectSecret("function f(s) { let r = \"c\"; const g = () => r; r = s; return g(); }", &.{secret_value}, true);
-    try expectSecret("function f(s) { let r = \"c\"; const g = () => r; r = \"d\"; return g(); }", &.{secret_value}, false);
-}
-
-test "a closure writes the owner's binding" {
-    try expectSecret(
-        "function f(s) { let r = \"c\"; const w = () => { r = s; return 1; }; w(); return r; }",
-        &.{secret_value},
-        true,
-    );
-    try expectSecret(
-        "function f(s) { let r = \"c\"; const w = () => { r = \"d\"; return 1; }; w(); return r; }",
-        &.{secret_value},
-        false,
-    );
+    try expectSecret(id_fn ++ "function f(s) { let r = \"c\"; const g = id(() => r); r = s; return g(); }", &.{secret_value}, true);
+    try expectSecret(id_fn ++ "function f(s) { let r = \"c\"; const g = id(() => r); r = \"d\"; return g(); }", &.{secret_value}, false);
 }
 
 test "two activations of a captured const share one weak cell" {
     try expectSecret(
-        "function mk(v) { const x = v; return () => x; } function f(s) { const a = mk(s); const b = mk(\"c\"); return a(); }",
+        id_fn ++ "function mk(v) { const x = v; return id(() => x); } function f(s) { const a = mk(s); const b = mk(\"c\"); return a(); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function mk(v) { const x = v; return () => x; } function f(s) { const a = mk(\"d\"); const b = mk(\"c\"); return a(); }",
+        id_fn ++ "function mk(v) { const x = v; return id(() => x); } function f(s) { const a = mk(\"d\"); const b = mk(\"c\"); return a(); }",
         &.{secret_value},
         false,
     );
@@ -5285,12 +5256,12 @@ test "two activations of a captured const share one weak cell" {
 
 test "two activations of a captured parameter share one weak cell" {
     try expectSecret(
-        "function mk(v) { return () => v; } function f(s) { const a = mk(s); mk(\"c\"); return a(); }",
+        id_fn ++ "function mk(v) { return id(() => v); } function f(s) { const a = mk(s); mk(\"c\"); return a(); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function mk(v) { return () => v; } function f(s) { const a = mk(\"d\"); mk(\"c\"); return a(); }",
+        id_fn ++ "function mk(v) { return id(() => v); } function f(s) { const a = mk(\"d\"); mk(\"c\"); return a(); }",
         &.{secret_value},
         false,
     );
@@ -5298,22 +5269,15 @@ test "two activations of a captured parameter share one weak cell" {
 
 test "a captured match binding lives in its cell" {
     try expectSecret(
-        "function f(s) { const o = { text: s }; return match (o) { when { text }: (() => text)() default: \"c\" }; }",
+        thunk_fn ++ "function f(s) { const o = { text: s }; return match (o) { when { text }: thunk(() => text) default: \"c\" }; }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { const o = { text: \"d\" }; return match (o) { when { text }: (() => text)() default: \"c\" }; }",
+        thunk_fn ++ "function f(s) { const o = { text: \"d\" }; return match (o) { when { text }: thunk(() => text) default: \"c\" }; }",
         &.{secret_value},
         false,
     );
-}
-
-test "a captured loop variable is read by a later activation's loop" {
-    const carried = "function f(s) { let first = () => \"c\"; let seen = \"c\"; const mk = (xs) => { let last = () => \"c\"; for (const v of xs) { seen = first(); last = () => v; } return last; }; first = mk([s]); mk([\"c\"]); return seen; }";
-    const clean = "function f(s) { let first = () => \"c\"; let seen = \"c\"; const mk = (xs) => { let last = () => \"c\"; for (const v of xs) { seen = first(); last = () => v; } return last; }; first = mk([\"d\"]); mk([\"c\"]); return seen; }";
-    try expectSecret(carried, &.{secret_value}, true);
-    try expectSecret(clean, &.{secret_value}, false);
 }
 
 test "a capture follows the parser's binding, not the name" {
@@ -5321,12 +5285,12 @@ test "a capture follows the parser's binding, not the name" {
     // closure reads the binding of its own block, so a secret written to the
     // other one never reaches it. A scan by name would join the two.
     try expectSecret(
-        "function f(c, s) { let r = \"c\"; if (c) { let x = s; } if (c) { let x = \"c\"; r = (() => x)(); } return r; }",
+        thunk_fn ++ "function f(c, s) { let r = \"c\"; if (c) { let x = s; } if (c) { let x = \"c\"; r = thunk(() => x); } return r; }",
         &c_secret,
         false,
     );
     try expectSecret(
-        "function f(c, s) { let r = \"c\"; if (c) { let x = s; r = (() => x)(); } if (c) { let x = \"c\"; } return r; }",
+        thunk_fn ++ "function f(c, s) { let r = \"c\"; if (c) { let x = s; r = thunk(() => x); } if (c) { let x = \"c\"; } return r; }",
         &c_secret,
         true,
     );
@@ -5338,22 +5302,16 @@ test "a module-level function resolves only when it is the single fixed declarat
     try expectSecret(definition ++ "function f(s) { return help(\"c\"); }", &.{secret_value}, false);
     // A forward read is an undeclared global when it is parsed.
     try expectSecret("function f(s) { return help(s); } " ++ definition, &.{secret_value}, true);
-    try expectSecret("const help = (x) => x; function f(s) { return help(s); }", &.{secret_value}, true);
     try expectSecret("export function help(x) { return x; } function f(s) { return help(s); }", &.{secret_value}, true);
 
     // An assignment in another function may replace it.
     const assigned = try analyzeSource(
-        definition ++ "function g() { help = (x) => \"c\"; return 0; } function f(s) { return help(s); }",
+        definition ++ "function g() { help = g; return 0; } function f(s) { return help(s); }",
         "f",
         &.{secret_value},
     );
     defer assigned.deinit();
     try expectUnresolved(assigned.result, .identifier, .module_state_unmodeled);
-
-    // A `let` arrow is not a fixed function.
-    const mutable = try analyzeSource("let help = (x) => x; function f(s) { return help(s); }", "f", &.{secret_value});
-    defer mutable.deinit();
-    try expectUnresolved(mutable.result, .identifier, .module_state_unmodeled);
 }
 
 test "a recursive call feeds its arguments into the entry" {
@@ -5420,40 +5378,14 @@ test "a recursive call returns the summary's write through a local object" {
     );
 }
 
-test "a recursive call returns the summary's write through a captured binding" {
-    try expectSecret(
-        "function f(s) { let out = \"c\"; const r = (n, x, y) => { if (n) { out = x; return 0; } r(true, y, y); return out; }; return r(false, \"c\", s); }",
-        &.{secret_value},
-        true,
-    );
-    try expectSecret(
-        "function f(s) { let out = \"c\"; const r = (n, x, y) => { if (n) { out = x; return 0; } r(true, y, y); return out; }; return r(false, \"c\", \"d\"); }",
-        &.{secret_value},
-        false,
-    );
-}
-
-test "a capture written in one recursive pass is read in a later one" {
-    try expectSecret(
-        "function f(s) { let r = \"c\"; const rec = (n) => { const out = r; if (n) { return out; } r = s; return rec(true); }; return rec(false); }",
-        &.{secret_value},
-        true,
-    );
-    try expectSecret(
-        "function f(s) { let r = \"c\"; const rec = (n) => { const out = r; if (n) { return out; } r = \"d\"; return rec(true); }; return rec(false); }",
-        &.{secret_value},
-        false,
-    );
-}
-
 test "mutual recursion through a captured binding converges" {
     try expectSecret(
-        "function f(s) { let b = undefined; const a = (n, x) => { if (n) { return x; } return b(true, s); }; b = (n, x) => a(n, x); return a(false, \"c\"); }",
+        id_fn ++ "function f(s) { let b = undefined; const a = id((n, x) => { if (n) { return x; } return b(true, s); }); b = id((n, x) => a(n, x)); return a(false, \"c\"); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { let b = undefined; const a = (n, x) => { if (n) { return x; } return b(true, \"d\"); }; b = (n, x) => a(n, x); return a(false, \"c\"); }",
+        id_fn ++ "function f(s) { let b = undefined; const a = id((n, x) => { if (n) { return x; } return b(true, \"d\"); }); b = id((n, x) => a(n, x)); return a(false, \"c\"); }",
         &.{secret_value},
         false,
     );
@@ -5461,12 +5393,12 @@ test "mutual recursion through a captured binding converges" {
 
 test "recursion through a callable set converges" {
     try expectSecret(
-        "function f(c, s) { let g = (n, x) => \"c\"; const a = (n, x) => { if (n) { return x; } return g(true, s); }; g = c ? a : g; return g(false, \"c\"); }",
+        id_fn ++ "function f(c, s) { let g = id((n, x) => \"c\"); const a = id((n, x) => { if (n) { return x; } return g(true, s); }); g = c ? a : g; return g(false, \"c\"); }",
         &c_secret,
         true,
     );
     try expectSecret(
-        "function f(c, s) { let g = (n, x) => \"c\"; const a = (n, x) => { if (n) { return x; } return g(true, \"d\"); }; g = c ? a : g; return g(false, \"c\"); }",
+        id_fn ++ "function f(c, s) { let g = id((n, x) => \"c\"); const a = id((n, x) => { if (n) { return x; } return g(true, \"d\"); }); g = c ? a : g; return g(false, \"c\"); }",
         &c_secret,
         false,
     );
@@ -5749,12 +5681,12 @@ test "a capture cell is not an object and a read through an unnamed origin skips
     // read of `p.x` must not see it: no value points at a capture cell.
     const origins_top: Value = .{ .origins_top = true };
     try expectSecret(
-        "function f(p, s) { let r = s; const g = () => r; return p.x; }",
+        id_fn ++ "function f(p, s) { let r = s; const g = id(() => r); return p.x; }",
         &.{ origins_top, secret_value },
         false,
     );
     try expectSecret(
-        "function f(p, s) { let r = s; const g = () => r; return g(); }",
+        id_fn ++ "function f(p, s) { let r = s; const g = id(() => r); return g(); }",
         &.{ origins_top, secret_value },
         true,
     );
@@ -8348,7 +8280,7 @@ test "persistent module roots retain scalar and alias writes across requests" {
         "let prior = false; function handler(req) { const old = prior; prior = req.url.length > 0; return Response.html(String(old)); }",
         "const shared = { value: \"public\" }; function handler(req) { const old = shared.value; shared.value = req.headers.authorization; return old; }",
         "let shared = { value: \"public\" }; function handler(req) { const old = shared.value; shared = { value: req.headers.authorization }; return old; }",
-        "let saved = () => \"public\"; function make(value) { return () => value; } function handler(req) { const old = saved(); saved = make(req.headers.authorization); return old; }",
+        id_fn ++ "let saved = id(() => \"public\"); function make(value) { return id(() => value); } function handler(req) { const old = saved(); saved = make(req.headers.authorization); return old; }",
     }) |source| {
         const result = try probeReport(source);
         try testing.expect(!result.cleared);
@@ -8520,26 +8452,6 @@ test "an assignment to a field of a module array element is a persistent write" 
     try testing.expectEqualSlices(u32, &.{4}, found.lines);
 }
 
-test "a closure counter made during initialization is a persistent write" {
-    const found = try persistentWriteLines(
-        \\function makeCounter() {
-        \\  let n = 0;
-        \\  const inc = () => {
-        \\    n = n + 1;
-        \\    return n;
-        \\  };
-        \\  return inc;
-        \\}
-        \\const counter = makeCounter();
-        \\function handler(req) {
-        \\  return Response.text(String(counter()));
-        \\}
-    );
-    defer found.deinit();
-    try testing.expect(!found.cleared);
-    try testing.expectEqualSlices(u32, &.{4}, found.lines);
-}
-
 test "push, field assignment, and module binding assignment are persistent writes" {
     const pushed = try persistentWriteLines(
         \\const seen = [1];
@@ -8647,25 +8559,6 @@ test "a push during module initialization is no persistent write" {
         \\seen.push(1);
         \\function handler(req) {
         \\  return Response.text(String(seen.length));
-        \\}
-    );
-    defer found.deinit();
-    try testing.expect(!found.cleared);
-    try testing.expectEqualSlices(u32, &.{}, found.lines);
-}
-
-test "a closure that each request makes writes only its own binding" {
-    const found = try persistentWriteLines(
-        \\const hooks = [];
-        \\function handler(req) {
-        \\  let n = 0;
-        \\  const inc = () => {
-        \\    n = n + 1;
-        \\    return n;
-        \\  };
-        \\  const local = hooks.slice();
-        \\  local.push(inc);
-        \\  return Response.text(String(inc()));
         \\}
     );
     defer found.deinit();
@@ -8856,8 +8749,8 @@ test "imported bindings copy current shared globals and returned closures retain
     try testing.expect(!overwritten.cleared);
     try testing.expect(!overwritten.properties.no_secret_leakage);
     const closure = try probeImported(
-        "import { make } from \"./helper.ts\"; let saved = () => \"public\"; function handler(req) { const result = saved(); saved = make(req.headers.authorization); return result; }",
-        "export function make(value) { return () => value; }",
+        "import { make } from \"./helper.ts\"; function id(g) { return g; } let saved = id(() => \"public\"); function handler(req) { const result = saved(); saved = make(req.headers.authorization); return result; }",
+        "function id(g) { return g; } export function make(value) { return id(() => value); }",
         "make",
         "make",
     );

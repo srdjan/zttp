@@ -2516,15 +2516,15 @@ test "verified edit path appends one aggregate receipt before the proof card" {
     }
 }
 
-// A legal first-draft a model would naturally emit (an arrow-form handler)
+// A legal first-draft a model would naturally emit (a function-form handler)
 // that passes the veto on the first attempt. The applied bytes are normalized
 // on the way to disk; the file content, the attested `after`, and the
 // `is_canonical` flag must all agree. Because every canonical-band rule is a
 // hard `check` error that would itself fail the veto, an edit that reaches the
 // green arm is already canonical, so normalize is a behavior-preserving no-op
 // and the attested bytes equal the model's draft byte-for-byte.
-const arrow_handler =
-    "const handler = (req: Request): Proof<Response, \"deterministic\"> => Response.json({ok: true});";
+const legal_handler =
+    "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.json({ ok: true });\n}\n";
 
 test "legal first draft lands in one attempt and disk equals the aggregate receipt" {
     var tmp = std.testing.tmpDir(.{});
@@ -2537,7 +2537,7 @@ test "legal first draft lands in one attempt and disk equals the aggregate recei
     var canned: CannedClient = .{ .reply = .{
         .response = .{ .change_set = .{
             .file = "handler.ts",
-            .content = arrow_handler,
+            .content = legal_handler,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};

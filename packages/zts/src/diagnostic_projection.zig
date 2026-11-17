@@ -283,7 +283,9 @@ const all_codes: [code_count]CodeEntry = blk: {
 };
 
 test "checker diagnostic codes are globally unique" {
-    // 64 with the redundant-arm kind (ZTS216); it was 63 after three more dead
+    // 63 after the ZTS608 and ZTS609 kinds went: the parser refuses what they
+    // named with ZTS072, a parser-band code. Before that it was 65. It was 64
+    // with the redundant-arm kind (ZTS216); it was 63 after three more dead
     // verifier variants went - spec_not_discharged,
     // spec_incompatible_with_import and spec_unknown_name, which named
     // ZTS500/501/502 while `spec_discharge.zig` emitted those codes through
@@ -297,7 +299,7 @@ test "checker diagnostic codes are globally unique" {
     // The count is here so a projection that silently stops enumerating a
     // checker cannot pass the uniqueness loop below over a shorter list; it
     // moves whenever a checker's kind set does.
-    try std.testing.expectEqual(@as(usize, 65), allCodes().len);
+    try std.testing.expectEqual(@as(usize, 63), allCodes().len);
 
     var seen: std.StringHashMapUnmanaged(CodeEntry) = .empty;
     defer seen.deinit(std.testing.allocator);

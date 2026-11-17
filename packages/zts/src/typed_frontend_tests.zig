@@ -9708,69 +9708,6 @@ test "direct source pilot compacts annotated parameters by final owner" {
     try std.testing.expectEqual(@as(usize, 2), direct_env.direct_accumulator_events);
 }
 
-test "direct function specifications read a variable arrow capsule" {
-    const source =
-        "const helper = (value: number): Proof<number, \"deterministic\"> => value;";
-    var direct_count = CountingAllocator.init(std.testing.allocator);
-    var type_count = CountingAllocator.init(std.testing.allocator);
-    var direct_atoms = AtomTable.init(direct_count.allocator());
-    defer direct_atoms.deinit();
-    var direct = try JsParser.initAdmission(direct_count.allocator(), type_count.allocator(), source, .compile);
-    defer direct.deinit();
-    direct.setAtomTable(&direct_atoms);
-    const direct_root = try direct.parse();
-    const direct_view = parserIrView(&direct);
-    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_count);
-
-    var direct_pool = TypePool.init(std.testing.allocator);
-    defer direct_pool.deinit(std.testing.allocator);
-    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
-    defer direct_env.deinit();
-    module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
-    try direct_env.populateSourceTypes(.{ .direct = .{
-        .store = &direct.type_store,
-        .ir_view = direct_view,
-        .atoms = &direct_atoms,
-    } });
-    var direct_effects = try effect_inference.buildEffectFacts(
-        std.testing.allocator,
-        direct_view,
-        &direct_atoms,
-        direct_root,
-        .{},
-    );
-    defer direct_effects.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), direct_effects.all().len);
-    const direct_effect = direct_effects.all()[0];
-    try std.testing.expectEqual(engine.parser.NodeTag.var_decl, direct_view.getTag(direct_effect.decl_node).?);
-    const direct_declaration = direct_view.getVarDecl(direct_effect.decl_node) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(engine.parser.NodeTag.arrow_function, direct_view.getTag(direct_declaration.init).?);
-    const arrow_reference = direct_env.functionTypeRef(direct_view, direct_declaration.init) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expect(direct_env.getFunctionSignature(arrow_reference) != null);
-
-    var direct_capsules = try function_specs.dischargeWithTypeSource(
-        std.testing.allocator,
-        &direct_effects,
-        .{ .direct = &direct_env },
-        direct_view,
-    );
-    defer direct_capsules.deinit(std.testing.allocator);
-    const direct_capsule = direct_capsules.byName("helper") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), direct_capsule.declared.items.len);
-    try std.testing.expectEqualStrings("deterministic", direct_capsule.declared.items[0]);
-    try std.testing.expectEqual(@as(usize, 0), direct_capsule.effect_declared.items.len);
-    try std.testing.expectEqual(@as(usize, 0), direct_capsule.inferred_caps.count());
-    try std.testing.expect(direct_capsule.proven.total);
-    try std.testing.expect(direct_capsule.proven.pure);
-    try std.testing.expect(direct_capsule.proven.read_only);
-    try std.testing.expect(direct_capsule.proven.deterministic);
-    try std.testing.expect(direct_capsule.discharged());
-    try std.testing.expect(!direct_capsule.effectDischarged());
-}
-
 const ExpectedConsumerTypeDiagnostic = struct {
     kind: type_checker_mod.DiagnosticKind,
     line: ?u32 = null,
@@ -9905,16 +9842,20 @@ test "direct consumers preserve measured lookup winners sibling scopes and captu
         .{
             .case = .sibling_capture,
             .source =
+            \\function thunkString(f: () => string): string {
+            \\  return f();
+            \\}
+            \\function thunkNumber(f: () => number): number {
+            \\  return f();
+            \\}
             \\function compute(): number {
             \\  if (true) {
             \\    const value: string = "inner";
-            \\    const readInner = (): string => value;
-            \\    const innerResult: string = readInner();
+            \\    const innerResult: string = thunkString((): string => value);
             \\  }
             \\  if (true) {
             \\    const value: number = 1;
-            \\    const readOuter = (): number => value;
-            \\    const outerResult: number = readOuter();
+            \\    const outerResult: number = thunkNumber((): number => value);
             \\    return outerResult;
             \\  }
             \\}
@@ -9948,16 +9889,17 @@ test "direct consumers preserve measured lookup winners sibling scopes and captu
         .{
             .case = .sibling_capture_mismatch,
             .source =
+            \\function thunkNumber(f: () => number): number {
+            \\  return f();
+            \\}
             \\function compute(): number {
             \\  if (true) {
             \\    const value: string = "inner";
-            \\    const readInner = (): number => value;
-            \\    const innerResult: number = readInner();
+            \\    const innerResult: number = thunkNumber((): number => value);
             \\  }
             \\  if (true) {
             \\    const value: number = 1;
-            \\    const readOuter = (): number => value;
-            \\    const outerResult: number = readOuter();
+            \\    const outerResult: number = thunkNumber((): number => value);
             \\    return outerResult;
             \\  }
             \\}
@@ -9968,8 +9910,8 @@ test "direct consumers preserve measured lookup winners sibling scopes and captu
             ,
             .type_diagnostics = &.{.{
                 .kind = .return_type_mismatch,
-                .line = 4,
-                .column = 23,
+                .line = 7,
+                .column = 45,
             }},
             .strict_diagnostics = &.{},
         },
@@ -10339,7 +10281,6 @@ test "direct function specifications preserve nonempty effects and helper select
 
 const ContractConsumerCase = enum {
     simple,
-    module_arrow,
     nonliteral_effect,
     unknown_capability,
 };
@@ -10368,21 +10309,6 @@ fn expectContractConsumerFacts(
             try std.testing.expectEqual(@as(usize, 1), matches);
             try std.testing.expectEqual(@as(u32, 1), contract.handler.line);
             try std.testing.expectEqual(@as(u32, 17), contract.handler.column);
-        },
-        .module_arrow => {
-            try std.testing.expectEqual(@as(usize, 1), contract.function_capsules.items.len);
-            try std.testing.expectEqual(@as(usize, 1), contract.function_effect_capsules.items.len);
-            try std.testing.expectEqual(@as(usize, 0), contract.function_capsules.items[0].declared.items.len);
-            try std.testing.expectEqual(@as(usize, 0), contract.function_effect_capsules.items[0].declared.items.len);
-            try std.testing.expectEqual(@as(usize, 1), contract.holes.items.len);
-            const hole = contract.holes.items[0];
-            try std.testing.expectEqualStrings("helper", hole.function);
-            try std.testing.expectEqualStrings("unknown", hole.expected_type);
-            try std.testing.expectEqual(@as(u32, 1), hole.line);
-            try std.testing.expectEqual(@as(u32, 43), hole.column);
-            try std.testing.expectEqual(@as(usize, 1), hole.in_scope.items.len);
-            try std.testing.expectEqualStrings("value", hole.in_scope.items[0].name);
-            try std.testing.expectEqualStrings("string", hole.in_scope.items[0].type_name);
         },
     }
 }
@@ -10458,13 +10384,12 @@ fn expectDirectSingleModuleContract(
 
 test "direct single-module full and sound extraction preserve contract bytes" {
     const fixtures = [_]struct { kind: ContractConsumerCase, source: []const u8, json_hash: u64 }{
-        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0xc74330eb07540246 },
-        .{ .kind = .module_arrow, .source = "const helper = (value: string): string => hole();\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0xe4a861aaaaeabe30 },
-        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0x193f68b42a61756e },
-        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0x628d984b6e9a72bb },
+        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0x151300717fd4ea69 },
+        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0x9d894cec495664c4 },
+        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0xd24b61e1660dab2e },
     };
     const fields = @typeInfo(ContractConsumerCase).@"enum".field_names;
-    try std.testing.expectEqual(@as(usize, 4), fixtures.len);
+    try std.testing.expectEqual(@as(usize, 3), fixtures.len);
     try std.testing.expectEqual(fields.len, fixtures.len);
     var seen: [fields.len]bool = @splat(false);
     for (fixtures) |fixture| {
@@ -10698,7 +10623,7 @@ test "admission header fallback preserves grouped and raw arrow type constructio
         initializer: engine.parser.NodeTag,
         generic_owners: usize,
     }{
-        .{ .source = "const result = (value /* ( */) => value;", .initializer = .arrow_function, .generic_owners = 0 },
+        .{ .source = "const result = [1].map((value /* ( */) => value);", .initializer = .arrow_function, .generic_owners = 0 },
     };
     try std.testing.expectEqual(@as(usize, 1), cases.len);
     for (cases) |case| {
@@ -10718,7 +10643,12 @@ test "admission header fallback preserves grouped and raw arrow type constructio
         const view = parserIrView(&direct);
         try std.testing.expectEqual(@as(usize, 1), countRuntimeTag(&direct, .var_decl));
         const declaration = view.getVarDecl(try runtimeNodeAt(&direct, .var_decl, 0)) orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqual(case.initializer, view.getTag(declaration.init).?);
+        try std.testing.expectEqual(engine.parser.NodeTag.call, view.getTag(declaration.init).?);
+        const call = view.getCall(declaration.init) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u8, 1), call.args_count);
+        try std.testing.expectEqual(@as(usize, 1), countRuntimeTag(&direct, case.initializer));
+        const arrow = try runtimeNodeAt(&direct, case.initializer, 23);
+        try std.testing.expectEqual(case.initializer, view.getTag(arrow).?);
         try std.testing.expectEqual(case.generic_owners, direct.type_store.generic_owners.items.len);
         try std.testing.expectEqual(@as(usize, 0), direct.type_store.annotations.items.len);
         var direct_pool = TypePool.init(std.testing.allocator);

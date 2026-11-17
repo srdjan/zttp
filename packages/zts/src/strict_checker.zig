@@ -99,8 +99,6 @@ pub const DiagnosticKind = enum {
     /// functions keep inference-friendly raw types.
     raw_exported_boundary_type,
     mutable_live_iteration,
-    canonical_arrow_helper,
-    canonical_export_function_const,
     canonical_public_helper_effects,
     /// A module-internal function carries an `Effects<...>` ceiling. Spec 5.7
     /// makes placement decidable rather than a style choice: exported with a
@@ -248,14 +246,6 @@ pub const StrictChecker = struct {
     /// Bindings whose initializer is built out of a `dictEntries(d)` call, so
     /// a round trip spelled across two statements is seen as one.
     entries_derived_bindings: std.AutoHashMapUnmanaged(u32, EntryChain),
-    call_counts: std.AutoHashMapUnmanaged(u32, u32),
-    /// Calls made through a captured reference, counted by name atom for the
-    /// same reason as `assigned_upvalue_atoms`.
-    upvalue_call_counts: std.AutoHashMapUnmanaged(u16, u32),
-    /// How many `var_decl` and `function_decl` nodes declare each name. An
-    /// upvalue call count is attributed to a declaration only when the name
-    /// is declared once, so a shadowing name cannot add a false reuse.
-    declared_name_counts: std.AutoHashMapUnmanaged(u16, u32),
     imported_functions: std.ArrayList(ImportedFunction),
     /// Shared import index, injected by the orchestrator when one exists.
     /// Borrowed; must outlive the checker. Null means build a private one.
@@ -306,9 +296,6 @@ pub const StrictChecker = struct {
             .function_valued_bindings = .empty,
             .static_literal_bindings = .empty,
             .entries_derived_bindings = .empty,
-            .call_counts = .empty,
-            .upvalue_call_counts = .empty,
-            .declared_name_counts = .empty,
             .imported_functions = .empty,
             .allocation_failed = false,
         };
@@ -323,9 +310,6 @@ pub const StrictChecker = struct {
         }
         if (self.owned_facts) |*owned| owned.deinit();
         self.imported_functions.deinit(self.allocator);
-        self.declared_name_counts.deinit(self.allocator);
-        self.upvalue_call_counts.deinit(self.allocator);
-        self.call_counts.deinit(self.allocator);
         self.static_literal_bindings.deinit(self.allocator);
         self.entries_derived_bindings.deinit(self.allocator);
         self.annotated_function_bindings.deinit(self.allocator);
@@ -346,7 +330,6 @@ pub const StrictChecker = struct {
         self.collectStaticLiterals(root);
         self.collectEntriesDerivedBindings(root);
         self.collectAssignments(root);
-        self.collectCallCounts(root);
         self.walkStmt(root);
         if (self.type_env) |env| {
             try env.ensureHealthy();
@@ -488,20 +471,6 @@ pub const StrictChecker = struct {
                         .message = "let binding is never reassigned",
                         .help = "use const for bindings that do not change",
                         .repair_intent = .replace_let_with_const,
-                    });
-                }
-                if (decl.kind == .@"const" and
-                    self.ir_view.getTag(decl.init) == .arrow_function and
-                    !self.isHandlerBinding(decl.binding) and
-                    self.bindingCallCount(decl.binding) > 1)
-                {
-                    self.addDiagnostic(.{
-                        .severity = self.canonicalSeverity(),
-                        .kind = .canonical_arrow_helper,
-                        .node = node,
-                        .message = "reused arrow helper should be a named function",
-                        .help = "rewrite reusable helpers as `function name(...) { ... }`; keep arrows for callbacks and local one-off values",
-                        .repair_intent = .replace_arrow_with_function,
                     });
                 }
                 if (decl.init != null_node) {
@@ -1061,27 +1030,15 @@ pub const StrictChecker = struct {
     }
 
     /// Checks rules whose scope is the exported declaration itself. ZTS061 is
-    /// deliberately limited to `.function_decl`; function-valued constants
-    /// remain under ZTS609 until their boundary semantics are specified.
-    /// Annotation completeness is still handled by the normal statement walk,
-    /// which avoids emitting ZTS601 twice for one `export function`.
+    /// deliberately limited to `.function_decl`. Annotation completeness is
+    /// still handled by the normal statement walk, which avoids emitting
+    /// ZTS601 twice for one `export function`.
     fn checkExportedDeclaration(self: *StrictChecker, node: NodeIndex) void {
         const tag = self.ir_view.getTag(node) orelse return;
         const decl = self.ir_view.getVarDecl(node) orelse return;
         if (tag == .function_decl and decl.init != null_node and self.isFunctionNode(decl.init)) {
             self.checkExportedBoundaryTypes(decl.init);
         }
-        if (tag != .var_decl) return;
-        if (decl.init == null_node or !self.isFunctionNode(decl.init)) return;
-        if (decl.kind != .@"const") return;
-        self.addDiagnostic(.{
-            .severity = self.canonicalSeverity(),
-            .kind = .canonical_export_function_const,
-            .node = node,
-            .message = "exported function-valued const should be an export function declaration",
-            .help = "use `export function name(...) { ... }` unless the export is intentionally a first-class function value",
-            .repair_intent = .replace_export_arrow_with_function,
-        });
     }
 
     /// ZTS061: an exported signature is a contract another file reads, so its
@@ -1883,86 +1840,6 @@ pub const StrictChecker = struct {
         while (children.next()) |child| self.collectEntriesDerivedBindings(child);
     }
 
-    /// Count the calls to each callee binding, and the declarations of each
-    /// name. The walk reads each child that `IrView.expressionChildren`
-    /// yields, so a call inside a spread operand, a literal, or a closure
-    /// counts.
-    fn collectCallCounts(self: *StrictChecker, node: NodeIndex) void {
-        if (node == null_node) return;
-        const tag = self.ir_view.getTag(node) orelse return;
-        switch (tag) {
-            .call => {
-                const call = self.ir_view.getCall(node) orelse return;
-                self.recordCall(call.callee);
-            },
-            .var_decl, .function_decl => {
-                const decl = self.ir_view.getVarDecl(node) orelse return;
-                self.countDeclaredName(decl.binding.name_atom);
-            },
-            // A parameter declares a name too. A `function_decl` reaches this
-            // arm through its initializer.
-            .function_expr, .arrow_function => {
-                if (self.ir_view.getFunction(node)) |func| {
-                    for (0..func.params_count) |i| {
-                        const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
-                        const param = self.ir_view.paramBinding(param_idx) orelse continue;
-                        self.countDeclaredName(param.name_atom);
-                    }
-                }
-            },
-            .for_of_stmt => {
-                const for_iter = self.ir_view.getForIter(node) orelse return;
-                self.countDeclaredName(for_iter.binding.name_atom);
-            },
-            // exhaustive: every other tag only passes its children on, below.
-            // A `match` pattern binding is not counted; an upvalue call
-            // through one is a false reuse only when it shadows a helper.
-            else => {},
-        }
-        var children = self.ir_view.expressionChildren(node);
-        while (children.next()) |child| self.collectCallCounts(child);
-    }
-
-    fn countDeclaredName(self: *StrictChecker, name_atom: u16) void {
-        const gop = self.declared_name_counts.getOrPut(self.allocator, name_atom) catch {
-            self.markAllocationFailure();
-            return;
-        };
-        if (!gop.found_existing) gop.value_ptr.* = 0;
-        gop.value_ptr.* += 1;
-    }
-
-    fn recordCall(self: *StrictChecker, callee: NodeIndex) void {
-        if (self.ir_view.getTag(callee) != .identifier) return;
-        const binding = self.ir_view.getBinding(callee) orelse return;
-        if (binding.kind == .upvalue) {
-            const gop = self.upvalue_call_counts.getOrPut(self.allocator, binding.name_atom) catch {
-                self.markAllocationFailure();
-                return;
-            };
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            gop.value_ptr.* += 1;
-            return;
-        }
-        const key = bindingKey(binding);
-        const gop = self.call_counts.getOrPut(self.allocator, key) catch {
-            self.markAllocationFailure();
-            return;
-        };
-        if (!gop.found_existing) gop.value_ptr.* = 0;
-        gop.value_ptr.* += 1;
-    }
-
-    /// Calls to a binding. A call from inside a closure names the binding
-    /// through an upvalue reference, which `recordCall` counts by name. That
-    /// count joins this one only when one declaration owns the name.
-    fn bindingCallCount(self: *const StrictChecker, binding: ir.BindingRef) u32 {
-        const direct = self.call_counts.get(bindingKey(binding)) orelse 0;
-        const declared_once = (self.declared_name_counts.get(binding.name_atom) orelse 0) == 1;
-        if (!declared_once) return direct;
-        return direct + (self.upvalue_call_counts.get(binding.name_atom) orelse 0);
-    }
-
     /// Which imported export a call names, if any.
     ///
     /// Public because the residual guard plan has to answer the same question
@@ -2328,12 +2205,6 @@ test "missing_public_annotation count is the same exported and not" {
     try testing.expectEqual(@as(usize, 1), countKind(&plain, .missing_public_annotation));
 }
 
-test "canonical_export_function_const survives the export annotation split" {
-    var checker = try checkSource("export const handler = (req) => Response.json({ok: true});");
-    defer checker.deinit();
-    try expectKind(&checker, .canonical_export_function_const);
-}
-
 test "strict checker flags avoidable let" {
     const source = "function handler(req) { let x = 1; return Response.json({ x: x }); }";
     var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
@@ -2399,81 +2270,16 @@ test "an exported function's let that is never reassigned is still flagged" {
     try testing.expect(saw_let);
 }
 
-test "canonical profile warns on reused arrow helper" {
-    const source = "const parse = (x) => x; function handler(req) { const a = parse(1); const b = parse(2); return Response.json({ a: a, b: b }); }";
+test "an arrow function that is not a call argument is refused with ZTS072" {
+    const source = "const f = (x: number): number => x;";
     var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
     defer parser.deinit();
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var checker = StrictChecker.init(testing.allocator, view, null, null, null);
-    defer checker.deinit();
-    const errors = try checker.check(root);
-    try testing.expect(errors > 0);
-    var saw = false;
-    for (checker.getDiagnostics()) |diag| {
-        if (diag.kind == .canonical_arrow_helper) {
-            saw = true;
-            try testing.expectEqual(Severity.err, diag.severity);
-        }
-    }
-    try testing.expect(saw);
-}
-
-test "canonical profile counts reused arrow helper after typed arrow" {
-    const source =
-        \\const load = (id: string): Response => Response.text(id);
-        \\const parse = (x: number): number => x;
-        \\function handler(req: Request): Response {
-        \\  const a = parse(1);
-        \\  const b = parse(2);
-        \\  return Response.json({ a: a, b: b });
-        \\}
-    ;
-    var atoms = @import("zts-engine").atom_table.AtomTable.init(testing.allocator);
-    defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var pool = type_pool_mod.TypePool.init(testing.allocator);
-    defer pool.deinit(testing.allocator);
-    var env = TypeEnv.init(testing.allocator, &pool);
-    defer env.deinit();
-    try env.populateSourceTypes(.{ .direct = .{
-        .store = &parser.type_store,
-        .ir_view = view,
-        .atoms = &atoms,
-    } });
-    var tc = TypeChecker.init(testing.allocator, view, &atoms, &env);
-    tc.scopes = &parser.scopes;
-    defer tc.deinit();
-    _ = try tc.check(root);
-    var checker = StrictChecker.init(testing.allocator, view, &atoms, &env, &tc);
-    defer checker.deinit();
-    _ = try checker.check(root);
-    var saw = false;
-    for (checker.getDiagnostics()) |diag| {
-        if (diag.kind == .canonical_arrow_helper) saw = true;
-    }
-    try testing.expect(saw);
-}
-
-test "strict checker accepts one-off arrow helper value" {
-    const source = "const parse = (x) => x; function handler(req) { const a = parse(1); return Response.json({ a: a }); }";
-    var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
-    defer parser.deinit();
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var checker = StrictChecker.init(testing.allocator, view, null, null, null);
-    defer checker.deinit();
-    const errors = try checker.check(root);
-    for (checker.getDiagnostics()) |diag| {
-        try testing.expect(diag.kind != .canonical_arrow_helper);
-    }
-    // Other strict diagnostics may fire because this untyped fixture uses an
-    // unannotated function; the canonical arrow-helper rule should not.
-    _ = errors;
+    try testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try testing.expectEqual(@as(usize, 1), errors.len);
+    try testing.expectEqualStrings("ZTS072", @import("diagnostic_catalog.zig").parserCode(errors[0].kind));
+    try testing.expectEqual(@as(u32, 1), errors[0].location.line);
+    try testing.expectEqual(@as(u32, 11), errors[0].location.column);
 }
 
 fn expectKind(checker: *const StrictChecker, kind: DiagnosticKind) !void {
@@ -2580,7 +2386,7 @@ test "canonical_redundant_bool_compare fires on a captured unannotated boolean c
     // would not fire. The control with the same comparison in the declaring function
     // fires either way.
     var arrow_form = try checkSourceTyped(
-        "function handler(req) { const ready = req.method === \"GET\"; const g = () => { if (ready === false) { return \"no\"; } return \"yes\"; }; return Response.text(g()); }",
+        "function thunk(f) { return f(); } function handler(req) { const ready = req.method === \"GET\"; const r = thunk(() => { if (ready === false) { return \"no\"; } return \"yes\"; }); return Response.text(r); }",
     );
     defer arrow_form.deinit();
     try expectKind(&arrow_form.checker, .canonical_redundant_bool_compare);
@@ -2595,15 +2401,18 @@ test "canonical_redundant_bool_compare fires on a captured unannotated boolean c
 test "canonical_redundant_bool_compare fires on a captured annotated boolean" {
     // w9 bc_closure_upvalue.ts and bc_arrow_upvalue.ts, with the annotation.
     var arrow_form = try checkDirect(
+        \\function thunk(f: () => string): string {
+        \\  return f();
+        \\}
         \\export function handler(req: Request): Response {
         \\  const ready: boolean = req.method === "GET";
-        \\  const g = (): string => {
+        \\  const r = thunk((): string => {
         \\    if (ready === false) {
         \\      return "no";
         \\    }
         \\    return "yes";
-        \\  };
-        \\  return Response.text(g());
+        \\  });
+        \\  return Response.text(r);
         \\}
     );
     defer arrow_form.deinit();
@@ -2739,9 +2548,9 @@ test "a computed SQL statement registered by a helper function is refused" {
         "function reg(s: string): undefined { sql(\"q\", s); }\nfunction handler(req: Request): Response { reg(req.url); return Response.json({}); }\n", true);
 }
 
-test "a computed SQL statement in an arrow body or callback is refused" {
+test "a computed SQL statement in a function body or callback is refused" {
     try expectRegistrationVerdict(sql_import ++
-        "const reg = (s: string): undefined => { sql(\"q\", s); };\nfunction handler(req: Request): Response { reg(req.url); return Response.json({}); }\n", true);
+        "function reg(s: string): undefined { sql(\"q\", s); }\nfunction handler(req: Request): Response { reg(req.url); return Response.json({}); }\n", true);
     try expectRegistrationVerdict(sql_import ++
         "function handler(req: Request): Response { const ids = [1].map((n: number): number => { sql(\"q\", req.url); return n; }); return Response.json({ ids: ids }); }\n", true);
 }
@@ -2845,8 +2654,7 @@ test "an annotated function sharing a line with an arrow is fully annotated" {
 
 test "an anonymous arrow with some parameters annotated is refused" {
     var h = try checkDirect(
-        "function handler(req: Request): Response { return Response.json({}); }\n" ++
-            "const first = (a: number, b): number => a;\n",
+        "function handler(req: Request): Response { const ys = [1].map((a: number, b): number => a); return Response.json({ ys: ys }); }\n",
     );
     defer h.deinit();
     try expectKind(&h.checker, .missing_public_annotation);
@@ -2854,8 +2662,7 @@ test "an anonymous arrow with some parameters annotated is refused" {
 
 test "an anonymous arrow annotating only its return type is refused" {
     var h = try checkDirect(
-        "function handler(req: Request): Response { return Response.json({}); }\n" ++
-            "const first = (a): number => 1;\n",
+        "function handler(req: Request): Response { const ys = [1].map((a): number => 1); return Response.json({ ys: ys }); }\n",
     );
     defer h.deinit();
     try expectKind(&h.checker, .missing_public_annotation);
@@ -2904,15 +2711,6 @@ test "raw union members cannot hide behind a closed or ABI member" {
         defer h.deinit();
         try testing.expectEqual(@as(usize, 2), countKind(&h.checker, .raw_exported_boundary_type));
     }
-}
-
-test "exported function-valued constants stay outside ZTS061 scope" {
-    var h = try checkDirect(
-        "export const widen = (value: string): string => value;",
-    );
-    defer h.deinit();
-    try expectKind(&h.checker, .canonical_export_function_const);
-    try expectNoKind(&h.checker, .raw_exported_boundary_type);
 }
 
 test "raw exported boundary types are refused in a multi-line signature" {
@@ -3631,84 +3429,9 @@ test "a ternary inside an assert is checked for purity" {
     try expectKind(&checker, .canonical_ternary_impure);
 }
 
-test "a reused arrow helper called under array spreads is counted" {
-    var checker = try checkSource(
-        "function handler(req) { const h = () => [1]; const a = [...h(), ...h()]; return Response.json({ a: a }); }",
-    );
-    defer checker.deinit();
-    try expectKind(&checker, .canonical_arrow_helper);
-}
-
-test "a reused arrow helper called under an object spread is counted" {
-    // The object spread was read as a property, so the call under it was not
-    // reached.
-    var checker = try checkSource(
-        "function handler(req) { const h = () => ({ v: 1 }); const a = { ...h() }; const b = h(); return Response.json({ a: a, b: b }); }",
-    );
-    defer checker.deinit();
-    try expectKind(&checker, .canonical_arrow_helper);
-}
-
-test "a one-off arrow helper called once under a spread is admitted" {
-    var checker = try checkSource(
-        "function handler(req) { const h = () => [1]; const a = [...h()]; return Response.json({ a: a }); }",
-    );
-    defer checker.deinit();
-    try expectNoKind(&checker, .canonical_arrow_helper);
-}
-
-test "a reused arrow helper called from a closure is counted" {
-    // The closure names `h` through an upvalue reference, which carries a
-    // different scope and slot than the declaration.
-    var checker = try checkSource(
-        "function handler(req) { const h = () => 1; const g = () => h(); const a = g() + h(); return Response.json({ a: a }); }",
-    );
-    defer checker.deinit();
-    try expectKind(&checker, .canonical_arrow_helper);
-}
-
-test "a call from a closure is not counted for a helper name a sibling scope declares" {
-    // Two sibling scopes declare the name `h`, so the upvalue call cannot be
-    // attributed to the first one. The first `h` is called once.
-    var checker = try checkSource(
-        "function first() { const h = () => 1; return h(); } function other() { const h = () => 2; const g = () => h(); return g(); } function handler(req) { return Response.json({ a: first(), b: other() }); }",
-    );
-    defer checker.deinit();
-    try expectNoKind(&checker, .canonical_arrow_helper);
-}
-
-test "a call from a closure is not counted for a helper name a sibling parameter declares" {
-    // The closure calls the parameter `h`, not the arrow `h` of the sibling
-    // function, which is called once.
-    var checker = try checkSource(
-        "function first() { const h = () => 1; return h(); } function outer(h) { const g = () => h(); return g() + h(); } function handler(req) { return Response.json({ a: first(), b: outer(() => 3) }); }",
-    );
-    defer checker.deinit();
-    try expectNoKind(&checker, .canonical_arrow_helper);
-}
-
-test "a call from a closure is not counted for a helper name a sibling loop binding declares" {
-    var checker = try checkSource(
-        "function first() { const h = () => 1; return h(); } function handler(req) { const fs = [first]; let n = 0; for (const h of fs) { const g = () => h(); n = n + g(); } return Response.json({ a: first(), n: n }); }",
-    );
-    defer checker.deinit();
-    try expectNoKind(&checker, .canonical_arrow_helper);
-}
-
-test "a let that only a closure reassigns is not flagged avoidable" {
-    // The closure writes through an upvalue reference, not the declaring
-    // binding. The write must be recorded, or ZTS604 refuses a binding
-    // that is reassigned.
-    var checker = try checkSource(
-        "function handler(req) { let v = 1; const g = () => { v = 2; return 1; }; const n = g(); return Response.json({ v: v, n: n }); }",
-    );
-    defer checker.deinit();
-    try expectNoKind(&checker, .avoidable_let);
-}
-
 test "a let that nothing reassigns is still flagged next to a closure" {
     var checker = try checkSource(
-        "function handler(req) { let v = 1; const g = () => { return v; }; const n = g(); return Response.json({ v: v, n: n }); }",
+        "function thunk(f) { return f(); } function handler(req) { let v = 1; const n = thunk(() => { return v; }); return Response.json({ v: v, n: n }); }",
     );
     defer checker.deinit();
     try expectKind(&checker, .avoidable_let);
@@ -3738,15 +3461,6 @@ test "mutable_live_iteration fires when the push sits in an array literal elemen
     try expectKind(&checker, .mutable_live_iteration);
 }
 
-test "mutable_live_iteration fires when a closure in the loop pushes to the collection" {
-    // The closure names `xs` through an upvalue reference.
-    var checker = try checkSource(
-        "function handler(req) { const xs = [1, 2]; for (const x of xs) { const f = () => xs.push(x); f(); } return Response.json({ n: xs.length }); }",
-    );
-    defer checker.deinit();
-    try expectKind(&checker, .mutable_live_iteration);
-}
-
 test "mutable_live_iteration does not fire on a spread of a different collection" {
     var checker = try checkSource(
         "function wrap(n) { return [n]; } function handler(req) { const xs = [1, 2]; const ys = []; for (const x of xs) { const zs = [...wrap(ys.push(x))]; } return Response.json({ n: xs.length }); }",
@@ -3769,7 +3483,7 @@ test "a function declaration inside a function body is refused with ZTS071" {
 
 test "canonical_redundant_bool_compare fires inside an arrow callback" {
     var h = try checkSourceTyped(
-        "function handler(req) { const g = () => { const ready = req.method === \"GET\"; if (ready === false) { return \"no\"; } return \"yes\"; }; return Response.text(g()); }",
+        "function thunk(f) { return f(); } function handler(req) { const r = thunk(() => { const ready = req.method === \"GET\"; if (ready === false) { return \"no\"; } return \"yes\"; }); return Response.text(r); }",
     );
     defer h.deinit();
     try expectKind(&h.checker, .canonical_redundant_bool_compare);

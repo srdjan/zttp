@@ -2876,9 +2876,12 @@ test "compileHandler graph exempts a dependency that fails only ZTS061" {
     try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
 }
 
-test "compileHandler graph refuses a dependency that fails ZTS609" {
+test "compileHandler graph refuses a dependency that fails ZTS604" {
     var fixture = try graphDependencyFixture(
-        \\export const value = (): number => 1;
+        \\export function value(): number {
+        \\  let one = 1;
+        \\  return one;
+        \\}
         \\
     );
     defer fixture.deinit();
@@ -4511,28 +4514,6 @@ test "compileHandler graph refuses read_only on a dependency helper that calls a
     try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
 }
 
-test "compileHandler graph refuses read_only on a helper that calls an inline arrow writer held by a dependency object" {
-    var fixture = try importFixture(
-        \\import { api } from "./dep.ts";
-        \\
-        \\function tally(): Proof<number, "read_only"> {
-        \\  return api.bump();
-        \\}
-        \\
-        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
-        \\  return Response.text("ok");
-        \\}
-        \\
-    ,
-        \\let count = 0;
-        \\
-        \\export const api = { bump: (): number => { count = count + 1; return count; } };
-        \\
-    );
-    defer fixture.deinit();
-    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
-}
-
 test "compileHandler graph refuses read_only on a helper that calls a named writer through a dependency holder" {
     var fixture = try importFixture(
         \\import { api } from "./dep.ts";
@@ -4634,21 +4615,6 @@ test "compileHandler graph refuses an Effects ceiling that a dependency helper b
         \\
         \\export function digest(): Effects<string, "clock"> {
         \\  return sha256("a");
-        \\}
-        \\
-    );
-    defer fixture.deinit();
-    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
-}
-
-test "compileHandler graph refuses a false Proof capsule on an arrow helper of a dependency" {
-    var fixture = try importFixture(capsule_stamp_entry,
-        \\const clock = (): Proof<number, "pure"> => {
-        \\  return Date.now();
-        \\};
-        \\
-        \\export function stamp(): number {
-        \\  return clock();
         \\}
         \\
     );

@@ -433,8 +433,6 @@ as `default:` rather than `when _:`.
 | ZTS602 | Dynamic capability access | A configured policy can cover computed env keys, egress endpoints, and cache namespaces as residual guards. The diagnostic names the guard kind, required section, assurance consequence, and `zttp check <handler.ts> --contract`. Computed SQL names, route paths, and unguarded exports remain literal-only. |
 | ZTS604 | Avoidable `let` | Use `const` unless the binding is reassigned. |
 | ZTS605 | Dynamic computed property access | Use a typed field, a literal key, or narrow the object before indexing. |
-| ZTS608 | Reused arrow helper | Give reusable helpers named function declarations; keep arrows for callbacks. |
-| ZTS609 | Exported function-valued `const` | Export a function declaration. |
 | ZTS610 | Public helper effects | Annotate the helper return type with `Effects<T, "...">`. |
 | ZTS611 | Public helper proof capsule | Annotate the helper return type with `Proof<T, "...">`. |
 | ZTS623 | Internal helper ceiling | Remove the `Effects<...>`: placement is decidable, and the handler budget already bounds an internal helper. |

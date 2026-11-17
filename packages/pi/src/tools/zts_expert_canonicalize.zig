@@ -140,7 +140,7 @@ test "canonicalize registry returns bound version-2 candidates and optional simu
     try testing.expectEqualStrings(envelope.get("policy_hash").?.string, bound.get("policy_hash").?.string);
     try testing.expectEqualStrings(envelope.get("module_graph_hash").?.string, bound.get("module_graph_hash").?.string);
     try testing.expectEqual(@as(usize, 64), bound.get("semantics_hash").?.string.len);
-    try testing.expectEqualStrings("ZTS608", candidate.get("diagnostic_code").?.string);
+    try testing.expectEqualStrings("ZTS072", candidate.get("diagnostic_code").?.string);
 
     const simulated_args = try testing.allocator.print("{{\"file\":{f},\"simulate\":true}}", .{std.json.fmt(file, .{})});
     defer testing.allocator.free(simulated_args);

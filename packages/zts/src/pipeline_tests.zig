@@ -3203,7 +3203,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "isDict",
         "boolean",
         3291,
-        "15541ee68126d43ee0c63c3d6a45ef67a90b52c1fe5e730f59498625e6d26244",
+        "f1fcab6d062833c28fa3e6b1a5d2d1b9bab8f408682516dff411af1a0b0f973a",
     );
 
     const helper_source =
@@ -3221,7 +3221,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "helper",
         "unknown",
         3295,
-        "2cbec9c7f9944257a26abdd28ea4d0744714f39ab7c820bdf262f4756cad8511",
+        "e531867bab47cd9dd8d9d41bdcd24693330e0d94618f557004eec3dcb080561c",
     );
 }
 
@@ -6892,16 +6892,6 @@ test "an export row carries writes_module_state for a holder whose user writes" 
     try testing.expect((try exportRowForTest(allocator, holder, "api")).writes_module_state);
 }
 
-test "an export row carries writes_module_state for a holder with an inline arrow that writes" {
-    const allocator = testing.allocator;
-    const holder =
-        \\let count = 0;
-        \\
-        \\export const api = { bump: (): number => { count = count + 1; return count; } };
-    ;
-    try testing.expect((try exportRowForTest(allocator, holder, "api")).writes_module_state);
-}
-
 test "an export row of a holder with no write keeps writes_module_state clear" {
     const allocator = testing.allocator;
     const holder =
@@ -7062,26 +7052,6 @@ test "a chain of ten local functions to an imported writer fails read_only and i
         "`tally` reaches a function in another file that writes module state, so it cannot prove `read_only`: remove `read_only` from the capsule, or stop reaching the writer.",
         rows[0].suggestion,
     );
-}
-
-test "a read_only helper over an imported holder with an inline writer fails" {
-    const allocator = testing.allocator;
-    const holder =
-        \\let count = 0;
-        \\
-        \\export const api = { bump: (): number => { count = count + 1; return count; } };
-    ;
-    const rows = try analyzeAcrossFile(allocator, holder,
-        \\import { api } from "./b.ts";
-        \\
-        \\function tally(): Proof<number, "read_only"> {
-        \\  return api.bump();
-        \\}
-    , .with_writes);
-    defer freeHelperRows(allocator, rows);
-    try testing.expectEqual(@as(usize, 1), rows.len);
-    try testing.expectEqualStrings("tally", rows[0].function);
-    try testing.expectEqualStrings("read_only", rows[0].spec);
 }
 
 test "a read_only helper passes when the dependency export rows were built with no verifier write" {

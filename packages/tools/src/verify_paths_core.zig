@@ -194,11 +194,9 @@ test "writeJsonEnvelope canonical diagnostics make ok false" {
     defer tmp_dir.cleanup();
 
     const fixture =
-        \\const parse = (x: number): number => x;
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
-        \\  const a = parse(1);
-        \\  const b = parse(2);
-        \\  return Response.json({ a: a, b: b });
+        \\  let a = 1;
+        \\  return Response.json({ a: a });
         \\}
     ;
     try tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "canonical.ts", .data = fixture });
@@ -217,7 +215,7 @@ test "writeJsonEnvelope canonical diagnostics make ok false" {
 
     try std.testing.expect(!outcome.ok);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"ZTS608\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"ZTS604\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"severity\":\"error\"") != null);
 }
 

@@ -920,10 +920,10 @@ test "repair plan: a comparison of ok with true gets ZTS620 and a Result plan be
 
 test "repair plan: a closure read gets a check inside the closure" {
     try expectFirstPlan(plan_head ++
-        \\  const read = (): unknown => {
+        \\  const vs = [1].map((n: number): unknown => {
         \\    return r.value;
-        \\  };
-        \\  return Response.json({ v: read() });
+        \\  });
+        \\  return Response.json({ v: vs });
         \\}
     , "Check result.ok inside the closure before it reads result.value. A check outside the closure does not reach it.", shape_guard);
 }
@@ -1043,10 +1043,10 @@ test "repair plan: a shared captured name asks for unique names" {
         \\  }
         \\  if (req.method !== "GET") {
         \\    const r = parseJson("2");
-        \\    const read = (): unknown => {
+        \\    const vs = [1].map((n: number): unknown => {
         \\      return r.value;
-        \\    };
-        \\    return Response.json({ v: read() });
+        \\    });
+        \\    return Response.json({ v: vs });
         \\  }
         \\  return Response.json({ v: 0 });
         \\}
