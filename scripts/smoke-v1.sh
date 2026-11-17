@@ -301,7 +301,7 @@ dep_check_case() {
 }
 cat > "$TMP_DIR/dep-check-app/dep.ts" <<'TS'
 export function value(): number {
-  if (5) return 1;
+  if (5) { return 1; }
   return 2;
 }
 TS
