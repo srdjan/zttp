@@ -131,6 +131,11 @@ pub const ScopeAnalyzer = struct {
     scopes: std.ArrayList(Scope),
     current_scope: ScopeId,
     next_scope_id: ScopeId,
+    /// For each name atom, the newest scope that declares the name, or
+    /// `ir.null_scope`. Spec 5.2 refuses shadowing, so the scopes that
+    /// declare one name never nest, and only the newest of them can enclose
+    /// the current scope or sit inside it.
+    newest_declaration: std.ArrayList(ScopeId),
 
     pub fn init(allocator: std.mem.Allocator) !ScopeAnalyzer {
         var analyzer = ScopeAnalyzer{
@@ -138,6 +143,7 @@ pub const ScopeAnalyzer = struct {
             .scopes = .empty,
             .current_scope = 0,
             .next_scope_id = 0,
+            .newest_declaration = .empty,
         };
 
         // Create global scope
@@ -151,6 +157,7 @@ pub const ScopeAnalyzer = struct {
             scope.deinit(self.allocator);
         }
         self.scopes.deinit(self.allocator);
+        self.newest_declaration.deinit(self.allocator);
     }
 
     /// Push a new scope onto the stack
@@ -224,6 +231,8 @@ pub const ScopeAnalyzer = struct {
         // Spec 5.2: one declaration of a name in one scope. A parameter, a
         // `const`, a function, an import, and a pattern binding share the rule.
         if (scope.findLocalMutByAtom(name_atom) != null) return error.DuplicateBinding;
+        if (self.shadows(name_atom)) return error.ShadowedBinding;
+        try self.recordDeclaration(name_atom);
 
         // Global scope - use atom index as slot, no local allocation
         if (scope.kind == .global) {
@@ -272,6 +281,33 @@ pub const ScopeAnalyzer = struct {
             .name_atom = name_atom,
             .kind = if (kind == .parameter) .argument else .local,
         };
+    }
+
+    /// Spec 5.2: a name declared in one scope is not declared again in a scope
+    /// that encloses it or sits inside it. The module scope counts.
+    fn shadows(self: *const ScopeAnalyzer, name_atom: u16) bool {
+        if (name_atom >= self.newest_declaration.items.len) return false;
+        const newest = self.newest_declaration.items[name_atom];
+        if (newest == ir.null_scope) return false;
+        // The current scope is still open, so every scope created after it
+        // sits inside it.
+        if (newest > self.current_scope) return true;
+        // An enclosing scope has a smaller id than each scope inside it.
+        var outer = self.scopes.items[self.current_scope].parent;
+        while (outer) |id| : (outer = self.scopes.items[id].parent) {
+            if (id == newest) return true;
+            if (id < newest) return false;
+        }
+        return false;
+    }
+
+    fn recordDeclaration(self: *ScopeAnalyzer, name_atom: u16) !void {
+        if (name_atom >= self.newest_declaration.items.len) {
+            const old_len = self.newest_declaration.items.len;
+            try self.newest_declaration.resize(self.allocator, @as(usize, name_atom) + 1);
+            @memset(self.newest_declaration.items[old_len..], ir.null_scope);
+        }
+        self.newest_declaration.items[name_atom] = self.current_scope;
     }
 
     /// The nearest declaration of the name, seen from the current scope, or

@@ -771,7 +771,18 @@ fn buildNested(allocator: std.mem.Allocator, shape: Shape, depth: usize) !std.Ar
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, shape.prefix);
-    for (0..depth) |_| try out.appendSlice(allocator, shape.open);
+    for (0..depth) |level| {
+        // A `#` in the opener stands for the level, so that each nested
+        // declaration takes its own name: the parser refuses a name that an
+        // enclosing scope already declares.
+        const at = std.mem.indexOfScalar(u8, shape.open, '#') orelse {
+            try out.appendSlice(allocator, shape.open);
+            continue;
+        };
+        try out.appendSlice(allocator, shape.open[0..at]);
+        try out.print(allocator, "{d}", .{level});
+        try out.appendSlice(allocator, shape.open[at + 1 ..]);
+    }
     try out.appendSlice(allocator, shape.core);
     for (0..depth) |_| try out.appendSlice(allocator, shape.close);
     try out.appendSlice(allocator, shape.suffix);
@@ -796,7 +807,7 @@ const value_shapes = [_]Shape{
     .{ .name = "unary", .prefix = "const x = ", .open = "!", .core = "1", .close = "", .suffix = ";" },
     .{ .name = "ternary", .prefix = "const x = ", .open = "a ? b : ", .core = "1", .close = "", .suffix = ";" },
     .{ .name = "if", .open = "if (a) { ", .core = "a;", .close = "}" },
-    .{ .name = "function", .open = "function f() { ", .core = "", .close = "}" },
+    .{ .name = "function", .open = "function f#() { ", .core = "", .close = "}" },
     .{ .name = "template", .prefix = "const x = ", .open = "`${", .core = "1", .close = "}`", .suffix = ";" },
     .{ .name = "match", .prefix = "const x = ", .open = "match (a) { when 1: ", .core = "1", .close = " default: 2 }", .suffix = ";" },
     .{ .name = "spread object", .prefix = "const x = ", .open = "{ ...", .core = "a", .close = "}", .suffix = ";" },

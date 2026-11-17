@@ -3263,23 +3263,26 @@ test "FlowChecker keeps a property for a captured value that holds no secret" {
     ;
     try std.testing.expect((try runFlowProperties(std.testing.allocator, collision)).no_secret_leakage);
 
-    // Shadowing: the closure captures the function-level x, not the x of a
-    // block that has ended.
-    const shadowed =
+    // Sibling scopes: the closure captures the x of its own block, not the x
+    // of a sibling block that has ended.
+    const siblings =
         \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  if (req.method === "GET") {
         \\    const x = env("SECRET_KEY") ?? "";
         \\    const m = x.length;
         \\  }
-        \\  const x = "clean";
-        \\  const show = () => {
-        \\    return Response.json({ k: x });
-        \\  };
-        \\  return show();
+        \\  if (req.method !== "GET") {
+        \\    const x = "clean";
+        \\    const show = () => {
+        \\      return Response.json({ k: x });
+        \\    };
+        \\    return show();
+        \\  }
+        \\  return Response.json({ ok: 1 });
         \\}
     ;
-    try std.testing.expect((try runFlowProperties(std.testing.allocator, shadowed)).no_secret_leakage);
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, siblings)).no_secret_leakage);
 
     // The closure is declared where a parameter of the same name is clean.
     const param_clean =

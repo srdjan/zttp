@@ -30,6 +30,7 @@ const object = engine.object;
 const atom_table = engine.atom_table;
 const mb = engine.module_binding;
 const known_globals = @import("zts-base").known_globals;
+const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const report_types = @import("flow_report.zig");
 const flow_evidence = @import("flow_evidence.zig");
 const counterexample = @import("counterexample.zig");
@@ -4373,6 +4374,19 @@ fn analyzeSource(source: []const u8, name: []const u8, params: []const Value) !R
     return .{ .harness = h, .result = try h.analyze(name, params) };
 }
 
+/// Require that the parser refuses `source` with ZTS069, the shadowing refusal.
+fn expectShadowRefused(source: []const u8) !void {
+    var atoms = atom_table.AtomTable.init(testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    try testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try testing.expectEqual(@as(usize, 1), errors.len);
+    try testing.expectEqualStrings("ZTS069", diagnostic_catalog.parserCode(errors[0].kind));
+}
+
 /// Run `f` and require a fully resolved result whose returned labels have the
 /// secret flag set or clear.
 fn expectSecret(source: []const u8, params: []const Value, expected: bool) !void {
@@ -5155,18 +5169,18 @@ test "nested call sites keep allocated results distinct" {
 
 test "a call joins every return of the callee" {
     try expectSecret(
-        "function f(c, s) { function g(c) { if (c) { return \"c\"; } return s; } return g(c); }",
+        "function f(c, s) { function g(d) { if (d) { return \"c\"; } return s; } return g(c); }",
         &c_secret,
         true,
     );
     try expectSecret(
-        "function f(c, s) { function g(c) { if (c) { return \"c\"; } return \"d\"; } return g(c); }",
+        "function f(c, s) { function g(d) { if (d) { return \"c\"; } return \"d\"; } return g(c); }",
         &c_secret,
         false,
     );
     // The first return alone would be clean, and so would the last alone.
     try expectSecret(
-        "function f(c, s) { function g(c) { if (c) { return s; } return \"c\"; } return g(c); }",
+        "function f(c, s) { function g(d) { if (d) { return s; } return \"c\"; } return g(c); }",
         &c_secret,
         true,
     );
@@ -5313,16 +5327,16 @@ test "a captured loop variable is read by a later activation's loop" {
 }
 
 test "a capture follows the parser's binding, not the name" {
-    // A declaration in a nested block is a separate binding of `x`. The closure
-    // reads the outer binding, so a secret written to the inner one never
-    // reaches it. A scan by name would join the two.
+    // A declaration in a sibling block is a separate binding of `x`. The
+    // closure reads the binding of its own block, so a secret written to the
+    // other one never reaches it. A scan by name would join the two.
     try expectSecret(
-        "function f(c, s) { let x = \"c\"; if (c) { let x = s; } return (() => x)(); }",
+        "function f(c, s) { let r = \"c\"; if (c) { let x = s; } if (c) { let x = \"c\"; r = (() => x)(); } return r; }",
         &c_secret,
         false,
     );
     try expectSecret(
-        "function f(c, s) { let x = s; if (c) { let x = \"c\"; } return (() => x)(); }",
+        "function f(c, s) { let r = \"c\"; if (c) { let x = s; r = (() => x)(); } if (c) { let x = \"c\"; } return r; }",
         &c_secret,
         true,
     );
@@ -5401,12 +5415,12 @@ test "a recursive call feeds its arguments into the entry" {
 test "a recursive call returns the summary's write through a seeded parameter" {
     const origins_top: Value = .{ .origins_top = true };
     try expectSecret(
-        "function f(p, s) { function r(p, n, x, y) { if (n) { p.out = x; return 0; } r(p, true, y, y); return p.out; } return r(p, false, \"c\", s); }",
+        "function f(p, s) { function r(q, n, x, y) { if (n) { q.out = x; return 0; } r(q, true, y, y); return q.out; } return r(p, false, \"c\", s); }",
         &.{ origins_top, secret_value },
         true,
     );
     try expectSecret(
-        "function f(p, s) { function r(p, n, x, y) { if (n) { p.out = x; return 0; } r(p, true, y, y); return p.out; } return r(p, false, \"c\", \"d\"); }",
+        "function f(p, s) { function r(q, n, x, y) { if (n) { q.out = x; return 0; } r(q, true, y, y); return q.out; } return r(p, false, \"c\", \"d\"); }",
         &.{ origins_top, secret_value },
         false,
     );
@@ -6285,12 +6299,8 @@ test "an identity export carries the secret of its argument" {
     const alias = "import { unescapeHtml as plain } from \"zttp:text\"; ";
     try expectSecret(alias ++ "function f(s) { return plain(s); }", &.{secret_value}, true);
 
-    // A local binding of the same name is the local function, not the export.
-    try expectSecret(
-        text ++ "function f(s) { const unescapeHtml = (x) => \"c\"; return unescapeHtml(s); }",
-        &.{secret_value},
-        false,
-    );
+    // A local binding of the same name is refused: no scope may shadow an import.
+    try expectShadowRefused(text ++ "function f(s) { const unescapeHtml = (x) => \"c\"; return unescapeHtml(s); }");
 }
 
 // P5 specification test 28.

@@ -1178,14 +1178,17 @@ const fetch_probes = [_]FaultProbe{
         \\  return Response.text("ok");
         \\}
     },
-    .{ .name = "p7i a shadowed res keeps the outer fork", .clean = true, .source = fetch_prefix ++
+    .{ .name = "p7i a sibling res keeps the fetch fork", .clean = true, .source = fetch_prefix ++
         \\function handler(req) {
-        \\  const res = fetch("https://api.example.com/data");
         \\  if (req.method === "POST") {
-        \\    const res = "shadow";
+        \\    const res = "sibling";
         \\    return Response.text(res);
         \\  }
-        \\  if (res.status !== 200) { return Response.text("upstream failed", { status: 502 }); }
+        \\  if (req.method === "GET") {
+        \\    const res = fetch("https://api.example.com/data");
+        \\    if (res.status !== 200) { return Response.text("upstream failed", { status: 502 }); }
+        \\    return Response.text("ok");
+        \\  }
         \\  return Response.text("ok");
         \\}
     },

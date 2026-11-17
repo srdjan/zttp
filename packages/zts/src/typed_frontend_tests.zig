@@ -18,6 +18,7 @@ const handler_contract_mod = @import("zts-contracts").handler_contract;
 const contract_types = @import("zts-contracts").contract_types;
 const strict_checker_mod = @import("strict_checker.zig");
 const type_checker_mod = @import("type_checker.zig");
+const diagnostic_catalog = @import("diagnostic_catalog.zig");
 
 const AtomTable = engine.atom_table.AtomTable;
 const JsParser = engine.parser.JsParser;
@@ -7399,13 +7400,16 @@ test "annotation owner census covers current syntax kinds" {
     try std.testing.expectEqual(@as(usize, 1), call_count);
 }
 
-test "shadowed bindings and closure parameters retain their actual owners" {
+test "sibling bindings and closure parameters retain their actual owners" {
     const source =
-        "const shared: number = 1;\n" ++
         "function outer(value: string): string {\n" ++
-        "  const shared: string = value;\n" ++
-        "  function inner(value: number): string { return shared; }\n" ++
-        "  return shared;\n" ++
+        "  if (value === \"\") { const shared: number = 1; }\n" ++
+        "  if (value !== \"\") {\n" ++
+        "    const shared: string = value;\n" ++
+        "    function inner(item: number): string { return shared; }\n" ++
+        "    return shared;\n" ++
+        "  }\n" ++
+        "  return value;\n" ++
         "}";
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     const runtime_allocator = runtime_count.allocator();
@@ -7443,7 +7447,7 @@ test "shadowed bindings and closure parameters retain their actual owners" {
         const parameter = store.parameter_annotations.items[index];
         try std.testing.expectEqual(parameter.owner.pattern, view.getListIndex(function.params_start, 0));
         try std.testing.expect(std.meta.eql(parameter.owner.binding, view.paramBinding(parameter.owner.pattern).?));
-        try std.testing.expectEqualStrings("value", atoms.getName(@fromBackingInt(@intCast(parameter.owner.binding.name_atom))).?);
+        try std.testing.expectEqualStrings(if (index == 0) "value" else "item", atoms.getName(@fromBackingInt(@intCast(parameter.owner.binding.name_atom))).?);
         try std.testing.expectEqualStrings(if (index == 0) "string" else "number", parameter.value.raw_span.text(source));
     }
     const inner = view.getFunction(store.function_signatures.items[1].owner) orelse
@@ -9926,13 +9930,13 @@ fn expectDirectConsumerMatrixCase(
 const LookupConsumerCase = enum {
     forward_repeated,
     return_fallback,
-    untyped_shadow_gap,
-    shadowed_capture,
-    untyped_shadow_gap_mismatch,
-    shadowed_capture_mismatch,
+    untyped_sibling_gap,
+    sibling_capture,
+    untyped_sibling_gap_mismatch,
+    sibling_capture_mismatch,
 };
 
-test "direct consumers preserve measured lookup winners shadows and captures" {
+test "direct consumers preserve measured lookup winners sibling scopes and captures" {
     const cases = [_]struct {
         case: LookupConsumerCase,
         source: []const u8,
@@ -9996,18 +10000,18 @@ test "direct consumers preserve measured lookup winners shadows and captures" {
             },
         },
         .{
-            .case = .untyped_shadow_gap,
+            .case = .untyped_sibling_gap,
             .source =
-            \\const item: number = 1;
+            \\const topItem: number = 1;
             \\function readItem(): string {
-            \\  const item = "inferred";
+            \\  if (true) { const item = "inferred"; }
             \\  if (true) {
             \\    const item: string = "typed";
             \\    return item;
             \\  }
             \\}
             \\export function handler(req: Request): Response {
-            \\  return Response.json({ top: item, nested: readItem() });
+            \\  return Response.json({ top: topItem, nested: readItem() });
             \\}
             \\
             ,
@@ -10015,16 +10019,18 @@ test "direct consumers preserve measured lookup winners shadows and captures" {
             .strict_diagnostics = &.{},
         },
         .{
-            .case = .shadowed_capture,
+            .case = .sibling_capture,
             .source =
             \\function compute(): number {
-            \\  const value: number = 1;
-            \\  const readOuter = (): number => value;
             \\  if (true) {
             \\    const value: string = "inner";
             \\    const readInner = (): string => value;
-            \\    const outerResult: number = readOuter();
             \\    const innerResult: string = readInner();
+            \\  }
+            \\  if (true) {
+            \\    const value: number = 1;
+            \\    const readOuter = (): number => value;
+            \\    const outerResult: number = readOuter();
             \\    return outerResult;
             \\  }
             \\}
@@ -10037,18 +10043,18 @@ test "direct consumers preserve measured lookup winners shadows and captures" {
             .strict_diagnostics = &.{},
         },
         .{
-            .case = .untyped_shadow_gap_mismatch,
+            .case = .untyped_sibling_gap_mismatch,
             .source =
-            \\const item: number = 1;
+            \\const topItem: number = 1;
             \\function readItem(): string {
-            \\  const item = "inferred";
+            \\  if (true) { const item = "inferred"; }
             \\  if (true) {
             \\    const item: string = 2;
             \\    return item;
             \\  }
             \\}
             \\export function handler(req: Request): Response {
-            \\  return Response.json({ top: item, nested: readItem() });
+            \\  return Response.json({ top: topItem, nested: readItem() });
             \\}
             \\
             ,
@@ -10056,16 +10062,18 @@ test "direct consumers preserve measured lookup winners shadows and captures" {
             .strict_diagnostics = &.{},
         },
         .{
-            .case = .shadowed_capture_mismatch,
+            .case = .sibling_capture_mismatch,
             .source =
             \\function compute(): number {
-            \\  const value: number = 1;
-            \\  const readOuter = (): number => value;
             \\  if (true) {
             \\    const value: string = "inner";
             \\    const readInner = (): number => value;
-            \\    const outerResult: number = readOuter();
             \\    const innerResult: number = readInner();
+            \\  }
+            \\  if (true) {
+            \\    const value: number = 1;
+            \\    const readOuter = (): number => value;
+            \\    const outerResult: number = readOuter();
             \\    return outerResult;
             \\  }
             \\}
@@ -10076,7 +10084,7 @@ test "direct consumers preserve measured lookup winners shadows and captures" {
             ,
             .type_diagnostics = &.{.{
                 .kind = .return_type_mismatch,
-                .line = 6,
+                .line = 4,
                 .column = 23,
             }},
             .strict_diagnostics = &.{},
@@ -10447,8 +10455,6 @@ test "direct function specifications preserve nonempty effects and helper select
 
 const ContractConsumerCase = enum {
     simple,
-    nested_first,
-    outer_first,
     nested_hole,
     module_arrow,
     nonliteral_effect,
@@ -10463,15 +10469,6 @@ fn expectContractConsumerFacts(
         .simple => {
             try std.testing.expectEqual(@as(usize, 0), contract.holes.items.len);
             try std.testing.expectEqual(@as(usize, 0), contract.function_capsules.items.len);
-        },
-        .nested_first, .outer_first => {
-            try std.testing.expect(!contract.declared_specs_implicit);
-            try std.testing.expectEqual(@as(usize, 1), contract.declared_specs.items.len);
-            try std.testing.expectEqualStrings("pure", contract.declared_specs.items[0]);
-            try std.testing.expectEqual(@as(usize, 1), contract.function_capsules.items.len);
-            const capsule = contract.function_capsules.items[0];
-            try std.testing.expectEqualStrings("wrapper", capsule.function);
-            try std.testing.expectEqual(if (kind == .nested_first) @as(u32, 1) else 4, capsule.line);
         },
         .nonliteral_effect, .unknown_capability => {
             const expected_kind: contract_types.SpecDiagnostic.Kind = if (kind == .nonliteral_effect)
@@ -10581,15 +10578,13 @@ fn expectDirectSingleModuleContract(
 test "direct single-module full and sound extraction preserve contract bytes" {
     const fixtures = [_]struct { kind: ContractConsumerCase, source: []const u8, json_hash: u64 }{
         .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0xc74330eb07540246 },
-        .{ .kind = .nested_first, .source = "function wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\nfunction handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\n", .json_hash = 0x4fb8372f1e56284e },
-        .{ .kind = .outer_first, .source = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\nfunction wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\n", .json_hash = 0x8ec7a2017fab60d3 },
         .{ .kind = .nested_hole, .source = "function outer(): string {\n  function inner(): number { return hole(); }\n  return \"ok\";\n}\nfunction handler(req: Request): Response { return Response.text(outer()); }\n", .json_hash = 0x94b5d097fa0d8614 },
         .{ .kind = .module_arrow, .source = "const helper = (value: string): string => hole();\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0xe4a861aaaaeabe30 },
         .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0x193f68b42a61756e },
         .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0x628d984b6e9a72bb },
     };
     const fields = @typeInfo(ContractConsumerCase).@"enum".field_names;
-    try std.testing.expectEqual(@as(usize, 7), fixtures.len);
+    try std.testing.expectEqual(@as(usize, 5), fixtures.len);
     try std.testing.expectEqual(fields.len, fixtures.len);
     var seen: [fields.len]bool = @splat(false);
     for (fixtures) |fixture| {
@@ -10603,6 +10598,30 @@ test "direct single-module full and sound extraction preserve contract bytes" {
         try std.testing.expectEqualStrings(full, sound);
     }
     for (seen) |present| try std.testing.expect(present);
+}
+
+test "a nested function that reuses the handler name is refused with ZTS069" {
+    const nested_first = "function wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\nfunction handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\n";
+    var first_atoms = AtomTable.init(std.testing.allocator);
+    defer first_atoms.deinit();
+    var first = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, nested_first, .compile);
+    defer first.deinit();
+    first.setAtomTable(&first_atoms);
+    try std.testing.expectError(error.ParseError, first.parse());
+    const first_errors = first.getProjectedErrors();
+    try std.testing.expectEqual(@as(usize, 1), first_errors.len);
+    try std.testing.expectEqualStrings("ZTS069", diagnostic_catalog.parserCode(first_errors[0].kind));
+
+    const outer_first = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\nfunction wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\n";
+    var second_atoms = AtomTable.init(std.testing.allocator);
+    defer second_atoms.deinit();
+    var second = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, outer_first, .compile);
+    defer second.deinit();
+    second.setAtomTable(&second_atoms);
+    try std.testing.expectError(error.ParseError, second.parse());
+    const second_errors = second.getProjectedErrors();
+    try std.testing.expectEqual(@as(usize, 1), second_errors.len);
+    try std.testing.expectEqualStrings("ZTS069", diagnostic_catalog.parserCode(second_errors[0].kind));
 }
 
 const ExpectedCallbackCeiling = struct {

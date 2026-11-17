@@ -4474,8 +4474,8 @@ fn growthExpectTraceCase(case: GrowthCase) ![2]usize {
         // Parser scratch now retains one allocation through the parser's
         // lifetime. Signature replay's capacity/order assertions below remain
         // independent of this deliberately changed parser allocation shape.
-        .plain, .same_line => .{ 55, 0, 0, 10, 15649 },
-        .reordered => .{ 55, 0, 0, 10, 15633 },
+        .plain, .same_line => .{ 56, 0, 0, 10, 16505 },
+        .reordered => .{ 56, 0, 0, 10, 16489 },
     };
     try std.testing.expectEqual(allocation_shape, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);
@@ -4542,9 +4542,9 @@ test "direct signature replay preserves capacity and bucket order at two growth 
 test "direct signature replay retains exact nested generic function and same-line owners" {
     const allocator = std.testing.allocator;
     const source = "function outer<T extends number>(value: T): T { " ++
-        "function same(value: number): number { return value; } return value; } " ++
-        "function same(value: string): string { return value; } " ++
-        "function second<U extends string>(value: U): U { return value; }";
+        "function same(item: number): number { return item; } return value; } " ++
+        "function second<U extends string>(value: U): U { " ++
+        "function same(item: string): string { return item; } return value; }";
     var direct_count = GrowthCountingAllocator.init(allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
@@ -4553,7 +4553,7 @@ test "direct signature replay retains exact nested generic function and same-lin
     direct_parser.setAtomTable(&direct_atoms);
     const direct_root = try direct_parser.parse();
     try growthExpectRuntime(&direct_parser, direct_root);
-    try std.testing.expectEqual([5]usize{ 21, 0, 0, 2, 5045 }, direct_count.shape());
+    try std.testing.expectEqual([5]usize{ 24, 0, 0, 2, 6022 }, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);
     var direct_pool = TypePool.init(allocator);
     defer direct_pool.deinit(allocator);
@@ -4573,12 +4573,12 @@ test "direct signature replay retains exact nested generic function and same-lin
     var same_count: usize = 0;
     for (direct_parser.type_store.function_signatures.items, 0..) |record, index| {
         owners[index] = record.owner;
-        const expected_offsets = [_]u32{ 32, 61, 132, 207 };
+        const expected_offsets = [_]u32{ 32, 61, 150, 179 };
         try std.testing.expectEqual(expected_offsets[index], direct_view.signatureOffset(record.owner).?);
         const reference = direct_env.functionTypeRef(direct_view, record.owner) orelse return error.TestUnexpectedResult;
         const signature = direct_env.getFunctionSignature(reference) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(u8, 1), signature.param_count);
-        if (index == 1 or index == 2) {
+        if (index == 1 or index == 3) {
             const expected_type = if (index == 1) direct_pool.idx_number else direct_pool.idx_string;
             try growthExpectExactSignature(growthSignature(&.{expected_type}, expected_type), signature);
         }
@@ -4660,10 +4660,10 @@ fn growthExpectSignatureKind(
     const direct_root = try direct_parser.parse();
     try growthExpectRuntime(&direct_parser, direct_root);
     const allocation_shape: [5]usize = switch (case) {
-        .parameter, .arrow => .{ 13, 0, 0, 0, 3224 },
-        .return_value => .{ 13, 0, 0, 1, 3253 },
-        .guard => .{ 14, 0, 0, 1, 3465 },
-        .generic_only => .{ 14, 0, 0, 1, 3468 },
+        .parameter, .arrow => .{ 14, 0, 0, 0, 3894 },
+        .return_value => .{ 14, 0, 0, 1, 3923 },
+        .guard => .{ 15, 0, 0, 1, 4321 },
+        .generic_only => .{ 15, 0, 0, 1, 4324 },
     };
     try std.testing.expectEqual(allocation_shape, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);

@@ -825,8 +825,8 @@ test "DirectCheckSource validates runtime owners before publication" {
     try std.testing.expect(owner_types.has_induced_failure);
 }
 
-test "direct source distinguishes signatures and shadowed binding annotations" {
-    const source = "function outer(value: number): number { const convert = (value: string): string => value; const item: number = value; if (value > 0) { const item: string = convert(\"x\"); } return value; } function next(value: boolean): boolean { return value; }";
+test "direct source distinguishes signatures and sibling binding annotations" {
+    const source = "function outer(value: number): number { const convert = (text: string): string => text; if (value > 0) { const item: number = value; } if (value > 1) { const item: string = convert(\"x\"); } return value; } function next(value: boolean): boolean { return value; }";
     var owner: DirectCheckSource = undefined;
     try owner.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "signatures.ts");
     defer owner.deinit();

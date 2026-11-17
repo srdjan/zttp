@@ -10306,9 +10306,12 @@ test "TypeChecker: nested arrow in exported handler checks local annotation" {
     , 1, 0);
 }
 
-test "TypeChecker: shadowed exported local uses its own scoped annotation" {
+test "TypeChecker: sibling exported locals use their own scoped annotations" {
     try checkTypedSource(
-        \\export const zz: string = "top level";
+        \\export function other(): string {
+        \\  const zz: string = "sibling";
+        \\  return zz;
+        \\}
         \\export function handler(req: Request): Response {
         \\  const zz: number = "not a number";
         \\  return Response.json({ value: zz });
@@ -10567,14 +10570,13 @@ test "TypeChecker: a module export is called with its declared arguments" {
     , 0, 0);
 }
 
-test "TypeChecker import diagnostics preserve aliases and shadows" {
+test "TypeChecker import diagnostics preserve aliases" {
     const allocator = std.testing.allocator;
     const Case = struct { source: []const u8, errors: usize, message: []const u8 = "expected 1, got 2" };
     const cases = [_]Case{
         .{ .source = "import { sha256 as digest } from 'zttp:crypto'; digest('a', 'b');", .errors = 1 },
         .{ .source = "import { sha256 as digest } from 'zttp-ext:unknown'; digest('a', 'b');", .errors = 0 },
         .{ .source = "function sha256(a, b) { return a; } sha256('a', 'b');", .errors = 0 },
-        .{ .source = "import { sha256 as digest } from 'zttp:crypto'; function run(digest) { return digest('a', 'b'); }", .errors = 0 },
     };
     for ([_]bool{ false, true }) |borrow_imports| {
         for (cases) |case| {
@@ -10588,6 +10590,20 @@ test "TypeChecker import diagnostics preserve aliases and shadows" {
             }
         }
     }
+}
+
+test "TypeChecker: a parameter that reuses an import name is refused with ZTS069" {
+    const allocator = std.testing.allocator;
+    const source = "import { sha256 as digest } from 'zttp:crypto'; function run(digest) { return digest('a', 'b'); }";
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqualStrings("ZTS069", diagnostic_catalog.parserCode(errors[0].kind));
 }
 
 test "TypeChecker import policy compares named kind and slot without scope or local name" {
@@ -12948,15 +12964,18 @@ fn withMarker(comptime source: []const u8, comptime marker: []const u8, comptime
     return source[0..at] ++ value ++ source[at + marker.len ..];
 }
 
-test "capture: a closure over a for...of binding reads that binding, not an outer name" {
+test "capture: a closure over a for...of binding reads that binding, not a sibling binding of its name" {
     // p1_unsound.ts and p1_forof_shadow.ts. `i` is a `for...of` binding, which
-    // no name search saw, so the capture resolved to the parameter `i`.
+    // no name search saw, so the capture resolved to the `i` of a sibling loop.
     const source =
         \\function needS(s: string): number {
         \\  return s.length;
         \\}
-        \\function run(items: ELEM[], i: OUTER): number {
+        \\function run(items: ELEM[], others: OUTER[]): number {
         \\  let n = 0;
+        \\  for (const i of others) {
+        \\    n = n + 1;
+        \\  }
         \\  for (const i of items) {
         \\    const g = (): number => needS(i);
         \\    n = n + g();
@@ -12964,9 +12983,9 @@ test "capture: a closure over a for...of binding reads that binding, not an oute
         \\  return n;
         \\}
     ;
-    // The element can be undefined and the outer `i` is a string: refused.
+    // The element can be undefined and the sibling `i` is a string: refused.
     try expectKindCounts(withMarker(withMarker(source, "ELEM", "(string | undefined)"), "OUTER", "string"), refused_once);
-    // The element is a string and the outer `i` is a number: accepted.
+    // The element is a string and the sibling `i` is a number: accepted.
     try expectKindCounts(withMarker(withMarker(source, "ELEM", "string"), "OUTER", "number"), accepted);
     // Control p1_unsound_direct.ts: the same call outside the closure.
     try expectKindCounts(
@@ -12999,16 +13018,22 @@ test "capture: a closure over a for...of binding reads that binding, not an oute
 
 test "capture: a closure over a match pattern binding reads that binding" {
     // p2_unsound.ts and p2_match_binding.ts. A name search did not see the
-    // pattern binding `text`, so the capture resolved to the parameter `text`.
+    // pattern binding `text`, so the capture resolved to the `text` of a
+    // sibling match arm.
     const source =
         \\function needS(s: string): number {
         \\  return s.length;
         \\}
-        \\function run(m: { kind: "a"; text: FIELD } | { kind: "b" }, text: OUTER): number {
-        \\  return match (m) {
+        \\function run(m: { kind: "a"; text: FIELD } | { kind: "b" }, o: { kind: "a"; text: OUTER } | { kind: "b" }): number {
+        \\  const first = match (o) {
+        \\    when { kind: "a", text }: 1
+        \\    default: 0
+        \\  };
+        \\  const second = match (m) {
         \\    when { kind: "a", text }: ((): number => needS(text))()
         \\    default: 0
         \\  };
+        \\  return first + second;
         \\}
     ;
     try expectKindCounts(withMarker(withMarker(source, "FIELD", "string | undefined"), "OUTER", "string"), refused_once);
@@ -13074,14 +13099,17 @@ test "capture: a captured binding is typed from its declaration and not from the
 test "capture: without the parser record a captured binding has no type" {
     // The same source as the refusal above, from a caller that sets no
     // `scopes`. The capture is unknown: nothing is checked and nothing is
-    // granted, and no name search finds the parameter instead.
+    // granted, and no name search finds the `i` of the sibling loop instead.
     const allocator = std.testing.allocator;
     const source =
         \\function needS(s: string): number {
         \\  return s.length;
         \\}
-        \\function run(items: (string | undefined)[], i: string): number {
+        \\function run(items: (string | undefined)[], others: string[]): number {
         \\  let n = 0;
+        \\  for (const i of others) {
+        \\    n = n + 1;
+        \\  }
         \\  for (const i of items) {
         \\    const g = (): number => needS(i);
         \\    n = n + g();

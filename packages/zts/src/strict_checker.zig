@@ -3688,29 +3688,29 @@ test "a reused arrow helper called from a closure is counted" {
     try expectKind(&checker, .canonical_arrow_helper);
 }
 
-test "a call from a closure is not counted for a shadowed helper name" {
-    // Two declarations share the name `h`, so the upvalue call cannot be
-    // attributed to the outer one. The outer `h` is called once.
+test "a call from a closure is not counted for a helper name a sibling scope declares" {
+    // Two sibling scopes declare the name `h`, so the upvalue call cannot be
+    // attributed to the first one. The first `h` is called once.
     var checker = try checkSource(
-        "function handler(req) { const h = () => 1; function other() { const h = () => 2; const g = () => h(); return g(); } const a = h(); return Response.json({ a: a, b: other() }); }",
+        "function handler(req) { function first() { const h = () => 1; return h(); } function other() { const h = () => 2; const g = () => h(); return g(); } return Response.json({ a: first(), b: other() }); }",
     );
     defer checker.deinit();
     try expectNoKind(&checker, .canonical_arrow_helper);
 }
 
-test "a call from a closure is not counted for a helper name a parameter shadows" {
-    // The closure calls the parameter `h`, not the outer arrow `h`, which is
-    // called once.
+test "a call from a closure is not counted for a helper name a sibling parameter declares" {
+    // The closure calls the parameter `h`, not the arrow `h` of the sibling
+    // function, which is called once.
     var checker = try checkSource(
-        "function handler(req) { const h = () => 1; function outer(h) { const g = () => h(); return g() + h(); } const a = h(); return Response.json({ a: a, b: outer(h) }); }",
+        "function handler(req) { function first() { const h = () => 1; return h(); } function outer(h) { const g = () => h(); return g() + h(); } return Response.json({ a: first(), b: outer(() => 3) }); }",
     );
     defer checker.deinit();
     try expectNoKind(&checker, .canonical_arrow_helper);
 }
 
-test "a call from a closure is not counted for a helper name a loop binding shadows" {
+test "a call from a closure is not counted for a helper name a sibling loop binding declares" {
     var checker = try checkSource(
-        "function handler(req) { const h = () => 1; const fs = [h]; let n = 0; for (const h of fs) { const g = () => h(); n = n + g(); } const a = h(); return Response.json({ a: a, n: n }); }",
+        "function handler(req) { function first() { const h = () => 1; return h(); } const fs = [first]; let n = 0; for (const h of fs) { const g = () => h(); n = n + g(); } return Response.json({ a: first(), n: n }); }",
     );
     defer checker.deinit();
     try expectNoKind(&checker, .canonical_arrow_helper);

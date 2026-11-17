@@ -1359,6 +1359,18 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(body("  const a = 1;\n  const b = 2;")),
     },
     .{
+        .key = "A declaration of a name that an enclosing or a nested scope already declares, such as a body `const a = 2;` under the parameter `a: number`, an arrow parameter that reuses a local name such as `(v: number): number => v`, a block `const r` before a later `const r` of the function, and a local `sha256` under `import { sha256 }`",
+        .refused = &.{
+            r("const a = 2;", top("function g(a: number): number {\n  const a = 2;\n  return a;\n}")),
+            r("a: number", top("function g(a: number): number {\n  const a = 2;\n  return a;\n}")),
+            r("(v: number): number => v", body("  const v: number = 1;\n  const xs: number[] = [v];\n  const ys = xs.map((v: number): number => v);\n  assert ys.length > 0;")),
+            r("const r", top("function g(c: boolean): number {\n  if (c) {\n    const r: number = 1;\n    return r;\n  }\n  const r: number = 2;\n  return r;\n}")),
+            r("sha256", top("import { sha256 } from \"zttp:crypto\";\nfunction g(): number {\n  const sha256: number = 1;\n  return sha256;\n}")),
+            r("import { sha256 }", top("import { sha256 } from \"zttp:crypto\";\nfunction g(): number {\n  const sha256: number = 1;\n  return sha256;\n}")),
+        },
+        .clean = c(top("function g(c: boolean): number {\n  if (c) {\n    const r: number = 1;\n    return r;\n  }\n  if (!c) {\n    const r: number = 2;\n    return r;\n  }\n  return 0;\n}")),
+    },
+    .{
         .key = "A second declaration of a name in one scope, such as `const a = 1; const a = 2;`, a `function` and a `const` of one name, and an import and a declaration of one name",
         .refused = &.{
             r("const a = 1; const a = 2;", body("  const a = 1;\n  const a = 2;")),

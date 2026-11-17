@@ -246,10 +246,10 @@ const GeneratedFixture = enum {
                 try w.writeAll("]; return Response.json(values); }\n");
             },
             .nested_functions => {
-                for (0..24) |i| try w.print("function nested{d}(x: number): number {{\n", .{i});
-                try w.writeAll("return x + 1;\n}\n");
+                for (0..24) |i| try w.print("function nested{d}(x{d}: number): number {{\n", .{ i, i });
+                try w.writeAll("return x23 + 1;\n}\n");
                 var depth: usize = 23;
-                while (depth > 0) : (depth -= 1) try w.print("return nested{d}(x);\n}}\n", .{depth});
+                while (depth > 0) : (depth -= 1) try w.print("return nested{d}(x{d});\n}}\n", .{ depth, depth - 1 });
                 try w.writeAll("function handler(req: Request): Response { return Response.text(String(nested0(1))); }\n");
             },
             .typed_declarations => {

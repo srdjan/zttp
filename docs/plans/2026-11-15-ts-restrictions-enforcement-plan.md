@@ -222,6 +222,25 @@ owner chose option (a) on 2026-11-16: reserve every keyword of the lexer
 as a value name, with a targeted code. The rejected option was (b), which
 admits the words as names through contextual-keyword parsing.
 
+### Decision 16: the scope of the shadowing refusal (N12)
+
+The owner chose option (a) on 2026-11-17. ZTS069 refuses a declaration
+whose name an enclosing or a nested scope already declares, and the module
+scope counts. So a local, a parameter, or a pattern binding cannot reuse
+the name of an import or a top-level declaration. The measured fallout was
+about 29 broken tests and 0 uses in the 281 tracked `.ts` files. The
+rejected option was (b), which covers only function and block scopes, with
+about 24 broken tests.
+
+### Decision 17: the tests whose subject is two bindings of one name
+
+After N12, two sibling blocks can still declare one name. The owner chose
+option (a) on 2026-11-17. Each broken test moves to a sibling form that
+keeps its subject, and the analyzer code stays. A test case is deleted only
+when its subject needs nesting, and its outcome pin moves to the ZTS069
+refusal. The rejected option was (b), which follows Decision 11: delete the
+tests, then delete the analyzer code in a later unit.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -919,3 +938,27 @@ later.
   the parameter-assignment type test keeps only its `let` control, because
   their subject is now refused. `TypeChecker.typeOfDeclaration` keeps its
   parameter fallback, because reads use it.
+- U4b-7b refuses a declaration whose name an enclosing or a nested scope
+  already declares, with ZTS069 (N12, Decisions 16 and 17). The module
+  scope counts. `ScopeAnalyzer` keeps the newest declaring scope of each
+  name, so one check walks only the enclosing scopes. Under Decision 17,
+  30 broken tests move: 21 to two sibling scopes that declare one name, 5
+  by a rename where the shadowing was incidental, and 4 to a ZTS069 pin.
+  A mutant that counts a closure call by name fails exactly the three
+  sibling strict-checker tests. These findings stay open:
+  - The 4 pinned cases had a local that reuses a module-level name: an
+    import name in `flow_interp.zig` and `type_checker.zig`, a module
+    `const` in the state-isolation cases, and a nested `handler` in the
+    contract fixtures. The analyzer code that served them stays
+    (Decision 17), and parsed input probably no longer reaches it. An
+    audit with a probe for each site can confirm this.
+  - A local may still reuse an ambient name such as `Date`, because an
+    ambient name has no declaration in a scope.
+  - After a refused local that reuses a module `const`, a later
+    assignment to the name reads the module `const` and cascades a ZTS066.
+  - With `hyperfine -N -i`, `zts check` on 2,000 small module functions
+    took 380.8 ms before N12 and 379.3 ms after it (10 runs). On 20,000
+    functions, the minimum of 3 runs was 27.0 s before and 26.9 s after.
+    So N12 adds no measurable time, but the check itself grows faster
+    than the file: 10 times the functions take about 71 times as long. The
+    cause is older than N12 and is not measured.

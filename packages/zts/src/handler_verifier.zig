@@ -4195,15 +4195,18 @@ test "ZTS303 p_closure_dup2: a closure over a Result name that two bindings shar
         \\    }
         \\    return Response.json({ v: r.value });
         \\  }
-        \\  const r = parseJson("2");
-        \\  const read = (): unknown => {
-        \\    return r.value;
-        \\  };
-        \\  return Response.json({ v: read() });
+        \\  if (req.method !== "GET") {
+        \\    const r = parseJson("2");
+        \\    const read = (): unknown => {
+        \\      return r.value;
+        \\    };
+        \\    return Response.json({ v: read() });
+        \\  }
+        \\  return Response.json({ v: 0 });
         \\}
     );
     try std.testing.expectEqual(@as(u32, 1), refusals.count);
-    try std.testing.expectEqual(@as(u32, 12), refusals.first_line);
+    try std.testing.expectEqual(@as(u32, 13), refusals.first_line);
 }
 
 test "ZTS303 an unchecked requestJson read is refused" {
@@ -4779,11 +4782,14 @@ test "ZTS303 shape: a captured name that two Result bindings share" {
         \\    }
         \\    return Response.json({ v: r.value });
         \\  }
-        \\  const r = parseJson("2");
-        \\  const read = (): unknown => {
-        \\    return r.value;
-        \\  };
-        \\  return Response.json({ v: read() });
+        \\  if (req.method !== "GET") {
+        \\    const r = parseJson("2");
+        \\    const read = (): unknown => {
+        \\      return r.value;
+        \\    };
+        \\    return Response.json({ v: read() });
+        \\  }
+        \\  return Response.json({ v: 0 });
         \\}
     );
     try std.testing.expectEqual(ResultShape.ambiguous_upvalue, first.shape);

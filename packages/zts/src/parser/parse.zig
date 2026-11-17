@@ -2052,7 +2052,7 @@ pub const Parser = struct {
             .variable,
             kind == .@"const",
         ) catch |err| {
-            if (err == error.DuplicateBinding) return self.bindingFailure(err, name.location(), .duplicate_binding);
+            if (isNameFailure(err)) return self.bindingFailure(err, name.location(), .duplicate_binding);
             if (self.admission != null) switch (err) {
                 error.OutOfMemory => return err,
                 else => {},
@@ -2367,7 +2367,7 @@ pub const Parser = struct {
             .function,
             false,
         ) catch |err| {
-            if (err == error.DuplicateBinding) return self.bindingFailure(err, name.location(), .duplicate_binding);
+            if (isNameFailure(err)) return self.bindingFailure(err, name.location(), .duplicate_binding);
             if (self.admission != null) switch (err) {
                 error.OutOfMemory => return err,
                 else => {},
@@ -3299,7 +3299,7 @@ pub const Parser = struct {
                     false,
                 ) catch |err| switch (kind) {
                     .named => {
-                        if (err == error.DuplicateBinding) return self.selectAdmissionHeaderFailure(
+                        if (isNameFailure(err)) return self.selectAdmissionHeaderFailure(
                             self.bindingFailure(err, param_name.location(), .duplicate_parameter),
                             saved_failure,
                         );
@@ -4335,7 +4335,7 @@ pub const Parser = struct {
                 true, // imports are const
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.DuplicateBinding => return self.bindingFailure(err, spec_loc, .duplicate_binding),
+                error.DuplicateBinding, error.ShadowedBinding => return self.bindingFailure(err, spec_loc, .duplicate_binding),
                 else => {
                     self.errorAt(spec_loc, "too many local variables");
                     return error.ParseError;
@@ -6258,6 +6258,10 @@ pub const Parser = struct {
     /// when a scope has no local slot left. Each refusal must be recorded
     /// here: `parse` recovers from an error that recorded nothing by
     /// skipping the statement, which drops it without a trace.
+    fn isNameFailure(err: anyerror) bool {
+        return err == error.DuplicateBinding or err == error.ShadowedBinding;
+    }
+
     fn bindingFailure(self: *Parser, err: anyerror, loc: SourceLocation, duplicate: error_mod.ErrorKind) anyerror {
         switch (err) {
             error.OutOfMemory => return err,
@@ -6267,6 +6271,10 @@ pub const Parser = struct {
                 else
                     "this name is already declared in this scope";
                 self.errors.addError(duplicate, loc, message);
+                return error.ParseError;
+            },
+            error.ShadowedBinding => {
+                self.errors.addError(.shadowed_binding, loc, "this name is already declared in an enclosing or a nested scope");
                 return error.ParseError;
             },
             else => {

@@ -5825,17 +5825,18 @@ test "a status test is a conjunct that composes with the short-circuit cases" {
     try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_not_ok}));
 }
 
-test "a shadowed res keeps the status fork of the outer fetch" {
+test "a sibling res keeps the status fork of the fetch" {
     const source = status_prefix ++
         \\import { cacheGet } from "zttp:cache";
         \\function handler(req) {
-        \\  const res = fetch("https://api.example.com/a");
         \\  if (req.method === "POST") {
         \\    const res = cacheGet("ns", "k") ?? "none";
         \\    return Response.json({ cached: res });
+        \\  } else {
+        \\    const res = fetch("https://api.example.com/a");
+        \\    if (res.status !== 200) { return Response.json({ error: "upstream" }, { status: 502 }); }
+        \\    return Response.json({ a: res.body });
         \\  }
-        \\  if (res.status !== 200) { return Response.json({ error: "upstream" }, { status: 502 }); }
-        \\  return Response.json({ a: res.body });
         \\}
     ;
     var fixture = try generateFixture(std.testing.allocator, source);

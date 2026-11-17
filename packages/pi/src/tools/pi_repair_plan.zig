@@ -1041,11 +1041,14 @@ test "repair plan: a shared captured name asks for unique names" {
         \\    }
         \\    return Response.json({ v: r.value });
         \\  }
-        \\  const r = parseJson("2");
-        \\  const read = (): unknown => {
-        \\    return r.value;
-        \\  };
-        \\  return Response.json({ v: read() });
+        \\  if (req.method !== "GET") {
+        \\    const r = parseJson("2");
+        \\    const read = (): unknown => {
+        \\      return r.value;
+        \\    };
+        \\    return Response.json({ v: read() });
+        \\  }
+        \\  return Response.json({ v: 0 });
         \\}
     , "Give each Result binding in the file a unique name.", "// give each Result binding in the file a unique name");
 }

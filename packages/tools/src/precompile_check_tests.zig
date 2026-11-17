@@ -6598,7 +6598,7 @@ test "CHECK preserves nominal generic diagnostic order before scalar refusal" {
     try std.testing.expectEqual(cases.len, observed);
 }
 
-test "CHECK preserves measured lookup winners shadows and captures" {
+test "CHECK preserves measured lookup winners sibling scopes and captures" {
     const ambient_suggestion =
         "Import a published virtual-module capability or use an ambient name listed by " ++
         "meta.ambient_names.";
@@ -6681,16 +6681,16 @@ test "CHECK preserves measured lookup winners shadows and captures" {
         },
         .{
             .source =
-            \\const item: number = 1;
+            \\const topItem: number = 1;
             \\function readItem(): string {
-            \\  const item = "inferred";
+            \\  if (true) { const item = "inferred"; }
             \\  if (true) {
             \\    const item: string = "typed";
             \\    return item;
             \\  }
             \\}
             \\export function handler(req: Request): Response {
-            \\  return Response.json({ top: item, nested: readItem(), now: Date.now() });
+            \\  return Response.json({ top: topItem, nested: readItem(), now: Date.now() });
             \\}
             \\
             ,
@@ -6708,13 +6708,15 @@ test "CHECK preserves measured lookup winners shadows and captures" {
         .{
             .source =
             \\function compute(): number {
-            \\  const value: number = 1;
-            \\  const readOuter = (): number => value;
             \\  if (true) {
             \\    const value: string = "inner";
             \\    const readInner = (): string => value;
-            \\    const outerResult: number = readOuter();
             \\    const innerResult: string = readInner();
+            \\  }
+            \\  if (true) {
+            \\    const value: number = 1;
+            \\    const readOuter = (): number => value;
+            \\    const outerResult: number = readOuter();
             \\    return outerResult;
             \\  }
             \\}
@@ -6730,7 +6732,7 @@ test "CHECK preserves measured lookup winners shadows and captures" {
                 .{
                     .code = "ZTS500",
                     .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
-                    .line = 12,
+                    .line = 14,
                     .column = 24,
                     .suggestion = capture_contract_suggestion,
                 },
@@ -6759,16 +6761,16 @@ test "CHECK preserves measured lookup winners shadows and captures" {
         },
         .{
             .source =
-            \\const item: number = 1;
+            \\const topItem: number = 1;
             \\function readItem(): string {
-            \\  const item = "inferred";
+            \\  if (true) { const item = "inferred"; }
             \\  if (true) {
             \\    const item: string = 2;
             \\    return item;
             \\  }
             \\}
             \\export function handler(req: Request): Response {
-            \\  return Response.json({ top: item, nested: readItem() });
+            \\  return Response.json({ top: topItem, nested: readItem() });
             \\}
             \\
             ,
@@ -6785,13 +6787,15 @@ test "CHECK preserves measured lookup winners shadows and captures" {
         .{
             .source =
             \\function compute(): number {
-            \\  const value: number = 1;
-            \\  const readOuter = (): number => value;
             \\  if (true) {
             \\    const value: string = "inner";
             \\    const readInner = (): number => value;
-            \\    const outerResult: number = readOuter();
             \\    const innerResult: number = readInner();
+            \\  }
+            \\  if (true) {
+            \\    const value: number = 1;
+            \\    const readOuter = (): number => value;
+            \\    const outerResult: number = readOuter();
             \\    return outerResult;
             \\  }
             \\}
@@ -6806,7 +6810,7 @@ test "CHECK preserves measured lookup winners shadows and captures" {
             .diagnostics = &.{.{
                 .code = "ZTS204",
                 .message = "return type does not match declared return type",
-                .line = 6,
+                .line = 4,
                 .column = 23,
                 .suggestion = return_suggestion,
             }},
@@ -12794,25 +12798,6 @@ test "state isolation across helper shapes" {
         \\  return Response.text(String(local() + count));
         \\}
         },
-        .{ .name = "helper with a local that shadows a module name", .state_isolated = true, .source =
-        \\const count = 0;
-        \\function shadow(): number {
-        \\  let count: number = 1;
-        \\  count = count + 1;
-        \\  return count;
-        \\}
-        \\export function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  return Response.text(String(shadow()));
-        \\}
-        },
-        .{ .name = "handler with a local that shadows a module name", .state_isolated = true, .source =
-        \\const count = 0;
-        \\export function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  let count: number = 1;
-        \\  count = count + 1;
-        \\  return Response.text(String(count));
-        \\}
-        },
     };
     for (cases) |case| {
         errdefer std.debug.print("state isolation case failed: {s}\n", .{case.name});
@@ -12824,6 +12809,50 @@ test "state isolation across helper shapes" {
         const properties = (result.contract orelse return error.TestUnexpectedResult).properties orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(case.state_isolated, properties.state_isolated);
     }
+}
+
+test "a local that shadows a module name is refused with ZTS069" {
+    const allocator = std.testing.allocator;
+    const helper_local =
+        \\const count = 0;
+        \\function shadow(): number {
+        \\  let count: number = 1;
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(String(shadow()));
+        \\}
+    ;
+    var helper = try runCheckOnlyFromSourceWithOptions(allocator, helper_local, "helper-case.ts", .{ .json_mode = true });
+    defer helper.deinit(allocator);
+    // The refused declaration leaves `count` bound to the module const, so the assignment is refused too.
+    try std.testing.expectEqual(@as(u32, 2), helper.parse_errors);
+    try std.testing.expectEqual(@as(usize, 2), helper.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS069", helper.json_diagnostics.items[0].code);
+    try std.testing.expectEqual(@as(u32, 3), helper.json_diagnostics.items[0].line);
+    try std.testing.expectEqual(@as(u32, 7), helper.json_diagnostics.items[0].column);
+    try std.testing.expectEqualStrings("ZTS066", helper.json_diagnostics.items[1].code);
+    try std.testing.expectEqual(@as(u32, 4), helper.json_diagnostics.items[1].line);
+
+    const handler_local =
+        \\const count = 0;
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  let count: number = 1;
+        \\  count = count + 1;
+        \\  return Response.text(String(count));
+        \\}
+    ;
+    var handler = try runCheckOnlyFromSourceWithOptions(allocator, handler_local, "helper-case.ts", .{ .json_mode = true });
+    defer handler.deinit(allocator);
+    // The refused declaration leaves `count` bound to the module const, so the assignment is refused too.
+    try std.testing.expectEqual(@as(u32, 2), handler.parse_errors);
+    try std.testing.expectEqual(@as(usize, 2), handler.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS069", handler.json_diagnostics.items[0].code);
+    try std.testing.expectEqual(@as(u32, 3), handler.json_diagnostics.items[0].line);
+    try std.testing.expectEqual(@as(u32, 7), handler.json_diagnostics.items[0].column);
+    try std.testing.expectEqualStrings("ZTS066", handler.json_diagnostics.items[1].code);
+    try std.testing.expectEqual(@as(u32, 4), handler.json_diagnostics.items[1].line);
 }
 
 test "a direct handler mutation is still the ZTS310 error" {
@@ -15500,8 +15529,8 @@ const n01_binding_new_name =
 
 const n01_binding_shorthand =
     \\export function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const t = Date.now();
-    \\  const r = { m: req.method, t: t };
+    \\  const now = Date.now();
+    \\  const r = { m: req.method, t: now };
     \\  const s = match (r) {
     \\    when { m: "GET", t }: "get"
     \\    default: "other"

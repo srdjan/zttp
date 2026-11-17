@@ -567,11 +567,14 @@ const false_proofs = [_]FalseProof{
             "    }\n" ++
             "    return Response.json({ v: r.value });\n" ++
             "  }\n" ++
-            "  const r = validateJson(\"todo\", \"{}\");\n" ++
-            "  const read = (): unknown => {\n" ++
-            "    return r.value;\n" ++
-            "  };\n" ++
-            "  return Response.json({ v: read() });\n",
+            "  if (req.method !== \"GET\") {\n" ++
+            "    const r = validateJson(\"todo\", \"{}\");\n" ++
+            "    const read = (): unknown => {\n" ++
+            "      return r.value;\n" ++
+            "    };\n" ++
+            "    return Response.json({ v: read() });\n" ++
+            "  }\n" ++
+            "  return Response.json({ v: 0 });\n",
     },
 };
 
