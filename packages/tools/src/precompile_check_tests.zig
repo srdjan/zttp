@@ -1596,8 +1596,8 @@ test "CHECK refuses an empty predicate narrowing at the token after is" {
         // Narrowing ends at two spaces, a newline, and an indented brace.
         .{ .source = handler_line ++ "function isS(x: unknown): x is  \n  { return true; }\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 3, .column = 3, .suggestion = missing } },
         // Arrow forms.
-        .{ .source = handler_line ++ "const isS = (x: unknown): x is\n=> true;\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 3, .column = 1, .suggestion = missing } },
-        .{ .source = handler_line ++ "const isS = (x: unknown): x is => true;\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 2, .column = 32, .suggestion = missing } },
+        .{ .source = handler_line ++ "function use(): undefined { [1].filter((x: unknown): x is\n=> true); return undefined; }\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 3, .column = 1, .suggestion = missing } },
+        .{ .source = handler_line ++ "function use(): undefined { [1].filter((x: unknown): x is => true); return undefined; }\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 2, .column = 59, .suggestion = missing } },
         // A comment after is leaves the narrowing empty.
         .{ .source = handler_line ++ "function isS(x: unknown): x is /* c */ { return true; }\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 2, .column = 40, .suggestion = missing } },
         .{ .source = handler_line ++ "function isS(x: unknown): x is // c\n{ return true; }\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 3, .column = 1, .suggestion = missing } },
@@ -10488,8 +10488,8 @@ const absent_read_refused = [_]AbsentReadCase{
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
-    \\  const f = (): number => p.age;
-    \\  return Response.json({ a: f() });
+    \\  const f = [0].map((n: number): number => p.age);
+    \\  return Response.json({ a: f });
     \\}
     },
     .{ .name = "s01_union_result_unnarrowed", .expect = "ZTS309@6,ZTS500@4", .source =
@@ -10512,8 +10512,8 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     \\function handler(req: Request): Response {
     \\  const r: R = { ok: false };
-    \\  const read = (): number => r.value.age;
-    \\  return Response.json({ a: read(), b: other() });
+    \\  const read = [0].map((n: number): number => r.value.age);
+    \\  return Response.json({ a: read, b: other() });
     \\}
     },
     .{ .name = "s05b_upvalue_no_collision", .expect = "ZTS309@5,ZTS500@3", .source =
@@ -10521,8 +10521,8 @@ const absent_read_refused = [_]AbsentReadCase{
     \\structural R = { ok: boolean; value?: P; error?: string };
     \\function handler(req: Request): Response {
     \\  const r: R = { ok: false };
-    \\  const read = (): number => r.value.age;
-    \\  return Response.json({ a: read() });
+    \\  const read = [0].map((n: number): number => r.value.age);
+    \\  return Response.json({ a: read });
     \\}
     },
     .{ .name = "u01_match_on_unknown_binding", .expect = "ZTS309@7,ZTS500@3", .source =
@@ -10611,9 +10611,9 @@ const absent_read_accepted = [_]AbsentReadCase{
     .{ .name = "result_error_returned_as_string", .expect = "ZTS303@3,ZTS401@5,ZTS500@2", .source =
     \\import { jwtVerify } from "zttp:auth";
     \\function handler(req: Request): Response {
-    \\  const read = (): string => jwtVerify("t", "s").error;
-    \\  const again = read;
-    \\  return Response.text(again());
+    \\  const reads = ["t"].map((t: string): string => jwtVerify(t, "s").error);
+    \\  const again = reads.join("");
+    \\  return Response.text(again);
     \\}
     },
     .{ .name = "d5_requestjson", .expect = "ZTS201@5,ZTS201@5", .source =
@@ -10742,24 +10742,24 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\  return Response.json({ a: p.age });
     \\}
     },
-    .{ .name = "n28_closure_capture_const", .expect = "ZTS500@2", .source =
+    .{ .name = "n28_closure_capture_const", .expect = "clean", .source =
     \\structural P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
     \\  if (p === undefined) { return Response.json({ a: 0 }); }
-    \\  const f = (): number => p.age;
-    \\  return Response.json({ a: f() });
+    \\  const f = [0].map((n: number): number => p.age);
+    \\  return Response.json({ a: f });
     \\}
     },
-    .{ .name = "n29_closure_in_block", .expect = "ZTS500@2", .source =
+    .{ .name = "n29_closure_in_block", .expect = "clean", .source =
     \\structural P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const q = ps[0];
     \\  if (q !== undefined) {
-    \\    const f = (): number => q.age;
-    \\    return Response.json({ a: f() });
+    \\    const f = [0].map((n: number): number => q.age);
+    \\    return Response.json({ a: f });
     \\  }
     \\  return Response.json({ a: 0 });
     \\}
@@ -11717,8 +11717,7 @@ const absent_read_untyped_operand = [_]AbsentReadCase{
     },
     .{ .name = "u3_captured_parameter_of_a_named_function_gets_zts601_only", .expect = "ZTS601@1", .source =
     \\function mk(base) {
-    \\  const g = (v: number): number => v + base;
-    \\  return g;
+    \\  return [1].map((v: number): number => v + base);
     \\}
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  return Response.text("x");
@@ -12052,8 +12051,7 @@ const absent_read_untyped_receiver = [_]AbsentReadCase{
     },
     .{ .name = "n1_captured_parameter_of_a_named_function_gets_zts601_only", .expect = "ZTS601@1", .source =
     \\function mk(base) {
-    \\  const g = (v: string): string => base.trim();
-    \\  return g;
+    \\  return ["a"].map((v: string): string => base.trim());
     \\}
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  return Response.text("x");
@@ -14721,7 +14719,7 @@ test "a response chosen by a branch on a varying value is not deterministic" {
         .{ .name = "e_match_record", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { kind: t % 2, name: \"n\" };\n  const s = match (o) {\n    when { kind: 0 }: \"even\"\n    default: \"odd\"\n  };\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:13 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "e_filter", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [\"a\", \"b\"].filter((x: string): boolean => x.length > t % 3);\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:30 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "d_opt_prop", .source = "import { dictGet, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { n: 1 };\n  const d: Dict<string, { n: number }> = dictSet(dictEmpty(), \"a\", o);\n  const m = dictGet(d, String(t));\n  const s = m?.n;\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 7:14 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
-        .{ .name = "d_opt_call3", .source = "import { dictGet, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { f: (): string => \"a\" };\n  const d: Dict<string, { f: () => string }> = dictSet(dictEmpty(), \"a\", o);\n  const m = dictGet(d, String(t));\n  const s = m?.f();\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 6:20 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "d_opt_call3", .source = "import { dictGet, dictSet, dictEmpty } from \"zttp:collections\";\nfunction aStr(): string { return \"a\"; }\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { f: aStr };\n  const d: Dict<string, { f: () => string }> = dictSet(dictEmpty(), \"a\", o);\n  const m = dictGet(d, String(t));\n  const s = m?.f();\n  return Response.text(\"x\");\n}\n", .line = 3, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 7:20 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
     };
     for (rows) |row| try expectDeterministicRefused(allocator, row);
 }
@@ -14779,8 +14777,8 @@ test "a branch on request data, a constant, or an unused clock read keeps determ
         .{ .name = "d_dictfilter_clean", .source = "import { dictFilter, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), \"a\", 1);\n  const f = dictFilter(d, (v: number, k: string): boolean => v > 0);\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "d_some_range_clean", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const h = { v: \"\" };\n  const xs: number[] = range(3);\n  xs.some((i: number): boolean => {\n    h.v = \"x\";\n    return false;\n  });\n  return Response.text(h.v);\n}\n" },
         .{ .name = "d_reduce_clean", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs: number[] = range(3);\n  const n = xs.reduce((acc: string, x: number): string => \"y\", \"init\");\n  return Response.text(n);\n}\n" },
-        .{ .name = "d_opt_call_clean", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { f: (): string => \"a\" };\n  const os = [o];\n  const m = os[0];\n  const s = m?.f();\n  return Response.text(\"x\");\n}\n" },
-        .{ .name = "d_opt_call3_clean", .source = "import { dictGet, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { f: (): string => \"a\" };\n  const d: Dict<string, { f: () => string }> = dictSet(dictEmpty(), \"a\", o);\n  const m = dictGet(d, \"a\");\n  const s = m?.f();\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "d_opt_call_clean", .source = "function aStr(): string { return \"a\"; }\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { f: aStr };\n  const os = [o];\n  const m = os[0];\n  const s = m?.f();\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "d_opt_call3_clean", .source = "import { dictGet, dictSet, dictEmpty } from \"zttp:collections\";\nfunction aStr(): string { return \"a\"; }\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { f: aStr };\n  const d: Dict<string, { f: () => string }> = dictSet(dictEmpty(), \"a\", o);\n  const m = dictGet(d, \"a\");\n  const s = m?.f();\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "e_mapResult_clean", .source = "import { mapResult, ok } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const base = ok(1);\n  const r = mapResult(base, (n: number) => ok(2));\n  return Response.text(\"x\");\n}\n" },
         .{ .name = "d_router", .source = "import { routerMatch } from \"zttp:router\";\nfunction getUser(req: Request): Response {\n  return Response.text(\"u\");\n}\nconst routes = { \"GET /users/:id\": getUser };\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const found = routerMatch(routes, req);\n  if (found !== undefined) {\n    return found.handler(req);\n  }\n  return Response.text(\"nf\", { status: 404 });\n}\n" },
     };
@@ -14902,7 +14900,7 @@ test "a branch on a varying value is the cause of a failed deterministic" {
         // The loop reaches `h` only on its second pass, through `f`, and the branch in `h` changes
         // nothing but the mark. The loop fixpoint must compare the site, or it stops before the
         // return reads the mark.
-        .{ .name = "m3_mark_only_pass", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const g = (): number => {\n    return 0;\n  };\n  const h = (): number => {\n    if (Date.now() % 2 === 0) {\n      assert(false);\n    }\n    return 0;\n  };\n  let f = g;\n  let n = 0;\n  for (const x of [1, 2, 3]) {\n    if (x === 3) {\n      return Response.text(String(n));\n    }\n    n = f();\n    f = h;\n  }\n  assert(false);\n  return Response.text(\"never\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 6:5 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
+        .{ .name = "m3_mark_only_pass", .source = "function g(): number {\n  return 0;\n}\nfunction h(): number {\n  if (Date.now() % 2 === 0) {\n    assert(false);\n  }\n  return 0;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let f = g;\n  let n = 0;\n  for (const x of [1, 2, 3]) {\n    if (x === 3) {\n      return Response.text(String(n));\n    }\n    n = f();\n    f = h;\n  }\n  assert(false);\n  return Response.text(\"never\");\n}\n", .line = 10, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
         // Two arms mark the state at different sites. The join keeps the smaller site, the
         // first branch in the source.
         .{ .name = "m2_two_sites", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let s = \"x\";\n  if (req.url.length > 3) {\n    if (Date.now() % 2 === 0) {\n      s = \"a\";\n    }\n  } else {\n    if (Math.random() > 0.5) {\n      s = \"b\";\n    }\n  }\n  return Response.text(s);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:5 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },

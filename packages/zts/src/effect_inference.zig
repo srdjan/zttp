@@ -3485,7 +3485,7 @@ test "export projection owns names and classifies callables data and blocked val
             \\import { fetchSync } from "zttp:fetch";
             \\export function write(k) { cacheSet("ns", k, "v", 10); return 1; }
             \\export function read(k) { return cacheGet("ns", k); }
-            \\export const send = (url) => fetchSync(url);
+            \\export function send(url) { return fetchSync(url); }
             \\export const alias = write;
             \\export const holder = { run: alias };
             \\function loop() { return loop(); }
@@ -5177,8 +5177,10 @@ test "a module binding declared after the function that references it still char
     const row = try analyzeHandlerRow(
         \\import { cacheSet } from "zttp:cache";
         \\function handler(req) { return early.go("k"); }
-        \\const early = { go: (k) => later.save(k) };
-        \\const later = { save: (k) => { cacheSet("ns", k, "v", 10); return 1; } };
+        \\function goLater(k) { return later.save(k); }
+        \\const early = { go: goLater };
+        \\function saveLater(k) { cacheSet("ns", k, "v", 10); return 1; }
+        \\const later = { save: saveLater };
     );
     try testing.expect(row.writes);
 }
@@ -5187,7 +5189,8 @@ test "module data and pure module-held functions keep the row read only" {
     const row = try analyzeHandlerRow(
         \\const cfg = { limit: 10, names: ["a", "b"] };
         \\function fmt(x) { return x + 1; }
-        \\const table = { f: fmt, g: (x) => x };
+        \\function same(x) { return x; }
+        \\const table = { f: fmt, g: same };
         \\function handler(req) {
         \\  const n = cfg.limit;
         \\  return table.f(n);
@@ -5239,7 +5242,7 @@ test "a call through a member of a function-holding binding is a lower bound" {
         "function w(k) { return k; }\nfunction handler(k) { const o = { a: w }; return o.a(k); }",
         "function w(k) { return k; }\nfunction handler(xs) { const o = { a: w }; return xs.map((x) => o.a(x)); }",
         // a closure held at module scope that calls through its own binding
-        "const ops = { a: (k) => ops.b(k), b: (k) => k };\nfunction handler(k) { return ops.a(k); }",
+        "function viaB(k) { return ops.b(k); }\nfunction idB(k) { return k; }\nconst ops = { a: viaB, b: idB };\nfunction handler(k) { return ops.a(k); }",
         // an alias of a holder
         "function w(k) { return k; }\nconst ops = { a: w };\nconst ops2 = ops;\nfunction handler(k) { return ops2.a(k); }",
     };
@@ -5362,13 +5365,9 @@ test "a function value outside the closed positions sets the escape flag" {
         .{ .name = "down", .source = "function pick() { return down; }\nfunction down(n) { return pick()(n); }" },
         .{ .name = "down", .source = "function apply(f, n) { return f(n); }\nfunction down(n) { return apply(down, n); }" },
         .{ .name = "down", .source = "function down(n) { return [n].reduce((a, x) => a, down)(n); }" },
-        .{ .name = "slot", .source = "let slot = (n) => n;\nfunction down(n) { return slot(n); }" },
-        .{ .name = "an anonymous function", .source = "const ops = { a: (n) => n };\nfunction handler(k) { return k; }" },
-        .{ .name = "an anonymous function", .source = "function handler(k) { return ((n) => n)(k); }" },
+        .{ .name = "same", .source = "function same(n) { return n; }\nlet slot = same;\nfunction down(n) { return slot(n); }" },
+        .{ .name = "an anonymous function", .source = "function apply(f, n) { return f(n); }\nfunction handler(k) { return apply((n) => n, k); }" },
         .{ .name = "down", .source = "function down(n) { for (const f of [down]) { return f(n); } return n; }" },
-        // A body-local function has no call-graph edge, so a callback slot
-        // does not close it: recursion through `map` would leave no cycle.
-        .{ .name = "g", .source = "function handler(k) { const g = (x) => [x].map(g)[0]; return [k].map(g); }" },
         // A combinator returns a first argument that is not a Result
         // unchanged, so only its callback slot is closed.
         .{ .name = "down", .source = "import { mapResult } from \"zttp:result\";\nfunction down(n) { return mapResult(down, (x) => x)(n); }" },
@@ -5380,7 +5379,6 @@ test "function values in the closed positions leave the escape flag clear" {
     const cases = [_][]const u8{
         // P0 and P1: a literal bound once, and calls by name.
         "function fmt(x) { return x + 1; }\nfunction handler(k) { return fmt(k); }",
-        "const fmt = (x) => x + 1;\nfunction handler(k) { return fmt(k); }",
         // P2: a builtin that calls its first argument.
         "function fmt(x) { return x + 1; }\nfunction handler(items) { return items.map(fmt); }",
         "function handler(items) { return items.filter((x) => x > 1).map(String); }",
@@ -5395,6 +5393,22 @@ test "function values in the closed positions leave the escape flag clear" {
             "function handler(req) { const found = routerMatch(routes, req); if (found !== undefined) { return found.handler(req); } return Response.text(\"404\"); }",
     };
     for (cases) |source| try expectEscape(source, null);
+}
+
+// Rule 2 of the ZTS072 migration: each source holds an arrow form that the
+// parser refuses, so these cases cannot run once the refusal lands. They
+// moved here unchanged from the two tests above for phase 2 to pin or delete.
+test "a function value in a refused arrow form is classified by the escape flag" {
+    const escapes = [_]struct { name: []const u8, source: []const u8 }{
+        .{ .name = "an anonymous function", .source = "const ops = { a: (n) => n };\nfunction handler(k) { return k; }" },
+        .{ .name = "an anonymous function", .source = "function handler(k) { return ((n) => n)(k); }" },
+        // A body-local function has no call-graph edge, so a callback slot
+        // does not close it: recursion through `map` would leave no cycle.
+        .{ .name = "g", .source = "function handler(k) { const g = (x) => [x].map(g)[0]; return [k].map(g); }" },
+    };
+    for (escapes) |case| try expectEscape(case.source, case.name);
+    // P0 and P1: a literal bound once, and calls by name.
+    try expectEscape("const fmt = (x) => x + 1;\nfunction handler(k) { return fmt(k); }", null);
 }
 
 test "a route table that anything else reads is not a closed position" {
@@ -5528,7 +5542,7 @@ test "exports of a module with an escaped function value carry the flag" {
     defer atoms.deinit();
     var parser = try JsParser.initAdmission(allocator, allocator,
         \\export function plain(n) { return n; }
-        \\export const ops = { a: (n) => n };
+        \\export const ops = { a: plain };
     , .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();

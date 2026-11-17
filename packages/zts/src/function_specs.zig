@@ -441,12 +441,15 @@ test "total is refused for a function that recurses through a function value" {
         },
         .{ .name = "r4", .source = "function down(n) { return [n].map(down)[0]; }" },
         .{ .name = "g1", .source =
-        \\let slot = (n) => n;
+        \\function same(n) { return n; }
+        \\let slot = same;
         \\function down(items, n) { return items.map(slot)[0] ?? n; }
-        \\function arm(n) { slot = (x) => down([x], x); return n; }
+        \\function viaDown(x) { return down([x], x); }
+        \\function arm(n) { slot = viaDown; return n; }
         },
         .{ .name = "fc1", .source =
-        \\let slot = (n) => n;
+        \\function same(n) { return n; }
+        \\let slot = same;
         \\function down(n) { return slot(n); }
         \\function arm(n) { slot = down; return n; }
         },

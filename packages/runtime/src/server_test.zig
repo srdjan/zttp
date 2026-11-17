@@ -476,7 +476,8 @@ const map_items = blk: {
 const slow_recursion_handler = fib_source ++
     "function handler(req) { return Response.text(String(fib(" ++ fib_n ++ "))); }";
 const slow_map_handler =
-    "function handler(req) { const xs = " ++ map_items ++ "; const f = (a, y) => a + y; const r = xs.map((x) => xs.map((z) => xs.reduce(f, 0) + xs.reduce(f, 0) + xs.reduce(f, 0) + xs.reduce(f, 0)));" ++
+    "function addPair(a, y) { return a + y; }" ++
+    "function handler(req) { const xs = " ++ map_items ++ "; const r = xs.map((x) => xs.map((z) => xs.reduce(addPair, 0) + xs.reduce(addPair, 0) + xs.reduce(addPair, 0) + xs.reduce(addPair, 0)));" ++
     " return Response.text(String(r.length)); }";
 const slow_component_handler = fib_source ++
     "function Comp(props) { return h('p', {}, String(fib(" ++ fib_n ++ "))); }" ++

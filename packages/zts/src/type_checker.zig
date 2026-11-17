@@ -10314,11 +10314,11 @@ test "TypeChecker: sibling exported locals use their own scoped annotations" {
 test "TypeChecker: exported handler argument annotation reaches nested upvalue" {
     try checkTypedSource(
         \\export function handler(req: number): Response {
-        \\  const nested = () => {
+        \\  const nested = [0].map((k: number): string => {
         \\    const text: string = req;
         \\    return text;
-        \\  };
-        \\  return Response.json({ value: nested() });
+        \\  });
+        \\  return Response.json({ value: nested });
         \\}
     , 1, 0);
 }
@@ -10384,10 +10384,10 @@ test "TypeChecker: user function aliases carry the function signature" {
         \\  const alias = format;
         \\  alias("ok", 1);
         \\  alias("missing count");
-        \\  const nested = (local) => {
+        \\  const nested = [42].map((local) => {
         \\    alias("nested missing count");
-        \\  };
-        \\  nested(42);
+        \\    return local;
+        \\  });
         \\}
     , 2, 0);
 }
@@ -10692,7 +10692,7 @@ test "TypeChecker import cache allocation failure stays unproven after allocator
 test "TypeChecker: a call with exactly the declared arguments is accepted" {
     try checkTypedSource(
         \\function add(x: number, y: number): number { return x + y; }
-        \\const inc = (x: number): number => x + 1;
+        \\function inc(x: number): number { return x + 1; }
         \\function apply(f: (x: number) => number, v: number): number { return f(v); }
         \\function handler(req: Request): Response {
         \\  const doubled = [1, 2].map((x: number): number => x * 2);
@@ -11176,7 +11176,10 @@ test "TypeChecker refuses a partially written dynamic schema without leaking" {
 test "TypeChecker keeps the current JSON binding distinction for schemas" {
     try checkTypedSourceSaying(
         \\import { schemaCompile, validateJson } from "zttp:validate";
-        \\const JSON = { stringify: (value) => "ignored" };
+        \\function ignored(value: unknown): string {
+        \\  return "ignored";
+        \\}
+        \\const JSON = { stringify: ignored };
         \\schemaCompile("global-shadow", JSON.stringify({
         \\  type: "object",
         \\  properties: { title: { type: "string" } },
@@ -11187,8 +11190,11 @@ test "TypeChecker keeps the current JSON binding distinction for schemas" {
 
     try checkTypedSource(
         \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\function ignored(value: unknown): string {
+        \\  return "ignored";
+        \\}
         \\function register() {
-        \\  const JSON = { stringify: (value) => "ignored" };
+        \\  const JSON = { stringify: ignored };
         \\  schemaCompile("local-shadow", JSON.stringify({
         \\    type: "object",
         \\    properties: { title: { type: "string" } },
@@ -11551,13 +11557,13 @@ test "a captured binding and a parameter in the same slot narrow separately" {
         \\}
         \\function handler(req: Request): Response {
         \\    const v: string | undefined = load();
-        \\    const f = (n: number): number => {
+        \\    const f = [1].map((n: number): number => {
         \\        if (v === undefined) {
         \\            return 0;
         \\        }
         \\        return n;
-        \\    };
-        \\    return Response.json({ x: f(1) });
+        \\    });
+        \\    return Response.json({ x: f });
         \\}
     ,
         0,
@@ -12317,8 +12323,11 @@ test "a cycle through two names is refused" {
 test "negative recursion through a function parameter is refused" {
     try checkTypedSourceSaying(
         \\structural Neg = (value: Neg) => number;
+        \\function one(value: Neg): number {
+        \\    return 1;
+        \\}
         \\function handler(req: Request): Response {
-        \\    const v: Neg = (value) => 1;
+        \\    const v: Neg = one;
         \\    return Response.json({ ok: true });
         \\}
     ,
@@ -12942,8 +12951,8 @@ test "capture: a closure over a for...of binding reads that binding, not a sibli
         \\    n = n + 1;
         \\  }
         \\  for (const i of items) {
-        \\    const g = (): number => needS(i);
-        \\    n = n + g();
+        \\    const g = [0].map((k: number): number => needS(i));
+        \\    n = n + g.length;
         \\  }
         \\  return n;
         \\}
@@ -12973,8 +12982,8 @@ test "capture: a closure over a for...of binding reads that binding, not a sibli
         \\function run(items: string[]): number {
         \\  let n = 0;
         \\  for (const i of items) {
-        \\    const g = (): number => needS(i);
-        \\    n = n + g();
+        \\    const g = [0].map((k: number): number => needS(i));
+        \\    n = n + g.length;
         \\  }
         \\  return n;
         \\}
@@ -12995,7 +13004,7 @@ test "capture: a closure over a match pattern binding reads that binding" {
         \\    default: 0
         \\  };
         \\  const second = match (m) {
-        \\    when { kind: "a", text }: ((): number => needS(text))()
+        \\    when { kind: "a", text }: [0].map((k: number): number => needS(text)).length
         \\    default: 0
         \\  };
         \\  return first + second;
@@ -13022,7 +13031,7 @@ test "capture: a closure over a match pattern binding reads that binding" {
         \\}
         \\function run(m: { kind: "a"; text: string } | { kind: "b" }): number {
         \\  return match (m) {
-        \\    when { kind: "a", text }: ((): number => needS(text))()
+        \\    when { kind: "a", text }: [0].map((k: number): number => needS(text)).length
         \\    default: 0
         \\  };
         \\}
@@ -13040,8 +13049,7 @@ test "capture: a captured binding is typed from its declaration and not from the
         \\  if (input === undefined) {
         \\    return 0;
         \\  }
-        \\  const g = (): number => needS(input);
-        \\  return g();
+        \\  return [0].map((k: number): number => needS(input)).length;
         \\}
     , refused_once);
     // A guard inside the closure narrows the captured name there.
@@ -13050,13 +13058,12 @@ test "capture: a captured binding is typed from its declaration and not from the
         \\  return s.length;
         \\}
         \\function run(input: string | undefined): number {
-        \\  const g = (): number => {
+        \\  return [0].map((k: number): number => {
         \\    if (input === undefined) {
         \\      return 0;
         \\    }
         \\    return needS(input);
-        \\  };
-        \\  return g();
+        \\  }).length;
         \\}
     , accepted);
 }
@@ -13076,8 +13083,7 @@ test "capture: without the parser record a captured binding has no type" {
         \\    n = n + 1;
         \\  }
         \\  for (const i of items) {
-        \\    const g = (): number => needS(i);
-        \\    n = n + g();
+        \\    n = n + [0].map((k: number): number => needS(i)).length;
         \\  }
         \\  return n;
         \\}
@@ -13114,12 +13120,12 @@ test "call kill: the arguments run before the call" {
         \\function need(n: number, s: string): number {
         \\  return n + s.length;
         \\}
-        \\function run(input: string | undefined): number {
-        \\  let x: string | undefined = input;
-        \\  const clear = (): number => {
-        \\    x = undefined;
-        \\    return 1;
-        \\  };
+        \\let x: string | undefined = "a";
+        \\function clear(): number {
+        \\  x = undefined;
+        \\  return 1;
+        \\}
+        \\function run(): number {
         \\  if (x === undefined) {
         \\    return 0;
         \\  }
@@ -13132,12 +13138,12 @@ test "call kill: the arguments run before the call" {
         \\function need(s: string, n: number): number {
         \\  return n + s.length;
         \\}
-        \\function run(input: string | undefined): number {
-        \\  let x: string | undefined = input;
-        \\  const clear = (): number => {
-        \\    x = undefined;
-        \\    return 1;
-        \\  };
+        \\let x: string | undefined = "a";
+        \\function clear(): number {
+        \\  x = undefined;
+        \\  return 1;
+        \\}
+        \\function run(): number {
         \\  if (x === undefined) {
         \\    return 0;
         \\  }
@@ -13149,21 +13155,37 @@ test "call kill: the arguments run before the call" {
 test "call kill: a call inside a loop body or an && chain kills for what follows" {
     // p8_loop_call.ts. The loop body's kill reaches the join after the loop.
     try expectKindCounts(
-        narrowedThenClear("  for (const i of [1, 2]) {\n    n = n + clear();\n  }"),
-        refused_once,
-    );
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\let x: string | undefined = "a";
+        \\function clear(): number {
+        \\  x = undefined;
+        \\  return 1;
+        \\}
+        \\function run(): number {
+        \\  let n = 0;
+        \\  if (x === undefined) {
+        \\    return 0;
+        \\  }
+        \\  for (const i of [1, 2]) {
+        \\    n = n + clear();
+        \\  }
+        \\  return needS(x) + n;
+        \\}
+    , refused_once);
     // p15_and_chain_reinstall.ts. `clear()` in the middle of the chain voids
     // the guard that the left operand installed.
     try expectKindCounts(
         \\function needS(s: string): number {
         \\  return s.length;
         \\}
-        \\function run(input: string | undefined): number {
-        \\  let x: string | undefined = input;
-        \\  const clear = (): number => {
-        \\    x = undefined;
-        \\    return 1;
-        \\  };
+        \\let x: string | undefined = "a";
+        \\function clear(): number {
+        \\  x = undefined;
+        \\  return 1;
+        \\}
+        \\function run(): number {
         \\  const ok = x !== undefined && clear() === 1 && needS(x) > 0;
         \\  if (ok) {
         \\    return 1;
@@ -13643,9 +13665,11 @@ test "function value: a function stays assignable to a function type" {
         \\}
     );
     try expectNoDiagnostics(
-        \\function r(): number {
-        \\  const k: (x: number) => number = (x: number): number => x;
+        \\function apply(k: (x: number) => number): number {
         \\  return k(1);
+        \\}
+        \\function r(): number {
+        \\  return apply((x: number): number => x);
         \\}
     );
 }
@@ -13685,8 +13709,9 @@ test "function value: an unannotated arrow in a shadowing JSON object takes its 
 
 test "function value: a function with an extra parameter is refused at a function type" {
     try expectOnlyDiagnostic(
+        \\function g(x: number, y: number): number { return x; }
         \\function r(): number {
-        \\  const k: (x: number) => number = (x: number, y: number): number => x;
+        \\  const k: (x: number) => number = g;
         \\  return 1;
         \\}
     , .type_mismatch);
@@ -13694,8 +13719,9 @@ test "function value: a function with an extra parameter is refused at a functio
 
 test "function value: a function with a wrong parameter type is refused at a function type" {
     try expectOnlyDiagnostic(
+        \\function g(x: string): number { return 1; }
         \\function r(): number {
-        \\  const k: (x: number) => number = (x: string): number => 1;
+        \\  const k: (x: number) => number = g;
         \\  return 1;
         \\}
     , .type_mismatch);
@@ -13976,7 +14002,13 @@ test "predicate target: a predicate that names no parameter is ZTS211" {
 
 test "predicate target: an arrow predicate that names no parameter gets one ZTS211" {
     try expectOnlyDiagnostic(
-        \\const isStr = (y: unknown): x is string => typeof y === "string";
+        \\function apply(f: (x: unknown) => boolean): boolean {
+        \\    return f(1);
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const r = apply((y: unknown): x is string => typeof y === "string");
+        \\    return Response.json({ r: r });
+        \\}
     , .invalid_type_predicate);
 }
 

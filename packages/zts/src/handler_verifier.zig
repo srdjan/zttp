@@ -3364,12 +3364,12 @@ test "a binding read only by a closure is not reported unused" {
     // upvalue reference, so `y` counted no reference.
     try std.testing.expectEqual(@as(u32, 0), try countUnusedVariableWarnings(
         \\function handler(req) {
-        \\  let saved = () => "clean";
+        \\  let saved = "clean";
         \\  if (req.method === "GET") {
         \\    const y = "kept";
-        \\    saved = () => y;
+        \\    saved = [0].map(() => y).join("");
         \\  }
-        \\  return Response.text(saved());
+        \\  return Response.text(saved);
         \\}
     ));
     // A binding nothing reads is still reported beside a captured one.
@@ -3377,8 +3377,8 @@ test "a binding read only by a closure is not reported unused" {
         \\function handler(req) {
         \\  const y = "kept";
         \\  const unused = "never read";
-        \\  const read = () => y;
-        \\  return Response.text(read());
+        \\  const read = [0].map(() => y);
+        \\  return Response.text(read.join(""));
         \\}
     ));
 }
@@ -3848,19 +3848,19 @@ test "ZTS303 reports an unchecked Result read inside an assert condition" {
 
 test "ZTS303 reports an unchecked Result read inside a closure" {
     const arrow = try routeVerifierCounts(result_import ++
+        \\function thunk(f) { return f(); }
         \\function handler(req) {
         \\  const result = jwtVerify("token", "key");
-        \\  const g = () => String(result.value);
-        \\  return Response.text(g());
+        \\  return Response.text(thunk(() => String(result.value)));
         \\}
     );
     try std.testing.expectEqual(@as(u32, 1), arrow.unchecked_result);
 
     const arrow_block = try routeVerifierCounts(result_import ++
+        \\function thunk(f) { return f(); }
         \\function handler(req) {
         \\  const result = jwtVerify("token", "key");
-        \\  const g = () => { return String(result.value); };
-        \\  return Response.text(g());
+        \\  return Response.text(thunk(() => { return String(result.value); }));
         \\}
     );
     try std.testing.expectEqual(@as(u32, 1), arrow_block.unchecked_result);
@@ -3879,13 +3879,13 @@ test "ZTS303 reports an unchecked Result read through a spread" {
 
 test "ZTS303 a guard inside a closure does not clear the enclosing read" {
     const arrow = try routeVerifierCounts(result_import ++
+        \\function thunk(f) { return f(); }
         \\function handler(req) {
         \\  const result = jwtVerify("token", "key");
-        \\  const g = () => {
+        \\  const t = thunk(() => {
         \\    if (result.ok === false) { return "no"; }
         \\    return "yes";
-        \\  };
-        \\  const t = g();
+        \\  });
         \\  return Response.text([String(result.value), t].join(""));
         \\}
     );
@@ -3942,11 +3942,11 @@ test "a reassignment inside a closure is refused for a Result and un-narrows an 
 test "ZTS303 closure walks keep the precision of the checks outside them" {
     // A closure that does not touch the Result adds nothing.
     const untouched = try routeVerifierCounts(result_import ++
+        \\function thunk(f) { return f(); }
         \\function handler(req) {
         \\  const result = jwtVerify("token", "key");
         \\  if (!result.ok) { return Response.text("no"); }
-        \\  const g = () => 1;
-        \\  return Response.text(String(result.value) + String(g()));
+        \\  return Response.text(String(result.value) + String(thunk(() => 1)));
         \\}
     );
     try std.testing.expectEqual(@as(u32, 0), untouched.unchecked_result);
@@ -3954,11 +3954,11 @@ test "ZTS303 closure walks keep the precision of the checks outside them" {
     // Documented precision cost: a closure can run at any later time, so a
     // check around its definition does not hold inside it.
     const inside_guard = try routeVerifierCounts(result_import ++
+        \\function thunk(f) { return f(); }
         \\function handler(req) {
         \\  const result = jwtVerify("token", "key");
         \\  if (result.ok) {
-        \\    const g = () => String(result.value);
-        \\    return Response.text(g());
+        \\    return Response.text(thunk(() => String(result.value)));
         \\  }
         \\  return Response.text("no");
         \\}
@@ -3967,11 +3967,11 @@ test "ZTS303 closure walks keep the precision of the checks outside them" {
 
     // The flags are restored after the closure: the guard still holds after it.
     const restored = try routeVerifierCounts(result_import ++
+        \\function thunk(f) { return f(); }
         \\function handler(req) {
         \\  const result = jwtVerify("token", "key");
         \\  if (!result.ok) { return Response.text("no"); }
-        \\  const g = () => 1;
-        \\  const n = g();
+        \\  const n = thunk(() => 1);
         \\  return Response.text(String(result.value) + String(n));
         \\}
     );
@@ -4165,6 +4165,7 @@ test "ZTS303 p_computed: a non-literal computed key on a Result is refused" {
 
 test "ZTS303 p_closure_dup2: a closure over a Result name that two bindings share is refused" {
     const refusals = try resultRefusals(json_prefix ++
+        \\function thunk(f: () => unknown): unknown { return f(); }
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  if (req.method === "GET") {
         \\    const r = parseJson("1");
@@ -4175,16 +4176,16 @@ test "ZTS303 p_closure_dup2: a closure over a Result name that two bindings shar
         \\  }
         \\  if (req.method !== "GET") {
         \\    const r = parseJson("2");
-        \\    const read = (): unknown => {
+        \\    const v = thunk((): unknown => {
         \\      return r.value;
-        \\    };
-        \\    return Response.json({ v: read() });
+        \\    });
+        \\    return Response.json({ v: v });
         \\  }
         \\  return Response.json({ v: 0 });
         \\}
     );
     try std.testing.expectEqual(@as(u32, 1), refusals.count);
-    try std.testing.expectEqual(@as(u32, 13), refusals.first_line);
+    try std.testing.expectEqual(@as(u32, 14), refusals.first_line);
 }
 
 test "ZTS303 an unchecked requestJson read is refused" {
@@ -4449,7 +4450,7 @@ test "an expression-bodied arrow is a total function body" {
     // without it a rewrite that answered `false` everywhere would pass them
     // while breaking every helper capsule's `total` fact.
     try std.testing.expect(try totalityOfFirstNode(
-        "const f = (x) => x + 1;",
+        "function h(xs) { return xs.map((x) => x + 1); }",
         .binary_op,
     ));
 }
@@ -4474,14 +4475,14 @@ fn totalityOfFirstArrowBody(source: []const u8) !bool {
 }
 
 test "a block body that returns on only one path is not total" {
-    try std.testing.expect(!try totalityOfFirstArrowBody("const f = (x) => { if (x) { return 1; } };"));
+    try std.testing.expect(!try totalityOfFirstArrowBody("function h(xs) { return xs.map((x) => { if (x) { return 1; } }); }"));
 }
 
 test "a block body that returns on every path is total" {
     // The other half of the block arm, so a rewrite cannot satisfy the test
     // above by answering `false` for every block.
     try std.testing.expect(try totalityOfFirstArrowBody(
-        "const f = (x) => { if (x) { return 1; } return 2; };",
+        "function h(xs) { return xs.map((x) => { if (x) { return 1; } return 2; }); }",
     ));
 }
 
@@ -4619,11 +4620,12 @@ test "ZTS303 shape: a value read after a comparison of ok with true" {
 
 test "ZTS303 shape: a closure reads a Result without its own check" {
     const first = try firstResultShape(shape_head ++
-        \\  const read = (): unknown => {
+        \\  const v = thunk((): unknown => {
         \\    return r.value;
-        \\  };
-        \\  return Response.json({ v: read() });
+        \\  });
+        \\  return Response.json({ v: v });
         \\}
+        \\function thunk(f: () => unknown): unknown { return f(); }
     );
     try std.testing.expectEqual(ResultShape.closure_read, first.shape);
 }
@@ -4752,6 +4754,7 @@ test "ZTS303 shape: a member read on an unbound Result call" {
 
 test "ZTS303 shape: a captured name that two Result bindings share" {
     const first = try firstResultShape(json_prefix ++
+        \\function thunk(f: () => unknown): unknown { return f(); }
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  if (req.method === "GET") {
         \\    const r = parseJson("1");
@@ -4762,10 +4765,10 @@ test "ZTS303 shape: a captured name that two Result bindings share" {
         \\  }
         \\  if (req.method !== "GET") {
         \\    const r = parseJson("2");
-        \\    const read = (): unknown => {
+        \\    const v = thunk((): unknown => {
         \\      return r.value;
-        \\    };
-        \\    return Response.json({ v: read() });
+        \\    });
+        \\    return Response.json({ v: v });
         \\  }
         \\  return Response.json({ v: 0 });
         \\}

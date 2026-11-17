@@ -3575,7 +3575,7 @@ test "End-to-end: optional method call short-circuits on nullish receiver" {
         allocator,
         ctx,
         &strings,
-        "function outer() { const a = { foo: () => 5 }; return a?.foo(); } let result = outer();",
+        "function five() { return 5; } function outer() { const a = { foo: five }; return a?.foo(); } let result = outer();",
     )) orelse return error.TestUnexpectedResult;
     try std.testing.expect(defined.isInt());
     try std.testing.expectEqual(@as(i32, 5), defined.getInt());
@@ -4490,7 +4490,8 @@ test "End-to-end: a record pattern matches only a record, at every depth" {
         \\let rec = { w: 1 };
         \\let empty = {};
         \\let lengthy = { length: 3 };
-        \\let fun = () => 1;
+        \\function one() { return 1; }
+        \\let fun = one;
         \\let t1 = match (str) { when { w }: "record" default: "other" };
         \\let t2 = match (rec) { when { w }: "record" default: "other" };
         \\let t3 = match (arr) { when { w }: "record" default: "other" };

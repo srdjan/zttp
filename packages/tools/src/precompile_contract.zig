@@ -1148,8 +1148,9 @@ test "schema contract marks readable dynamic forms and malformed raw JSON dynami
         \\function handler(req) { return Response.text("ok"); }
         ,
         \\import { schemaCompile } from "zttp:validate";
+        \\function ignoredStringify(value) { return "ignored"; }
         \\function register() {
-        \\  const JSON = { stringify: (value) => "ignored" };
+        \\  const JSON = { stringify: ignoredStringify };
         \\  schemaCompile("local-shadow", JSON.stringify({ type: "object" }));
         \\}
         \\register();
@@ -1172,7 +1173,8 @@ test "schema contract keeps the current top-level JSON shadow behavior" {
     const allocator = std.testing.allocator;
     const source =
         \\import { schemaCompile } from "zttp:validate";
-        \\const JSON = { stringify: (value) => "ignored" };
+        \\function ignoredStringify(value) { return "ignored"; }
+        \\const JSON = { stringify: ignoredStringify };
         \\schemaCompile("global-shadow", JSON.stringify({ type: "string" }));
         \\function handler(req) { return Response.text("ok"); }
     ;

@@ -975,8 +975,8 @@ test "a handler whose only failable call is unseen is not covered" {
     // the report alone would say nothing. The verdict must still be false.
     const source =
         \\import { jwtVerify } from "zttp:auth";
+        \\function read() { return jwtVerify("t", "secret").error; }
         \\function handler(req) {
-        \\  const read = () => jwtVerify("t", "secret").error;
         \\  const again = read;
         \\  return Response.text(again());
         \\}

@@ -1918,7 +1918,7 @@ test "sound: unknown function result in if fails closed" {
 }
 
 test "sound: unknown parameter in ternary fails closed" {
-    try checkSource("const f = (x) => x ? 1 : 2;", 1);
+    try checkSource("function f(x) { return x ? 1 : 2; }", 1);
 }
 
 test "sound: number literal in if fails" {
@@ -1977,7 +1977,7 @@ test "sound: string LHS for ?? warns" {
 }
 
 test "sound: unknown LHS for ?? no warning" {
-    try checkSourceFull("const f = (x) => x ?? 0;", 0, 0);
+    try checkSourceFull("function f(x) { return x ?? 0; }", 0, 0);
 }
 
 // Combined
@@ -2043,19 +2043,19 @@ test "sound: arrow function returning number fails in if" {
 
 test "sound: block function returning boolean passes" {
     try checkSource(
-        \\const check = (x) => {
+        \\function check(x) {
         \\  return x > 0;
-        \\};
+        \\}
         \\if (check(1)) { let y = 1; }
     , 0);
 }
 
 test "sound: block function with mixed return types fails closed" {
     try checkSource(
-        \\const mixed = (x) => {
+        \\function mixed(x) {
         \\  if (x > 0) { return true; }
         \\  return 0;
-        \\};
+        \\}
         \\if (mixed(1)) { let y = 1; }
     , 1);
 }
@@ -2107,113 +2107,113 @@ test "sound: diagnostic gives explicit boolean repair" {
 
 test "sound: typeof number guard still requires explicit comparison" {
     try checkSource(
-        \\const f = (x) => {
+        \\function f(x) {
         \\  if (typeof x === "number") {
         \\    if (x) { let y = 1; }
         \\  }
         \\  return true;
-        \\};
+        \\}
     , 1);
 }
 
 test "sound: typeof guard narrows to boolean, used in boolean context" {
     try checkSource(
-        \\const f = (x) => {
+        \\function f(x) {
         \\  if (typeof x === "boolean") {
         \\    if (x) { let y = 1; }
         \\  }
         \\  return true;
-        \\};
+        \\}
     , 0);
 }
 
 test "sound: reversed typeof number guard still requires explicit comparison" {
     try checkSource(
-        \\const f = (x) => {
+        \\function f(x) {
         \\  if ("number" === typeof x) {
         \\    if (x) { let y = 1; }
         \\  }
         \\  return true;
-        \\};
+        \\}
     , 1);
 }
 
 test "sound: negated typeof number guard still requires explicit comparison" {
     try checkSource(
-        \\const f = (x) => {
+        \\function f(x) {
         \\  if (typeof x !== "number") {
         \\    let y = 1;
         \\  } else {
         \\    if (x) { let z = 1; }
         \\  }
         \\  return true;
-        \\};
+        \\}
     , 1);
 }
 
 test "sound: typeof number guard rejects bare ternary condition" {
     try checkSource(
-        \\const f = (x) => {
+        \\function f(x) {
         \\  typeof x === "number" ? (x ? 1 : 0) : 0;
         \\  return true;
-        \\};
+        \\}
     , 1);
 }
 
 test "sound: negated typeof number guard rejects bare ternary condition" {
     try checkSource(
-        \\const f = (x) => {
+        \\function f(x) {
         \\  typeof x !== "number" ? 0 : (x ? 1 : 0);
         \\  return true;
-        \\};
+        \\}
     , 1);
 }
 
 test "sound: unknown outside typeof branch fails closed" {
     try checkSource(
-        \\const f = (x) => {
+        \\function f(x) {
         \\  if (typeof x === "number") {
         \\    let y = x;
         \\  }
         \\  if (x) { let z = 1; }
         \\  return true;
-        \\};
+        \\}
     , 1);
 }
 
 test "sound: compound typeof guard does not permit number truthiness" {
     try checkSource(
-        \\const f = (x, y) => {
+        \\function f(x, y) {
         \\  if (typeof x === "number" && typeof y === "string") {
         \\    if (x) { let z = 1; }
         \\  }
         \\  return true;
-        \\};
+        \\}
     , 1);
 }
 
 test "sound: typeof nested guards compose" {
     try checkSource(
-        \\const f = (x, y) => {
+        \\function f(x, y) {
         \\  if (typeof x === "boolean") {
         \\    if (typeof y === "boolean") {
         \\      const r = x && y;
         \\    }
         \\  }
         \\  return true;
-        \\};
+        \\}
     , 0);
 }
 
 test "sound: non-typeof condition does not narrow" {
     // x === true is not a typeof guard, so x remains unknown and fails closed.
     try checkSource(
-        \\const f = (x) => {
+        \\function f(x) {
         \\  if (x === true) {
         \\    if (x) { let y = 1; }
         \\  }
         \\  return true;
-        \\};
+        \\}
     , 1);
 }
 
@@ -2333,10 +2333,10 @@ test "sound: optional cacheGet fails in boolean context" {
 
 test "sound: function returning string or undefined fails in boolean context" {
     try checkSource(
-        \\const find = (arr) => {
+        \\function find(arr) {
         \\  if (arr.length > 0) { return "found"; }
         \\  return undefined;
-        \\};
+        \\}
         \\const r = find([1]);
         \\if (r) { let x = 1; }
     , 1);
@@ -2455,7 +2455,10 @@ test "sound: if ({}) fails - object always truthy" {
 }
 
 test "sound: if (fn) fails - function always truthy" {
-    try checkSource("if (() => 1) { let x = 1; }", 1);
+    try checkSource(
+        \\function one() { return 1; }
+        \\if (one) { let x = 1; }
+    , 1);
 }
 
 test "sound: if (named_object_literal) - static check rejects pointless condition" {
@@ -2494,10 +2497,10 @@ test "sound: && with number and string rejects both operands" {
 
 test "sound: optional from function fails in boolean context" {
     try checkSource(
-        \\const find = (arr) => {
+        \\function find(arr) {
         \\  if (arr.length > 0) { return "found"; }
         \\  return undefined;
-        \\};
+        \\}
         \\const r = find([1]);
         \\if (r) { let x = r; }
     , 1);
@@ -2534,8 +2537,7 @@ test "a function declaration nested in a function is refused with ZTS071" {
 test "sound: if (5) in an arrow inside a function declaration fails" {
     try checkSource(
         \\function handler() {
-        \\  const f = () => { if (5) { let x = 1; } };
-        \\  return f;
+        \\  return run(() => { if (5) { let x = 1; } });
         \\}
     , 1);
 }
@@ -2595,7 +2597,10 @@ test "sound: object in arithmetic fails" {
 }
 
 test "sound: function in arithmetic fails" {
-    try checkSource("const r = (() => 1) * 2;", 1);
+    try checkSource(
+        \\function one() { return 1; }
+        \\const r = one * 2;
+    , 1);
 }
 
 test "sound: optional string in arithmetic fails" {
@@ -2607,7 +2612,7 @@ test "sound: optional string in arithmetic fails" {
 
 test "sound: unknown in arithmetic passes" {
     try checkSource(
-        \\const f = (x) => x - 1;
+        \\function f(x) { return x - 1; }
     , 0);
 }
 
@@ -2648,13 +2653,13 @@ test "sound: object in + fails" {
 
 test "sound: unknown + number passes (runtime decides)" {
     try checkSource(
-        \\const f = (x) => x + 1;
+        \\function f(x) { return x + 1; }
     , 0);
 }
 
 test "sound: unknown + unknown passes" {
     try checkSource(
-        \\const f = (x, y) => x + y;
+        \\function f(x, y) { return x + y; }
     , 0);
 }
 
@@ -2692,7 +2697,7 @@ test "sound: typeof !== on known type is tautological" {
 
 test "sound: typeof on unknown is not tautological" {
     try checkSourceFull(
-        \\const f = (x) => typeof x === "number";
+        \\function f(x) { return typeof x === "number"; }
     , 0, 0);
 }
 

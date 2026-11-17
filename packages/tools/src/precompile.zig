@@ -4104,8 +4104,10 @@ test "serialized bytecode matches the committed goldens" {
 /// expression is recorded since the I/O tracker descends.)
 const unseen_call_handler =
     \\import { jwtVerify } from "zttp:auth";
+    \\function read(): string {
+    \\  return jwtVerify("t", "s").error;
+    \\}
     \\function handler(req: Request): Response {
-    \\  const read = (): string => jwtVerify("t", "s").error;
     \\  const again = read;
     \\  return Response.text(again());
     \\}

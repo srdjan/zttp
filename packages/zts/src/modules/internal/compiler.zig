@@ -282,7 +282,7 @@ test "ordered compilation allocation failures release completed owners" {
     const allocator = std.testing.allocator;
     const Reader = struct {
         fn read(a: std.mem.Allocator, _: []const u8) module_graph.ReadFileError![]const u8 {
-            return a.dupe(u8, "export const helper = () => 1.25;\n");
+            return a.dupe(u8, "export function helper(): number { return 1.25; }\n");
         }
     };
     var graph = module_graph.ModuleGraph.init(allocator);

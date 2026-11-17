@@ -4433,14 +4433,15 @@ test "logical operators join both operands and keep the right operand's write" {
 
     // The write sits in the right operand and the left operand may skip it,
     // so the exit state holds it on the joined path.
-    const write = "function f(a, s) { const h = {}; a && (() => { h.x = s; return true; })(); return h; }";
+    const store = "function store(t, v) { t.x = v; return true; } ";
+    const write = store ++ "function f(a, s) { const h = {}; a && store(h, s); return h; }";
     const r = try analyzeSource(write, "f", &.{ Value.clean, secret_value });
     defer r.deinit();
     try testing.expect(!r.result.cleared);
     const seen = try r.harness.interp.readAll(r.result.exit, r.result.returned.?);
     try testing.expect(seen.labels.secret);
 
-    const clean_write = "function f(a, s) { const h = {}; a && (() => { h.x = \"c\"; return true; })(); return h; }";
+    const clean_write = store ++ "function f(a, s) { const h = {}; a && store(h, \"c\"); return h; }";
     const c = try analyzeSource(clean_write, "f", &.{ Value.clean, secret_value });
     defer c.deinit();
     const unseen = try c.harness.interp.readAll(c.result.exit, c.result.returned.?);
@@ -4455,9 +4456,10 @@ test "a ternary carries a secret from either arm and from either arm's write" {
     try expectSecret(source, &arm_b, true);
     try expectSecret(source, &.{ Value.clean, Value.clean, Value.clean }, false);
 
-    const then_write = "function f(c, s) { const h = {}; c ? (() => { h.x = s; return 0; })() : (() => { h.y = \"k\"; return 0; })(); return h; }";
-    const else_write = "function f(c, s) { const h = {}; c ? (() => { h.x = \"k\"; return 0; })() : (() => { h.y = s; return 0; })(); return h; }";
-    const both_clean = "function f(c, s) { const h = {}; c ? (() => { h.x = \"k\"; return 0; })() : (() => { h.y = \"j\"; return 0; })(); return h; }";
+    const setters = "function setX(t, v) { t.x = v; return 0; } function setY(t, v) { t.y = v; return 0; } ";
+    const then_write = setters ++ "function f(c, s) { const h = {}; c ? setX(h, s) : setY(h, \"k\"); return h; }";
+    const else_write = setters ++ "function f(c, s) { const h = {}; c ? setX(h, \"k\") : setY(h, s); return h; }";
+    const both_clean = setters ++ "function f(c, s) { const h = {}; c ? setX(h, \"k\") : setY(h, \"j\"); return h; }";
     inline for (.{ then_write, else_write, both_clean }, .{ true, true, false }) |src, leaks| {
         const r = try analyzeSource(src, "f", &.{ Value.clean, secret_value });
         defer r.deinit();
@@ -4576,12 +4578,12 @@ test "a spread copies its source's cells and labels" {
 }
 
 test "a function value is a mutable object" {
-    const source = "function f(s) { const g = () => 0; g.x = s; return g.x; }";
+    const source = "function zero() { return 0; } function f(s) { const g = zero; g.x = s; return g.x; }";
     try expectSecret(source, &.{secret_value}, true);
     try expectSecret(source, &.{Value.clean}, false);
 
-    // The value of a function expression names its body.
-    const r = try analyzeSource("function f() { const g = () => 0; return g; }", "f", &.{});
+    // The value of a function names its body.
+    const r = try analyzeSource("function zero() { return 0; } function f() { const g = zero; return g; }", "f", &.{});
     defer r.deinit();
     const returned = r.result.returned.?;
     try testing.expectEqual(@as(usize, 1), returned.callables.len);
@@ -5234,17 +5236,17 @@ test "a bare helper assert returns clean undefined to the caller" {
 
 test "a callable set runs every function in both node orders" {
     try expectSecret(
-        "function f(c, s) { const a = () => \"c\"; const b = () => s; return (c ? a : b)(); }",
+        "function a(x) { return \"c\"; } function b(x) { return x; } function f(c, s) { return (c ? a : b)(s); }",
         &c_secret,
         true,
     );
     try expectSecret(
-        "function f(c, s) { const b = () => s; const a = () => \"c\"; return (c ? a : b)(); }",
+        "function b(x) { return x; } function a(x) { return \"c\"; } function f(c, s) { return (c ? a : b)(s); }",
         &c_secret,
         true,
     );
     try expectSecret(
-        "function f(c, s) { const a = () => \"c\"; const b = () => \"d\"; return (c ? a : b)(); }",
+        "function a(x) { return \"c\"; } function b(x) { return \"d\"; } function f(c, s) { return (c ? a : b)(s); }",
         &c_secret,
         false,
     );
@@ -5484,19 +5486,20 @@ test "recursion inside a loop with break and continue after it" {
 }
 
 test "a labelled callee labels the call's value" {
-    try expectSecret("function f(s) { const a = () => \"c\"; const g = s || a; return g(); }", &.{secret_value}, true);
-    try expectSecret("function f(s) { const a = () => \"c\"; const g = \"d\" || a; return g(); }", &.{secret_value}, false);
+    const retC = "function retC() { return \"c\"; } ";
+    try expectSecret(retC ++ "function f(s) { const g = s || retC; return g(); }", &.{secret_value}, true);
+    try expectSecret(retC ++ "function f(s) { const g = \"d\" || retC; return g(); }", &.{secret_value}, false);
 }
 
 test "a known callable joined with an unknown one is an unknown callee" {
-    const source = "function f(c, g) { const h = c ? (() => \"c\") : g; return h(); }";
+    const source = "function retC() { return \"c\"; } function f(c, g) { const h = c ? retC : g; return h(); }";
     const unknown = try analyzeSource(source, "f", &.{ Value.clean, Value.top });
     defer unknown.deinit();
     try expectUnresolved(unknown.result, .call, .unknown_callee);
 
     // The contrast: the same join with a known function resolves.
     try expectSecret(
-        "function f(c, g) { const k = () => \"d\"; const h = c ? (() => \"c\") : k; return h(); }",
+        "function retC() { return \"c\"; } function retD() { return \"d\"; } function f(c, g) { const h = c ? retC : retD; return h(); }",
         &.{ Value.clean, Value.clean },
         false,
     );
@@ -5504,8 +5507,9 @@ test "a known callable joined with an unknown one is an unknown callee" {
 
 test "a call through a property dispatches to the stored function or the builtin" {
     // A callback method of an array resolves.
-    try expectSecret("function f(s) { const a = [() => \"c\"]; return a.map(() => s)[0]; }", &.{secret_value}, true);
-    try expectSecret("function f(s) { const a = [() => \"c\"]; return a.map(() => \"c\")[0]; }", &.{secret_value}, false);
+    const stored = "function retC() { return \"c\"; } ";
+    try expectSecret(stored ++ "function f(s) { const a = [retC]; return a.map(() => s)[0]; }", &.{secret_value}, true);
+    try expectSecret(stored ++ "function f(s) { const a = [retC]; return a.map(() => \"c\")[0]; }", &.{secret_value}, false);
 
     // The method of a native Result with the same name has no rule.
     const result_method = try analyzeSource(
@@ -5517,16 +5521,16 @@ test "a call through a property dispatches to the stored function or the builtin
     try expectUnresolved(result_method.result, .call, .no_operation_rule);
 
     // A function stored in a property runs, by name and by literal key.
-    try expectSecret("function f(s) { const o = { m: () => \"c\" }; return o.m(); }", &.{secret_value}, false);
-    try expectSecret("function f(s) { const o = { m: () => \"c\" }; return o[\"m\"](); }", &.{secret_value}, false);
+    try expectSecret(stored ++ "function f(s) { const o = { m: retC }; return o.m(); }", &.{secret_value}, false);
+    try expectSecret(stored ++ "function f(s) { const o = { m: retC }; return o[\"m\"](); }", &.{secret_value}, false);
 
     // The contrast: the same function called through a name resolves.
-    try expectSecret("function f(s) { const m = () => \"c\"; return m(); }", &.{secret_value}, false);
+    try expectSecret(stored ++ "function f(s) { return retC(); }", &.{secret_value}, false);
 }
 
 test "a method read into a variable is an unknown callee" {
     const extracted = try analyzeSource(
-        "function f(c, s) { const x = c ? { slice: () => \"c\" } : s; const g = x.slice; return g(); }",
+        "function retC() { return \"c\"; } function f(c, s) { const x = c ? { slice: retC } : s; const g = x.slice; return g(); }",
         "f",
         &c_secret,
     );
@@ -5535,7 +5539,7 @@ test "a method read into a variable is an unknown callee" {
 
     // The contrast: a function held in a variable resolves.
     try expectSecret(
-        "function f(c, s) { const x = c ? () => \"c\" : () => \"d\"; const g = x; return g(); }",
+        "function retC() { return \"c\"; } function retD() { return \"d\"; } function f(c, s) { const x = c ? retC : retD; const g = x; return g(); }",
         &c_secret,
         false,
     );
@@ -5566,7 +5570,7 @@ test "call-site spread is refused by the strict checker" {
     try expectSecret("function id(y) { return y; } function f(xs) { return id(xs); }", &.{Value.clean}, false);
 
     const later = try analyzeSource(
-        "function g(a, b) { return 0; } function f(s) { let x = \"c\"; g(...[], (() => { x = s; return \"c\"; })()); return x; }",
+        "function g(a, b) { return 0; } function store(t, v) { t.v = v; return \"c\"; } function f(s) { const x = { v: \"c\" }; g(...[], store(x, s)); return x.v; }",
         "f",
         &.{secret_value},
     );
@@ -5575,7 +5579,7 @@ test "call-site spread is refused by the strict checker" {
     try testing.expect(later.returnedLabels().secret);
 
     const optional = try analyzeSource(
-        "function f(s) { let x = \"c\"; const o = { slice: () => \"c\" }; o?.slice(...[], (() => { x = s; return \"c\"; })()); return x; }",
+        "function retC() { return \"c\"; } function store(t, v) { t.v = v; return \"c\"; } function f(s) { const x = { v: \"c\" }; const o = { slice: retC }; o?.slice(...[], store(x, s)); return x.v; }",
         "f",
         &.{secret_value},
     );
@@ -5786,14 +5790,16 @@ fn expectLabelsPublic(source: []const u8, env_public: []const []const u8, expect
 
 // P5 specification test 1.
 test "a user method runs through a property call" {
-    try expectSecret("function f(s) { const o = { m: () => s }; return o.m(); }", &.{secret_value}, true);
-    try expectSecret("function f(s) { const o = { m: () => \"c\" }; return o.m(); }", &.{secret_value}, false);
+    const helpers = "function ident(x) { return x; } function retC(x) { return \"c\"; } ";
+    try expectSecret(helpers ++ "function f(s) { const o = { m: ident }; return o.m(s); }", &.{secret_value}, true);
+    try expectSecret(helpers ++ "function f(s) { const o = { m: retC }; return o.m(s); }", &.{secret_value}, false);
 }
 
 // P5 specification test 2.
 test "the string candidate runs beside a user method" {
-    try expectSecret("function f(s) { const o = { slice: () => \"c\" }; return o.slice(s); }", &.{secret_value}, true);
-    try expectSecret("function f(s) { const o = { slice: () => \"c\" }; return o.slice(\"d\"); }", &.{secret_value}, false);
+    const retC = "function retC(x) { return \"c\"; } ";
+    try expectSecret(retC ++ "function f(s) { const o = { slice: retC }; return o.slice(s); }", &.{secret_value}, true);
+    try expectSecret(retC ++ "function f(s) { const o = { slice: retC }; return o.slice(\"d\"); }", &.{secret_value}, false);
 }
 
 // P5 specification test 3.
@@ -5959,13 +5965,14 @@ test "a Result method with a callback has no operation rule" {
 // P5 specification test 21.
 test "a property read adds a native function only where the runtime may find one" {
     // An object literal's own field is not a method.
-    const own = try analyzeSource("function f() { const o = { handler: () => 1 }; return o.handler; }", "f", &.{});
+    const one = "function one() { return 1; } ";
+    const own = try analyzeSource(one ++ "function f() { const o = { handler: one }; return o.handler; }", "f", &.{});
     defer own.deinit();
     try testing.expect(!own.result.returned.?.callables_top);
     try testing.expectEqual(@as(usize, 1), own.result.returned.?.callables.len);
 
     // A name that String.prototype holds may be a method of a joined value.
-    const method = try analyzeSource("function f() { const o = { handler: () => 1 }; return o.slice; }", "f", &.{});
+    const method = try analyzeSource(one ++ "function f() { const o = { handler: one }; return o.slice; }", "f", &.{});
     defer method.deinit();
     try testing.expect(method.result.returned.?.callables_top);
 
@@ -5977,25 +5984,25 @@ test "a property read adds a native function only where the runtime may find one
 
     // A name that no builtin holds, on a receiver that holds no native
     // method, reads nothing but the stored content.
-    const other = try analyzeSource("function f() { const o = { handler: () => 1 }; return o.other; }", "f", &.{});
+    const other = try analyzeSource(one ++ "function f() { const o = { handler: one }; return o.other; }", "f", &.{});
     defer other.deinit();
     try testing.expect(!other.result.returned.?.callables_top);
     try testing.expectEqual(@as(usize, 0), other.result.returned.?.callables.len);
 
     // A key that is not a literal may name a method.
-    const dynamic = try analyzeSource("function f(k) { const o = { handler: () => 1 }; return o[k]; }", "f", &.{Value.clean});
+    const dynamic = try analyzeSource(one ++ "function f(k) { const o = { handler: one }; return o[k]; }", "f", &.{Value.clean});
     defer dynamic.deinit();
     try testing.expect(dynamic.result.returned.?.callables_top);
 
     // A numeric literal names no method.
-    const indexed = try analyzeSource("function f() { const o = [() => 1]; return o[0]; }", "f", &.{});
+    const indexed = try analyzeSource(one ++ "function f() { const o = [one]; return o[0]; }", "f", &.{});
     defer indexed.deinit();
     try testing.expect(!indexed.result.returned.?.callables_top);
 }
 
 // P5 specification test 22.
 test "a user Math does not replace a call that compiles to an opcode" {
-    const user_math = "const Math = { floor: (x) => \"c\" }; ";
+    const user_math = "function retC(x) { return \"c\"; } const Math = { floor: retC }; ";
     try expectSecret(user_math ++ "function f(s) { return Math.floor(s); }", &.{secret_value}, true);
     try expectSecret(user_math ++ "function f(s) { return Math.floor(\"d\"); }", &.{secret_value}, false);
     try expectSecret(user_math ++ "function f(s) { return Math.max(s, 1); }", &.{secret_value}, true);
@@ -6339,10 +6346,10 @@ test "an export result aliases the container passed to it" {
 test "an export hands back a function stored in its argument" {
     const collections = "import { dictEmpty, dictSet, dictGet } from \"zttp:collections\"; ";
     const stored = collections ++
-        "function f(s) { const g = () => s; const h = dictGet(dictSet(dictEmpty(), \"k\", g), \"k\"); return h(); }";
+        "function ident(x) { return x; } function f(s) { const h = dictGet(dictSet(dictEmpty(), \"k\", ident), \"k\"); return h(s); }";
     try expectSecret(stored, &.{secret_value}, true);
     const clean = collections ++
-        "function f(s) { const g = () => \"c\"; const h = dictGet(dictSet(dictEmpty(), \"k\", g), \"k\"); return h(); }";
+        "function retC(x) { return \"c\"; } function f(s) { const h = dictGet(dictSet(dictEmpty(), \"k\", retC), \"k\"); return h(s); }";
     try expectSecret(clean, &.{secret_value}, false);
 }
 
@@ -6350,10 +6357,10 @@ test "an export hands back a function stored in its argument" {
 test "routerMatch returns a route handler that runs" {
     const router = "import { routerMatch } from \"zttp:router\"; ";
     const routed = router ++
-        "function f(s, req) { const routes = { \"GET /x\": () => s }; const m = routerMatch(routes, req); const h = m.handler; return h(); }";
+        "function ident(x) { return x; } function f(s, req) { const routes = { \"GET /x\": ident }; const m = routerMatch(routes, req); const h = m.handler; return h(s); }";
     try expectSecretBit(routed, &.{ secret_value, Value.clean }, true);
     const clean = router ++
-        "function f(s, req) { const routes = { \"GET /x\": () => \"c\" }; const m = routerMatch(routes, req); const h = m.handler; return h(); }";
+        "function retC(x) { return \"c\"; } function f(s, req) { const routes = { \"GET /x\": retC }; const m = routerMatch(routes, req); const h = m.handler; return h(s); }";
     try expectSecretBit(clean, &.{ secret_value, Value.clean }, false);
 }
 
@@ -6500,10 +6507,10 @@ test "a presumed callback loop runs again until its parameters stop growing" {
     // second passes that secret to the callback, which stores it.
     const collections = "import { dictEmpty, dictSet } from \"zttp:collections\"; ";
     const source = collections ++
-        "function f(s) { const o = { v: \"c\" }; const g = (x) => { o.v = x; return s; }; dictSet(dictEmpty(), \"k\", g); return o.v; }";
+        "function f(s) { const o = { v: \"c\" }; dictSet(dictEmpty(), \"k\", (x) => { o.v = x; return s; }); return o.v; }";
     try expectSecret(source, &.{secret_value}, true);
     const clean = collections ++
-        "function f(s) { const o = { v: \"c\" }; const g = (x) => { o.v = x; return \"c\"; }; dictSet(dictEmpty(), \"k\", g); return o.v; }";
+        "function f(s) { const o = { v: \"c\" }; dictSet(dictEmpty(), \"k\", (x) => { o.v = x; return \"c\"; }); return o.v; }";
     try expectSecret(clean, &.{secret_value}, false);
 
     // A cap below the need records the limit, and a cap equal to it converges.
@@ -6624,6 +6631,10 @@ const ExportFixture = struct {
 
 const collections_import = "import { dictEmpty, dictMapValues, dictFilter, dictFold } from \"zttp:collections\"; ";
 const result_import = "import { ok, err, mapResult, mapError, andThen, orElse } from \"zttp:result\"; ";
+/// A module-level function that returns the secret. A fixture passes it by
+/// name in another argument, where the export must not call it.
+const leak_import = "import { env } from \"zttp:env\"; ";
+const leaker = "function leak() { return env(\"SECRET_KEY\"); } ";
 
 const export_fixtures = [_]ExportFixture{
     .{
@@ -6631,49 +6642,49 @@ const export_fixtures = [_]ExportFixture{
         .name = "dictMapValues",
         .secret = collections_import ++ "function f(s) { return dictMapValues(dictEmpty(), () => s); }",
         .clean = collections_import ++ "function f(s) { return dictMapValues(dictEmpty(), () => \"c\"); }",
-        .elsewhere = collections_import ++ "function f(s) { return dictMapValues({ k: () => s }, () => \"c\"); }",
+        .elsewhere = collections_import ++ leak_import ++ leaker ++ "function f(s) { return dictMapValues({ k: leak }, () => \"c\"); }",
     },
     .{
         .specifier = "zttp:collections",
         .name = "dictFilter",
         .secret = collections_import ++ "function f(s) { return dictFilter(dictEmpty(), () => s); }",
         .clean = collections_import ++ "function f(s) { return dictFilter(dictEmpty(), () => \"c\"); }",
-        .elsewhere = collections_import ++ "function f(s) { return dictFilter({ k: () => s }, () => \"c\"); }",
+        .elsewhere = collections_import ++ leak_import ++ leaker ++ "function f(s) { return dictFilter({ k: leak }, () => \"c\"); }",
     },
     .{
         .specifier = "zttp:collections",
         .name = "dictFold",
         .secret = collections_import ++ "function f(s) { return dictFold(dictEmpty(), () => s, 0); }",
         .clean = collections_import ++ "function f(s) { return dictFold(dictEmpty(), () => \"c\", 0); }",
-        .elsewhere = collections_import ++ "function f(s) { return dictFold({ k: () => s }, () => \"c\", 0); }",
+        .elsewhere = collections_import ++ leak_import ++ leaker ++ "function f(s) { return dictFold({ k: leak }, () => \"c\", 0); }",
     },
     .{
         .specifier = "zttp:result",
         .name = "mapResult",
         .secret = result_import ++ "function f(s) { return mapResult(ok(\"c\"), () => s); }",
         .clean = result_import ++ "function f(s) { return mapResult(ok(\"c\"), () => \"c\"); }",
-        .elsewhere = result_import ++ "function f(s) { return mapResult({ v: () => s }, () => \"c\"); }",
+        .elsewhere = result_import ++ leak_import ++ leaker ++ "function f(s) { return mapResult({ v: leak }, () => \"c\"); }",
     },
     .{
         .specifier = "zttp:result",
         .name = "mapError",
         .secret = result_import ++ "function f(s) { return mapError(err(\"c\"), () => s); }",
         .clean = result_import ++ "function f(s) { return mapError(err(\"c\"), () => \"c\"); }",
-        .elsewhere = result_import ++ "function f(s) { return mapError({ v: () => s }, () => \"c\"); }",
+        .elsewhere = result_import ++ leak_import ++ leaker ++ "function f(s) { return mapError({ v: leak }, () => \"c\"); }",
     },
     .{
         .specifier = "zttp:result",
         .name = "andThen",
         .secret = result_import ++ "function f(s) { return andThen(ok(\"c\"), () => s); }",
         .clean = result_import ++ "function f(s) { return andThen(ok(\"c\"), () => \"c\"); }",
-        .elsewhere = result_import ++ "function f(s) { return andThen({ v: () => s }, () => \"c\"); }",
+        .elsewhere = result_import ++ leak_import ++ leaker ++ "function f(s) { return andThen({ v: leak }, () => \"c\"); }",
     },
     .{
         .specifier = "zttp:result",
         .name = "orElse",
         .secret = result_import ++ "function f(s) { return orElse(err(\"c\"), () => s); }",
         .clean = result_import ++ "function f(s) { return orElse(err(\"c\"), () => \"c\"); }",
-        .elsewhere = result_import ++ "function f(s) { return orElse({ v: () => s }, () => \"c\"); }",
+        .elsewhere = result_import ++ leak_import ++ leaker ++ "function f(s) { return orElse({ v: leak }, () => \"c\"); }",
     },
 };
 
@@ -6837,10 +6848,10 @@ test "a callback chosen through a labelled value labels what it returns" {
     // read back carries it. The second pass passes that label to the
     // accumulator, and the callback stores it where the caller reads it.
     const labelled =
-        "function f(s) { const o = {}; const sink = { w: \"c\" }; o[s] = (acc, x) => { sink.w = acc; return \"c\"; }; [1].reduce(o.k, \"c\"); return sink.w; }";
+        "function put(t, k, fn) { t[k] = fn; return 0; } function f(s) { const o = {}; const sink = { w: \"c\" }; put(o, s, (acc, x) => { sink.w = acc; return \"c\"; }); [1].reduce(o.k, \"c\"); return sink.w; }";
     try expectSecret(labelled, &.{secret_value}, true);
     const plain =
-        "function f(s) { const o = {}; const sink = { w: \"c\" }; o[\"k\"] = (acc, x) => { sink.w = acc; return \"c\"; }; [1].reduce(o.k, \"c\"); return sink.w; }";
+        "function put(t, k, fn) { t[k] = fn; return 0; } function f(s) { const o = {}; const sink = { w: \"c\" }; put(o, \"k\", (acc, x) => { sink.w = acc; return \"c\"; }); [1].reduce(o.k, \"c\"); return sink.w; }";
     try expectSecret(plain, &.{secret_value}, false);
 }
 
@@ -6848,7 +6859,7 @@ test "a callback chosen through a labelled value labels what it returns" {
 test "renderToString refuses a vnode that holds a component" {
     // A component runs later and writes its props.
     const component = try analyzeSource(
-        "function f(s) { const c = (props) => s; return renderToString(h(c, {})); }",
+        "function comp(props) { return props; } function f(s) { return renderToString(h(comp, {})); }",
         "f",
         &.{secret_value},
     );
@@ -7095,21 +7106,23 @@ test "method dispatch adds the user candidate only when it can be called" {
     try expectDefenses(list, &params, html_only);
 
     // A stored function runs, and its result reaches the call.
-    try expectUserInput("function f(u) { const a = [() => u]; return a.map(() => \"c\"); }", &params, true);
-    try expectUserInput("function f(u) { const a = [() => \"c\"]; return a.map(() => \"c\"); }", &params, false);
+    const put = "function put(t, k, fn) { t[k] = fn; return 0; } ";
+    const ret_c = "function retC() { return \"c\"; } ";
+    try expectUserInput(put ++ "function f(u) { const a = []; put(a, 0, () => u); return a.map(() => \"c\"); }", &params, true);
+    try expectUserInput(ret_c ++ "function f(u) { const a = [retC]; return a.map(() => \"c\"); }", &params, false);
 
     // The flow of a callable candidate joins the result even when the body
     // returns a clean value.
-    const selected = "function f(s) { const a = []; a[s] = () => \"c\"; return a.map(() => \"c\"); }";
+    const selected = ret_c ++ "function f(s) { const a = []; a[s] = retC; return a.map(() => \"c\"); }";
     const p = try probe(selected, &.{secret_value});
     try testing.expect(!p.cleared);
     try testing.expect(p.surface.labels.secret);
     try expectSameDefenses(no_defenses, p.surface.defenses);
-    try expectSecret("function f(s) { const a = []; a[\"k\"] = () => \"c\"; return a.map(() => \"c\"); }", &.{secret_value}, false);
+    try expectSecret(ret_c ++ "function f(s) { const a = []; a[\"k\"] = retC; return a.map(() => \"c\"); }", &.{secret_value}, false);
 
     // A raw key that selects the function removes a defense from the result.
-    const keyed = text_import ++
-        "function f(u) { const a = []; a[u] = () => \"c\"; return a.map(() => escapeHtml(u)).join(\"\"); }";
+    const keyed = text_import ++ ret_c ++
+        "function f(u) { const a = []; a[u] = retC; return a.map(() => escapeHtml(u)).join(\"\"); }";
     try expectDefenses(keyed, &params, no_defenses);
 }
 
@@ -7746,18 +7759,18 @@ const resolved_corpus = [_][]const u8{
     "function f(p, q) { return p ? p.x : q[\"y\"]; }",
     "function f(p, q) { let x = p?.x; x = q; p.k = x; p[q] = x; p.k += 1; return p; }",
     "function f(p, q) { const a = [p, ...q]; const o = { k: p, ...q }; return o.k; }",
-    "function inner() { return 1; } function f(p, q) { const g = () => p; const h = (z) => q; return inner; }",
+    "function inner() { return 1; } function f(p, q) { [p].map((z) => q); return inner; }",
     "function f(p, q) { if (p) { return 1; } else { return 2; } }",
     "function f(p, q) { assert p; assert q; return 1; }",
     "function f(p, q) { return match (p) { when { kind: \"a\", text }: text when \"x\": q when string: q default: 0 }; }",
     "function f(p, q) { return match (p) { when [{ k: v }, , \"a\"]: v when { a: [{ b: w }] }: w when { c: { d: z } }: z default: 0 }; }",
     "function f(p, q) { p; return; }",
     "function f(p, q) { let r = p; for (const v of q) { if (v) { r = v; break; } if (r) { continue; } r = q; } return r; }",
-    // Calls: a local callee, a captured binding read and written through a
-    // closure, recursion, a callable set, and a module-level function.
-    "function id(x) { return x; } function f(p, q) { const g = (a) => id(a); let r = p; const w = () => { r = q; return r; }; return g(w()); }",
+    // Calls: a module-level callee, a captured binding read through a
+    // callback, recursion, a callable set, and a module-level function.
+    "function id(x) { return x; } function f(p, q) { let r = p; r = q; return [p].map((a) => id(r)); }",
     "function rec(n) { if (n) { return 1; } return rec(true); } function f(p, q) { return rec(p); }",
-    "function f(p, q) { const a = () => p; const b = () => q; return (p ? a : b)(); }",
+    "function ca(x) { return x; } function cb(x) { return x; } function f(p, q) { return (p ? ca : cb)(p); }",
     "function help(x) { return x; } function f(p, q) { return help(p); }",
 };
 
@@ -9057,10 +9070,10 @@ test "real fetchSync global observes egress and returns an upstream response" {
 
 test "ambiguous callable selection never witnesses an unselected internal sink" {
     for ([_][]const u8{
-        "[() => { console.log(env(\"API_TOKEN\")); return \"bad\"; }, () => \"public\"]",
-        "[() => { console.log(env(\"API_TOKEN\")); return \"bad\"; }, undefined]",
+        "[bad, pub]",
+        "[bad, undefined]",
     }) |options| {
-        const source = try testing.allocator.print("import {{ env }} from \"zttp:env\"; function handler(req) {{ const options = {s}; const f = options[1]; f(); return \"public\"; }}", .{options});
+        const source = try testing.allocator.print("import {{ env }} from \"zttp:env\"; function bad() {{ console.log(env(\"API_TOKEN\")); return \"bad\"; }} function pub() {{ return \"public\"; }} function handler(req) {{ const options = {s}; const f = options[1]; f(); return \"public\"; }}", .{options});
         defer testing.allocator.free(source);
         const h = try Harness.create(testing.allocator, source);
         defer h.destroy();
@@ -9134,7 +9147,7 @@ test "pure AND predicates retain a constrained constructive branch" {
 }
 
 test "short circuit writes cannot lend another branch their data witness" {
-    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { let value = \"public\"; const ignored = req.method === \"POST\" && (() => { value = env(\"API_TOKEN\"); return true; })(); if (req.method !== \"POST\") { return Response.text(value); } return \"public\"; }");
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function store(t, v) { t.v = v; return true; } function handler(req) { const box = { v: \"public\" }; const ignored = req.method === \"POST\" && store(box, env(\"API_TOKEN\")); if (req.method !== \"POST\") { return Response.text(box.v); } return \"public\"; }");
     defer h.destroy();
     const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
     try testing.expect(!report.properties.no_secret_leakage);

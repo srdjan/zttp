@@ -4532,7 +4532,7 @@ fn growthExpectSignatureKind(
     const direct_root = try direct_parser.parse();
     try growthExpectRuntime(&direct_parser, direct_root);
     const allocation_shape: [5]usize = switch (case) {
-        .parameter, .arrow => .{ 14, 0, 0, 0, 3894 },
+        .parameter, .arrow => .{ 15, 0, 0, 0, 3897 },
         .return_value => .{ 14, 0, 0, 1, 3923 },
         .guard => .{ 15, 0, 0, 1, 4321 },
         .generic_only => .{ 15, 0, 0, 1, 4324 },
@@ -4576,7 +4576,7 @@ fn growthExpectSignatureKind(
 }
 
 test "direct signature replay covers parameter return guard generic-only and atom-zero cases" {
-    try growthExpectSignatureKind(.parameter, "const value = (item: string) => item;", 1, 1, 0);
+    try growthExpectSignatureKind(.parameter, "const value = run((item: string) => item);", 1, 1, 0);
     try growthExpectSignatureKind(.return_value, "function value(): string { return \"x\"; }", 1, 1, 1);
     try growthExpectSignatureKind(
         .guard,
@@ -4585,12 +4585,12 @@ test "direct signature replay covers parameter return guard generic-only and ato
         1,
         1,
     );
-    try growthExpectSignatureKind(.arrow, "const value = (item: string): string => item;", 2, 1, 0);
+    try growthExpectSignatureKind(.arrow, "const value = run((item: string): string => item);", 2, 1, 0);
     try growthExpectSignatureKind(.generic_only, "function identity<T>(value) { return value; }", 0, 0, 0);
 
     const allocator = std.testing.allocator;
     const source = "function named(value: string): string { return value; } " ++
-        "const arrow = (value: number): number => value;";
+        "const arrow = run((value: number): number => value);";
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
     var parser = try engine.parser.JsParser.initAdmission(allocator, allocator, source, .compile);

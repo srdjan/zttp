@@ -3,8 +3,12 @@ import { sha256 } from "zttp:crypto";
 
 structural Maker = { make: () => string };
 
+function digest(): string {
+    return sha256("zttp");
+}
+
 function build(): Maker {
-    return { make: () => sha256("zttp") };
+    return { make: digest };
 }
 
 function handler(req: Request): Proof<Effects<Response, "crypto">, "state_isolated"> {

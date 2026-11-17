@@ -66,7 +66,7 @@ fn decision(comptime tag: NodeTag) Row {
         .object_property => yields("const r = { k: a };", &.{.identifier}),
         .object_spread => yields("const r = { ...b };", &.{.identifier}),
         .function_expr => yields("function f(a) { return a; }", &.{.block}),
-        .arrow_function => yields("const f = (a) => a;", &.{.return_stmt}),
+        .arrow_function => yields("f((a) => a);", &.{.return_stmt}),
         .spread => yields("const r = [...b];", &.{.identifier}),
         .match_expr => yields("const r = match (a) { when 1: 1 default: 2 };", &.{ .identifier, .match_arm, .match_arm }),
         .match_arm => yields("const r = match (a) { when 1: b default: 2 };", &.{.identifier}),

@@ -2453,11 +2453,11 @@ test "expressionChildren of a function expression is its body and not its parame
 }
 
 test "expressionChildren of an arrow function is its body and not its parameters" {
-    try expectChildrenOf("const f = (a) => { return a; };", .arrow_function, 0, &.{
+    try expectChildrenOf("f((a) => { return a; });", .arrow_function, 0, &.{
         .{ .tag = .block },
     });
     // An expression body is wrapped in a return statement.
-    try expectChildrenOf("const f = (a) => a + 1;", .arrow_function, 0, &.{
+    try expectChildrenOf("f((a) => a + 1);", .arrow_function, 0, &.{
         .{ .tag = .return_stmt },
     });
 }

@@ -25,7 +25,7 @@ test "candidate facade owns captures and retains warning diagnostics" {
     const allocator = std.testing.allocator;
     var atoms = engine.atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try engine.parser.JsParser.initAdmission(allocator, allocator, "function handler(req) { const read = () => req.headers.authorization; return read(); }", .compile);
+    var parser = try engine.parser.JsParser.initAdmission(allocator, allocator, "function thunk(f) { return f(); } function handler(req) { return thunk(() => req.headers.authorization); }", .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -2058,7 +2058,8 @@ test "typed object methods resolve their actual bodies across imports" {
     ;
     const source =
         \\import { invoke } from "./utils.ts";
-        \\function handler(req) { return Response.json({ v: invoke({ trim: () => "ok" }) }); }
+        \\function okTrim() { return "ok"; }
+        \\function handler(req) { return Response.json({ v: invoke({ trim: okTrim }) }); }
     ;
     try std.testing.expect(try runWithImportedFunction(
         std.testing.allocator,
@@ -2069,7 +2070,8 @@ test "typed object methods resolve their actual bodies across imports" {
     const leaking =
         \\import { env } from "zttp:env";
         \\import { invoke } from "./utils.ts";
-        \\function handler(req) { return Response.json({ v: invoke({ trim: () => env("SECRET_KEY") }) }); }
+        \\function leakTrim() { return env("SECRET_KEY"); }
+        \\function handler(req) { return Response.json({ v: invoke({ trim: leakTrim }) }); }
     ;
     try std.testing.expect(!try runWithImportedFunction(std.testing.allocator, leaking, imported, "invoke"));
 }
@@ -2452,12 +2454,12 @@ test "FlowChecker reports an egress body secret inside a nested arrow" {
     const source =
         \\import { env } from "zttp:env";
         \\import { fetch } from "zttp:fetch";
+        \\function callWith(f, x) { return f(x); }
         \\function handler(req) {
-        \\  const send = (t) => {
+        \\  const n = callWith((t) => {
         \\    fetch("https://api.example.com/collect", { body: t });
         \\    return 1;
-        \\  };
-        \\  const n = send(env("SECRET_KEY"));
+        \\  }, env("SECRET_KEY"));
         \\  return Response.json({ n: n });
         \\}
     ;
@@ -2736,18 +2738,18 @@ test "FlowChecker checks sinks on return paths, concise bodies, and nested expre
             \\}
         },
         .{ .name = "concise body, in a callee", .source = head ++
+            \\function callWith(f, x) { return f(x); }
             \\function handler(req) {
             \\  const t = env("API_TOKEN") ?? "";
-            \\  const inner = (x) => logInfo(x, { n: 1 });
-            \\  const n = inner(t);
+            \\  const n = callWith((x) => logInfo(x, { n: 1 }), t);
             \\  return Response.json({ ok: 1 });
             \\}
         },
         .{ .name = "concise body, fetch field", .source = head ++
+            \\function callWith(f, x) { return f(x); }
             \\function handler(req) {
             \\  const t = env("API_TOKEN") ?? "";
-            \\  const inner = (x) => fetch("https://api.example.com/x", { method: "POST", body: x }).status;
-            \\  const n = inner(t);
+            \\  const n = callWith((x) => fetch("https://api.example.com/x", { method: "POST", body: x }).status, t);
             \\  return Response.json({ ok: 1 });
             \\}
         },
@@ -2830,10 +2832,10 @@ test "FlowChecker checks sinks on return paths, concise bodies, and nested expre
             \\}
         },
         .{ .name = "concise body", .source = head ++
+            \\function callWith(f, x) { return f(x); }
             \\function handler(req) {
             \\  const t = env("API_TOKEN") ?? "";
-            \\  const inner = (x) => logInfo(x, { n: 1 });
-            \\  const n = inner("hello");
+            \\  const n = callWith((x) => logInfo(x, { n: 1 }), "hello");
             \\  return Response.json({ ok: 1 });
             \\}
         },
@@ -3219,13 +3221,13 @@ test "FlowChecker keeps a property for a captured value that holds no secret" {
     // Control: the captured value is clean.
     const clean =
         \\import { env } from "zttp:env";
+        \\function thunk(f) { return f(); }
         \\function handler(req) {
         \\  const region = env("REGION") ?? "";
-        \\  const inner = () => {
+        \\  return thunk(() => {
         \\    console.log(region);
         \\    return Response.json({ r: region });
-        \\  };
-        \\  return inner();
+        \\  });
         \\}
     ;
     try std.testing.expect((try runFlowPropertiesPublic(std.testing.allocator, clean, &.{"REGION"})).no_secret_leakage);
@@ -3234,13 +3236,13 @@ test "FlowChecker keeps a property for a captured value that holds no secret" {
     // x is only measured. A union by name would refuse this.
     const collision =
         \\import { env } from "zttp:env";
+        \\function thunk(f) { return f(); }
         \\function helperA() {
         \\  const x = "clean";
-        \\  const inner = () => {
+        \\  return thunk(() => {
         \\    console.log(x);
         \\    return 1;
-        \\  };
-        \\  return inner();
+        \\  });
         \\}
         \\function handler(req) {
         \\  const x = env("SECRET_KEY") ?? "";
@@ -3255,6 +3257,7 @@ test "FlowChecker keeps a property for a captured value that holds no secret" {
     // of a sibling block that has ended.
     const siblings =
         \\import { env } from "zttp:env";
+        \\function thunk(f) { return f(); }
         \\function handler(req) {
         \\  if (req.method === "GET") {
         \\    const x = env("SECRET_KEY") ?? "";
@@ -3262,10 +3265,9 @@ test "FlowChecker keeps a property for a captured value that holds no secret" {
         \\  }
         \\  if (req.method !== "GET") {
         \\    const x = "clean";
-        \\    const show = () => {
+        \\    return thunk(() => {
         \\      return Response.json({ k: x });
-        \\    };
-        \\    return show();
+        \\    });
         \\  }
         \\  return Response.json({ ok: 1 });
         \\}
@@ -3275,11 +3277,11 @@ test "FlowChecker keeps a property for a captured value that holds no secret" {
     // The closure is declared where a parameter of the same name is clean.
     const param_clean =
         \\import { env } from "zttp:env";
+        \\function thunk(f) { return f(); }
         \\function show(token) {
-        \\  const inner = () => {
+        \\  return thunk(() => {
         \\    return Response.json({ k: token });
-        \\  };
-        \\  return inner();
+        \\  });
         \\}
         \\function handler(req) {
         \\  const token = env("SECRET_KEY") ?? "";
@@ -3318,8 +3320,9 @@ test "FlowChecker fails closed on a discarded method of a record a function retu
     // leak is refused there already.
     const bound =
         \\import { env } from "zttp:env";
+        \\function logOne(s) { console.log(s); return 1; }
         \\function makeOps() {
-        \\  return { run: (s) => { console.log(s); return 1; } };
+        \\  return { run: logOne };
         \\}
         \\function handler(req) {
         \\  const ops = makeOps();
@@ -3333,8 +3336,9 @@ test "FlowChecker fails closed on a discarded method of a record a function retu
     // resolve `run` through the returned record, so the property is cleared.
     const discarded =
         \\import { env } from "zttp:env";
+        \\function logOne(s) { console.log(s); return 1; }
         \\function makeOps() {
-        \\  return { run: (s) => { console.log(s); return 1; } };
+        \\  return { run: logOne };
         \\}
         \\function handler(req) {
         \\  const ops = makeOps();
@@ -3541,10 +3545,11 @@ test "FlowChecker resolves a method of a record passed as a parameter" {
     // calls, and the secret reaches that method's log.
     const leaking =
         \\import { env } from "zttp:env";
+        \\function logOne(x) { console.log(x); return 1; }
         \\function useOps(o, t) { return o.run(t); }
         \\function handler(req) {
         \\  const s = env("SECRET_KEY");
-        \\  const n = useOps({ run: (x) => { console.log(x); return 1; } }, s);
+        \\  const n = useOps({ run: logOne }, s);
         \\  return Response.json({ ok: true });
         \\}
     ;
@@ -3555,9 +3560,10 @@ test "FlowChecker resolves a method of a record passed as a parameter" {
     // Control: the same record with a clean argument reports nothing.
     const clean =
         \\import { env } from "zttp:env";
+        \\function logOne(x) { console.log(x); return 1; }
         \\function useOps(o, t) { return o.run(t); }
         \\function handler(req) {
-        \\  const n = useOps({ run: (x) => { console.log(x); return 1; } }, "ok");
+        \\  const n = useOps({ run: logOne }, "ok");
         \\  return Response.json({ ok: true });
         \\}
     ;
@@ -3570,10 +3576,11 @@ test "FlowChecker resolves a method of a record passed as a parameter" {
     // stays unresolved and the property is unproven rather than refused.
     const named =
         \\import { env } from "zttp:env";
+        \\function logOne(x) { console.log(x); return 1; }
         \\function useOps(o, t) { return o.run(t); }
         \\function handler(req) {
         \\  const s = env("SECRET_KEY");
-        \\  const ops = { run: (x) => { console.log(x); return 1; } };
+        \\  const ops = { run: logOne };
         \\  const n = useOps(ops, s);
         \\  return Response.json({ ok: true });
         \\}
@@ -3770,7 +3777,7 @@ test "FlowChecker proves every flow property for clean routerMatch routes" {
     const source =
         \\import { routerMatch } from "zttp:router";
         \\function first(req) { return Response.json({ route: "first" }); }
-        \\const second = (req) => Response.text("second");
+        \\function second(req) { return Response.text("second"); }
         \\let routes = { "GET /first": first, "GET /second": second };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
@@ -3873,7 +3880,8 @@ test "FlowChecker resolves finite callees and keeps unknown calls unproven" {
         \\function handler(req) { return Response.json({ value: req.callback() }); }
         ,
         // A finite literal method stays known through array selection.
-        \\function handler(req) { return Response.json({ value: [{ run: () => "ok" }][0].run() }); }
+        \\function ok() { return "ok"; }
+        \\function handler(req) { return Response.json({ value: [{ run: ok }][0].run() }); }
         ,
         // A computed element used directly as the callee.
         \\function handler(req) { return Response.json({ value: [req.callback][0]() }); }
@@ -3892,9 +3900,11 @@ test "FlowChecker resolves finite callees and keeps unknown calls unproven" {
         \\function handler(req) { return Response.json({ value: JSON.parse("{}").run() }); }
         ,
         // Array methods that return elements or accumulator values are not arrays.
-        \\function handler(req) { return Response.json({ value: [{ run: () => "ok" }].find((x) => true).run() }); }
+        \\function ok() { return "ok"; }
+        \\function handler(req) { return Response.json({ value: [{ run: ok }].find((x) => true).run() }); }
         ,
-        \\function handler(req) { return Response.json({ value: [{ run: () => "ok" }].reduce((a, x) => x).run() }); }
+        \\function ok() { return "ok"; }
+        \\function handler(req) { return Response.json({ value: [{ run: ok }].reduce((a, x) => x).run() }); }
         ,
         // A module object return does not make every property a known method.
         \\import { urlParse } from "zttp:url";
@@ -3924,8 +3934,9 @@ test "FlowChecker resolves finite callees and keeps unknown calls unproven" {
 
 test "FlowChecker follows actual object and function replacements" {
     const clean =
+        \\function okRun() { return "ok"; }
         \\function handler(req) {
-        \\  const api = { run: () => "ok" };
+        \\  const api = { run: okRun };
         \\  return Response.json({ value: api.run() });
         \\}
     ;
@@ -3933,9 +3944,11 @@ test "FlowChecker follows actual object and function replacements" {
 
     const mutated =
         \\import { env } from "zttp:env";
+        \\function okRun() { return "ok"; }
+        \\function leakRun() { return env("SECRET_KEY"); }
         \\function handler(req) {
-        \\  const api = { run: () => "ok" };
-        \\  api.run = () => env("SECRET_KEY");
+        \\  const api = { run: okRun };
+        \\  api.run = leakRun;
         \\  return Response.json({ value: api.run() });
         \\}
     ;
@@ -3943,9 +3956,11 @@ test "FlowChecker follows actual object and function replacements" {
 
     const reassigned_function =
         \\import { env } from "zttp:env";
+        \\function okRun() { return "ok"; }
+        \\function leakRun() { return env("SECRET_KEY"); }
         \\function handler(req) {
-        \\  let f = () => "ok";
-        \\  f = () => env("SECRET_KEY");
+        \\  let f = okRun;
+        \\  f = leakRun;
         \\  return Response.json({ value: f() });
         \\}
     ;
@@ -3953,10 +3968,12 @@ test "FlowChecker follows actual object and function replacements" {
 
     const alias_mutated =
         \\import { env } from "zttp:env";
+        \\function okRun() { return "ok"; }
+        \\function leakRun() { return env("SECRET_KEY"); }
         \\function handler(req) {
-        \\  const api = { run: () => "ok" };
+        \\  const api = { run: okRun };
         \\  const alias = api;
-        \\  alias.run = () => env("SECRET_KEY");
+        \\  alias.run = leakRun;
         \\  return Response.json({ value: api.run() });
         \\}
     ;
@@ -3964,10 +3981,12 @@ test "FlowChecker follows actual object and function replacements" {
 
     const aggregate_alias_mutated =
         \\import { env } from "zttp:env";
+        \\function okRun() { return "ok"; }
+        \\function leakRun() { return env("SECRET_KEY"); }
         \\function handler(req) {
-        \\  const api = { run: () => "ok" };
+        \\  const api = { run: okRun };
         \\  const box = { api: api };
-        \\  box.api.run = () => env("SECRET_KEY");
+        \\  box.api.run = leakRun;
         \\  return Response.json({ value: api.run() });
         \\}
     ;
@@ -3975,9 +3994,11 @@ test "FlowChecker follows actual object and function replacements" {
 
     const call_escape_mutated =
         \\import { env } from "zttp:env";
-        \\function mutate(api) { api.run = () => env("SECRET_KEY"); }
+        \\function okRun() { return "ok"; }
+        \\function leakRun() { return env("SECRET_KEY"); }
+        \\function mutate(api) { api.run = leakRun; }
         \\function handler(req) {
-        \\  const api = { run: () => "ok" };
+        \\  const api = { run: okRun };
         \\  mutate(api);
         \\  return Response.json({ value: api.run() });
         \\}
@@ -3990,8 +4011,10 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         // A replaced type predicate can mutate the table passed to it.
         \\import { routerMatch } from "zttp:router";
         \\function clean(req) { return Response.json({ ok: true }); }
+        \\function changed(req) { return Response.html("changed"); }
+        \\function replacement(table) { table["GET /probe"] = changed; return false; }
         \\const routes = { "GET /probe": clean };
-        \\Array.isArray = (table) => { table["GET /probe"] = () => Response.html("changed"); return false; };
+        \\Array.isArray = replacement;
         \\Array.isArray(routes);
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
@@ -4002,9 +4025,10 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         // Selecting the table from an aggregate retains a mutable alias.
         \\import { routerMatch } from "zttp:router";
         \\function clean(req) { return Response.json({ ok: true }); }
+        \\function changed(req) { return Response.html("changed"); }
         \\const routes = { "GET /probe": clean };
         \\const alias = [routes][0];
-        \\alias["GET /probe"] = () => Response.html("changed");
+        \\alias["GET /probe"] = changed;
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.json({ error: "not found" }); }
@@ -4014,12 +4038,13 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         // The same aggregate selector can change the selected handler.
         \\import { routerMatch } from "zttp:router";
         \\function clean(req) { return Response.json({ ok: true }); }
+        \\function changed(req) { return Response.html("changed"); }
         \\const routes = { "GET /probe": clean };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  const selected = [found][0];
-        \\  selected.handler = () => Response.html("changed");
+        \\  selected.handler = changed;
         \\  return found.handler(req);
         \\}
         ,
@@ -4054,11 +4079,12 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\import { routerMatch } from "zttp:router";
         \\import { env } from "zttp:env";
         \\function clean(req) { return Response.json({ ok: true }); }
+        \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
         \\const routes = { "GET /probe": clean };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.json({ error: "not found" }); }
-        \\  found.handler = () => Response.json({ key: env("SECRET_KEY") });
+        \\  found.handler = leak;
         \\  return found.handler(req);
         \\}
         ,
@@ -4111,12 +4137,13 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\import { routerMatch } from "zttp:router";
         \\import { env } from "zttp:env";
         \\function clean(req) { return Response.json({ ok: true }); }
+        \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
         \\const routes = { "GET /probe": clean };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  const selected = found;
-        \\  selected.handler = () => Response.json({ key: env("SECRET_KEY") });
+        \\  selected.handler = leak;
         \\  return found.handler(req);
         \\}
         ,
@@ -5427,8 +5454,9 @@ test "a shadowed Date does not carry the varying label" {
     // the handler defined. Labelling it would demote a handler that is in fact
     // deterministic.
     const source =
+        \\function seven() { return 7; }
         \\function handler(req) {
-        \\  const Date = { now: () => 7 };
+        \\  const Date = { now: seven };
         \\  return Response.json({ at: Date.now() });
         \\}
     ;

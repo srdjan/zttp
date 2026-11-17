@@ -3196,8 +3196,7 @@ test "a fetch backend refuses a connect that has no deadline" {
 fn writeCachedTeardownFixture(allocator: std.mem.Allocator, buffer: []u8) ![]const u8 {
     const source =
         \\function cachedOuter() {
-        \\  const cachedInner = () => 1;
-        \\  return cachedInner;
+        \\  return [0].map(() => 1);
         \\}
         \\function handler() {
         \\  return 1;
@@ -3239,7 +3238,7 @@ test "cached and source bytecode keep independent teardown ownership" {
     try rt.loadFromCachedBytecodeNoHandler(cached);
     try rt.loadFromCachedBytecodeNoHandler(cached);
     try rt.loadCodeNoHandler(
-        "function sourceOuter() { const sourceInner = () => 2; return sourceInner; }",
+        "function sourceOuter() { return [0].map(() => 2); }",
         "<source-teardown-owner>",
     );
 }

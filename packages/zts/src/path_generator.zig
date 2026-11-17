@@ -4946,8 +4946,8 @@ test "the scan names a failable call the walk never recorded" {
     const allocator = std.testing.allocator;
     const source =
         \\import { jwtVerify } from "zttp:auth";
+        \\function read() { return jwtVerify("t", "secret").error; }
         \\function handler(req) {
-        \\  const read = () => jwtVerify("t", "secret").error;
         \\  const again = read;
         \\  return Response.text(again());
         \\}
@@ -6171,15 +6171,18 @@ test "cost is unbounded when the handler reaches a recursion through a function 
         \\export function handler(req) { return Response.json({ v: down(3) }); }
         },
         .{ .name = "f3", .source =
-        \\let cb = (x) => x + 1;
+        \\function bump(x) { return x + 1; }
+        \\let cb = bump;
         \\function down(n) { return cb(n); }
         \\function arm() { cb = down; return 0; }
         \\export function handler(req) { const a = arm(); return Response.json({ v: down(3) + a }); }
         },
         .{ .name = "g1", .source =
-        \\let slot = (n) => n;
+        \\function same(n) { return n; }
+        \\let slot = same;
         \\function down(items, n) { return items.map(slot)[0] ?? n; }
-        \\function arm(n) { slot = (x) => down([x], x); return n; }
+        \\function viaDown(x) { return down([x], x); }
+        \\function arm(n) { slot = viaDown; return n; }
         \\export function handler(req) { return Response.json({ v: arm(1) + down([3], 3) }); }
         },
         .{ .name = "h4", .source =

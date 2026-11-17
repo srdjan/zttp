@@ -7962,9 +7962,9 @@ test "break and continue in a function nested in a loop are refused" {
     // `break` that names the enclosing function's loop compiled to nothing
     // and the statements after it ran.
     const refused = [_][]const u8{
-        "function f(xs) { for (const x of xs) { const g = () => { break; }; } }",
-        "function f(xs) { for (const x of xs) { const g = () => { continue; }; } }",
-        "function f(xs) { for (const x of xs) { const g = (y) => { if (y) { continue; } return y; }; } }",
+        "function f(xs) { for (const x of xs) { run(() => { break; }); } }",
+        "function f(xs) { for (const x of xs) { run(() => { continue; }); } }",
+        "function f(xs) { for (const x of xs) { run((y) => { if (y) { continue; } return y; }); } }",
     };
     for (refused) |source| {
         var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -7978,8 +7978,8 @@ test "break and continue in a function nested in a loop are refused" {
     // The loop flag comes back after the nested function, so the outer
     // loop's own `break` and `continue` still parse.
     const accepted = [_][]const u8{
-        "function f(xs) { for (const x of xs) { const g = () => 1; break; } }",
-        "function f(xs) { for (const x of xs) { const g = () => { for (const y of xs) { break; } return 1; }; continue; } }",
+        "function f(xs) { for (const x of xs) { run(() => 1); break; } }",
+        "function f(xs) { for (const x of xs) { run(() => { for (const y of xs) { break; } return 1; }); continue; } }",
     };
     for (accepted) |source| {
         var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -8087,7 +8087,7 @@ test "parse function declaration" {
 }
 
 test "parse arrow function" {
-    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const f = (x) => x * 2;", .compile);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "function f(xs) { return xs.map((x) => x * 2); }", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -8264,7 +8264,7 @@ test "parse closure creates upvalue" {
         std.testing.allocator,
         std.testing.allocator,
         \\function outer(x) {
-        \\  return () => x;
+        \\  return run(() => x);
         \\}
     ,
         .compile,
@@ -10836,8 +10836,8 @@ test "error-list allocation failure outranks a retained type-only module refusal
 test "nested type-only module refusal removes enclosing type syntax" {
     const tails = [_][]const u8{
         "function helper<T>(value: string): string {import type { Spec } from \"" ++ retired_types_module ++ "\";return value;}",
-        "const helper=(value)=>{import type { Spec } from \"" ++ retired_types_module ++ "\";return value;};",
-        "export const helper=(value)=>{import type { Spec } from \"" ++ retired_types_module ++ "\";return value;};",
+        "function helper(value){return run((inner)=>{import type { Spec } from \"" ++ retired_types_module ++ "\";return inner;});}",
+        "export function helper(value){import type { Spec } from \"" ++ retired_types_module ++ "\";return value;}",
     };
     for (tails) |tail| {
         const source = try std.mem.concat(

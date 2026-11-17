@@ -1064,9 +1064,9 @@ fn runHeaderTypeAllocation(
 ) !void {
     const source = switch (case) {
         .mixed => "const seed: number = 1;\n" ++
-            "const guard = (candidate, marker: unknown): candidate is string => typeof candidate === \"string\";",
+            "const guard = [0].map((candidate, marker: unknown): candidate is string => typeof candidate === \"string\");",
         .tab => "const seed: number = 1;\n" ++
-            "const guard = (value: unknown): value\tis\tstring => true;",
+            "const guard = [0].map((value: unknown): value\tis\tstring => true);",
     };
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
@@ -1673,7 +1673,7 @@ test "type-only module allocation sweeps retain the earlier module" {
 }
 
 test "typed predicate arrow owns its exact header syntax" {
-    const source = "const guard = (candidate, marker: unknown): candidate is string => typeof candidate === \"string\";";
+    const source = "const guard = [0].map((candidate, marker: unknown): candidate is string => typeof candidate === \"string\");";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -1717,7 +1717,7 @@ test "typed predicate arrow owns its exact header syntax" {
     try std.testing.expectEqualStrings("candidate", predicate.target_span.text(source));
     try std.testing.expectEqualStrings("string", predicate.narrowed.raw_span.text(source));
     try std.testing.expectEqualStrings("candidate is string ", return_syntax.raw_span.text(source));
-    const opener = std.mem.indexOfScalar(u8, source, '(') orelse return error.TestUnexpectedResult;
+    const opener = std.mem.indexOf(u8, source, "(candidate") orelse return error.TestUnexpectedResult;
     const body = std.mem.indexOf(u8, source, "typeof") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, @intCast(opener)), signature.source_span.start);
     try std.testing.expectEqual(@as(u32, @intCast(body)), signature.source_span.end);
@@ -1763,7 +1763,7 @@ test "typed predicate arrow owns its exact header syntax" {
 }
 
 test "ordinary typed arrow owns parameter and return roots" {
-    const source = "const echo = (value: string): string => value;";
+    const source = "const echo = [\"\"].map((value: string): string => value);";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -1804,7 +1804,7 @@ test "named and arrow returns retain predicate facets" {
             .shape = .mixed,
         },
         .{
-            .source = "const guard = (candidate, marker: unknown): candidate is string => typeof candidate === \"string\";",
+            .source = "const guard = [0].map((candidate, marker: unknown): candidate is string => typeof candidate === \"string\");",
             .owner_tag = .arrow_function,
             .shape = .mixed,
         },
@@ -1814,7 +1814,7 @@ test "named and arrow returns retain predicate facets" {
             .shape = .unresolved,
         },
         .{
-            .source = "const guard = (value: unknown): missing is string => true;",
+            .source = "const guard = [0].map((value: unknown): missing is string => true);",
             .owner_tag = .arrow_function,
             .shape = .unresolved,
         },
@@ -1824,7 +1824,7 @@ test "named and arrow returns retain predicate facets" {
             .shape = .quoted,
         },
         .{
-            .source = "const guard = (value: unknown): \"x is y\" => true;",
+            .source = "const guard = [0].map((value: unknown): \"x is y\" => true);",
             .owner_tag = .arrow_function,
             .shape = .quoted,
         },
@@ -1834,7 +1834,7 @@ test "named and arrow returns retain predicate facets" {
             .shape = .tab,
         },
         .{
-            .source = "const guard = (value: unknown): value\tis\tstring => true;",
+            .source = "const guard = [0].map((value: unknown): value\tis\tstring => true);",
             .owner_tag = .arrow_function,
             .shape = .tab,
         },
@@ -1952,7 +1952,7 @@ test "predicate narrowing retains the untrimmed whitespace tail" {
     };
     const cases = [_]Case{
         .{ .source = "function guard(value: unknown): value is string   { return true; }", .expected_raw = "value is string   " },
-        .{ .source = "const guard = (value: unknown): value is string   => true;", .expected_raw = "value is string   " },
+        .{ .source = "const guard = [0].map((value: unknown): value is string   => true);", .expected_raw = "value is string   " },
     };
     for (cases) |case| {
         var atoms = AtomTable.init(std.testing.allocator);
@@ -1991,9 +1991,9 @@ test "empty predicate narrowing is a parse error at the token after is" {
     };
     const cases = [_]Case{
         .{ .source = "function guard(value: unknown): value is { return true; }", .column = 42, .token_text = "{" },
-        .{ .source = "const guard = (value: unknown): value is => true;", .column = 42, .token_text = "=>" },
+        .{ .source = "const guard = [0].map((value: unknown): value is => true);", .column = 50, .token_text = "=>" },
         .{ .source = "function guard(value: unknown): value\tis\t{ return true; }", .column = 42, .token_text = "{" },
-        .{ .source = "const guard = (value: unknown): value\tis\t=> true;", .column = 42, .token_text = "=>" },
+        .{ .source = "const guard = [0].map((value: unknown): value\tis\t=> true);", .column = 50, .token_text = "=>" },
         .{ .source = "function guard(value: unknown): value is /* c */ { return true; }", .column = 50, .token_text = "{" },
     };
     for (cases) |case| {
@@ -2015,7 +2015,7 @@ test "empty predicate narrowing is a parse error at the token after is" {
 }
 
 test "nested return function type selects the outer arrow" {
-    const source = "const make = (): (value: string) => string => (value: string): string => value;";
+    const source = "const make = [0].map((): (value: string) => string => [\"\"].map((value: string): string => value));";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -2081,7 +2081,7 @@ test "arrow lookahead keeps grouped controls outside signatures" {
 test "predicate target validation rejects external runtime identity" {
     const source =
         "function left(value: unknown): value is string { return true; }\n" ++
-        "const right = (value: unknown): value is string => true;\n";
+        "const right = [0].map((value: unknown): value is string => true);\n";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -4935,11 +4935,11 @@ test "named function comment node failures remove pending compatibility owners" 
 test "arrow and wrapper allocation failures restore all header arrays" {
     const variable_source =
         "const seed: number = 1;\n" ++
-        "const guard = (candidate, marker: unknown): candidate is string => typeof candidate === \"string\";";
+        "const guard = [0].map((candidate, marker: unknown): candidate is string => typeof candidate === \"string\");";
     const export_source =
         "const seed: number = 1;\n" ++
-        "export const guard = (candidate, marker: unknown): candidate is string => typeof candidate === \"string\";";
-    const final_semicolon = std.mem.lastIndexOfScalar(u8, variable_source, ';').?;
+        "export const guard = [0].map((candidate, marker: unknown): candidate is string => typeof candidate === \"string\");";
+    const final_paren = std.mem.lastIndexOfScalar(u8, variable_source, ')').?;
     const last_newline = std.mem.lastIndexOfScalar(u8, variable_source, '\n').?;
     const common = FinalNodeRollbackCase{
         .source = variable_source,
@@ -4958,12 +4958,12 @@ test "arrow and wrapper allocation failures restore all header arrays" {
         .retained_checkpoint = seedCheckpoint(),
         .runtime_validation = true,
         .expected_current = .{ .token = .{
-            .kind = .semicolon,
+            .kind = .rparen,
             .location = .{
-                .offset = @intCast(final_semicolon),
-                .end_offset = @intCast(final_semicolon + 1),
+                .offset = @intCast(final_paren),
+                .end_offset = @intCast(final_paren + 1),
                 .line = 2,
-                .column = @intCast(final_semicolon - last_newline),
+                .column = @intCast(final_paren - last_newline),
             },
         } },
     };
@@ -7072,7 +7072,7 @@ fn runtimeNodeAt(
 
 test "outer annotation keeps its index across a nested typed initializer" {
     const source =
-        "const outer: number = (() => { const inner: string = \"x\"; return 1; })();";
+        "const outer: number[] = [0].map(() => { const inner: string = \"x\"; return 1; });";
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
@@ -8299,7 +8299,9 @@ fn expectDirectPredicateConsumerInner(
     direct_checker.scopes = &direct.scopes;
     const type_ok = try direct_checker.check(direct_root);
     const expected_type: []const type_checker_mod.DiagnosticKind = switch (case) {
-        .named_guard_unverified, .arrow_guard_unverified, .arrow_ordinary_tab, .compact_target_position, .unresolved_target, .mixed_untyped_target, .target_after_sixteen, .quoted_marker_space, .quoted_marker_tab, .ordinary_tab, .readonly_tab => &.{.invalid_type_predicate},
+        .named_guard_unverified, .arrow_guard_unverified, .arrow_ordinary_tab, .unresolved_target, .mixed_untyped_target, .quoted_marker_space, .quoted_marker_tab, .ordinary_tab, .readonly_tab => &.{.invalid_type_predicate},
+        // The arrow is a `map` callback, and `map` takes at most two parameters.
+        .compact_target_position, .target_after_sixteen => &.{ .invalid_type_predicate, .arg_count_mismatch },
         .quoted_value => &.{.return_type_mismatch},
         else => &.{},
     };
@@ -8337,19 +8339,19 @@ test "direct predicates preserve construction and checker behavior" {
         return_spelling: ?[]const u8,
     }{
         .{ .case = .named_value, .source = "function echo(value: string): string { return value; }", .predicate = .absent, .return_spelling = "string " },
-        .{ .case = .arrow_value, .source = "const echo = (value: string): string => value;", .predicate = .absent, .return_spelling = "string " },
+        .{ .case = .arrow_value, .source = "const echo = [\"\"].map((value: string): string => value);", .predicate = .absent, .return_spelling = "string " },
         .{ .case = .named_guard_verified, .source = "function guard(candidate: unknown): candidate is string { return typeof candidate === \"string\"; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
         .{ .case = .named_guard_unverified, .source = "function guard(candidate: unknown): candidate is string { return true; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
-        .{ .case = .arrow_guard_unverified, .source = "const guard = (candidate: unknown): candidate is string => true;", .predicate = .{ .parameter = 0 }, .return_spelling = null },
+        .{ .case = .arrow_guard_unverified, .source = "const guard = [0].map((candidate: unknown): candidate is string => true);", .predicate = .{ .parameter = 0 }, .return_spelling = null },
         .{ .case = .ordinary_newline, .source = "function guard(candidate: unknown): candidate\nis\r\nstring { return typeof candidate === \"string\"; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
         .{ .case = .ordinary_tab, .source = "function guard(candidate: unknown): candidate\tis\tstring { return true; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
-        .{ .case = .arrow_ordinary_tab, .source = "const guard = (candidate: unknown): candidate\tis\tstring => true;", .predicate = .{ .parameter = 0 }, .return_spelling = null },
+        .{ .case = .arrow_ordinary_tab, .source = "const guard = [0].map((candidate: unknown): candidate\tis\tstring => true);", .predicate = .{ .parameter = 0 }, .return_spelling = null },
         .{ .case = .readonly_tab, .source = "function guard(readonly: unknown): readonly\tis\tstring { return true; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
-        .{ .case = .quoted_value, .source = "const text = (): \"x is y\" => true;", .predicate = .absent, .return_spelling = "\"x is y\" " },
+        .{ .case = .quoted_value, .source = "const text = [0].map((): \"x is y\" => true);", .predicate = .absent, .return_spelling = "\"x is y\" " },
         .{ .case = .unresolved_target, .source = "function guard(candidate: unknown): missing is string[] { return true; }\n", .predicate = .absent, .return_spelling = null },
         .{ .case = .mixed_untyped_target, .source = "function guard(candidate, marker: unknown): candidate is string[] { return true; }\n", .predicate = .absent, .return_spelling = null },
-        .{ .case = .compact_target_position, .source = "const guard = (lead, marker: unknown, candidate: unknown): candidate is string => true;", .predicate = .{ .parameter = 1 }, .return_spelling = null },
-        .{ .case = .target_after_sixteen, .source = "const guard = (p0: unknown, p1: unknown, p2: unknown, p3: unknown, p4: unknown, p5: unknown, p6: unknown, p7: unknown, p8: unknown, p9: unknown, p10: unknown, p11: unknown, p12: unknown, p13: unknown, p14: unknown, p15: unknown, target: unknown): target is string[] => true;\n", .predicate = .absent, .return_spelling = null },
+        .{ .case = .compact_target_position, .source = "const guard = [0].map((lead, marker: unknown, candidate: unknown): candidate is string => true);", .predicate = .{ .parameter = 1 }, .return_spelling = null },
+        .{ .case = .target_after_sixteen, .source = "const guard = [0].map((p0: unknown, p1: unknown, p2: unknown, p3: unknown, p4: unknown, p5: unknown, p6: unknown, p7: unknown, p8: unknown, p9: unknown, p10: unknown, p11: unknown, p12: unknown, p13: unknown, p14: unknown, p15: unknown, target: unknown): target is string[] => true);\n", .predicate = .absent, .return_spelling = null },
         .{ .case = .trailing_ordinary, .source = "function echo(value: string): string   { return value; }", .predicate = .absent, .return_spelling = "string   " },
         .{ .case = .quoted_marker_space, .source = "function guard(candidate: unknown): candidate is \"a is b\" { return true; }\n", .predicate = .{ .literal = "a is b" }, .return_spelling = null },
         .{ .case = .quoted_marker_tab, .source = "function guard(candidate: unknown): candidate\tis \"a is b\" { return true; }\n", .predicate = .{ .literal = "a is b" }, .return_spelling = null },
@@ -10028,7 +10030,7 @@ test "direct consumers preserve generic calls compact arity and strict signature
         .{
             .case = .compact_arity,
             .source =
-            \\const first = (a: number, b): number => a;
+            \\function first(a: number, b): number { return a; }
             \\function handler(req: Request): Response {
             \\  return Response.json({ value: first(1, 2, 3) });
             \\}
@@ -10040,7 +10042,7 @@ test "direct consumers preserve generic calls compact arity and strict signature
             .case = .incomplete_signature,
             .source =
             \\function handler(req: Request): Response { return Response.json({}); }
-            \\const first = (a: number, b): number => a;
+            \\function first(a: number, b): number { return a; }
             ,
             .type_diagnostics = &.{},
             .strict_diagnostics = &.{.{ .kind = .missing_public_annotation }},

@@ -1,12 +1,16 @@
 // Syntactic sugar demo.
 //
-// The conveniences the model-minimal profile keeps: arrow callbacks, the array
-// higher-order functions, and `Object.keys`. Compound assignment is not one of
-// them - `score += 50` is ZTS613, so the update is written in full.
+// The conveniences the model-minimal profile keeps: arrow callbacks passed
+// directly to a call, the array higher-order functions, and `Object.keys`. A
+// helper is a module-level `function`; an arrow bound to a name is ZTS072.
+// Compound assignment is not one of them - `score += 50` is ZTS613, so the
+// update is written in full.
+
+function double(x: number): number {
+  return x * 2;
+}
 
 function handler(req: Request): Proof<Response, "state_isolated" | "no_secret_leakage" | "injection_safe"> {
-  const double = (x: number): number => x * 2;
-
   let score = 100;
   score = score + 50;
 

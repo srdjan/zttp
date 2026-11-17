@@ -459,11 +459,11 @@ test "an error read inside the err arm is proved" {
 test "an error read with a nullish fallback emits no event" {
     const allocator = testing.allocator;
     var certified = try certify(allocator, validate_prelude ++
-        "const describe = (text: string): string => {\n" ++
+        "function describe(text: string): string {\n" ++
         "  const r = validateJson(\"todo\", text);\n" ++
         "  const reason = r.error ?? \"none\";\n" ++
         "  return reason;\n" ++
-        "};\n" ++
+        "}\n" ++
         "export function handler(req: Request): " ++ result_capsule ++ " {\n" ++
         "  return Response.json({ out: describe(\"1\") });\n" ++
         "}\n");
@@ -569,10 +569,10 @@ const false_proofs = [_]FalseProof{
             "  }\n" ++
             "  if (req.method !== \"GET\") {\n" ++
             "    const r = validateJson(\"todo\", \"{}\");\n" ++
-            "    const read = (): unknown => {\n" ++
+            "    const read = [0].map((n: number): unknown => {\n" ++
             "      return r.value;\n" ++
-            "    };\n" ++
-            "    return Response.json({ v: read() });\n" ++
+            "    });\n" ++
+            "    return Response.json({ v: read[0] });\n" ++
             "  }\n" ++
             "  return Response.json({ v: 0 });\n",
     },

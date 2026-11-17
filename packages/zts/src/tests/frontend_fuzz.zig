@@ -803,7 +803,7 @@ const value_shapes = [_]Shape{
     .{ .name = "array", .prefix = "const x = ", .open = "[", .core = "1", .close = "]", .suffix = ";" },
     .{ .name = "object", .prefix = "const x = ", .open = "{ a: ", .core = "1", .close = "}", .suffix = ";" },
     .{ .name = "call", .prefix = "const x = ", .open = "f(", .core = "1", .close = ")", .suffix = ";" },
-    .{ .name = "arrow", .prefix = "const x = ", .open = "() => ", .core = "1", .close = "", .suffix = ";" },
+    .{ .name = "arrow", .prefix = "const x = ", .open = "f(() => ", .core = "1", .close = ")", .suffix = ";" },
     .{ .name = "unary", .prefix = "const x = ", .open = "!", .core = "1", .close = "", .suffix = ";" },
     .{ .name = "ternary", .prefix = "const x = ", .open = "a ? b : ", .core = "1", .close = "", .suffix = ";" },
     .{ .name = "if", .open = "if (a) { ", .core = "a;", .close = "}" },

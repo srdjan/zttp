@@ -2547,10 +2547,10 @@ const false_proof_lowerings = [_]FalseProofLowering{
     \\  }
     \\  if (req.method !== "GET") {
     \\    const r = validateJson("todo", "{}");
-    \\    const read = () => {
+    \\    const read = [0].map((n) => {
     \\      return r.value;
-    \\    };
-    \\    return Response.text(read());
+    \\    });
+    \\    return Response.text(read[0]);
     \\  }
     \\  return Response.text("none");
     \\}

@@ -52,13 +52,12 @@ function assertProbe(req) {
   return Response.json({ authorization: req.headers.authorization });
 }
 
-function makeAdder(base) {
-  return (value) => value + base;
+function addBase(base, value) {
+  return value + base;
 }
 
 function closureProbe() {
-  const addSeven = makeAdder(7);
-  return Response.json({ value: addSeven(5) });
+  return Response.json({ value: addBase(7, 5) });
 }
 
 function factorialTail(n, acc) {

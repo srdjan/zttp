@@ -1836,8 +1836,8 @@ test "every compile stage releases what it allocated at any failure index" {
     const allocator = testing.allocator;
     const source =
         \\import { sha256 } from "zttp:crypto";
+        \\function make() { return sha256("x"); }
         \\function handler(req) {
-        \\  const make = () => sha256("x");
         \\  if (req.url === "/a") { return Response.json({ hash: make() }); }
         \\  return Response.text("ok");
         \\}
@@ -2204,7 +2204,7 @@ test "dropRepeatsOfTypeErrors removes a strict diagnostic below a type error and
         \\}
         \\function handler(req: Request): Response {
         \\  const x: number = one(1, (a: number, b) => a);
-        \\  const y = (a: number, b) => a;
+        \\  const y = [1].map((a: number, b) => a);
         \\  return Response.text(String(x));
         \\}
     ;
@@ -2251,44 +2251,44 @@ const guard_union_decl = "structural Ev = { kind: \"a\"; flag: boolean } | { kin
 test "the right operand of && is typed under the left operand's guard" {
     // An optional boolean read after an undefined test.
     try expectBoolErrors(
-        "const f = (v: boolean | undefined): boolean => v !== undefined && v;",
+        "function f(v: boolean | undefined): boolean { return v !== undefined && v; }",
         0,
     );
     // A discriminant test selects the member that has the field.
     try expectBoolErrors(
-        guard_union_decl ++ "const f = (e: Ev): boolean => e.kind === \"a\" && e.flag;",
+        guard_union_decl ++ "function f(e: Ev): boolean { return e.kind === \"a\" && e.flag; }",
         0,
     );
     // A chain of tests: each guard reaches every operand to its right.
     try expectBoolErrors(
-        "const f = (a: boolean | undefined, b: boolean | undefined): boolean =>" ++
-            " a !== undefined && b !== undefined && a && b;",
+        "function f(a: boolean | undefined, b: boolean | undefined): boolean {" ++
+            " return a !== undefined && b !== undefined && a && b; }",
         0,
     );
     // A condition that is itself a conjunction, in `if` and in a ternary.
     try expectBoolErrors(
-        "const f = (v: boolean | undefined): number => { if (v !== undefined && v) { return 1; } return 0; };",
+        "function f(v: boolean | undefined): number { if (v !== undefined && v) { return 1; } return 0; }",
         0,
     );
     try expectBoolErrors(
-        "const f = (v: boolean | undefined): number => v !== undefined && v ? 1 : 0;",
+        "function f(v: boolean | undefined): number { return v !== undefined && v ? 1 : 0; }",
         0,
     );
 }
 
 test "the right operand of || is typed under the negated left guard" {
     try expectBoolErrors(
-        "const f = (v: boolean | undefined): boolean => v === undefined || !v;",
+        "function f(v: boolean | undefined): boolean { return v === undefined || !v; }",
         0,
     );
     try expectBoolErrors(
-        "const f = (v: boolean | undefined): boolean => v === undefined || v;",
+        "function f(v: boolean | undefined): boolean { return v === undefined || v; }",
         0,
     );
     // The disjunction of two tests is false only when both failed.
     try expectBoolErrors(
-        "const f = (a: boolean | undefined, b: boolean | undefined): boolean =>" ++
-            " a === undefined || b === undefined || a || b;",
+        "function f(a: boolean | undefined, b: boolean | undefined): boolean {" ++
+            " return a === undefined || b === undefined || a || b; }",
         0,
     );
 }
@@ -2297,32 +2297,32 @@ test "a guard does not reach an operand the left side does not decide" {
     // `||` runs its right side when the left one was false, so a test that
     // narrows the true branch narrows nothing there.
     try expectBoolErrors(
-        "const f = (v: boolean | undefined): boolean => v !== undefined || v;",
+        "function f(v: boolean | undefined): boolean { return v !== undefined || v; }",
         1,
     );
     // `&&` runs its right side when the left one was true.
     try expectBoolErrors(
-        "const f = (v: boolean | undefined): boolean => v === undefined && v;",
+        "function f(v: boolean | undefined): boolean { return v === undefined && v; }",
         1,
     );
     // The false side of a conjunction decides neither of its operands.
     try expectBoolErrors(
-        "const f = (v: boolean | undefined): boolean => (v !== undefined && v) || v;",
+        "function f(v: boolean | undefined): boolean { return (v !== undefined && v) || v; }",
         1,
     );
     // An operand with no guard keeps its declared type.
     try expectBoolErrors(
-        "const f = (v: boolean | undefined): boolean => v && true;",
+        "function f(v: boolean | undefined): boolean { return v && true; }",
         1,
     );
 }
 
 test "a guard of && ends with the expression it guards" {
     try expectBoolErrors(
-        "const f = (v: boolean | undefined): number => {\n" ++
+        "function f(v: boolean | undefined): number {\n" ++
             "  const both = v !== undefined && v;\n" ++
             "  return v ? 1 : 0;\n" ++
-            "};",
+            "}",
         1,
     );
 }
@@ -2417,20 +2417,20 @@ fn expectEveryContextBoolean(source: []const u8, comptime expected: usize) !void
 
 test "isDict and isBytes are booleans in every boolean context" {
     try expectBoolErrors(
-        "const f = (d: unknown): number => { if (isDict(d)) { return 1; } return 0; };",
+        "function f(d: unknown): number { if (isDict(d)) { return 1; } return 0; }",
         0,
     );
     try expectBoolErrors(
-        "const f = (d: unknown): boolean => !isDict(d) || (isBytes(d) && true);",
+        "function f(d: unknown): boolean { return !isDict(d) || (isBytes(d) && true); }",
         0,
     );
     try expectBoolErrors(
-        "const f = (d: unknown): number => isBytes(d) ? 1 : 0;",
+        "function f(d: unknown): number { return isBytes(d) ? 1 : 0; }",
         0,
     );
     // Control: an unknown value itself is still not a boolean.
     try expectBoolErrors(
-        "const f = (d: unknown): number => { if (d) { return 1; } return 0; };",
+        "function f(d: unknown): number { if (d) { return 1; } return 0; }",
         1,
     );
     try expectEveryContextBoolean(
@@ -2444,16 +2444,16 @@ test "isDict and isBytes are booleans in every boolean context" {
 test "a member read through a record parameter's named field is typed" {
     const todo = "structural Todo = { text: string; done: boolean };\n";
     try expectBoolErrors(
-        todo ++ "const f = (p: { todo: Todo }): number => p.todo.done ? 1 : 0;",
+        todo ++ "function f(p: { todo: Todo }): number { return p.todo.done ? 1 : 0; }",
         0,
     );
     try expectBoolErrors(
-        todo ++ "const f = (p: { todo: Todo }): boolean => !p.todo.done && p.todo.done;",
+        todo ++ "function f(p: { todo: Todo }): boolean { return !p.todo.done && p.todo.done; }",
         0,
     );
     // Control: the field read resolves to its declared type, which is a string.
     try expectBoolErrors(
-        todo ++ "const f = (p: { todo: Todo }): number => p.todo.text ? 1 : 0;",
+        todo ++ "function f(p: { todo: Todo }): number { return p.todo.text ? 1 : 0; }",
         1,
     );
     try expectEveryContextBoolean(todo ++
@@ -2465,22 +2465,22 @@ test "a member read through a record parameter's named field is typed" {
 
 test "typeof over an unknown value refines it to the named primitive" {
     try expectBoolErrors(
-        "const f = (v: unknown): number => { if (typeof v === \"boolean\") { if (v) { return 1; } } return 0; };",
+        "function f(v: unknown): number { if (typeof v === \"boolean\") { if (v) { return 1; } } return 0; }",
         0,
     );
     // The negated form refines the other branch.
     try expectBoolErrors(
-        "const f = (v: unknown): number => { if (typeof v !== \"boolean\") { return 0; } return v ? 1 : 0; };",
+        "function f(v: unknown): number { if (typeof v !== \"boolean\") { return 0; } return v ? 1 : 0; }",
         0,
     );
     // Control: a refinement to a string is not a boolean.
     try expectBoolErrors(
-        "const f = (v: unknown): number => { if (typeof v === \"string\") { if (v) { return 1; } } return 0; };",
+        "function f(v: unknown): number { if (typeof v === \"string\") { if (v) { return 1; } } return 0; }",
         1,
     );
     // Control: the refinement ends with the branch.
     try expectBoolErrors(
-        "const f = (v: unknown): number => { if (typeof v === \"boolean\") { return 1; } return v ? 1 : 0; };",
+        "function f(v: unknown): number { if (typeof v === \"boolean\") { return 1; } return v ? 1 : 0; }",
         1,
     );
     try expectEveryContextBoolean(
@@ -2495,12 +2495,12 @@ test "typeof over an unknown value refines it to the named primitive" {
 
 test "the element variable of for-of over an array takes the element type" {
     try expectBoolErrors(
-        "const f = (flags: boolean[]): number => { for (const flag of flags) { if (flag) { return 1; } } return 0; };",
+        "function f(flags: boolean[]): number { for (const flag of flags) { if (flag) { return 1; } } return 0; }",
         0,
     );
     // Control: a string element is not a boolean.
     try expectBoolErrors(
-        "const f = (names: string[]): number => { for (const name of names) { if (name) { return 1; } } return 0; };",
+        "function f(names: string[]): number { for (const name of names) { if (name) { return 1; } } return 0; }",
         1,
     );
     try expectEveryContextBoolean(
@@ -2533,29 +2533,29 @@ fn expectBoolKind(source: []const u8, comptime kind: bool_checker_mod.Diagnostic
 
 test "arithmetic on a parameter declared string is refused" {
     try expectBoolKind(
-        "const f = (s: string): number => s - 1;",
+        "function f(s: string): number { return s - 1; }",
         .arithmetic_on_non_numeric,
         true,
     );
     try expectBoolKind(
-        "const f = (b: boolean): number => b * 2;",
+        "function f(b: boolean): number { return b * 2; }",
         .arithmetic_on_non_numeric,
         true,
     );
     try expectBoolKind(
-        "const f = (xs: number[]): number => 2 / xs;",
+        "function f(xs: number[]): number { return 2 / xs; }",
         .arithmetic_on_non_numeric,
         true,
     );
     // An optional string is not a number either.
     try expectBoolKind(
-        "const f = (s: string | undefined): number => s - 1;",
+        "function f(s: string | undefined): number { return s - 1; }",
         .arithmetic_on_non_numeric,
         true,
     );
     // A union of string literals is a string.
     try expectBoolKind(
-        "const f = (m: \"GET\" | \"POST\"): number => m - 1;",
+        "function f(m: \"GET\" | \"POST\"): number { return m - 1; }",
         .arithmetic_on_non_numeric,
         true,
     );
@@ -2563,7 +2563,7 @@ test "arithmetic on a parameter declared string is refused" {
 
 test "arithmetic on a parameter declared number is accepted" {
     try expectBoolKind(
-        "const f = (n: number, m: number): number => n - m * 2;",
+        "function f(n: number, m: number): number { return n - m * 2; }",
         .arithmetic_on_non_numeric,
         false,
     );
@@ -2816,17 +2816,17 @@ test "arithmetic on a value proven to be a number is accepted" {
 
 test "plus on a parameter declared boolean or object is refused" {
     try expectBoolKind(
-        "const f = (b: boolean): number => b + 1;",
+        "function f(b: boolean): number { return b + 1; }",
         .add_on_non_addable,
         true,
     );
     try expectBoolKind(
-        "const f = (xs: number[]): number => 1 + xs;",
+        "function f(xs: number[]): number { return 1 + xs; }",
         .add_on_non_addable,
         true,
     );
     try expectBoolKind(
-        "const f = (a: number, b: number): number => a + b;",
+        "function f(a: number, b: number): number { return a + b; }",
         .add_on_non_addable,
         false,
     );
@@ -2834,17 +2834,17 @@ test "plus on a parameter declared boolean or object is refused" {
 
 test "a fallback on a parameter that cannot be undefined is reported" {
     try expectBoolKind(
-        "const f = (s: string): string => s ?? \"x\";",
+        "function f(s: string): string { return s ?? \"x\"; }",
         .nullish_on_non_nullable,
         true,
     );
     try expectBoolKind(
-        "const f = (s: string | undefined): string => s ?? \"x\";",
+        "function f(s: string | undefined): string { return s ?? \"x\"; }",
         .nullish_on_non_nullable,
         false,
     );
     try expectBoolKind(
-        "const f = (n: number | undefined): number => n ?? 1;",
+        "function f(n: number | undefined): number { return n ?? 1; }",
         .nullish_on_non_nullable,
         false,
     );
@@ -2852,22 +2852,22 @@ test "a fallback on a parameter that cannot be undefined is reported" {
 
 test "a comparison with undefined or typeof on a parameter with a known type is reported" {
     try expectBoolKind(
-        "const f = (s: string): boolean => s === undefined;",
+        "function f(s: string): boolean { return s === undefined; }",
         .tautological_comparison,
         true,
     );
     try expectBoolKind(
-        "const f = (s: string): boolean => typeof s === \"string\";",
+        "function f(s: string): boolean { return typeof s === \"string\"; }",
         .tautological_comparison,
         true,
     );
     try expectBoolKind(
-        "const f = (s: string | undefined): boolean => s === undefined;",
+        "function f(s: string | undefined): boolean { return s === undefined; }",
         .tautological_comparison,
         false,
     );
     try expectBoolKind(
-        "const f = (v: unknown): boolean => typeof v === \"string\";",
+        "function f(v: unknown): boolean { return typeof v === \"string\"; }",
         .tautological_comparison,
         false,
     );
@@ -2876,7 +2876,7 @@ test "a comparison with undefined or typeof on a parameter with a known type is 
 test "a typed parameter does not change the bytecode annotations" {
     // The declared type feeds the diagnostics only. Specializing an operator
     // on a declared parameter type would move precompiled bytecode.
-    try withSession(testing.allocator, "const f = (a: number, b: number): number => a + b;", struct {
+    try withSession(testing.allocator, "function f(a: number, b: number): number { return a + b; }", struct {
         fn run(session: Session) anyerror!void {
             try testing.expectEqual(@as(u32, 0), session.resolved.bool_checker.node_types.count());
         }
@@ -4129,7 +4129,8 @@ test "builtin result: a parameter named Math is not the builtin" {
 test "builtin result: a top-level binding named Math is not the builtin" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
-        \\const Math = { floor: (n: number): string => "x" };
+        \\function floorText(n: number): string { return "x"; }
+        \\const Math = { floor: floorText };
         \\function f(): number { const p: Nope = Math.floor(1); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
@@ -6640,8 +6641,9 @@ test "response init: a redirect with no status or a number-typed status is accep
 
 test "response init: a shadowed Response is a different value" {
     try expectNoTypeDiagnostic(
+        \\function echoBody(body: string, init: { headers: { a: string } }): string { return body; }
         \\function f(): string {
-        \\  const Response = { text: (body: string, init: { headers: { a: string } }): string => body };
+        \\  const Response = { text: echoBody };
         \\  return Response.text("x", { headers: { a: "b" } });
         \\}
     );
