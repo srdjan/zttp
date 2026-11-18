@@ -317,6 +317,42 @@ worktrees from 759f9fd0. Both variants pass every extra route.
 - (b) Exempt `env` reads and a registration bound to a `const`. Variant B
   breaks only the shared set.
 
+### Decision 23: what `zttp serve` checks
+
+A probe on 2026-11-18 ran `zttp serve` on a handler that `zts check`
+refuses with ZTS629 (`JSON.parse`). Serve returned 200 with the parsed
+value. Serve also runs an untyped handler, which `docs/cli.md` shows as
+its `-e` example. A parser refusal, such as ZTS071, stops serve, and a
+ZTS217 type error stops it with `SoundModeViolation`. Serve runs the
+parser refusals and the type check, and not the strict check. `zttp dev`
+and `zttp test` were not probed.
+
+- (a) Recommended. Keep serve as it is, and state in `docs/cli.md` that
+  serve does not run the strict check. The runtime `JSON` object and each
+  `JSON` row that `validateSourceAuthority` reaches stay.
+- (b) Make serve refuse a handler that fails the strict check. This
+  changes a documented command and breaks its `-e` example, so a fallout
+  measurement comes first.
+
+The owner has not answered.
+
+### Decision 24: mutual recursion
+
+A call of a function declared later in the file gets ZTS629, so no mutual
+recursion passes the strict check, and spec 5.6 admits mutual recursion.
+The binding order that causes it also keeps an initializer from reading a
+`const` before its declaration runs. A probe of that read under
+`zttp serve` failed at startup with `PrewarmFailed`.
+
+- (a) Recommended. One unit after U4f. The strict check admits a call of a
+  later module function, and ZTS630 also refuses an initializer that
+  reaches a module `const` declared at or after it. A test that
+  reproduces the refusal comes first.
+- (b) Defer to the roadmap, and state that mutual recursion is not
+  admitted.
+
+The owner has not answered.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -1342,3 +1378,38 @@ later.
     from reading a `const` before its declaration runs. A fix that admits
     a call of a later function must keep that guarantee. For example,
     `const x = a();` before `const K = 1;` must not reach a read of `K`.
+- U4f audited the code behind the refused forms of Decisions 3, 4, 18,
+  and 20, callback purity, U5, and X2, about 95 marked branches in all.
+  The first census was invalid: the marker kept one once-per-process flag
+  for every id, so each process recorded only its first marker. A marker
+  keyed on its id fixed it, and the census ran again. Five probe units
+  then decided each site with admitted sources on every surface, or with
+  lldb. Five commits deleted the dead code, each with a full gate:
+  5f0e57cc (Decision 18: six branches, including the `capture_unseeded`
+  seeding and the nested hole attribution), 9bf36681 (Decision 3: the
+  dependency top-level assert walk), 68942614 (U5: the `JSON.parse`
+  request body fast path and the `ResponseBodySource` enum), fb6f740b
+  (callback purity: three upvalue-write branches), and ee5d9053
+  (Decision 4: six branches, including `Analyzer.reachesRecursion` and
+  `dischargeWithTypeSource`, which had only test callers). Every X2 and
+  Decision 20 site stays: a module-level `let` that a function writes
+  reaches the X2 sites, and a local `const` alias reaches the Decision 20
+  sites. These findings stay open:
+  - f6d2842e fixed a defect that the Decision 20 probes found: a
+    `for...of` loop variable named like a builtin function took the
+    builtin's signature, so `isDict(5)` on a number passed every check.
+  - Two anchors of this plan were wrong. checkGraphModule has no code that
+    carries a label across an exported `const`: labels cross modules in
+    packages/zts/src/flow_interp.zig#FlowInterp.initializeModule. The
+    contract flow extraction in precompile_contract.zig runs only in
+    tests, so the production `strict = false` paths are
+    packages/runtime/src/runtime_cli.zig#validateSourceAuthority and
+    handler_instance.zig.
+  - `zts canonicalize` prints `"ok":true` for a source that ZTS073
+    refuses. The cause is not diagnosed.
+  - function_specs.zig#functionSignature keeps a
+    `.function_expr, .arrow_function => declaration` arm and an
+    `owner_tag != .arrow_function` check, which are probably dead after
+    Decision 4. The audit did not mark them.
+  - scanClosureWrites ignores a write to an `.undeclared_global`, which
+    only the serve path reaches (Decision 23).
