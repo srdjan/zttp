@@ -41,6 +41,7 @@ pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:fetch",
     .name = "fetch",
     .summary = "Fetch an HTTP resource.",
+    .type_exports = &.{"FetchOptions"},
     .required_capabilities = &.{ .network, .runtime_callback },
     .stateful = true,
     .exports = &.{

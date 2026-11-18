@@ -382,6 +382,10 @@ pub const ModuleBinding = struct {
     /// `zttp:sql` being the case that earned it. Empty means undeclared.
     summary: []const u8 = "",
 
+    /// Type names that `import type { ... } from "<specifier>"` declares. A type
+    /// name is not a value export, so `import { Name }` of one stays refused.
+    type_exports: []const []const u8 = &.{},
+
     /// Runtime capabilities consumed by the module's Zig implementation.
     required_capabilities: []const ModuleCapability = &.{},
 

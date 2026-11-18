@@ -254,6 +254,7 @@ pub const ModuleDescriptor = struct {
     name: []const u8,
     exports: []const FunctionDescriptor,
     summary: []const u8 = "",
+    type_exports: []const []const u8 = &.{},
     required_capabilities: []const ModuleCapability = &.{},
     stateful: bool = false,
     contract_section: ?[]const u8 = null,

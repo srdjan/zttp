@@ -7,6 +7,9 @@
     "network",
     "runtime_callback"
   ],
+  "typeExports": [
+    "FetchOptions"
+  ],
   "exports": [
     {
       "name": "fetch",

@@ -65,6 +65,7 @@ pub const Doc = struct {
     gaps: []const GapDoc,
     admitted: []const AdmittedLine,
     ambient: []const []const u8,
+    ambient_types: []const []const u8,
     limits: []const LimitDoc,
     /// The backticked spans of every refusal and gap form cell.
     form_spans: []const []const u8,
@@ -226,6 +227,7 @@ pub fn parseDoc(a: std.mem.Allocator, text: []const u8) !Doc {
     var form_spans: std.ArrayList([]const u8) = .empty;
     var gap_spans: std.ArrayList([]const u8) = .empty;
     var ambient: []const []const u8 = &.{};
+    var ambient_types: []const []const u8 = &.{};
 
     var lines: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, text, '\n');
@@ -246,21 +248,24 @@ pub fn parseDoc(a: std.mem.Allocator, text: []const u8) !Doc {
             }
             continue;
         }
-        if (std.mem.eql(u8, section, "Ambient Names And Effects") and
-            std.mem.indexOf(u8, line, "The closed ambient value namespace is:") != null)
-        {
-            var paragraph: std.ArrayList(u8) = .empty;
-            var j = i;
-            while (j < lines.items.len and lines.items[j].len != 0) : (j += 1) {
-                try paragraph.appendSlice(a, lines.items[j]);
-                try paragraph.append(a, ' ');
+        if (std.mem.eql(u8, section, "Ambient Names And Effects")) {
+            const is_values = std.mem.indexOf(u8, line, "The closed ambient value namespace is:") != null;
+            const is_types = std.mem.indexOf(u8, line, "The closed ambient type namespace is:") != null;
+            if (is_values or is_types) {
+                var paragraph: std.ArrayList(u8) = .empty;
+                var j = i;
+                while (j < lines.items.len and lines.items[j].len != 0) : (j += 1) {
+                    try paragraph.appendSlice(a, lines.items[j]);
+                    try paragraph.append(a, ' ');
+                }
+                const marker = "namespace is:";
+                const start = (std.mem.indexOf(u8, paragraph.items, marker) orelse return error.BadAmbientList) + marker.len;
+                const stop = std.mem.indexOfPos(u8, paragraph.items, start, ".") orelse return error.BadAmbientList;
+                const spans = try codeSpans(a, paragraph.items[start..stop]);
+                if (is_values) ambient = spans else ambient_types = spans;
+                i = j;
+                continue;
             }
-            const marker = "namespace is:";
-            const start = (std.mem.indexOf(u8, paragraph.items, marker) orelse return error.BadAmbientList) + marker.len;
-            const stop = std.mem.indexOfPos(u8, paragraph.items, start, ".") orelse return error.BadAmbientList;
-            ambient = try codeSpans(a, paragraph.items[start..stop]);
-            i = j;
-            continue;
         }
         if (line.len == 0 or line[0] != '|') continue;
 
@@ -301,6 +306,7 @@ pub fn parseDoc(a: std.mem.Allocator, text: []const u8) !Doc {
         .gaps = try gaps.toOwnedSlice(a),
         .admitted = try admitted.toOwnedSlice(a),
         .ambient = ambient,
+        .ambient_types = ambient_types,
         .limits = try limits.toOwnedSlice(a),
         .form_spans = try form_spans.toOwnedSlice(a),
         .gap_spans = try gap_spans.toOwnedSlice(a),
@@ -367,6 +373,7 @@ pub const Registry = struct {
     kind_codes: []const []const u8,
     members: []const Member,
     ambient: []const []const u8,
+    ambient_types: []const []const u8,
     limits: []const Limit,
 };
 
@@ -502,6 +509,7 @@ pub fn runGate(gpa: std.mem.Allocator, inputs: Inputs) !Report {
     try checkAdmitted(&report, doc, inputs.registry.members);
     try checkMemberReads(&report, doc, inputs);
     try checkAmbient(&report, doc, inputs.registry.ambient);
+    try checkAmbientTypes(&report, doc, inputs.registry.ambient_types);
     try checkLimits(&report, doc, inputs.registry.limits);
     return report;
 }
@@ -769,6 +777,16 @@ fn checkAmbient(report: *Report, doc: Doc, registry: []const []const u8) !void {
     if (doc.ambient.len == 0) try report.fail("the document lists no ambient names", .{});
 }
 
+fn checkAmbientTypes(report: *Report, doc: Doc, registry: []const []const u8) !void {
+    for (doc.ambient_types) |name| {
+        if (!contains(registry, name)) try report.fail("ambient type name `{s}`: the document lists it, and the meta payload does not", .{name});
+    }
+    for (registry) |name| {
+        if (!contains(doc.ambient_types, name)) try report.fail("ambient type name `{s}`: the meta payload lists it, and the document does not", .{name});
+    }
+    if (doc.ambient_types.len == 0) try report.fail("the document lists no ambient type names", .{});
+}
+
 fn checkLimits(report: *Report, doc: Doc, registry: []const Limit) !void {
     for (doc.limits) |row| {
         var found = false;
@@ -870,6 +888,11 @@ fn realRegistry(a: std.mem.Allocator, gpa: std.mem.Allocator) !Registry {
     var ambient: std.ArrayList([]const u8) = .empty;
     const values = (payload.get("ambient_names") orelse return error.MissingMetaField).object.get("values") orelse return error.MissingMetaField;
     for (values.array.items) |item| try ambient.append(a, item.string);
+    var ambient_types: std.ArrayList([]const u8) = .empty;
+    const type_rows = (payload.get("ambient_names") orelse return error.MissingMetaField).object.get("types") orelse return error.MissingMetaField;
+    for (type_rows.array.items) |item| {
+        try ambient_types.append(a, (item.object.get("name") orelse return error.MissingMetaField).string);
+    }
     // The own members of each ambient name whose global is an object, such as
     // `Math` and `Object`.
     for (ambient.items) |name| {
@@ -899,6 +922,7 @@ fn realRegistry(a: std.mem.Allocator, gpa: std.mem.Allocator) !Registry {
         .kind_codes = try codes.toOwnedSlice(a),
         .members = try members.toOwnedSlice(a),
         .ambient = try ambient.toOwnedSlice(a),
+        .ambient_types = try ambient_types.toOwnedSlice(a),
         .limits = try limits.toOwnedSlice(a),
     };
 }
@@ -974,6 +998,8 @@ const test_doc =
     \\
     \\The closed ambient value namespace is: `Array`, `Math`. The `meta` list.
     \\
+    \\The closed ambient type namespace is: `Bytes`, `Dict`. The `meta` list.
+    \\
     \\## Limits
     \\
     \\| Limit | Value |
@@ -1030,6 +1056,7 @@ const test_registry: Registry = .{
         .{ .scope = "Array.prototype", .name = "slice" },
     },
     .ambient = &.{ "Array", "Math" },
+    .ambient_types = &.{ "Bytes", "Dict" },
     .limits = &.{.{ .label = "Source file size", .value = 10 }},
 };
 
@@ -1130,6 +1157,7 @@ test "a member missing from Admitted Members and an extra ambient name fail" {
             .{ .scope = "Array.prototype", .name = "join" },
         },
         .ambient = &.{"Array"},
+        .ambient_types = &.{ "Bytes", "Widget" },
         .limits = &.{.{ .label = "Source file size", .value = 11 }},
     };
     var report = try runGate(testing.allocator, testInputs(test_doc, &good_refusals, &good_gaps, registry));
@@ -1137,6 +1165,8 @@ test "a member missing from Admitted Members and an extra ambient name fail" {
     try expectFailure(&report, "member Array.prototype.join: not in Admitted Members");
     try expectFailure(&report, "member Array.prototype.join: a read is accepted, and the document does not admit it");
     try expectFailure(&report, "ambient name `Math`: the document lists it, and the meta payload does not");
+    try expectFailure(&report, "ambient type name `Dict`: the document lists it, and the meta payload does not");
+    try expectFailure(&report, "ambient type name `Widget`: the meta payload lists it, and the document does not");
     try expectFailure(&report, "limit \"Source file size\": the document says 10, and the meta payload says 11");
 }
 
@@ -1145,6 +1175,7 @@ test "a kind that no probe observes needs an allowlist row, and a stale row fail
         .kind_codes = &.{ "ZTS001", "ZTS002", "ZTS004" },
         .members = test_registry.members,
         .ambient = test_registry.ambient,
+        .ambient_types = test_registry.ambient_types,
         .limits = test_registry.limits,
     };
     var report = try runGate(testing.allocator, testInputs(test_doc, &good_refusals, &good_gaps, registry));

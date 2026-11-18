@@ -149,6 +149,9 @@ pub const ModuleBinding = struct {
     /// the module wrong without it, and keep it to the sentence they need
     /// before the first call. It is not documentation.
     summary: []const u8 = "",
+    /// Type names that `import type { ... } from "<specifier>"` declares. A type
+    /// name is not a value export: `import { Name }` of one is still refused.
+    type_exports: []const []const u8 = &.{},
     required_capabilities: []const ModuleCapability = &.{},
     stateful: bool = false,
     state_init: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!void = null,
@@ -191,6 +194,15 @@ pub fn validateBindingMetadata(comptime bindings: anytype) void {
         }
         if (findDuplicateRequiredCapability(binding.required_capabilities)) |capability| {
             @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' in " ++ binding.specifier);
+        }
+        // `import { Name }` and `import type { Name }` share one namespace per
+        // module, so a type name may not repeat a function export.
+        for (binding.type_exports) |type_name| {
+            for (binding.exports) |f| {
+                if (std.mem.eql(u8, type_name, f.name)) {
+                    @compileError("type export '" ++ type_name ++ "' repeats a function export of " ++ binding.specifier);
+                }
+            }
         }
         for (binding.exports) |f| {
             const export_caps = f.required_capabilities orelse continue;

@@ -182,6 +182,15 @@ const refusal_rows_a = [_]RefusalRow{
         .clean = c(top("import { dictEmpty } from \"zttp:collections\";\nconst d: Dict<string, number> = dictEmpty();")),
     },
     .{
+        .key = "An `import type` of a name that the module does not export",
+        .refused = &.{
+            r("import type", top("import type { Nope } from \"zttp:fetch\";")),
+            r("import type", top("import type { FetchOptions, Nope } from \"zttp:fetch\";")),
+            r("import type", top("import type { Nope } from \"zttp:collections\";")),
+        },
+        .clean = c(top("import type { FetchOptions } from \"zttp:fetch\";\nfunction g(o: FetchOptions): number {\n  return 1;\n}")),
+    },
+    .{
         .key = "`namespace` and `module` declarations",
         .refused = &.{
             r("namespace", top("namespace N {\n  export const a = 1;\n}")),
@@ -1395,6 +1404,11 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("structural Item = { id: number };\nstructural Partial<T> = { v: T };\nfunction g<T>(a: T, b: Item, c: readonly Item[], d: Later, e: Partial<number>): T {\n  return a;\n}\nstructural Later = { v: number };")),
     },
     .{
+        .key = "`FetchOptions` with no import",
+        .refused = &.{r("FetchOptions", paramText("FetchOptions"))},
+        .clean = c(top("import type { FetchOptions } from \"zttp:fetch\";\nfunction g(o: FetchOptions): number {\n  return 1;\n}")),
+    },
+    .{
         .key = "A generic default, such as `function f<T = string>(a: T): T`",
         .refused = &.{
             r("function f<T = string>(a: T): T", top("function f<T = string>(a: T): T {\n  return a;\n}")),
@@ -1660,12 +1674,4 @@ pub const refusal_rows = refusal_rows_a ++ refusal_rows_b;
 
 pub const gap_rows = [_]GapRow{
     // ----- U1b rows, in the order of the row assignment of the plan -----
-    .{
-        .key = "`FetchOptions` with no import",
-        .sources = &.{c(top("function g(o: FetchOptions): number {\n  return 1;\n}"))},
-    },
-    .{
-        .key = "`DictKey` with no import, such as `<K extends DictKey>`",
-        .sources = &.{c(top("function f<K extends DictKey>(k: K): K {\n  return k;\n}"))},
-    },
 };

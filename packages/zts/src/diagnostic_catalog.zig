@@ -162,6 +162,7 @@ pub fn parserCode(kind: ParserKind) []const u8 {
         .invalid_super => "ZTS027",
         .too_many_parameters => "ZTS028",
         .undeclared_type_name => "ZTS065",
+        .unexported_type_import => "ZTS207",
         .too_many_locals => "ZTS029",
         .too_many_upvalues => "ZTS030",
         .too_many_constants => "ZTS031",
@@ -375,6 +376,7 @@ fn parserMetadata(kind: ParserKind) Metadata {
             .non_ascii_identifier,
             .missing_semicolon,
             => .source_profile,
+            .unexported_type_import => .module_contract,
             else => .syntax,
         },
         .risk = .correctness,
@@ -621,7 +623,10 @@ test "only explicitly shared semantic faults have multiple producers" {
     // and type-position admission. ZTS044 is shared by the compatibility
     // diagnostic family and the parser's depth check. ZTS042 is shared by the
     // admission of `x as T` and the parser's refusal of `<T>x`.
-    const shared_codes = [_][]const u8{ "ZTS008", "ZTS042", "ZTS044" };
+    // ZTS207 is shared by the virtual-import check of a value import and the
+    // parser-tier check of an `import type` name that the module does not
+    // export.
+    const shared_codes = [_][]const u8{ "ZTS008", "ZTS042", "ZTS044", "ZTS207" };
     var duplicate_count: usize = 0;
     for (all_entries, 0..) |entry, index| {
         for (all_entries[index + 1 ..]) |other| {

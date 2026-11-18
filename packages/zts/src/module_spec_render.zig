@@ -291,6 +291,13 @@ pub fn renderModuleSpec(
     try stringArray(&buf, allocator, 2, caps[0..binding.required_capabilities.len]);
     try buf.appendSlice(allocator, ",\n");
 
+    // Omitted when the module exports no type, like `summary`.
+    if (binding.type_exports.len > 0) {
+        try key(&buf, allocator, 2, "typeExports");
+        try stringArray(&buf, allocator, 2, binding.type_exports);
+        try buf.appendSlice(allocator, ",\n");
+    }
+
     try key(&buf, allocator, 2, "exports");
     try buf.appendSlice(allocator, "[\n");
     for (binding.exports, 0..) |exp, i| {

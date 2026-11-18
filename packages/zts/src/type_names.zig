@@ -6,11 +6,11 @@
 //! Any other name is refused at the name. The pass runs once, after the parse,
 //! because a forward reference needs every declaration of the file.
 //!
-//! Two exceptions are deliberate, in `known_types.module`. `FetchOptions` is a
+//! An `import type { Name } from "zttp:module"` declares `Name` when the module
+//! lists it in `type_exports`. A name that the module does not export is a
+//! refusal at that name in the import. `FetchOptions` is the one such type: a
 //! builtin alias that `module_types.populateModuleTypes` registers for the
-//! `fetch` signature (spec section 7.1). `DictKey` is the key bound of the Dict
-//! signatures (spec section 6.2). Both resolve with no import and have no row
-//! in `ambient_names.types`; docs/ts-restrictions.md lists both as gaps.
+//! `fetch` signature (spec section 7.1).
 //!
 //! A type parameter of a function is in scope for the whole file in this pass,
 //! because the store does not record where a function body ends. A type
@@ -22,7 +22,9 @@ const parser = @import("parser/root.zig");
 const object = @import("object.zig");
 const atom_table = @import("atom_table.zig");
 const known_types = @import("zts-base").known_types;
+const builtin_modules = @import("builtin_modules.zig");
 
+const Tokenizer = parser.Tokenizer;
 const type_syntax = parser.type_syntax;
 const Store = type_syntax.Store;
 const Span = type_syntax.Span;
@@ -54,10 +56,77 @@ pub fn repairFor(name: []const u8) []const u8 {
     return default_repair;
 }
 
+pub const RefusalKind = enum {
+    /// A type name that resolves to nothing (ZTS065).
+    undeclared_name,
+    /// A name in an `import type` that the module does not export (ZTS207).
+    unexported_type,
+};
+
 pub const Refusal = struct {
     name: []const u8,
     offset: u32,
+    kind: RefusalKind = .undeclared_name,
+    /// The specifier of the module, for `unexported_type`.
+    module: []const u8 = "",
 };
+
+const TypeImport = struct {
+    module: []const u8,
+    imported: []const u8,
+    local: []const u8,
+    offset: u32,
+};
+
+/// Append the names of one `import type { A, B as C } from "m";` statement. A
+/// statement of another shape adds nothing: the parser refuses it by itself.
+fn appendTypeImports(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    base: u32,
+    out: *std.ArrayList(TypeImport),
+) !void {
+    var tokens = Tokenizer.init(text);
+    var token = tokens.next();
+    while (token.type != .lbrace) : (token = tokens.next()) {
+        if (token.type == .eof) return;
+    }
+    var names: std.ArrayList(TypeImport) = .empty;
+    defer names.deinit(allocator);
+    token = tokens.next();
+    while (token.type != .rbrace) {
+        if (!parser.isNameText(token.text(text))) return;
+        const imported = token.text(text);
+        const offset = base + token.start;
+        var local = imported;
+        token = tokens.next();
+        if (token.type == .kw_as) {
+            token = tokens.next();
+            if (!parser.isNameText(token.text(text))) return;
+            local = token.text(text);
+            token = tokens.next();
+        }
+        try names.append(allocator, .{ .module = "", .imported = imported, .local = local, .offset = offset });
+        if (token.type == .comma) {
+            token = tokens.next();
+        } else if (token.type != .rbrace) {
+            return;
+        }
+    }
+    token = tokens.next();
+    if (token.type != .kw_from) return;
+    token = tokens.next();
+    if (token.type != .string_literal or token.len < 2) return;
+    const specifier = token.text(text)[1 .. token.len - 1];
+    for (names.items) |name| {
+        try out.append(allocator, .{
+            .module = specifier,
+            .imported = name.imported,
+            .local = name.local,
+            .offset = name.offset,
+        });
+    }
+}
 
 fn containsName(names: []const []const u8, name: []const u8) bool {
     for (names) |candidate| {
@@ -101,8 +170,28 @@ pub fn undeclared(
         }
     }
 
+    var type_imports: std.ArrayList(TypeImport) = .empty;
+    defer type_imports.deinit(allocator);
+    for (store.type_only_modules.items) |module| {
+        if (module.kind != .import_type) continue;
+        try appendTypeImports(allocator, module.raw_span.text(store.source), module.raw_span.start, &type_imports);
+    }
+
     var refusals: std.ArrayList(Refusal) = .empty;
     errdefer refusals.deinit(allocator);
+    for (type_imports.items) |type_import| {
+        const binding = builtin_modules.fromSpecifier(type_import.module) orelse continue;
+        if (containsName(binding.type_exports, type_import.imported)) {
+            try imported.append(allocator, type_import.local);
+        } else {
+            try refusals.append(allocator, .{
+                .name = type_import.imported,
+                .offset = type_import.offset,
+                .kind = .unexported_type,
+                .module = type_import.module,
+            });
+        }
+    }
     for (store.nodes.items) |node| {
         const span = switch (node.data) {
             .named_reference => |span| span,
@@ -111,7 +200,6 @@ pub fn undeclared(
         const name = span.text(store.source);
         if (name.len == 0) continue;
         if (containsName(&known_types.ambient, name)) continue;
-        if (containsName(&known_types.module, name)) continue;
         if (containsName(imported.items, name)) continue;
         if (declaresName(store, name)) continue;
         if (isTypeParameterInScope(store, name, span)) continue;

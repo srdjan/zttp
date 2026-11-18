@@ -5,8 +5,8 @@
 //! `ambient_names` compares the two, so a name added to one and not the other
 //! fails the build.
 
-/// The ambient type names: the primitives, `Dict`, the capsule aliases, and the
-/// handler ABI aliases. Each is a row of `ambient_names.types`.
+/// The ambient type names: the primitives, `Dict`, `DictKey`, the capsule
+/// aliases, and the handler ABI aliases. Each is a row of `ambient_names.types`.
 pub const ambient = [_][]const u8{
     "boolean",
     "Bytes",
@@ -17,14 +17,9 @@ pub const ambient = [_][]const u8{
     "undefined",
     "unknown",
     "Dict",
+    "DictKey",
     "Effects",
     "Proof",
     "Request",
     "Response",
 };
-
-/// Builtin names that resolve with no import and have no row in
-/// `ambient_names.types`. `FetchOptions` is the type of the `fetch` options
-/// (spec section 7.1). `DictKey` is the key bound of the Dict signatures
-/// (spec section 6.2). docs/ts-restrictions.md lists both as gaps.
-pub const module = [_][]const u8{ "FetchOptions", "DictKey" };

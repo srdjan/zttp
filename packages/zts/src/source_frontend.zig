@@ -272,13 +272,22 @@ pub const DirectCheckSource = struct {
         if (refusals.len == 0) return false;
         for (refusals) |refusal| {
             const token = parser.type_syntax.tokenAtOffset(self.source, refusal.offset);
-            self.parser.errors.addErrorFmt(
-                .undeclared_type_name,
-                token.location(),
-                "type name `{s}` is not declared",
-                .{refusal.name},
-                type_names.repairFor(refusal.name),
-            );
+            switch (refusal.kind) {
+                .undeclared_name => self.parser.errors.addErrorFmt(
+                    .undeclared_type_name,
+                    token.location(),
+                    "type name `{s}` is not declared",
+                    .{refusal.name},
+                    type_names.repairFor(refusal.name),
+                ),
+                .unexported_type => self.parser.errors.addErrorFmt(
+                    .unexported_type_import,
+                    token.location(),
+                    "module '{s}' does not export type '{s}'",
+                    .{ refusal.module, refusal.name },
+                    "import a type that the module exports",
+                ),
+            }
         }
         if (self.parser.errors.outOfMemory()) return error.OutOfMemory;
         self.parse_outcome = .{ .parser_refused = .{

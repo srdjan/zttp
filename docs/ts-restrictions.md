@@ -51,6 +51,7 @@ type error hides a `ZTS624` strict error in the same function.
 | A top-level `let` that is never reassigned | ZTS604 | `const` |
 | A handler that writes to a module-scope variable | ZTS310 | Function-local state |
 | An unknown `zttp:` module, or a name that the module does not export | ZTS206, ZTS207 | A module and an export from `packages/zts/src/builtin_modules.zig` |
+| An `import type` of a name that the module does not export | ZTS207 | A type that the module exports, such as `import type { FetchOptions } from "zttp:fetch";` |
 | `namespace` and `module` declarations | ZTS001 | ES modules |
 | An `import` after a declaration | ZTS002 | Move each `import` above the first declaration |
 | An `import` or `export` inside a function body | ZTS002 | Move the `import` or `export` to the top level |
@@ -323,6 +324,7 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | A record type with comma separators, such as `{ a: number, b: string }` | ZTS001 | `{ a: number; b: string }` |
 | `readonly` on a record type, such as `readonly { a: number }` | ZTS001 | The record type |
 | A type name that is not declared, imported, or ambient, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error`, `object`, and the utility types `Partial<T>`, `Required<T>`, `Pick<T, K>`, `Omit<T, K>`, and `Readonly<T>` | ZTS065 | A declared or imported type, or an ambient type from `meta` |
+| `FetchOptions` with no import | ZTS065 | Write `import type { FetchOptions } from "zttp:fetch";` |
 
 The admitted types are listed in section 5.7 of the
 [specification](spec/zts-model-1.md). The specification also excludes these
@@ -366,6 +368,11 @@ The closed ambient value namespace is: `Array`, `Date`,
 `renderToString`, `requestBody`, `requestJson`, and `requestText`. The `meta`
 operation of `zttp agent --stdin-json` publishes this list as
 `payload.ambient_names`.
+
+The closed ambient type namespace is: `boolean`, `Bytes`, `never`, `null`,
+`number`, `string`, `undefined`, `unknown`, `Dict`, `DictKey`, `Effects`, `Proof`,
+`Request`, and `Response`. The `meta` operation publishes this list as
+`payload.ambient_names.types`.
 
 | Refused form | Code | Write instead |
 |---|---|---|
@@ -425,5 +432,3 @@ against the compiler.
 
 | Form | Observed result | Required |
 |---|---|---|
-| `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
-| `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |

@@ -13,6 +13,7 @@
 //! - `parser/type_syntax` primitive names, for the primitives,
 //! - `type_syntax_lowering.lowerOwnedRange`, for `Dict<K, V>`, which is a
 //!   value kind of its own rather than an alias a handler could shadow,
+//!   and `type_env.TypeEnv.resolveType`, for `DictKey`, its key bound,
 //! - `type_env.TypeEnv.registerBuiltins`, for the capsule aliases,
 //! - `abi_types.populateHandlerAbiTypes`, for the handler ABI's two nominal
 //!   aliases.
@@ -76,6 +77,7 @@ pub const types = [_]AmbientType{
     .{ .name = "unknown", .origin = .primitive },
 
     .{ .name = "Dict", .origin = .value_kind, .arity = 2 },
+    .{ .name = "DictKey", .origin = .value_kind },
 
     .{ .name = "Effects", .origin = .builtin_alias, .arity = 2 },
     .{ .name = "Proof", .origin = .builtin_alias, .arity = 2 },

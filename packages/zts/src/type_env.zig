@@ -1465,6 +1465,12 @@ pub const TypeEnv = struct {
         const trimmed = std.mem.trim(u8, type_text, " \t\n\r");
         if (trimmed.len == 0) return null_type_idx;
 
+        // `DictKey` is the key bound of the Dict signatures (spec section 6.2).
+        // The bound parse answers it before any table, and so does this entry.
+        if (std.mem.eql(u8, trimmed, "DictKey")) {
+            return self.pool.addUnion(self.allocator, &.{ self.pool.idx_string, self.pool.idx_number });
+        }
+
         // Check type aliases
         if (self.type_aliases.get(trimmed)) |idx| return idx;
         // Check generic scope stack (innermost first)

@@ -86,6 +86,8 @@ pub const ErrorKind = enum {
 
     // Name resolution
     undeclared_type_name,
+    /// An `import type` names a type that the module does not export.
+    unexported_type_import,
 };
 
 /// A single parse error
