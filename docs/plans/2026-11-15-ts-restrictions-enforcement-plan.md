@@ -327,14 +327,13 @@ ZTS217 type error stops it with `SoundModeViolation`. Serve runs the
 parser refusals and the type check, and not the strict check. `zttp dev`
 and `zttp test` were not probed.
 
-- (a) Recommended. Keep serve as it is, and state in `docs/cli.md` that
-  serve does not run the strict check. The runtime `JSON` object and each
-  `JSON` row that `validateSourceAuthority` reaches stay.
+- (a) Keep serve as it is, and state in `docs/cli.md` that serve does not
+  run the strict check. The runtime `JSON` object and each `JSON` row that
+  `validateSourceAuthority` reaches stay. The owner chose this option on
+  2026-11-18.
 - (b) Make serve refuse a handler that fails the strict check. This
   changes a documented command and breaks its `-e` example, so a fallout
   measurement comes first.
-
-The owner has not answered.
 
 ### Decision 24: mutual recursion
 
@@ -344,14 +343,13 @@ The binding order that causes it also keeps an initializer from reading a
 `const` before its declaration runs. A probe of that read under
 `zttp serve` failed at startup with `PrewarmFailed`.
 
-- (a) Recommended. One unit after U4f. The strict check admits a call of a
+- (a) One unit after U4f, U4g below. The strict check admits a call of a
   later module function, and ZTS630 also refuses an initializer that
   reaches a module `const` declared at or after it. A test that
-  reproduces the refusal comes first.
+  reproduces the refusal comes first. The owner chose this option on
+  2026-11-18.
 - (b) Defer to the roadmap, and state that mutual recursion is not
   admitted.
-
-The owner has not answered.
 
 ## Units
 
@@ -503,6 +501,7 @@ dispatches. Bulk rewrite scripts are not allowed.
 | U4e | G5 with Decision 8 (a). The ZTS612 and ZTS621 exact repair in `canonicalize.zig` binds `const c = !!(cond);` and writes `match (c)` |
 | U4d | G6 with X21, X22, Decision 5, N3, N5, N15 |
 | U5 | G4 |
+| U4g | Decision 24 (a) |
 | U6 | The spec text for Decisions 3, 4, 6, and 7, and for N1 to N16 |
 
 U4a runs as five commits, one for each rule. U4a-1 refuses the array members
@@ -621,6 +620,16 @@ evidence, in three phases.
 The U5 list also asks whether `zttp serve` runs a handler that the strict
 check refuses. A2 probes that first, because a refused handler that runs is
 a defect, not dead code.
+
+### U4g: admit mutual recursion (Sonnet, 80 turns, Decision 24 a)
+
+First, a test reproduces the refusal: two module functions that call each
+other get ZTS629 at the call of the later function. Then the strict check
+admits a call of a module function declared later in the file. In the same
+commit, ZTS630 refuses a top-level initializer that reaches a module
+`const` declared at or after it, directly or through a function that it
+calls. A probe of that read under `zttp serve` failed with
+`PrewarmFailed`, so the refusal closes that path at the check.
 
 ### U6: close-out (Opus)
 

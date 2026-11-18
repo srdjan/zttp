@@ -73,6 +73,10 @@ zttp serve src/handler.ts -p 3000
 zttp serve -e "function handler(req) { return Response.json({ ok: true }); }"
 ```
 
+`zttp serve` stops on a parser refusal and on a sound-mode type error.
+It does not run the strict check of `zttp check`. A handler that
+`zttp check` refuses can still run under `zttp serve`.
+
 Common `dev` and `serve` flags:
 
 | Flag | Purpose |
