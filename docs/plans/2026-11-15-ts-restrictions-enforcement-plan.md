@@ -281,14 +281,12 @@ keeps a defense has no effect (`packages/zts/src/flow_interp.zig#FlowInterp.appl
 The result fails closed. Four census hand probes now send the validated
 value, narrowed to a string, without an encode step.
 
-- (a) Accept the refusal. A handler cannot prove `injection_safe` when it
-  forwards encoded validated JSON.
-- (b) Recommended. Give `stringifyJson` a row that keeps `schema_checked`
-  and removes `html_escaped`, as `JSON.stringify` did. The flow check must
-  apply a keep-only row, and the kept defense must be the intersection over
-  every part that the argument reaches. Probes: a secret still refused, an
-  unvalidated input still refused, and a record that mixes a validated
-  part with a raw part still refused.
+The owner chose option (a) on 2026-11-18: accept the refusal. A handler
+cannot prove `injection_safe` when it forwards encoded validated JSON, and
+the flow rows do not change. The rejected option was (b): give
+`stringifyJson` a row that keeps `schema_checked` and removes
+`html_escaped`, as `JSON.stringify` did, which needs a keep-only row in
+the flow check.
 
 ### Decision 22: which top-level initializers X2 refuses
 
@@ -309,8 +307,8 @@ worktrees from 759f9fd0. Both variants pass every extra route.
   isolation row, and the router test that writes its route table during
   initialization. Both also break 7 clean restriction probes that call
   an import from `./mod.ts` at top level.
-- (a) Recommended. Refuse every effect, with no exemption. Variant A
-  also refuses 4 sources that write `const x = schemaCompile(...)` (the
+- (a) Refuse every effect, with no exemption. The owner chose this option
+  on 2026-11-18. Variant A also refuses 4 sources that write `const x = schemaCompile(...)` (the
   `modules_all.ts` example, its contract fixture, and two corpus cases)
   and 43 flow census probes whose module constant reads `env`. Those three
   census kinds lose their subject, because no labeled value can exist at
@@ -557,6 +555,36 @@ G4 removes `JSON` from `known_globals.zig` and `builtin_results.zig`, so
 `JSON.parse` and `JSON.stringify` get ZTS629. Migrate each use: a schema
 argument becomes a string literal, and other uses move to `zttp:json`.
 Update `example_registry.zig`, the 11 `.ts` files, and the Zig tests.
+
+### U4f: audit the code behind the refused forms (Sonnet, three phases)
+
+Decisions 3, 4, 18, and 20, callback purity, U5, and X2 each left a list of
+analyzer code that probably only a refused form reaches. The lists are in
+Open Items. A refused source stops at the parser or at the strict check, so
+the analyzers after that point never see it. U4f decides each site with
+evidence, in three phases.
+
+- A1 (census, 80 turns, no commit). In a private worktree from local main,
+  the implementer finds the branch of each listed site that handles the
+  refused form. It adds a marker at each branch that appends the site name
+  to a hit file. Then it runs the full aggregate, `test-zruntime`, and the
+  two smoke steps in an empty cache. It hands back a table of sites with
+  the hit count of each.
+- A2 (probes, one unit for each decision list). For each site with hits,
+  the implementer writes a probe source that `zts check` admits and that
+  reaches the marker through the instrumented binaries. That site stays,
+  and the probe goes into its note. For each site with no hit, it reads the
+  code, names each node shape that reaches the branch, and shows the
+  parser or strict refusal of each shape. The callback purity sites also
+  get a probe with a module-level `let` write and a parameter write.
+- A3 (deletion, one commit for each decision list). Each deletion removes
+  a branch that A2 shows only a refused form reaches. A walk keeps a
+  default arm that descends through `IrView.expressionChildren` or fails
+  closed, and it never ends in `else => {}`. Each commit runs the full gate.
+
+The U5 list also asks whether `zttp serve` runs a handler that the strict
+check refuses. A2 probes that first, because a refused handler that runs is
+a defect, not dead code.
 
 ### U6: close-out (Opus)
 
@@ -1275,8 +1303,8 @@ later.
     as `count = count + 1;`. The skill census lists ZTS074 for those
     blocks. A prose fix can move the corpus identity, so it waits for U7.
 - U4c-X2 refuses, with ZTS630, a top-level initializer with an effect
-  (spec 5.1), in the variant (a) of Decision 22 that the plan
-  recommends. The pass is
+  (spec 5.1), in the variant (a) of Decision 22 that the owner chose.
+  The pass is
   packages/zts/src/strict_checker.zig#StrictChecker.checkModuleInitializers.
   It follows the body of each module function that an initializer calls,
   and the body of each callback that a builtin or a method receives. A
@@ -1306,6 +1334,11 @@ later.
     packages/tools/src/precompile.zig#checkGraphModule.
   - A call of a module function that is declared later in the file
     reports ZTS629, "unpublished ambient global". Spec 5.6 gives mutual
-    recursion a call semantics, so this refusal is a probable defect that
-    predates X2. A probe of two functions, where the first calls the
-    second, can confirm it.
+    recursion a call semantics, so this refusal is a defect that predates
+    X2. A probe at f5b9e7a7 confirmed it: `a` calls `b`, which is
+    declared after `a`, and the strict check reports ZTS629 at the call.
+    No mutual recursion can pass the strict check. The scope analysis
+    binds names in source order, and that order also keeps an initializer
+    from reading a `const` before its declaration runs. A fix that admits
+    a call of a later function must keep that guarantee. For example,
+    `const x = a();` before `const K = 1;` must not reach a read of `K`.
