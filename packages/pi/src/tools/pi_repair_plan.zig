@@ -973,7 +973,7 @@ test "repair plan: an alias asks for a check and result.value" {
 
 test "repair plan: a Result function without a call asks for a direct call" {
     try expectFirstPlan(plan_head ++
-        \\  const f = parseJson;
+        \\  const fs = [parseJson];
         \\  return Response.text("ok");
         \\}
     , "Call the Result function directly and bind the call to a const.", "// call the Result function directly and bind the call to a const");

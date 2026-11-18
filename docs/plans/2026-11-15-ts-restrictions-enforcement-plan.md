@@ -1052,7 +1052,7 @@ later.
   `exported-arrow-const` now target ZTS072 and stay salvaged. The skill
   text, the policy hash, and the stand-in seeds change, so U7 re-records
   the corpus. These findings stay open:
-  - Decision 20 (open, owner): a local name can still hold a function
+  - Decision 20 (decided, a): a local name can still hold a function
     value. Probes on 2026-11-17 at e49cf29b passed parse, types, sound
     mode, and strict mode for two forms: a capturing closure through an
     identity function, `const tag = id((x: string): string => ...);`,
@@ -1060,9 +1060,8 @@ later.
     flow census uses the first form for 145 probes. The options are (a)
     refuse a local `const` or `let` whose type is a function type, with a
     new restriction row; (b) accept both forms and document them; and (c)
-    defer to U6. The recommendation is (a), measured first, as the next
-    unit. Until the owner decides, the audit must probe each site with
-    both forms before it deletes code.
+    defer to U6. The owner chose (a) on 2026-11-17. U4c-Decision 20 below
+    records the rule.
   - The audit unit of Decision 4 starts from this list of code that
     probably only a refused arrow reaches. The implementers named the sites
     from the deleted tests and did not confirm them:
@@ -1135,3 +1134,35 @@ later.
   - The audit of the callback purity sites listed above must probe each
     site with a module-level `let` write and a parameter write before it
     deletes code, because both forms stay legal.
+- U4c-Decision 20 refuses, with ZTS217, a `const` or `let` whose resolved
+  type is a function type, at module level or in a function, such as
+  `const tag = helper;` and `const tag = id((x: string): string => x);`.
+  The type checker reports it at the declaration. A record field and an
+  array element may still hold a function value. The restriction gate read
+  each member as `const f = xs.filter;`, so its probe now reads the member
+  inside an array literal. The corpus adds check/bad/function_value_binding.
+  The ZTS512 case called through `const f = m.make;`. A direct call
+  `m.make()` resolves and reports nothing, so the case now calls through an
+  array element. That call leaves a `state_isolated` capsule undischarged
+  (ZTS500), so the case and the `effect-row-lower-bound` stand-in seed
+  declare `fault_covered`, which the call does not touch. These findings
+  stay open:
+  - Three forms still bind a function value: a method value with no
+    resolved type, such as `const m = xs.map;`; a `for...of` binding over
+    an array of functions, where strict mode refuses the call with ZTS600;
+    and a union such as `Fn | undefined`.
+  - The flow census templates that held a closure in a declaration now hold
+    it in a record field through an identity function, such as
+    `{ go: id1<string, T>((x: string): T => { ... }) }`, and call it through
+    the field. All 683 probes match, and the floors do not move. A later
+    rule that refuses a function value reached through an identity function
+    moves these templates again.
+  - The audit of Decision 20 starts from two analyzer functions that
+    probably only a deleted alias test reached. This list is unconfirmed:
+    packages/zts/src/type_checker.zig#TypeChecker.callableMetadataForExpression
+    and packages/zts/src/type_checker.zig#TypeChecker.bindCallableMetadata.
+    A probe for each site must confirm it before the audit deletes code.
+  - The compound type row `() => number` is deleted, because a declaration
+    cannot carry that type. The row `{ cb: (x?: number) => number }` still
+    prints a function type, so the count of compound rows moves from 20
+    to 19.

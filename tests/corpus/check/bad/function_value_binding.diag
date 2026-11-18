@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS217","severity":"error","message":"a declaration cannot hold a function value","file":"check/bad/function_value_binding.ts","line":7,"column":5,"suggestion":"call the module-level function by its name, or pass the arrow directly as a call argument","repair_intent":null}

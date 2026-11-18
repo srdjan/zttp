@@ -2280,20 +2280,15 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\structural Maker = { make: () => string };
-        \\
         \\function makeIt(): string {
         \\  return sha256("zttp");
         \\}
         \\
-        \\function build(): Maker {
-        \\  return { make: makeIt };
-        \\}
-        \\
-        \\function handler(req: Request): Proof<Effects<Response, "crypto">, "state_isolated"> {
-        \\  const m = build();
-        \\  const f = m.make;
-        \\  return Response.text(f());
+        \\function handler(req: Request): Proof<Effects<Response, "crypto">, "fault_covered"> {
+        \\  const fs = [makeIt];
+        \\  const made = fs[0]();
+        \\  assert made.length >= 0;
+        \\  return Response.text("ok");
         \\}
         \\
         ,

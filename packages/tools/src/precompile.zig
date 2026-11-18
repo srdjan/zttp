@@ -1656,7 +1656,7 @@ test "compileHandler carries loaded graph effects into the merged properties" {
     try fixture.add("dep.ts",
         \\import { cacheSet } from "zttp:cache";
         \\function save(): undefined { cacheSet("items", "key", "value"); return undefined; }
-        \\export const saveAlias = save;
+        \\export function saveAlias(): undefined { return save(); }
         \\
     );
 
@@ -1668,6 +1668,20 @@ test "compileHandler carries loaded graph effects into the merged properties" {
     try std.testing.expect(!props.read_only);
     try std.testing.expect(!props.stateless);
     try std.testing.expect(!props.retry_safe);
+
+    // The control: the same graph with a dependency that writes nothing.
+    var quiet = try CompileGraphFixture.init("entry.ts", entry_source);
+    defer quiet.deinit();
+    try quiet.add("dep.ts",
+        \\function save(): undefined { return undefined; }
+        \\export function saveAlias(): undefined { return save(); }
+        \\
+    );
+    var quiet_compiled = try quiet.compile(.{ .emit_contract = true });
+    defer quiet_compiled.deinit(std.testing.allocator);
+    const quiet_props = try graphProperties(&quiet_compiled);
+    try std.testing.expect(quiet_props.read_only);
+    try std.testing.expect(quiet_props.retry_safe);
 }
 
 test "multi-module compile without verification extracts the flow facts and no isolation fact" {
@@ -1685,7 +1699,7 @@ test "multi-module compile without verification extracts the flow facts and no i
     try fixture.add("dep.ts",
         \\import { cacheSet } from "zttp:cache";
         \\function save(): undefined { cacheSet("items", "key", "value"); return undefined; }
-        \\export const saveAlias = save;
+        \\export function saveAlias(): undefined { return save(); }
         \\
     );
 
@@ -4099,9 +4113,9 @@ test "serialized bytecode matches the committed goldens" {
 // One fault coverage record across check, compile, and text output
 // ---------------------------------------------------------------------------
 
-/// A failable call inside a closure body that the handler reaches through an
-/// alias: `walkPaths` does not enter a nested function, and a call by the
-/// alias is not expanded, so no path records the call. The walk lists it as
+/// A failable call inside a closure body that the handler reaches through a record
+/// field: `walkPaths` does not enter a nested function, and a call by the
+/// field is not expanded, so no path records the call. The walk lists it as
 /// unseen and `fault_covered` is refused. (A call by the closure's own name is
 /// expanded, and a failable call nested in a returned or initializer
 /// expression is recorded since the I/O tracker descends.)
@@ -4111,8 +4125,8 @@ const unseen_call_handler =
     \\  return jwtVerify("t", "s").error;
     \\}
     \\function handler(req: Request): Response {
-    \\  const again = read;
-    \\  return Response.text(again());
+    \\  const ops = { run: read };
+    \\  return Response.text(ops.run());
     \\}
 ;
 

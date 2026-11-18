@@ -2692,22 +2692,12 @@ test "CHECK applies a sibling writer effect to handler properties" {
     try std.testing.expect(refused_retry_safe);
 }
 
-test "CHECK applies sibling effects through an alias and a holder" {
+test "CHECK applies sibling effects through a holder" {
     const cases = [_]struct {
         imported_name: []const u8,
         call: []const u8,
         dependency: []const u8,
     }{
-        .{
-            .imported_name = "saveAlias",
-            .call = "saveAlias()",
-            .dependency =
-            \\import { cacheSet } from "zttp:cache";
-            \\function save(): undefined { cacheSet("items", "key", "value"); return undefined; }
-            \\export const saveAlias = save;
-            \\
-            ,
-        },
         .{
             .imported_name = "holder",
             .call = "holder.save()",
@@ -2733,6 +2723,26 @@ test "CHECK applies sibling effects through an alias and a holder" {
         try std.testing.expect(!properties.read_only);
         try std.testing.expect(!properties.retry_safe);
     }
+}
+
+test "CHECK keeps read_only for a sibling holder whose function writes nothing" {
+    var fixture = try SiblingFixture.init(
+        \\import { holder } from "./dep.ts";
+        \\function handler(req: Request): Response { holder.save(); return Response.text("ok"); }
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\function save(): undefined { return undefined; }
+        \\export const holder: { save: () => undefined } = { save: save };
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const properties = result.contract.?.properties.?;
+    try std.testing.expect(properties.read_only);
+    try std.testing.expect(properties.retry_safe);
 }
 
 test "CHECK applies a sibling writer effect through two imports" {
@@ -3078,17 +3088,17 @@ test "CHECK reports the verifier ZTS310 for a dependency helper that writes its 
     try expectOneStateWriteAt(&fixture, &result, "dep.ts", 3);
 }
 
-test "CHECK does not classify a factory-produced callable as data" {
+test "CHECK does not classify a factory-produced holder as data" {
     var fixture = try SiblingFixture.init(
         \\import { save } from "./dep.ts";
-        \\function handler(req: Request): Response { save(); return Response.text("ok"); }
+        \\function handler(req: Request): Response { save.run(); return Response.text("ok"); }
         \\
     );
     defer fixture.deinit();
     try fixture.add("dep.ts",
         \\import { cacheSet } from "zttp:cache";
         \\function writer(): undefined { cacheSet("items", "key", "value"); return undefined; }
-        \\function factory(): () => undefined { return writer; }
+        \\function factory(): { run: () => undefined } { return { run: writer }; }
         \\export const save = factory();
         \\
     );
@@ -3704,7 +3714,7 @@ test "a sibling that exports a failable builtin as a value blocks fault_covered"
     defer fixture.deinit();
     try fixture.add("dep.ts",
         \\import { fetch } from "zttp:fetch";
-        \\export const enrich = fetch;
+        \\export const enrich = { run: fetch };
         \\
     );
     var result = try fixture.check();
@@ -4558,7 +4568,6 @@ test "CHECK preserves compound type diagnostics and semantic prefixes" {
         .{ .annotation = "{ /*c*/ x: number }", .message = "type 'undefined' is not assignable to type '{ x: number }'" },
         .{ .annotation = "{ x: number /*c*/ }", .message = "type 'undefined' is not assignable to type '{ x: number }'" },
         .{ .annotation = "(number)", .message = "type 'undefined' is not assignable to type 'number'" },
-        .{ .annotation = "() => number", .message = "type 'undefined' is not assignable to type '() => number'" },
         .{ .annotation = "number [ ]", .message = "type 'undefined' is not assignable to type 'number[]'" },
         .{ .annotation = "number /*c*/ []", .message = "type 'undefined' is not assignable to type 'number[]'" },
         .{ .annotation = "{ cb: (x?: number) => number }", .message = "type 'undefined' is not assignable to type '{ cb: (x: number) => number }'" },
@@ -4601,7 +4610,7 @@ test "CHECK preserves compound type diagnostics and semantic prefixes" {
         try std.testing.expect(result.contract == null);
         observed += 1;
     }
-    try std.testing.expectEqual(@as(usize, 20), cases.len);
+    try std.testing.expectEqual(@as(usize, 19), cases.len);
     try std.testing.expectEqual(cases.len, observed);
 }
 
@@ -7748,15 +7757,16 @@ test "CHECK refuses termination claims when a function value recurses without en
         // Local or module state.
         .{ .name = "f3", .total_refused = false, .source =
         \\structural Fn = (n: number) => number;
+        \\structural Slot = { f: Fn };
         \\function inc(x: number): number {
         \\  return x + 1;
         \\}
-        \\let cb: Fn = inc;
+        \\let cb: Slot = { f: inc };
         \\function down(n: number): number {
-        \\  return cb(n);
+        \\  return cb.f(n);
         \\}
         \\function arm(): number {
-        \\  cb = down;
+        \\  cb = { f: down };
         \\  return 0;
         \\}
         \\function handler(req: Request): Proof<Response, "cost_bounded"> {
@@ -7766,15 +7776,16 @@ test "CHECK refuses termination claims when a function value recurses without en
         },
         .{ .name = "fc1", .total_refused = true, .source =
         \\structural Fn = (n: number) => number;
+        \\structural Slot = { f: Fn };
         \\function same(n: number): number {
         \\  return n;
         \\}
-        \\let slot: Fn = same;
+        \\let slot: Slot = { f: same };
         \\function down(n: number): Proof<number, "total"> {
-        \\  return slot(n);
+        \\  return slot.f(n);
         \\}
         \\function arm(n: number): number {
-        \\  slot = down;
+        \\  slot = { f: down };
         \\  return n;
         \\}
         \\function handler(req: Request): Proof<Response, "cost_bounded"> {
@@ -7783,18 +7794,19 @@ test "CHECK refuses termination claims when a function value recurses without en
         },
         .{ .name = "g1", .total_refused = true, .source =
         \\structural Fn = (n: number) => number;
+        \\structural Slot = { f: Fn };
         \\function same(n: number): number {
         \\  return n;
         \\}
-        \\let slot: Fn = same;
+        \\let slot: Slot = { f: same };
         \\function down(items: number[], n: number): Proof<number, "total"> {
-        \\  return items.map(slot)[0] ?? n;
+        \\  return items.map(slot.f)[0] ?? n;
         \\}
         \\function viaDown(x: number): number {
         \\  return down([x], x);
         \\}
         \\function arm(n: number): number {
-        \\  slot = viaDown;
+        \\  slot = { f: viaDown };
         \\  return n;
         \\}
         \\function handler(req: Request): Proof<Response, "cost_bounded"> {
@@ -9427,9 +9439,9 @@ const letfn_one = imp_cache ++
     \\function first(): string | undefined { return cacheGet("ns", "one"); }
     \\function other(): string | undefined { return cacheGet("ns", "z"); }
     \\function handler(req: Request): Response {
-    \\  let g = first;
-    \\  g = other;
-    \\  const x = g();
+    \\  let g = { run: first };
+    \\  g = { run: other };
+    \\  const x = g.run();
     \\  return Response.json({ ok: true });
     \\}
 ;
@@ -9437,25 +9449,25 @@ const letfn_two = imp_cache ++
     \\function first(): string | undefined { return cacheGet("ns", "two"); }
     \\function other(): string | undefined { return cacheGet("ns", "z"); }
     \\function handler(req: Request): Response {
-    \\  let g = first;
-    \\  g = other;
-    \\  const x = g();
+    \\  let g = { run: first };
+    \\  g = { run: other };
+    \\  const x = g.run();
     \\  return Response.json({ ok: true });
     \\}
 ;
 const alias_one = imp_cache ++
     \\function g(): string | undefined { return cacheGet("ns", "one"); }
     \\function handler(req: Request): Response {
-    \\  const h = g;
-    \\  const x = h();
+    \\  const h = { run: g };
+    \\  const x = h.run();
     \\  return Response.json({ ok: true });
     \\}
 ;
 const alias_two = imp_cache ++
     \\function g(): string | undefined { return cacheGet("ns", "two"); }
     \\function handler(req: Request): Response {
-    \\  const h = g;
-    \\  const x = h();
+    \\  const h = { run: g };
+    \\  const x = h.run();
     \\  return Response.json({ ok: true });
     \\}
 ;
@@ -9636,9 +9648,37 @@ test "prove-behavior: helper expansion controls keep their verdicts" {
     try expectVerdict(.equivalent, top_one, top_one);
 }
 
-test "prove-behavior: a function bound with let or reached through an alias is not expanded" {
+test "prove-behavior: a function held in a record bound with let or const is not expanded" {
     try expectVerdict(.equivalent, letfn_one, letfn_two);
     try expectVerdict(.equivalent, alias_one, alias_two);
+}
+
+test "CHECK refuses a declaration that holds a function value with ZTS217" {
+    const allocator = std.testing.allocator;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator,
+        \\function g(): number {
+        \\  return 1;
+        \\}
+        \\function handler(req: Request): Response {
+        \\  const h = g;
+        \\  return Response.text("ok");
+        \\}
+        \\
+    , "handler.ts", .{
+        .json_mode = true,
+        .skip_contract = true,
+    });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
+        .code = "ZTS217",
+        .message = "a declaration cannot hold a function value",
+        .line = 5,
+        .column = 3,
+        .suggestion = "call the module-level function by its name, or pass the arrow directly as a call argument",
+    });
 }
 
 test "prove-behavior: a module call in an if branch that does not return is on the path" {
@@ -14647,12 +14687,38 @@ test "a branch on a varying value is the cause of a failed deterministic" {
         // The loop reaches `h` only on its second pass, through `f`, and the branch in `h` changes
         // nothing but the mark. The loop fixpoint must compare the site, or it stops before the
         // return reads the mark.
-        .{ .name = "m3_mark_only_pass", .source = "function g(): number {\n  return 0;\n}\nfunction h(): number {\n  if (Date.now() % 2 === 0) {\n    assert(false);\n  }\n  return 0;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let f = g;\n  let n = 0;\n  for (const x of [1, 2, 3]) {\n    if (x === 3) {\n      return Response.text(String(n));\n    }\n    n = f();\n    f = h;\n  }\n  assert(false);\n  return Response.text(\"never\");\n}\n", .line = 10, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
+        .{ .name = "m3_mark_only_pass", .source = "function g(): number {\n  return 0;\n}\nfunction h(): number {\n  if (Date.now() % 2 === 0) {\n    assert(false);\n  }\n  return 0;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let f = { run: g };\n  let n = 0;\n  for (const x of [1, 2, 3]) {\n    if (x === 3) {\n      return Response.text(String(n));\n    }\n    n = f.run();\n    f = { run: h };\n  }\n  assert(false);\n  return Response.text(\"never\");\n}\n", .line = 10, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
         // Two arms mark the state at different sites. The join keeps the smaller site, the
         // first branch in the source.
         .{ .name = "m2_two_sites", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let s = \"x\";\n  if (req.url.length > 3) {\n    if (Date.now() % 2 === 0) {\n      s = \"a\";\n    }\n  } else {\n    if (Math.random() > 0.5) {\n      s = \"b\";\n    }\n  }\n  return Response.text(s);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:5 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
     };
     for (rows) |row| try expectDeterministicRefused(allocator, row);
+}
+
+test "a loop that reaches a function with no varying branch keeps deterministic" {
+    // The control of the m3_mark_only_pass row: the same loop with a clean `h`.
+    try expectDeterministicHeld(std.testing.allocator, .{ .name = "m3_clean_pass", .source =
+        \\function g(): number {
+        \\  return 0;
+        \\}
+        \\function h(): number {
+        \\  return 0;
+        \\}
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  let f = { run: g };
+        \\  let n = 0;
+        \\  for (const x of [1, 2, 3]) {
+        \\    if (x === 3) {
+        \\      return Response.text(String(n));
+        \\    }
+        \\    n = f.run();
+        \\    f = { run: h };
+        \\  }
+        \\  assert(false);
+        \\  return Response.text("never");
+        \\}
+        \\
+    });
 }
 
 test "a value cause that an imported export makes names the export" {

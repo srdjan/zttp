@@ -392,24 +392,24 @@ const t_top_fn_self =
 ;
 const t_top_arrow =
     \\@PRE@
-    \\function id<F>(f: F): F { return f; }
-    \\const helper = id((x: string): @RT@ => {
+    \\function id1<A, R>(f: (a: A) => R): (a: A) => R { return f; }
+    \\const helper = { go: id1<string, @RT@>((x: string): @RT@ => {
     \\  @BODY@
-    \\});
+    \\}) };
     \\function handler(req: Request): Claim<Response> {
     \\  const s = @SRC@;
-    \\  @USE{helper(s)}USE@
+    \\  @USE{helper.go(s)}USE@
     \\}
 ;
 const t_nested_arrow_param =
     \\@PRE@
-    \\function id<F>(f: F): F { return f; }
+    \\function id1<A, R>(f: (a: A) => R): (a: A) => R { return f; }
     \\function handler(req: Request): Claim<Response> {
-    \\  const inner = id((x: string): @RT@ => {
+    \\  const inner = { go: id1<string, @RT@>((x: string): @RT@ => {
     \\    @BODY@
-    \\  });
+    \\  }) };
     \\  const s = @SRC@;
-    \\  @USE{inner(s)}USE@
+    \\  @USE{inner.go(s)}USE@
     \\}
 ;
 const t_nested_arrow_capture =
@@ -417,10 +417,10 @@ const t_nested_arrow_capture =
     \\function id<F>(f: F): F { return f; }
     \\function handler(req: Request): Claim<Response> {
     \\  const x = @SRC@;
-    \\  const inner = id((): @RT@ => {
+    \\  const inner = { go: id((): @RT@ => {
     \\    @BODY@
-    \\  });
-    \\  @USE{inner()}USE@
+    \\  }) };
+    \\  @USE{inner.go()}USE@
     \\}
 ;
 const t_hof_callback =
@@ -602,11 +602,11 @@ const t_module_const_closure =
     \\const token = @SRC@;
     \\function id<F>(f: F): F { return f; }
     \\function handler(req: Request): Claim<Response> {
-    \\  const inner = id((): @RT@ => {
+    \\  const inner = { go: id((): @RT@ => {
     \\    const x = token;
     \\    @BODY@
-    \\  });
-    \\  @USE{inner()}USE@
+    \\  }) };
+    \\  @USE{inner.go()}USE@
     \\}
 ;
 // Nine helpers: the ninth holds the sink, one past the summary depth cap of 8.
@@ -678,11 +678,11 @@ const t_recursion_taint =
 ;
 const t_concise_arrow =
     \\@PRE@
-    \\function id<F>(f: F): F { return f; }
+    \\function id1<A, R>(f: (a: A) => R): (a: A) => R { return f; }
     \\function handler(req: Request): Claim<Response> {
     \\  const s = @SRC@;
-    \\  const inner = id((x: string): @CRT@ => @CEXPR@);
-    \\  @USE{inner(s)}USE@
+    \\  const inner = { go: id1<string, @CRT@>((x: string): @CRT@ => @CEXPR@) };
+    \\  @USE{inner.go(s)}USE@
     \\}
 ;
 const t_concise_arrow_hof =
@@ -949,11 +949,11 @@ const hand_written = [_]Hand{
         \\function id<F>(f: F): F { return f; }
         \\function helperA(): number {
         \\  const x = "clean";
-        \\  const inner = id((): number => {
+        \\  const inner = { go: id((): number => {
         \\    logInfo(x, { n: 1 });
         \\    return 1;
-        \\  });
-        \\  return inner();
+        \\  }) };
+        \\  return inner.go();
         \\}
         \\function handler(req: Request): Claim<Response> {
         \\  const x = env("API_TOKEN") ?? "";

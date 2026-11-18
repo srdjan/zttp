@@ -1,18 +1,15 @@
 // Proves: a call through a value the compiler cannot resolve makes the effect row a lower bound (ZTS512).
+// A declaration cannot hold a function value (ZTS217), so the call goes
+// through an array element.
 import { sha256 } from "zttp:crypto";
-
-structural Maker = { make: () => string };
 
 function digest(): string {
     return sha256("zttp");
 }
 
-function build(): Maker {
-    return { make: digest };
-}
-
-function handler(req: Request): Proof<Effects<Response, "crypto">, "state_isolated"> {
-    const m = build();
-    const f = m.make;
-    return Response.text(f());
+function handler(req: Request): Proof<Effects<Response, "crypto">, "fault_covered"> {
+    const fs = [digest];
+    const made = fs[0]();
+    assert made.length >= 0;
+    return Response.text("ok");
 }

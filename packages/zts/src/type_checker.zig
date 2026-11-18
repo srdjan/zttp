@@ -112,6 +112,7 @@ pub const DiagnosticKind = enum {
     string_add, // string-valued use of + instead of explicit join
     nominal_constructor_call, // a nominal type name used in call position
     readonly_mutation, // a mutating array method called on a readonly receiver
+    function_value_binding, // a `const` or `let` whose type is a function type
 };
 
 pub const Diagnostic = struct {
@@ -1557,6 +1558,7 @@ pub const TypeChecker = struct {
                     }
                     if (effective != null_type_idx) {
                         self.binding_types.put(self.allocator, key, effective) catch self.markAllocationFailure();
+                        self.reportFunctionValueBinding(node, effective);
                     }
                     // A present initializer narrows a `T | undefined` annotation
                     // (written `T?` or as a union) to `T` for the rest of the scope.
@@ -8421,6 +8423,20 @@ pub const TypeChecker = struct {
     /// data constructor guards (spec 5.7). The alias is decided once in
     /// `TypeEnv`; this is the site that gives the verdict a source location,
     /// since the declaration has no runtime node after direct parsing.
+    /// A named function is a module-level `function`, and an arrow is a
+    /// direct call argument (spec 5.2), so no declaration holds a function
+    /// value (Decision 20). A record or an array may hold one.
+    fn reportFunctionValueBinding(self: *TypeChecker, node: NodeIndex, effective: TypeIndex) void {
+        if (self.env.pool.getTag(self.env.resolveRef(effective)) != .t_function) return;
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .function_value_binding,
+            .node = node,
+            .message = "a declaration cannot hold a function value",
+            .help = "call the module-level function by its name, or pass the arrow directly as a call argument",
+        });
+    }
+
     fn reportIfNonContractive(self: *TypeChecker, declared: TypeIndex, node: NodeIndex) void {
         if (declared == null_type_idx or node == null_node) return;
         if (!self.env.isNonContractiveType(declared)) return;
@@ -10314,23 +10330,6 @@ test "TypeChecker: correct local annotation in exported handler passes" {
     , 0, 0);
 }
 
-test "TypeChecker: colliding locals use their initializer signatures" {
-    try checkTypedSource(
-        \\function one(value: string): string { return value; }
-        \\function none(): string { return "ok"; }
-        \\function handler() {
-        \\  const request = one;
-        \\  const run = none;
-        \\  const scope = one;
-        \\  const fetch = none;
-        \\  request("request");
-        \\  run();
-        \\  scope("scope");
-        \\  fetch();
-        \\}
-    , 0, 0);
-}
-
 test "TypeChecker: non-callable colliding locals do not inherit module signatures" {
     try checkTypedSource(
         \\function handler(send) {
@@ -10343,29 +10342,16 @@ test "TypeChecker: non-callable colliding locals do not inherit module signature
     , 0, 0);
 }
 
-test "TypeChecker: module signature aliases preserve required parameter count" {
-    try checkTypedSource(
-        \\import { fetchWithRetry } from "zttp:fetch";
-        \\function handler() {
-        \\  const request = fetchWithRetry;
-        \\  request("https://example.com");
-        \\}
-    , 0, 0);
-}
-
-test "TypeChecker: user function aliases carry the function signature" {
-    try checkTypedSource(
+test "TypeChecker: a declaration that holds a function value is refused with ZTS217" {
+    // Decision 20. The diagnostic carries no location in this helper, so the
+    // test pins the kind, the code, the message, and the help text.
+    try std.testing.expectEqualStrings("ZTS217", diagnostic_catalog.typeCode(.function_value_binding));
+    try checkTypedSourceHelping(
         \\function format(value: string, count: number): string { return value; }
         \\function handler() {
         \\  const alias = format;
-        \\  alias("ok", 1);
-        \\  alias("missing count");
-        \\  const nested = [42].map((local) => {
-        \\    alias("nested missing count");
-        \\    return local;
-        \\  });
         \\}
-    , 2, 0);
+    , 1, "a declaration cannot hold a function value", "call the module-level function by its name, or pass the arrow directly as a call argument");
 }
 
 test "TypeChecker: a function and an arrow on one line keep separate signatures" {
@@ -11964,8 +11950,7 @@ test "Response.json refuses a payload JSON cannot carry" {
         \\    return n;
         \\}
         \\function handler(req: Request): Response {
-        \\    const f: (n: number) => number = helper;
-        \\    return Response.json({ f: f });
+        \\    return Response.json({ f: helper });
         \\}
     ,
         1,
@@ -12294,13 +12279,12 @@ test "a cycle through two names is refused" {
 }
 
 test "negative recursion through a function parameter is refused" {
+    // A declaration of a bare function alias is also ZTS217 (Decision 20), so the
+    // alias is a union with `string`. The cycle still passes through a parameter.
     try checkTypedSourceSaying(
-        \\structural Neg = (value: Neg) => number;
-        \\function one(value: Neg): number {
-        \\    return 1;
-        \\}
+        \\structural Neg = ((value: Neg) => number) | string;
         \\function handler(req: Request): Response {
-        \\    const v: Neg = one;
+        \\    const v: Neg = "x";
         \\    return Response.json({ ok: true });
         \\}
     ,
@@ -13386,9 +13370,11 @@ test "function value: a function in a JSON payload is ZTS213" {
 test "function value: a function stays assignable to a function type" {
     try expectNoDiagnostics(
         \\function g(x: number): number { return x; }
+        \\function apply(k: (x: number) => number): number {
+        \\  return k(1);
+        \\}
         \\function r(): number {
-        \\  const h: (x: number) => number = g;
-        \\  return h(1);
+        \\  return apply(g);
         \\}
     );
     try expectNoDiagnostics(
@@ -13397,6 +13383,15 @@ test "function value: a function stays assignable to a function type" {
         \\}
         \\function r(): number {
         \\  return apply((x: number): number => x);
+        \\}
+    );
+    // The record form that the two refusals below use, with a matching function.
+    try expectNoDiagnostics(
+        \\structural Ops = { k: (x: number) => number };
+        \\function g(x: number): number { return x; }
+        \\function r(): number {
+        \\  const o: Ops = { k: g };
+        \\  return 1;
         \\}
     );
 }
@@ -13439,9 +13434,10 @@ test "function value: an unannotated function in a shadowing JSON object takes i
 
 test "function value: a function with an extra parameter is refused at a function type" {
     try expectOnlyDiagnostic(
+        \\structural Ops = { k: (x: number) => number };
         \\function g(x: number, y: number): number { return x; }
         \\function r(): number {
-        \\  const k: (x: number) => number = g;
+        \\  const o: Ops = { k: g };
         \\  return 1;
         \\}
     , .type_mismatch);
@@ -13449,9 +13445,10 @@ test "function value: a function with an extra parameter is refused at a functio
 
 test "function value: a function with a wrong parameter type is refused at a function type" {
     try expectOnlyDiagnostic(
+        \\structural Ops = { k: (x: number) => number };
         \\function g(x: string): number { return 1; }
         \\function r(): number {
-        \\  const k: (x: number) => number = g;
+        \\  const o: Ops = { k: g };
         \\  return 1;
         \\}
     , .type_mismatch);

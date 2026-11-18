@@ -695,19 +695,20 @@ fn checkKinds(report: *Report, inputs: Inputs, observed: []const []const u8) !vo
 
 /// A handler that reads `member` off a value of its scope, or off the
 /// namespace that the scope names. A read of an admitted member type-checks;
-/// a read of any other member is ZTS201.
+/// a read of any other member is ZTS201. The read sits in an array literal,
+/// because a declaration cannot hold a function value (ZTS217).
 fn memberRead(a: std.mem.Allocator, member: Member) ![]const u8 {
     const value = if (std.mem.eql(u8, member.scope, "Array.prototype"))
-        "const xs: number[] = [1, 2];\n  const f = xs."
+        "const xs: number[] = [1, 2];\n  const f = [xs."
     else if (std.mem.eql(u8, member.scope, "String.prototype"))
-        "const s: string = \"a\";\n  const f = s."
+        "const s: string = \"a\";\n  const f = [s."
     else
-        try std.mem.concat(a, u8, &.{ "const f = ", member.scope, "." });
+        try std.mem.concat(a, u8, &.{ "const f = [", member.scope, "." });
     return std.mem.concat(a, u8, &.{
         "export function handler(req: Request): Proof<Response, \"no_secret_leakage\"> {\n  ",
         value,
         member.name,
-        ";\n  return Response.text(\"ok\");\n}\n",
+        "];\n  return Response.text(\"ok\");\n}\n",
     });
 }
 
@@ -1174,7 +1175,7 @@ test "parseDoc reads cells with an escaped pipe and spans with a backtick" {
 
 /// The fake check, except that a read of `xs.slice` is refused.
 fn refuseSliceRead(a: std.mem.Allocator, source: Source) anyerror![]const Diag {
-    if (std.mem.indexOf(u8, source.text, "xs.slice;") == null) return fakeCheck(a, source);
+    if (std.mem.indexOf(u8, source.text, "xs.slice]") == null) return fakeCheck(a, source);
     const out = try a.alloc(Diag, 1);
     out[0] = .{ .code = "ZTS201", .severity = .err };
     return out;

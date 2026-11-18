@@ -1408,6 +1408,16 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("function g(): number {\n  let n: number = 1;\n  n = 2;\n  return n;\n}")),
     },
     .{
+        .key = "A declaration that holds a function value, such as `const tag = helper;`, `let tag = helper;`, and `const tag = id((x: string): string => x);`",
+        .refused = &.{
+            r("const tag = helper;", top("function helper(x: string): string {\n  return x;\n}\nfunction g(): string {\n  const tag = helper;\n  return tag(\"a\");\n}")),
+            r("const tag = helper;", top("function helper(x: string): string {\n  return x;\n}\nconst tag = helper;\nfunction g(): string {\n  return tag(\"a\");\n}")),
+            r("let tag = helper;", top("function helper(x: string): string {\n  return x;\n}\nfunction g(): string {\n  let tag = helper;\n  tag = helper;\n  return tag(\"a\");\n}")),
+            r("const tag = id((x: string): string => x);", top("function id<F>(f: F): F {\n  return f;\n}\nfunction g(): string {\n  const tag = id((x: string): string => x);\n  return tag(\"a\");\n}")),
+        },
+        .clean = c(top("function helper(x: string): string {\n  return x;\n}\nfunction g(xs: string[]): string[] {\n  return xs.map(helper);\n}")),
+    },
+    .{
         .key = "A reserved word as a value name, such as `const set = 1;`, `function from(): number`, a parameter named `of`, an arrow parameter named `get`, the pattern binding `when { from }`, and `import { dictEmpty as match }`",
         .refused = &.{
             r("const set = 1;", body("  const set = 1;")),
