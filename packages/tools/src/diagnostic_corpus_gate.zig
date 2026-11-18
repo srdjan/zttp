@@ -1099,7 +1099,7 @@ fn probe(kind: FailureKind) !void {
 // ---------------------------------------------------------------------------
 
 const scratch_parse_code = "ZTS062";
-const scratch_check_code = "ZTS205";
+const scratch_check_code = "ZTS603";
 const scratch_phony_code = "ZTS990";
 const scratch_universe = [_][]const u8{ scratch_parse_code, scratch_check_code, scratch_phony_code };
 const scratch_allow =

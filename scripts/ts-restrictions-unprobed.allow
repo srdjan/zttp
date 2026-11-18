@@ -33,3 +33,4 @@ ZTS037 no emit site: the kind is declared in packages/zts/src/parser/error.zig a
 ZTS038 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `export { x };` of an undeclared name reports ZTS002
 ZTS039 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `export const a = 1;` twice reports no error
 ZTS044 nesting limit of the parser: docs/ts-restrictions.md names it only in prose under Limits, with no row
+ZTS205 a warning that the type checker drops when the strict checker follows and the type stage found no error, because ZTS603 answers for the match; it shows only beside another type error, and a refusal probe may report only the codes of its row

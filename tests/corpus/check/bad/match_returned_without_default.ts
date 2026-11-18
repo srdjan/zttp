@@ -1,10 +1,14 @@
-// Proves: a match returned straight from a function typed `string` has type `string | undefined` (ZTS204), and ZTS205 still names the missing case because the type error ends the check before the strict stage.
+// Proves: a match returned straight from a function typed `string` that does not cover every case is refused as ZTS603, as in the statement and `const` positions, and ZTS205 stays only beside the ZTS204 of another function.
 function describe(s: string): string {
     return match (s) {
         when "a": "first"
     };
 }
 
+function other(): number {
+    return "x";
+}
+
 function handler(req: Request): Proof<Response, "deterministic"> {
-    return Response.json({ out: describe("a") });
+    return Response.json({ out: describe("a"), n: other() });
 }

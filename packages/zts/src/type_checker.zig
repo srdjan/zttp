@@ -111,7 +111,7 @@ pub const DiagnosticKind = enum {
     unencodable_json_payload, // a `Response.json` payload whose type cannot be JSON
     string_add, // string-valued use of + instead of explicit join
     nominal_constructor_call, // a nominal type name used in call position
-    readonly_mutation, // a mutating array method called on a readonly receiver
+    readonly_mutation, // a mutating array method called on a readonly receiver, or a write to a readonly field
     function_value_binding, // a `const` or `let` whose type is a function type
     non_iterable_loop, // a `for...of` over a value that is not an array, a tuple, or `range(n)`
 };
@@ -387,13 +387,12 @@ pub const TypeChecker = struct {
             error_count += 1;
             if (diag.kind != .redundant_match_arm) blocking_error_count += 1;
         }
-        // The check pipeline stops at the type stage when it found an error
-        // (`precompile.runCheckOnlyFromSourceWithOptions`), so the strict
-        // checker reports a match that is not exhaustive only when this
-        // checker found none. Then ZTS603 answers for it and ZTS205 would be a
-        // second diagnostic for the same mistake. With a type error present,
-        // strict never reports, and ZTS205 stays: it would otherwise sit
-        // behind the type error its `| undefined` result type caused. A
+        // The strict checker reports a match that is not exhaustive as ZTS603,
+        // so ZTS205 would be a second diagnostic for the same mistake when this
+        // checker found no type error. With a type error present, ZTS205 stays:
+        // `dropRepeatsOfTypeErrors` drops a ZTS603 under the node of a type
+        // error, and the match itself no longer causes one when strict follows
+        // (`inferMatchType`). A
         // redundant arm (ZTS216) does not count: it types no expression, and
         // `check` still runs the strict stage and reports ZTS603 beside it.
         if (self.strict_checker_follows and blocking_error_count == 0) self.dropDiagnosticsOfKind(.non_exhaustive_match);
@@ -1966,10 +1965,10 @@ pub const TypeChecker = struct {
                                 if (field.readonly) {
                                     self.addDiagnostic(.{
                                         .severity = .err,
-                                        .kind = .type_mismatch,
+                                        .kind = .readonly_mutation,
                                         .node = node,
                                         .message = "cannot assign to readonly property",
-                                        .help = "Assign to a mutable property, or remove the readonly modifier.",
+                                        .help = "build a new record with the changed field, or remove the readonly modifier",
                                     });
                                 }
                             }
@@ -4986,7 +4985,11 @@ pub const TypeChecker = struct {
         // A match whose arms are not proved to cover every value evaluates to
         // `undefined` when none of them matches (spec 5.5, codegen), so its
         // type admits `undefined`. Without this the paths that run no strict
-        // checker would type a partial match as if it were total.
+        // checker would type a partial match as if it were total. When the
+        // strict checker follows, it refuses the match as ZTS603 in every
+        // position, and the `| undefined` type would raise a type error in a
+        // return that hides ZTS603 (`dropRepeatsOfTypeErrors`).
+        if (self.strict_checker_follows) return result;
         var coverage = self.matchCoverage(me, false);
         defer coverage.deinit(self.allocator);
         if (!coverage.exhaustive) {
@@ -10172,7 +10175,31 @@ test "TypeChecker: ZTS205 stays out of the way of the strict checker" {
     try std.testing.expectEqual(@as(usize, 0), with_strict.len);
 }
 
-test "TypeChecker: ZTS205 stays when a type error stops the check before the strict stage" {
+test "TypeChecker: a partial match in a return leaves ZTS603 to the strict checker" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\structural C = { kind: "a" } | { kind: "b" };
+        \\function run(c: C): string {
+        \\  return match (c) {
+        \\    when { kind: "a" }: "a",
+        \\  };
+        \\}
+    ;
+    // The strict checker follows and refuses the match as ZTS603 in every
+    // position, so the return reports no type error and no ZTS205.
+    const with_strict = try typedDiagnostics(allocator, source, true);
+    defer freeSeenDiagnostics(allocator, with_strict);
+    try std.testing.expectEqual(@as(usize, 0), with_strict.len);
+
+    // No strict checker follows: the partial match is `string | undefined`,
+    // which a `string` return refuses (ZTS204), and ZTS205 carries the witness.
+    const alone = try typedDiagnostics(allocator, source, false);
+    defer freeSeenDiagnostics(allocator, alone);
+    try std.testing.expectEqual(@as(usize, 1), countKind(alone, .return_type_mismatch));
+    try std.testing.expectEqual(@as(usize, 1), countKind(alone, .non_exhaustive_match));
+}
+
+test "TypeChecker: ZTS205 stays beside another type error when strict follows" {
     const allocator = std.testing.allocator;
     const seen = try typedDiagnostics(allocator,
         \\structural C = { kind: "a" } | { kind: "b" };
@@ -10181,11 +10208,11 @@ test "TypeChecker: ZTS205 stays when a type error stops the check before the str
         \\    when { kind: "a" }: "a",
         \\  };
         \\}
+        \\function other(): number {
+        \\  return "x";
+        \\}
     , true);
     defer freeSeenDiagnostics(allocator, seen);
-    // The partial match is `string | undefined`, which a `string` return
-    // refuses (ZTS204). The check ends there, so ZTS603 never reports and
-    // ZTS205 carries the witness.
     try std.testing.expectEqual(@as(usize, 1), countKind(seen, .return_type_mismatch));
     try std.testing.expectEqual(@as(usize, 1), countKind(seen, .non_exhaustive_match));
 }

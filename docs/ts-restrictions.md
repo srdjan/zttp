@@ -134,6 +134,7 @@ Declaration merging, open interfaces, and inheritance are excluded.
 | Call-site spread `f(...args)` | ZTS616 | Positional arguments |
 | A named function without parameter or return annotations | ZTS601 | Annotate every parameter and the return type |
 | A call with too few or too many arguments | ZTS202 | Supply every declared argument, and no more |
+| A returned value of a type that the declared return type does not admit, such as a string for a `number` | ZTS204 | Return a value of the declared type |
 | `this` and `super` | ZTS001 | Pass the context as an explicit parameter |
 | An exported function that reaches a capability with no `Effects<...>` return ceiling | ZTS610 | Declare `Effects<T, R>` on the return type |
 | A module-internal function that declares an `Effects<...>` ceiling | ZTS623 | Remove the ceiling |
@@ -245,6 +246,7 @@ boolean to text.
 | `push` on a tuple | ZTS200 | Annotate the binding as an array |
 | A write to the `length` of a string, an array, or a tuple | ZTS200 | A new array, built with `slice` or spread |
 | A mutating method on a `readonly` array | ZTS215 | A new array, or remove `readonly` from the type |
+| A write to a `readonly` field | ZTS215 | A new record |
 | A `dictEntries` round trip through `dictFromEntries` that changes only values or drops entries | ZTS627 (advisory) | `dictMapValues(d, f)` or `dictFilter(d, p)` |
 | A `reduce` over `dictEntries(d)` | ZTS628 (advisory) | `dictFold(d, f, init)` |
 
@@ -276,6 +278,8 @@ absence handling.
 | A rename to the same name, such as `{ text: text }` in a pattern | ZTS625 (advisory) | `{ text }` |
 | An arm that reads a field off the scrutinee | ZTS626 (advisory) | Bind the field in the pattern |
 | A `default` arm after full coverage of a closed union, or a duplicate `when` arm | ZTS216 | Remove the `default` arm or the duplicate arm |
+| A `match` that does not cover every case, in a statement or a `const` | ZTS603 | Cover each member, or add `default` for an open domain |
+| A `match` that does not cover every case, as the return value | ZTS603 | Cover each member, or add `default` for an open domain |
 
 An advisory names a better form for code that is already correct. An advisory
 never fails a build (spec section 4.2.1).
@@ -420,9 +424,6 @@ against the compiler.
 
 | Form | Observed result | Required |
 |---|---|---|
-| A write to a `readonly` field | Refused with ZTS200 | ZTS215. Write a new record |
-| A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
-| A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | Accepted, exit 0 | ZTS209. Pass a type argument that satisfies the constraint |
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |

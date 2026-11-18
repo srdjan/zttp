@@ -482,6 +482,11 @@ const refusal_rows_a = [_]RefusalRow{
         .clean = c(top("function f(a: number): number {\n  return a;\n}\nfunction g(): number {\n  return f(1);\n}")),
     },
     .{
+        .key = "A returned value of a type that the declared return type does not admit, such as a string for a `number`",
+        .refused = &.{r("number", top("function g(): number {\n  return \"x\";\n}"))},
+        .clean = c(top("function g(): number {\n  return 1;\n}")),
+    },
+    .{
         .key = "`this` and `super`",
         .refused = &.{
             r("this", top("function f(): number {\n  return this;\n}")),
@@ -975,6 +980,11 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("function g(xs: readonly number[]): number[] {\n  const ys: number[] = xs.slice(0, 1);\n  ys.push(1);\n  return ys;\n}")),
     },
     .{
+        .key = "A write to a `readonly` field",
+        .refused = &.{r("readonly", top("structural R = { readonly a: number };\nfunction g(r: R): number {\n  r.a = 2;\n  return r.a;\n}"))},
+        .clean = c(top("structural R = { readonly a: number };\nfunction g(r: R): R {\n  return { a: 2 };\n}")),
+    },
+    .{
         .key = "A `dictEntries` round trip through `dictFromEntries` that changes only values or drops entries",
         .refused = &.{
             r("dictEntries", dict_round_trip),
@@ -1070,6 +1080,19 @@ const refusal_rows_b = [_]RefusalRow{
             r("default", top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n    default: \"\"\n  };\n}")),
             r("when", top("function g(n: number): number {\n  return match (n) {\n    when 1: 1\n    when 1: 2\n    default: 0\n  };\n}")),
         },
+        .clean = c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n  };\n}")),
+    },
+    .{
+        .key = "A `match` that does not cover every case, in a statement or a `const`",
+        .refused = &.{
+            r("match", top(command_type ++ "function g(c: Cmd): string {\n  const v = match (c) {\n    when { kind: \"a\", text }: text\n  };\n  return \"x\";\n}")),
+            r("const", top("function g(n: number): string {\n  const v = match (n) {\n    when 1: \"a\"\n  };\n  return \"x\";\n}")),
+        },
+        .clean = c(top("function g(n: number): string {\n  const v = match (n) {\n    when 1: \"a\"\n    default: \"b\"\n  };\n  return v;\n}")),
+    },
+    .{
+        .key = "A `match` that does not cover every case, as the return value",
+        .refused = &.{r("match", top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n  };\n}"))},
         .clean = c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n  };\n}")),
     },
 
@@ -1620,21 +1643,6 @@ pub const refusal_rows = refusal_rows_a ++ refusal_rows_b;
 // ---------------------------------------------------------------------------
 
 pub const gap_rows = [_]GapRow{
-    .{
-        .key = "A write to a `readonly` field",
-        .sources = &.{c(top("structural R = { readonly a: number };\nfunction g(r: R): number {\n  r.a = 2;\n  return r.a;\n}"))},
-    },
-    .{
-        .key = "A `match` that does not cover every case, in a statement or a `const`",
-        .sources = &.{
-            c(top(command_type ++ "function g(c: Cmd): string {\n  const v = match (c) {\n    when { kind: \"a\", text }: text\n  };\n  return \"x\";\n}")),
-            c(top("function g(n: number): string {\n  const v = match (n) {\n    when 1: \"a\"\n  };\n  return \"x\";\n}")),
-        },
-    },
-    .{
-        .key = "A `match` that does not cover every case, as the return value",
-        .sources = &.{c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n  };\n}"))},
-    },
     // ----- U1b rows, in the order of the row assignment of the plan -----
     .{
         .key = "A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };`",
