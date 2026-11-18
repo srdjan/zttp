@@ -871,17 +871,6 @@ pub const FlowInterp = struct {
             return self.finish(State.bottom);
         };
 
-        // The analyzed function is a root, not a closure created by an
-        // activation in this analysis, so nothing placed the cells of the
-        // bindings it captures. Each one may hold anything.
-        if (self.captures) |table| {
-            const sources = table.upvalues(function.scope_id);
-            if (sources.len > 0) {
-                try self.record(func, func_tag, .capture_unseeded);
-                for (sources) |key| try self.weakWriteCapture(&st, key, Value.top);
-            }
-        }
-
         try self.bindParams(function, params, &st);
         try self.exec(function.body, &st);
         return self.finish(st);

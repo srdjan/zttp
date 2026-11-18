@@ -842,7 +842,7 @@ pub const Analyzer = struct {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
         switch (tag) {
-            .program, .block => {
+            .program => {
                 const block = self.ir_view.getBlock(node) orelse return;
                 for (0..block.stmts_count) |i| {
                     try self.collectFunctionsIn(self.ir_view.getListIndex(block.stmts_start, @intCast(i)), exported);
@@ -1232,14 +1232,6 @@ pub const Analyzer = struct {
                     }
                 }
             },
-            .function_decl => {
-                // Same rule for a nested declaration: it is not a unit, so
-                // its body is walked into the owner where it is declared.
-                const decl = self.ir_view.getVarDecl(node) orelse return;
-                if (decl.init != null_node) {
-                    try self.walkBaseExpr(decl.init, owner, row, seen_users);
-                }
-            },
             else => try self.walkBaseExpr(node, owner, row, seen_users),
         }
     }
@@ -1254,7 +1246,7 @@ pub const Analyzer = struct {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
         switch (tag) {
-            .program, .block, .if_stmt, .for_of_stmt, .return_stmt, .expr_stmt, .var_decl, .function_decl => {
+            .program, .block, .if_stmt, .for_of_stmt, .return_stmt, .expr_stmt, .var_decl => {
                 try self.walkBaseStmt(node, owner, row, seen_users);
             },
             .binary_op => {

@@ -1567,7 +1567,7 @@ pub const PathGenerator = struct {
                 try self.walkPaths(fi.body);
             },
 
-            .function_decl, .function_expr, .arrow_function => {
+            .function_expr, .arrow_function => {
                 // Don't recurse into nested function definitions
             },
 

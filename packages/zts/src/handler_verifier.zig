@@ -1106,10 +1106,6 @@ pub const HandlerVerifier = struct {
                 self.walkExprForRefs(stmt.condition);
                 self.walkExprForRefs(stmt.error_expr);
             },
-            .function_decl => {
-                const func = self.ir_view.getFunctionOfDecl(node) orelse return;
-                self.walkNestedFunctionBody(func.body);
-            },
             // exhaustive: every statement kind not named above descends through
             // the shared expression-child map, so a node kind that holds code
             // is walked by default. Each child gets its own journal span, so a
@@ -1162,7 +1158,7 @@ pub const HandlerVerifier = struct {
         self.walkChild(child);
     }
 
-    /// Walk the body of a nested function (declaration, expression, or arrow).
+    /// Walk the body of a nested function (expression or arrow).
     /// A closure can run at any later time, so no narrowing made outside it
     /// holds inside it: every flag is cleared for the walk and restored exactly
     /// after. A narrowing made inside the body is undone with the walk. A kill

@@ -57,8 +57,6 @@ pub const TagPlan = union(enum) {
 ///   cannot name (a value read from a property, or a join with `top`).
 /// - `capture_unplaced`: a closure read a captured binding and no capture
 ///   table was given, so the binding's cell is unknown.
-/// - `capture_unseeded`: the analyzed function itself captures bindings that
-///   no activation in this analysis created.
 /// - `budget_limit`: the root analysis reached `max_steps`, the activation
 ///   depth limit, or the native depth limit.
 /// - `refused_by_strict`: the strict checker refuses the construct (call-site
@@ -75,7 +73,6 @@ pub const Owner = enum {
     read_before_declaration,
     unknown_callee,
     capture_unplaced,
-    capture_unseeded,
     budget_limit,
     refused_by_strict,
     no_operation_rule,
