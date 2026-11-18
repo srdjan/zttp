@@ -740,6 +740,56 @@ A new code also needs a catalog row, a `describe-rule` row, a check corpus
 case, a restriction probe, and a defect seed, as ZTS217 had in c8138ac5.
 Each moved gap row goes to a refusal table of `docs/ts-restrictions.md`.
 
+### U4e: one `match` scrutinee form (G5, Decision 8 a, two commits)
+
+On 2026-11-18 I measured a rough parser refusal of every scrutinee that is
+not `Ident ("." Ident)*`, with ZTS001, in a worktree from 2c9a12ed. The
+commit gate in an empty cache gave 205/221 steps, 32 failed tests, and 1
+crashed test. The failures fall in two groups.
+
+- The ternary repair (Decision 8). The ZTS612 and ZTS621 exact repair of
+  `packages/tools/src/canonicalize.zig#ternaryToMatchRewrite` writes `match (!!(cond))`, which
+  the refusal rejects. This breaks 8 `canonicalize.zig` tests (the
+  emitted-source census, byte idempotence, and six ternary rewrites), 3
+  `kernel_identity.zig` tests, the M3 test of `repair_validator.zig`, the
+  `zts_expert_ast_rewrite.zig` chained ternary test, and two stand-in
+  tests: the seed `chained-ternary` ("declares salvaged: accepted=false")
+  and the seeded arm salvage. The test "calls stay outside the M3 slice
+  even when both sides spell one" crashes: it reads the `unsupported`
+  field of a verdict whose active field is `unparsable`.
+- Sources that match on a call or an index. A3 cases
+  `p20_match_nonident_scrutinee` and `q10_match_call_result`; the two
+  prove-behavior tests "a handler with a call in a condition, iterable,
+  discriminant, or inline callback ..."; the corpus case
+  `parse/bad/default_arm_not_last`, which then leaves ZTS062 uncovered and
+  fails two `diagnostic_corpus_gate.zig` probe tests; and the gap row
+  "`match` on a call".
+
+The repair change lands first, so that no emitted source is refused when
+the refusal lands.
+
+- U4e-1 (Decision 8 a, no refusal). When the ternary is the whole
+  initializer of a `const` or the whole operand of a `return`, the repair
+  inserts `const <c> = !!(cond);` before that statement and writes
+  `match (<c>) { when true: a, default: b }`. `<c>` is a name that occurs
+  nowhere in the source. The condition is the first thing that the
+  statement evaluates, so the order of evaluation does not change, and
+  the ZTS621 repair is offered only for a pure chain
+  (`strict_checker.zig`, `isPureExpr`). In any other position, such as an
+  object literal value or an arrow body, the repair is not exact and the
+  normalizer leaves the ternary. `packages/zts/src/kernel_identity.zig#compareExpressions`
+  gains one binding: it reads `<c>` in the repaired side as the lowered
+  initializer, and it refuses a binding whose initializer it cannot lower.
+  `repair_validator.zig` passes that binding. The fix of the crashing test
+  checks the verdict tag first. The normalize output and the repair text
+  are model-visible, so the U7 re-record carries them.
+- U4e-2 (G5). The parser refuses a scrutinee that is not a name path with
+  ZTS001 and a targeted message, at `packages/zts/src/parser/parse.zig#Parser.parseMatchExpression`. The
+  check in the type-test pattern parser that needs "a scrutinee that is a
+  name or a member path" becomes unreachable and is deleted. Each source
+  in the second group binds the scrutinee to a `const` first. The gap row
+  moves to the Match refusal table.
+
 ### U6: close-out (Opus)
 
 - Fable and Codex astra review the combined diff with split briefs.
@@ -1531,3 +1581,23 @@ later.
     Decision 4. The audit did not mark them.
   - scanClosureWrites ignores a write to an `.undeclared_global`, which
     only the serve path reaches (Decision 23).
+- U4d landed in five commits on 2026-11-18: 77b3f96a (U4d-2, X22),
+  652cd5be (U4d-4, N3 `Boolean`, N5, N15), 6b07d797 (U4d-3, Decision 5),
+  d58b731d (U4d-1, G6, X21, Decision 25), and c5b391f0 (U4d-5, N3
+  `Number`, Decision 26). Each commit gate in an empty cache gave 218/221
+  steps with the codegen replay as the only failed test. These findings
+  stay open:
+  - A method call on a union receiver, such as `v.split(n)` with
+    `v: string | string[]`, gets no ZTS203 check:
+    `inferUnionBuiltinMember` types the result, and `builtinCallee` gives
+    no row for a union.
+  - The checker admits `set`, `append`, and `delete` on `req.headers`.
+    Response headers are not supported, so a write to the request headers
+    has no use that a response can show. This is a restriction candidate
+    for the owner.
+  - The runtime finds the headers prototype through
+    `packages/runtime/src/runtime_natives.zig#headersPrototype`, which imports
+    `handler_instance.zig` lazily, because the `Headers` global is gone.
+  - A loop over a value whose type is only `undefined` or `null` gets
+    ZTS218.
+  - The CHANGELOG has no [Unreleased] entry for U4d. U6 writes it.
