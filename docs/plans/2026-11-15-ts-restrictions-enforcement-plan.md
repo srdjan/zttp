@@ -1153,7 +1153,7 @@ later.
     for an inline arrow in a route table,
     `packages/zts/src/effect_inference.zig#buildEffectFacts` for the escape
     flag of an arrow in a record field, an immediately called arrow, and a
-    body-local arrow, `packages/zts/src/function_specs.zig#dischargeWithTypeSource`
+    body-local arrow, `packages/zts/src/function_specs.zig#dischargeWithStateWriters`
     for a capsule on an arrow helper, and
     `packages/zts/src/path_generator.zig#PathGenerator.onlyReturned` for a
     module call in a named closure.

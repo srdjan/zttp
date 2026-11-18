@@ -126,20 +126,10 @@ pub const StateWriters = struct {
     verifier_writes: []const ir.NodeIndex = &.{},
 };
 
-pub fn dischargeWithTypeSource(
-    allocator: std.mem.Allocator,
-    effects: *const EffectFacts,
-    source: TypeSource,
-    ir_view: IrView,
-) !CapsuleTable {
-    return dischargeWithStateWriters(allocator, effects, source, ir_view, .{});
-}
-
-/// The function expression or arrow function that `declaration` names, or null.
+/// The function expression that `declaration` names, or null.
 fn functionOwnerNode(ir_view: IrView, declaration: ir.NodeIndex) ?ir.NodeIndex {
     const tag = ir_view.getTag(declaration) orelse return null;
     const owner = switch (tag) {
-        .function_expr, .arrow_function => declaration,
         .function_decl, .var_decl => (ir_view.getVarDecl(declaration) orelse return null).init,
         // exhaustive: effect inference records a helper only from a `function_decl` or a `var_decl` (`collectFunctionsIn`), so no helper's `decl_node` reaches this arm.
         else => return null,
@@ -363,7 +353,7 @@ test "discharge records proven facts and skips the handler" {
     var effects = try effect_inference.buildEffectFacts(allocator, view, &atoms, root, .{});
     defer effects.deinit(allocator);
 
-    var table = try dischargeWithTypeSource(allocator, &effects, .omitted, view);
+    var table = try dischargeWithStateWriters(allocator, &effects, .omitted, view, .{});
     defer table.deinit(allocator);
 
     // The handler is discharged via Proof<...> elsewhere; capsule discharge
@@ -400,7 +390,7 @@ test "discharge records non-total facts for a helper that may not return" {
     var effects = try effect_inference.buildEffectFacts(allocator, view, &atoms, root, .{});
     defer effects.deinit(allocator);
 
-    var table = try dischargeWithTypeSource(allocator, &effects, .omitted, view);
+    var table = try dischargeWithStateWriters(allocator, &effects, .omitted, view, .{});
     defer table.deinit(allocator);
 
     const maybe = table.byName("maybe") orelse return error.MissingCapsule;
@@ -419,7 +409,7 @@ fn totalHolds(source: []const u8, name: []const u8) !bool {
     var effects = try effect_inference.buildEffectFacts(allocator, view, &atoms, root, .{});
     defer effects.deinit(allocator);
 
-    var table = try dischargeWithTypeSource(allocator, &effects, .omitted, view);
+    var table = try dischargeWithStateWriters(allocator, &effects, .omitted, view, .{});
     defer table.deinit(allocator);
     const capsule = table.byName(name) orelse return error.MissingCapsule;
     return capsule.proven.holds(.total);
@@ -505,7 +495,7 @@ test "an imported row that writes module state removes read_only, pure, and dete
     });
     defer effects.deinit(allocator);
 
-    var table = try dischargeWithTypeSource(allocator, &effects, .omitted, view);
+    var table = try dischargeWithStateWriters(allocator, &effects, .omitted, view, .{});
     defer table.deinit(allocator);
 
     const tally = table.byName("tally") orelse return error.MissingCapsule;

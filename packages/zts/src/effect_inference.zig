@@ -788,35 +788,6 @@ pub const Analyzer = struct {
         return reaches_recursion;
     }
 
-    /// Whether the function whose body is `body_node` is recursive or can reach
-    /// a recursive function through the call graph.
-    ///
-    /// Keyed on the body rather than the declaration because callers hold
-    /// different nodes for the same function: `findHandlerFunction` returns the
-    /// `.function_expr`, while `decl_node` here is the enclosing
-    /// `.function_decl`. The body is the node both agree on.
-    ///
-    /// `EffectRow.recursive` answers only the first half: `propagate` resets it
-    /// to the function's own value on purpose, because a caller of a recursive
-    /// helper is not itself recursive and must not be refused capsule discharge
-    /// for one. A cost or termination claim needs the other question, so this
-    /// walks the same CSR call graph instead of reading the row.
-    ///
-    /// Returns false when `body_node` names no analyzed function, so a caller
-    /// should treat false as "no evidence of recursion", never as "proven
-    /// non-recursive". Allocation failure is returned as an error rather than
-    /// as false: the walk that would have found the cycle never ran, and
-    /// reporting its silence as a clean result would be a fail-open.
-    pub fn reachesRecursion(self: *const Analyzer, body_node: NodeIndex) !bool {
-        for (self.functions.items, 0..) |function, index| {
-            if (function.body_node != body_node) continue;
-            const reaches_recursion = try self.recursionReachability();
-            defer self.allocator.free(reaches_recursion);
-            return reaches_recursion[index];
-        }
-        return false;
-    }
-
     // ----- internal -----
 
     /// Resolve the index to read: the injected one, or a private one built on
@@ -2048,7 +2019,7 @@ pub const Analyzer = struct {
 
     fn isFunctionLiteral(self: *const Analyzer, node: NodeIndex) bool {
         const tag = self.ir_view.getTag(node) orelse return false;
-        return tag == .function_expr or tag == .arrow_function;
+        return tag == .function_expr;
     }
 
     /// Whether the identifier `node` names a function value: an import that is
@@ -3933,27 +3904,6 @@ test "a call chain too deep to converge marks every row a lower bound" {
     try testing.expect(!f20.deterministic);
 }
 
-test "an unmatched recursion query returns false without allocation" {
-    const allocator = testing.allocator;
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.initAdmission(allocator, allocator, "function work() { return 1; }", .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-
-    var failing = testing.FailingAllocator.init(allocator, .{});
-    var analyzer = Analyzer.init(failing.allocator(), view, &atoms);
-    defer analyzer.deinit();
-    try analyzer.analyze(root);
-    try testing.expect(analyzer.lookup("work") != null);
-
-    failing.fail_index = failing.alloc_index;
-    try testing.expect(!(try analyzer.reachesRecursion(null_node)));
-    try testing.expect(!failing.has_induced_failure);
-}
-
 test "self-recursive function is flagged" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
@@ -5199,11 +5149,6 @@ test "a route function that references the route table is not recursive" {
     const get = analyzer.lookup("getUser") orelse return error.FunctionNotFound;
     try testing.expect(!list.recursive);
     try testing.expect(!get.recursive);
-    var idx: usize = 0;
-    for (analyzer.all(), 0..) |fe, i| {
-        if (std.mem.eql(u8, fe.name, "listUsers")) idx = i;
-    }
-    try testing.expect(!(try analyzer.reachesRecursion(analyzer.all()[idx].body_node)));
 }
 
 test "a call through a member of a function-holding binding is a lower bound" {

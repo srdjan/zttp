@@ -335,14 +335,6 @@ pub const BoolChecker = struct {
                         const key = bindingKey(vd.binding);
                         self.const_types.put(self.allocator, key, inferred) catch self.markAllocationFailure();
 
-                        // If binding is a function, try to infer its return type
-                        if (inferred == .function) {
-                            const ret_type = self.inferFunctionReturnType(vd.init);
-                            if (ret_type != .unknown) {
-                                self.fn_return_types.put(self.allocator, key, ret_type) catch self.markAllocationFailure();
-                            }
-                        }
-
                         // Track Result bindings: const r = jwtVerify(...)
                         if (inferred == .object) {
                             if (self.isResultCall(vd.init)) {

@@ -2733,9 +2733,6 @@ pub const TypeChecker = struct {
                 const init_is_function = init_tag == .arrow_function or init_tag == .function_expr;
                 if (tag == .function_decl and module_level) {
                     self.admitOneTypePredicate(node);
-                } else if (init_is_function) {
-                    const name = self.resolveAtomName(decl.binding.name_atom) orelse "<anonymous>";
-                    self.refuseMisplacedPredicate(node, decl.init, name);
                 }
                 // The function is read through its own node only when it has
                 // no binding to name it, so one predicate is reported once.

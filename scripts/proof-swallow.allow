@@ -361,7 +361,6 @@ packages/zts/src/bool_checker.zig walkStmt catch-poison
 packages/zts/src/bool_checker.zig walkStmt catch-poison@2
 packages/zts/src/bool_checker.zig walkStmt catch-poison@3
 packages/zts/src/bool_checker.zig walkStmt catch-poison@4
-packages/zts/src/bool_checker.zig walkStmt catch-poison@5
 
 # A schema that fails to parse is classified `.breaking`, the most severe
 # change. The catch can raise the classification of an upgrade and can never

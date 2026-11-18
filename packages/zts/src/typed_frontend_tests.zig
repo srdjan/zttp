@@ -8806,11 +8806,12 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
         .{},
     );
     defer direct_effects.deinit(std.testing.allocator);
-    var direct_capsules = try function_specs.dischargeWithTypeSource(
+    var direct_capsules = try function_specs.dischargeWithStateWriters(
         std.testing.allocator,
         &direct_effects,
         .{ .direct = &direct_env },
         direct_view,
+        .{},
     );
     defer direct_capsules.deinit(std.testing.allocator);
     const direct_capsule = direct_capsules.byName("helper") orelse return error.TestUnexpectedResult;
@@ -8966,11 +8967,12 @@ test "direct source selection distinguishes omitted and empty inputs" {
     const empty_effects: effect_inference.EffectFacts = .{};
     try std.testing.expectError(
         error.TypeSourceModeMismatch,
-        function_specs.dischargeWithTypeSource(
+        function_specs.dischargeWithStateWriters(
             std.testing.allocator,
             &empty_effects,
             .{ .direct = &omitted_env },
             empty_view,
+            .{},
         ),
     );
     direct_pool.failure = error.TypePoolCapacityExceeded;
@@ -9007,11 +9009,12 @@ test "direct source selection distinguishes omitted and empty inputs" {
     try std.testing.expectError(error.OutOfMemory, unhealthy_strict.check(empty_root));
     try std.testing.expectError(
         error.OutOfMemory,
-        function_specs.dischargeWithTypeSource(
+        function_specs.dischargeWithStateWriters(
             std.testing.allocator,
             &empty_effects,
             .{ .direct = &direct_env },
             empty_view,
+            .{},
         ),
     );
 }
@@ -9076,11 +9079,12 @@ fn runDirectPilotAllocationSweep(
             const empty_effects: effect_inference.EffectFacts = .{};
             try std.testing.expectError(
                 error.OutOfMemory,
-                function_specs.dischargeWithTypeSource(
+                function_specs.dischargeWithStateWriters(
                     allocator,
                     &empty_effects,
                     .{ .direct = &env },
                     view,
+                    .{},
                 ),
             );
         } else if (env.sourceTypeMode() == .direct) {
@@ -9104,11 +9108,12 @@ fn runDirectPilotAllocationSweep(
             const empty_effects: effect_inference.EffectFacts = .{};
             try std.testing.expectError(
                 error.OutOfMemory,
-                function_specs.dischargeWithTypeSource(
+                function_specs.dischargeWithStateWriters(
                     allocator,
                     &empty_effects,
                     .{ .direct = &env },
                     view,
+                    .{},
                 ),
             );
         }
@@ -10232,11 +10237,12 @@ fn expectDirectFunctionCapsules(source: []const u8) !void {
     defer direct_effects.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), direct_effects.all().len);
 
-    var direct_capsules = try function_specs.dischargeWithTypeSource(
+    var direct_capsules = try function_specs.dischargeWithStateWriters(
         std.testing.allocator,
         &direct_effects,
         .{ .direct = &direct_env },
         direct_view,
+        .{},
     );
     defer direct_capsules.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), direct_capsules.capsules.items.len);
@@ -10521,11 +10527,12 @@ fn expectDirectCallbackCeiling(
     );
     try std.testing.expectEqual(expected.has_crypto, direct_row.capabilities.contains(.crypto));
 
-    var direct_capsules = try function_specs.dischargeWithTypeSource(
+    var direct_capsules = try function_specs.dischargeWithStateWriters(
         std.testing.allocator,
         &direct_effects,
         .{ .direct = &direct_env },
         direct_view,
+        .{},
     );
     defer direct_capsules.deinit(std.testing.allocator);
     const direct_capsule = direct_capsules.byName("run") orelse return error.TestUnexpectedResult;
