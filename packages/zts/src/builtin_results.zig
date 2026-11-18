@@ -179,7 +179,8 @@ pub const rows =
     // `renderToString` returns "" for no argument and throws, rather than
     // returns, when a component fails.
     calls("global", 0, any_one, .string, &.{ "String", "renderToString" }) ++
-    calls("global", 0, any_one, .number, &.{ "Number", "parseFloat" }) ++
+    calls("global", 0, &.{.string}, .number, &.{"Number"}) ++
+    calls("global", 0, any_one, .number, &.{"parseFloat"}) ++
     calls("global", 0, any_two, .number, &.{"parseInt"}) ++
     // String.prototype. The receiver is a string, so each method returns its
     // normal result for any argument, except `repeat`: a negative or infinite

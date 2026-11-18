@@ -4740,19 +4740,7 @@ pub const TypeChecker = struct {
             if (param == .any) continue;
             const arg_type = self.inferType(arg);
             if (arg_type == null_type_idx or pool.mentionsError(arg_type)) return null_type_idx;
-            switch (param) {
-                .any => {},
-                .number => if (!self.env.isAssignableTo(arg_type, pool.idx_number)) return null_type_idx,
-                .string => if (!self.env.isAssignableTo(arg_type, pool.idx_string)) return null_type_idx,
-                .function => if (pool.getTag(self.resolvedType(arg_type)) != .t_function) return null_type_idx,
-                .object => switch (pool.getTag(self.resolvedType(arg_type)) orelse return null_type_idx) {
-                    .t_record, .t_dict, .t_array, .t_tuple => {},
-                    // exhaustive: a union, a nullable, a scalar, and every
-                    // other type may not be an object at runtime, and
-                    // `Object.keys` then returns `undefined`.
-                    else => return null_type_idx,
-                },
-            }
+            if (!self.rowParamAdmits(param, arg_type)) return null_type_idx;
         }
         return switch (row.result) {
             .receiver_array,
@@ -4791,43 +4779,74 @@ pub const TypeChecker = struct {
         return self.env.resolveRef(holder) == request;
     }
 
+    /// A builtin row that a call names, with the array a row of an array
+    /// method reads its element type from. `array` is `null_type_idx` for a
+    /// row of any other receiver.
+    const BuiltinCallee = struct {
+        row: builtin_results.Row,
+        array: TypeIndex,
+    };
+
+    /// The builtin row that `call` names: a builtin global function, a method
+    /// of a builtin namespace, of the headers of a request, of a string, or of
+    /// an array or a tuple. A union receiver and a callee that names no row
+    /// give null.
+    fn builtinCallee(self: *const TypeChecker, call: Node.CallExpr) ?BuiltinCallee {
+        if (self.builtinGlobalName(call.callee)) |name| {
+            const row = builtin_results.find(.call, "global", name) orelse return null;
+            return .{ .row = row, .array = null_type_idx };
+        }
+        // `getMember` reads any node as a member, so the tag decides first.
+        if (self.ir_view.getTag(call.callee) != .member_access) return null;
+        const callee = self.ir_view.getMember(call.callee) orelse return null;
+        if (callee.computed != null_node or callee.is_optional) return null;
+        const method = self.resolveAtomName(callee.property) orelse return null;
+        if (self.builtinGlobalName(callee.object)) |namespace| {
+            const row = builtin_results.find(.call, namespace, method) orelse return null;
+            return .{ .row = row, .array = null_type_idx };
+        }
+        if (self.isRequestHeaders(callee.object)) {
+            const row = builtin_results.find(.call, "Headers.prototype", method) orelse return null;
+            return .{ .row = row, .array = null_type_idx };
+        }
+        const raw = self.inferType(callee.object);
+        if (raw == null_type_idx) return null;
+        const pool = self.env.pool;
+        const receiver = pool.widenLiteral(pool.unwrapNominal(self.env.resolveRef(raw)));
+        if (pool.getTag(receiver) == .t_string) {
+            const row = builtin_results.find(.call, "String.prototype", method) orelse return null;
+            return .{ .row = row, .array = null_type_idx };
+        }
+        const array = self.arrayReceiverType(raw);
+        if (array == null_type_idx) return null;
+        const row = builtin_results.find(.call, "Array.prototype", method) orelse return null;
+        return .{ .row = row, .array = array };
+    }
+
     /// The result of a call of a builtin member: a method of a builtin
     /// namespace, of a string, of an array or a tuple, of a union of these, or
     /// of the headers of a request.
     fn inferBuiltinMemberCall(self: *const TypeChecker, call: Node.CallExpr) TypeIndex {
+        if (self.builtinCallee(call)) |target| return self.builtinCallResult(call, target.row, target.array);
+        // No row answers, so only a union receiver is left. A namespace has no
+        // type (`builtinGlobalName`), so it ends here with no result.
         const callee = self.ir_view.getMember(call.callee) orelse return null_type_idx;
         if (callee.computed != null_node or callee.is_optional) return null_type_idx;
         const method = self.resolveAtomName(callee.property) orelse return null_type_idx;
-        if (self.builtinGlobalName(callee.object)) |namespace| {
-            const row = builtin_results.find(.call, namespace, method) orelse return null_type_idx;
-            return self.builtinCallResult(call, row, null_type_idx);
-        }
-        if (self.isRequestHeaders(callee.object)) {
-            const row = builtin_results.find(.call, "Headers.prototype", method) orelse return null_type_idx;
-            return self.builtinCallResult(call, row, null_type_idx);
-        }
         const raw = self.inferType(callee.object);
         if (raw == null_type_idx) return null_type_idx;
         const pool = self.env.pool;
         const receiver = pool.widenLiteral(pool.unwrapNominal(self.env.resolveRef(raw)));
-        if (pool.getTag(receiver) == .t_union) return self.inferUnionBuiltinMember(receiver, method, call);
-        if (pool.getTag(receiver) == .t_string) {
-            const row = builtin_results.find(.call, "String.prototype", method) orelse return null_type_idx;
-            return self.builtinCallResult(call, row, null_type_idx);
-        }
-        const array = self.arrayReceiverType(raw);
-        if (array == null_type_idx) return null_type_idx;
-        const row = builtin_results.find(.call, "Array.prototype", method) orelse return null_type_idx;
-        return self.builtinCallResult(call, row, array);
+        if (pool.getTag(receiver) != .t_union) return null_type_idx;
+        return self.inferUnionBuiltinMember(receiver, method, call);
     }
 
     /// The result of a call of a builtin global function that no signature or
     /// callable binding answers. A name qualifies only as `builtinGlobalName`
     /// says.
     fn inferBuiltinGlobalCall(self: *const TypeChecker, call: Node.CallExpr) TypeIndex {
-        const name = self.builtinGlobalName(call.callee) orelse return null_type_idx;
-        const row = builtin_results.find(.call, "global", name) orelse return null_type_idx;
-        return self.builtinCallResult(call, row, null_type_idx);
+        const target = self.builtinCallee(call) orelse return null_type_idx;
+        return self.builtinCallResult(call, target.row, target.array);
     }
 
     /// The constructor name when `call` is `Response.<constructor>(...)` on the
@@ -8089,12 +8108,70 @@ pub const TypeChecker = struct {
         } else |_| self.markAllocationFailure();
     }
 
+    /// Whether a value of `arg_type` is what the row parameter `param`
+    /// admits. A union, a nullable, a scalar, and every other type may not be
+    /// an object at runtime, and `Object.keys` then returns `undefined`.
+    fn rowParamAdmits(self: *const TypeChecker, param: builtin_results.Param, arg_type: TypeIndex) bool {
+        const pool = self.env.pool;
+        return switch (param) {
+            .any => true,
+            .number => self.env.isAssignableTo(arg_type, pool.idx_number),
+            .string => self.env.isAssignableTo(arg_type, pool.idx_string),
+            .function => pool.getTag(self.resolvedType(arg_type)) == .t_function,
+            .object => switch (pool.getTag(self.resolvedType(arg_type)) orelse return false) {
+                .t_record, .t_dict, .t_array, .t_tuple => true,
+                // exhaustive: every other type may not be an object at runtime.
+                else => false,
+            },
+        };
+    }
+
+    /// Report ZTS203 for each argument of a builtin row call whose type is
+    /// known and is not what its row parameter admits. The runtime returns
+    /// `undefined` for such an argument, so the call has no result type.
+    fn checkBuiltinRowArgs(self: *TypeChecker, call: Node.CallExpr) void {
+        const target = self.builtinCallee(call) orelse return;
+        const row = target.row;
+        const pool = self.env.pool;
+        const scope: []const u8 = if (std.mem.eql(u8, row.scope, "global")) "" else row.scope;
+        const dot: []const u8 = if (scope.len == 0) "" else ".";
+        for (0..call.args_count) |position| {
+            const arg = self.ir_view.getListIndex(call.args_start, @intCast(position));
+            if (self.ir_view.getTag(arg) == .spread) continue;
+            const param = row.paramAt(position) orelse continue;
+            if (param == .any) continue;
+            const arg_type = self.inferType(arg);
+            if (arg_type == null_type_idx or pool.mentionsError(arg_type)) continue;
+            if (self.rowParamAdmits(param, arg_type)) continue;
+            var buf: [1024]u8 = undefined;
+            const got = pool.formatType(pool.widenLiteral(arg_type), &buf);
+            const article: []const u8 = switch (param) {
+                .object => "an object",
+                .number => "a number",
+                .string => "a string",
+                .function => "a function",
+                .any => "any value",
+            };
+            if (self.allocator.print("{s}{s}{s} argument {d} must be {s}, got '{s}'", .{ scope, dot, row.name, position + 1, article, got })) |msg| {
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .arg_type_mismatch,
+                    .node = arg,
+                    .message = msg,
+                    .help = "pass a value of the parameter type; the runtime returns undefined for any other",
+                    .allocated = true,
+                });
+            } else |_| self.markAllocationFailure();
+        }
+    }
+
     fn checkCallArgs(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
         // Before the branches on the callee tag: `responseConstructorName`
         // reads every spelling of the callee.
         self.checkResponseJsonPayload(call);
         self.checkResponseInit(call);
+        self.checkBuiltinRowArgs(call);
         if (callee_tag == .identifier) {
             self.checkModuleEncodableArgs(call);
             self.checkModuleBooleanPredicate(call);
@@ -13871,5 +13948,81 @@ test "predicate position: a module-level function declaration predicate is admit
         \\    }
         \\    return Response.json({ ok: true });
         \\}
+    );
+}
+
+fn expectOnlyArgMismatch(source: []const u8, message: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator, source, false);
+    defer freeSeenDiagnostics(allocator, seen);
+    if (seen.len != 1) for (seen) |d| std.debug.print("diagnostic: {s}\n", .{d.message});
+    try std.testing.expectEqual(@as(usize, 1), seen.len);
+    try std.testing.expectEqual(DiagnosticKind.arg_type_mismatch, seen[0].kind);
+    try std.testing.expectEqualStrings(message, seen[0].message);
+}
+
+test "builtin argument: a boolean passed to Math.pow is ZTS203" {
+    try expectOnlyArgMismatch(
+        \\function f(): number { const n: number = Math.pow(true, 2); return n; }
+    , "Math.pow argument 1 must be a number, got 'boolean'");
+}
+
+test "builtin argument: a string passed to Math.floor is ZTS203" {
+    try expectOnlyArgMismatch(
+        \\function f(): number { const m: number = Math.floor("x"); return m; }
+    , "Math.floor argument 1 must be a number, got 'string'");
+}
+
+test "builtin argument: a boolean passed to Number is ZTS203 and names no scope" {
+    try expectOnlyArgMismatch(
+        \\function f(): number { const n: number = Number(true); return n; }
+    , "Number argument 1 must be a string, got 'boolean'");
+}
+
+test "builtin argument: an unknown value passed to Math.abs is ZTS203" {
+    try expectOnlyArgMismatch(
+        \\function f(u: unknown): number { const n: number = Math.abs(u); return n; }
+    , "Math.abs argument 1 must be a number, got 'unknown'");
+}
+
+test "builtin argument: a number or undefined passed to Math.abs is ZTS203" {
+    try expectOnlyArgMismatch(
+        \\function f(n: number | undefined): number { const m: number = Math.abs(n); return m; }
+    , "Math.abs argument 1 must be a number, got 'number | undefined'");
+}
+
+test "builtin argument: a number passed to a string method is ZTS203 with the prototype scope" {
+    try expectOnlyArgMismatch(
+        \\function f(s: string, n: number): string[] { return s.split(n); }
+    , "String.prototype.split argument 1 must be a string, got 'number'");
+}
+
+test "builtin argument: a string passed to Object.keys is ZTS203 for an object parameter" {
+    try expectOnlyArgMismatch(
+        \\function f(s: string): string[] { return Object.keys(s); }
+    , "Object.keys argument 1 must be an object, got 'string'");
+}
+
+test "builtin argument: numbers passed to Math.pow are admitted" {
+    try expectNoDiagnostics(
+        \\function f(): number { const n: number = Math.pow(2, 3); return n; }
+    );
+}
+
+test "builtin argument: a string passed to Number is admitted" {
+    try expectNoDiagnostics(
+        \\function f(): number { const n: number = Number("12"); return n; }
+    );
+}
+
+test "builtin argument: a number passed to String is admitted" {
+    try expectNoDiagnostics(
+        \\function f(): string { const s: string = String(5); return s; }
+    );
+}
+
+test "builtin argument: an argument with no type is admitted" {
+    try expectNoDiagnostics(
+        \\function f(): number { const n: number = Math.abs(nothing()); return n; }
     );
 }

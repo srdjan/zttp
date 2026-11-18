@@ -228,6 +228,7 @@ boolean to text.
 | `Number.parseInt` and `Number.parseFloat` | ZTS201 | The globals `parseInt` and `parseFloat` |
 | An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, or `xs.indexOf(v, i)`, and a callback with a third parameter, such as `xs.map((x, i, all) => x)` | ZTS202 | The arguments of spec 6.5: `xs.slice(start, end)`, `xs.reduce(f, init)`, and a callback `(value, index)` or `(acc, value, index)` |
 | `join` on an array of non-strings, such as `[1, 2].join("")` | ZTS203 | Convert each element with `String` first |
+| A builtin argument of a type that the builtin does not take, such as `Math.pow(true, 2)` or `Number(true)` | ZTS203 | Pass the parameter type. Narrow a value that may be `undefined` first |
 | A numeric index read on a string, such as `s[0]` | ZTS201 | `s.charAt(i)` or `s.slice(i, i + 1)` |
 | An index read or a `length` read on `Bytes`, such as `b[0]` and `b.length` | ZTS201 | `byteAt(b, i)` or `bytesLength(b)` from `zttp:bytes` |
 | A member call on `unknown` or on a value with no known type | ZTS201 | Narrow with `typeof` or `isDict` first |

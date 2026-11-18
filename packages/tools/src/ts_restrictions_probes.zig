@@ -905,6 +905,14 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("function g(): string {\n  return [1, 2].map((x: number): string => String(x)).join(\"\");\n}")),
     },
     .{
+        .key = "A builtin argument of a type that the builtin does not take, such as `Math.pow(true, 2)` or `Number(true)`",
+        .refused = &.{
+            r("Math.pow(true, 2)", top("function g(): number {\n  return Math.pow(true, 2);\n}")),
+            r("Number(true)", top("function g(): number {\n  return Number(true);\n}")),
+        },
+        .clean = c(top("function g(): number {\n  return Math.pow(2, 3) + Number(\"12\");\n}")),
+    },
+    .{
         .key = "A numeric index read on a string, such as `s[0]`",
         .refused = &.{r("s[0]", body("  const s = \"abc\";\n  const c = s[0];"))},
         .clean = c(body("  const s = \"abc\";\n  const c = s.charAt(0);")),

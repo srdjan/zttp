@@ -4074,18 +4074,18 @@ test "false proof F2: a header that may be missing is not a string" {
     , "type 'string | undefined' is not assignable to type 'string'");
 }
 
-test "builtin result: an argument of the wrong type leaves the result untyped" {
-    try expectNoTypeDiagnostic(
+test "builtin result: an argument of the wrong type is ZTS203 and adds no result type" {
+    try expectOneArgMismatch(
         \\structural Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = Math.floor(s); return 0; }
-    );
+    , "Math.floor argument 1 must be a number, got 'string'");
 }
 
-test "builtin result: an argument that may be undefined leaves the result untyped" {
-    try expectNoTypeDiagnostic(
+test "builtin result: an argument that may be undefined is ZTS203 and adds no result type" {
+    try expectOneArgMismatch(
         \\structural Nope = { zz: Bytes };
         \\function f(n: number | undefined): number { const p: Nope = Math.floor(n); return 0; }
-    );
+    , "Math.floor argument 1 must be a number, got 'number | undefined'");
 }
 
 test "builtin result: a missing argument leaves the result untyped" {
@@ -4095,11 +4095,11 @@ test "builtin result: a missing argument leaves the result untyped" {
     );
 }
 
-test "builtin result: split with a separator that is not a string stays untyped" {
-    try expectNoTypeDiagnostic(
+test "builtin result: split with a separator that is not a string is ZTS203 and adds no result type" {
+    try expectOneArgMismatch(
         \\structural Nope = { zz: Bytes };
         \\function f(s: string, n: number): number { const p: Nope = s.split(n); return 0; }
-    );
+    , "String.prototype.split argument 1 must be a string, got 'number'");
 }
 
 test "builtin result: the length of a string that may be undefined stays untyped" {
@@ -5377,11 +5377,11 @@ test "builtin result: Object.keys of a record is a string array" {
     , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
 }
 
-test "builtin result: Object.keys of a string stays untyped" {
-    try expectNoTypeDiagnostic(
+test "builtin result: Object.keys of a string is ZTS203 and adds no result type" {
+    try expectOneArgMismatch(
         \\structural Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = Object.keys(s); return 0; }
-    );
+    , "Object.keys argument 1 must be an object, got 'string'");
 }
 
 test "builtin result: Object.values of a record is an unknown array" {
@@ -5406,11 +5406,18 @@ test "builtin result: Object.values of an object literal is not a number array" 
     , "type 'unknown[]' is not assignable to type 'number[]'");
 }
 
-test "builtin result: Object.values and Object.entries of a string stay untyped" {
-    try expectNoTypeDiagnostic(
+test "builtin result: Object.values of a string is ZTS203 and adds no result type" {
+    try expectOneArgMismatch(
         \\structural Nope = { zz: Bytes };
-        \\function f(s: string): number { const p: Nope = Object.values(s); const q: Nope = Object.entries(s); return 0; }
-    );
+        \\function f(s: string): number { const p: Nope = Object.values(s); return 0; }
+    , "Object.values argument 1 must be an object, got 'string'");
+}
+
+test "builtin result: Object.entries of a string is ZTS203 and adds no result type" {
+    try expectOneArgMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const q: Nope = Object.entries(s); return 0; }
+    , "Object.entries argument 1 must be an object, got 'string'");
 }
 
 test "builtin result: Array.isArray is boolean" {

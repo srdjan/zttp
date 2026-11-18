@@ -79,7 +79,7 @@ function helpersProbe() {
   const nums = [-1.8, -1.2, 3.6];
   const floors = nums.map((n) => Math.floor(n));
   const rounded = nums.map((n) => Math.round(n));
-  const abs = Math.abs(nums[0]);
+  const abs = Math.abs(nums[0] ?? 0);
   const min = Math.min(4, 9);
   const max = Math.max(4, 9);
 
