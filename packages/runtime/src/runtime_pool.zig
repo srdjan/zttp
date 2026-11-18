@@ -1858,12 +1858,12 @@ const lifetime_guard_cases = [_]LifetimeGuardCase{
         .expected_body = "ok",
     },
     .{
-        .name = "Headers append combines two values in a loop",
+        .name = "Request headers append combines two values in a loop",
         .handler =
         \\function handler(req) {
         \\  let last = "";
         \\  for (const i of range(200)) {
-        \\    const h = Headers({ "x-a": "1" });
+        \\    const h = Request("/", { headers: { "x-a": "1" } }).headers;
         \\    h.append("X-A", "2");
         \\    last = String(h.get("x-a"));
         \\  }
@@ -1876,12 +1876,12 @@ const lifetime_guard_cases = [_]LifetimeGuardCase{
         .expected_body = "1, 2",
     },
     .{
-        .name = "Headers delete in a loop",
+        .name = "Request headers delete in a loop",
         .handler =
         \\function handler(req) {
         \\  let last = "";
         \\  for (const i of range(200)) {
-        \\    const h = Headers({ "x-a": "1", "x-b": "2" });
+        \\    const h = Request("/", { headers: { "x-a": "1", "x-b": "2" } }).headers;
         \\    h.delete("X-A");
         \\    last = String(h.has("x-a"));
         \\  }

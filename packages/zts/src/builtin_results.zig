@@ -163,8 +163,6 @@ pub const rows =
     // the parsers return NaN for a value that is not a string, so each result
     // is the same for every argument. NaN is a `number`.
     calls("Number", 0, any_one, .boolean, &.{ "isInteger", "isNaN", "isFinite" }) ++
-    calls("Number", 0, any_one, .number, &.{"parseFloat"}) ++
-    calls("Number", 0, any_two, .number, &.{"parseInt"}) ++
     // The 8 constants that builtins/root.zig installs on `Number`.
     properties("Number", &.{
         "MAX_VALUE",         "MIN_VALUE",         "NaN",
@@ -329,8 +327,7 @@ pub const skips =
     skipsOf("global", "out of scope: range returns a lazy iterator, not an array. It has no prototype, and only for...of and .length read it", &.{"range"}) ++
     skipsOf("range", "out of scope: the iterator that range returns is untyped, so its length is too", &.{"length"}) ++
     skipsOf("global", "out of scope: h returns a vnode, a runtime object with no type", &.{"h"}) ++
-    skipsOf("global", "out of scope: Boolean is a known name that the runtime does not install, so a call fails with NotCallable", &.{"Boolean"}) ++
-    skipsOf("global", "out of scope: a call of the constructor returns a runtime object with no type", &.{ "Headers", "Request" }) ++
+    skipsOf("global", "out of scope: a call of the constructor returns a runtime object with no type", &.{"Request"}) ++
     skipsOf("global", "out of scope: assert is a statement, not a callable value", &.{"assert"}) ++
     skipsOf("global", refused_in_handler, &.{
         "Error",           "Fragment",    "RangeError", "ReferenceError", "Result",      "SyntaxError", "TypeError",

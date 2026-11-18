@@ -13,9 +13,7 @@ const std = @import("std");
 /// appear because they are the callee object of a member call.
 pub const names = [_][]const u8{
     "Array",
-    "Boolean",
     "Date",
-    "Headers",
     "Math",
     "Number",
     "Object",

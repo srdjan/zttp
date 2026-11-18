@@ -1270,7 +1270,7 @@ test "request helpers define empty and invalid body semantics" {
     try std.testing.expectEqual(true, invalid_obj.get("missingIsUndefined").?.bool);
 }
 
-test "Headers Request and Response factories share the HTTP model" {
+test "Request and Response factories share the HTTP model" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1280,19 +1280,16 @@ test "Headers Request and Response factories share the HTTP model" {
 
     const handler_code =
         \\function handler(req) {
-        \\  const headers = Headers({
-        \\    "Content-Type": "application/json",
-        \\    "X-Test": "one"
+        \\  const request = Request("/items?id=41&name=zttp", {
+        \\    method: "POST",
+        \\    headers: { "Content-Type": "application/json", "X-Test": "one" },
+        \\    body: "{\"ok\":true}"
         \\  });
+        \\  const headers = request.headers;
         \\  headers.append("X-Test", "two");
         \\  headers.set("X-Mode", "fast");
         \\  const beforeDelete = headers.has("x-mode");
         \\  headers.delete("x-mode");
-        \\  const request = Request("/items?id=41&name=zttp", {
-        \\    method: "POST",
-        \\    headers: headers,
-        \\    body: "{\"ok\":true}"
-        \\  });
         \\  const data = request.json();
         \\  const response = Response("done", {
         \\    status: 201,
@@ -1312,6 +1309,7 @@ test "Headers Request and Response factories share the HTTP model" {
         \\    responseOk: response.ok,
         \\    responseReply: response.headers.get("x-reply"),
         \\    responseType: response.headers.get("content-type"),
+        \\    staticType: Response.json({ ok: true }).headers.get("content-type"),
         \\    responseText: response.text()
         \\  });
         \\}
@@ -1345,6 +1343,7 @@ test "Headers Request and Response factories share the HTTP model" {
     try std.testing.expectEqual(true, obj.get("responseOk").?.bool);
     try std.testing.expectEqualStrings("ok", obj.get("responseReply").?.string);
     try std.testing.expectEqualStrings("text/plain; charset=utf-8", obj.get("responseType").?.string);
+    try std.testing.expectEqualStrings("application/json", obj.get("staticType").?.string);
     try std.testing.expectEqualStrings("done", obj.get("responseText").?.string);
 }
 

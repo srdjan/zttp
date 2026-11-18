@@ -295,20 +295,6 @@ pub fn headersDeleteNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const 
     return zq.JSValue.undefined_val;
 }
 
-pub fn headersConstructorNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const headers_obj = try createHeadersObjectDynamic(ctx);
-
-    if (args.len > 0 and !args[0].isUndefined() and !args[0].isNull()) {
-        copyHeadersIntoObject(ctx, args[0], headers_obj) catch |err| switch (err) {
-            error.InvalidHeaders => return throwTypeError(ctx, "Headers(init) expects object<string,string>"),
-            else => return err,
-        };
-    }
-
-    return headers_obj.toValue();
-}
-
 pub fn requestConstructorNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
 

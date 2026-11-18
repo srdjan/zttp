@@ -5830,9 +5830,9 @@ test "an unknown global is refused by the strict checker" {
     try expectUnresolved(r.result, .identifier, .refused_by_strict);
 
     // A known global that no rule models has no operation rule.
-    const boolean = try analyzeSource("function f(s) { return Boolean; }", "f", &.{secret_value});
-    defer boolean.deinit();
-    try expectUnresolved(boolean.result, .identifier, .no_operation_rule);
+    const request = try analyzeSource("function f(s) { return Request; }", "f", &.{secret_value});
+    defer request.deinit();
+    try expectUnresolved(request.result, .identifier, .no_operation_rule);
 }
 
 // P5 specification test 18.
@@ -6099,7 +6099,8 @@ test "census C1: every registered builtin has a row and every row names a builti
     );
     // A floor on the input: a census that enumerated nothing would pass.
     try testing.expect(counts.globals >= 18);
-    try testing.expect(counts.properties >= 76);
+    // U4d-4 removed Number.parseInt and Number.parseFloat: 75 callable properties remain.
+    try testing.expect(counts.properties >= 75);
     try testing.expectEqual(operation_rows.len, counts.rows);
     // Every property belongs to one row, and a global function has a row of
     // its own, so the rows cover the properties and the global functions.

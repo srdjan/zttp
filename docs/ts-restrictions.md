@@ -224,6 +224,7 @@ boolean to text.
 | A member that the runtime does not hold, such as `n.toFixed(2)` or `n.toString()` | ZTS201 | `String(n)` |
 | The array members `forEach`, `pop`, `shift`, `unshift`, `splice`, `toReversed`, and `concat`, and the string member `substring` | ZTS201 | `for...of`, `slice`, or spread `[...a, ...b]` for an array, and `slice` for a string |
 | A member that an ambient value does not hold, such as `Object.create`, `Object.defineProperty`, `Object.fromEntries`, `Object.hasOwn`, `Array.from`, `Array.of`, or `h.foo` | ZTS201 | `Object.keys`, `Object.values`, `Object.entries`, object spread, or `for...of` |
+| `Number.parseInt` and `Number.parseFloat` | ZTS201 | The globals `parseInt` and `parseFloat` |
 | An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, or `xs.indexOf(v, i)`, and a callback with a third parameter, such as `xs.map((x, i, all) => x)` | ZTS202 | The arguments of spec 6.5: `xs.slice(start, end)`, `xs.reduce(f, init)`, and a callback `(value, index)` or `(acc, value, index)` |
 | `join` on an array of non-strings, such as `[1, 2].join("")` | ZTS203 | Convert each element with `String` first |
 | A numeric index read on a string, such as `s[0]` | ZTS201 | `s.charAt(i)` or `s.slice(i, i + 1)` |
@@ -332,7 +333,7 @@ The type checker admits these members on an array, on a string, and on each ambi
 
 `Math`: `PI`, `abs`, `ceil`, `cos`, `exp`, `floor`, `log`, `max`, `min`, `pow`, `random`, `round`, `sin`, `sqrt`, `tan`, `trunc`
 
-`Number`: `EPSILON`, `MAX_SAFE_INTEGER`, `MAX_VALUE`, `MIN_SAFE_INTEGER`, `MIN_VALUE`, `NEGATIVE_INFINITY`, `NaN`, `POSITIVE_INFINITY`, `isFinite`, `isInteger`, `isNaN`, `parseFloat`, `parseInt`
+`Number`: `EPSILON`, `MAX_SAFE_INTEGER`, `MAX_VALUE`, `MIN_SAFE_INTEGER`, `MIN_VALUE`, `NEGATIVE_INFINITY`, `NaN`, `POSITIVE_INFINITY`, `isFinite`, `isInteger`, `isNaN`
 
 `Object`: `entries`, `keys`, `values`
 
@@ -342,7 +343,7 @@ The type checker admits these members on an array, on a string, and on each ambi
 
 ## Ambient Names And Effects
 
-The closed ambient value namespace is: `Array`, `Boolean`, `Date`, `Headers`,
+The closed ambient value namespace is: `Array`, `Date`,
 `Math`, `Number`, `Object`, `Request`, `Response`, `String`, `assert`, `h`,
 `hole`, `isBytes`, `isDict`, `parseFloat`, `parseInt`, `range`,
 `renderToString`, `requestBody`, `requestJson`, and `requestText`. The `meta`
@@ -352,6 +353,8 @@ operation of `zttp agent --stdin-json` publishes this list as
 | Refused form | Code | Write instead |
 |---|---|---|
 | A value name outside the ambient namespace, such as `console`, `process`, `globalThis`, or `Symbol` | ZTS629 | An import from a `zttp:` module |
+| `Boolean(x)` | ZTS600, ZTS629 | A comparison, such as `x !== ""` or `n > 0` |
+| `Headers` | ZTS629 | None. Read request headers through `req.headers` |
 | `eval`, `Proxy`, and `Reflect` | ZTS001 | A named function, or direct property access |
 | A capability call with a dynamic argument, such as a computed env key | ZTS602 | A literal argument, or a policy that names the value |
 

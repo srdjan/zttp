@@ -4255,8 +4255,8 @@ test "FlowChecker preserves known request string and rawJson calls" {
         \\    integer: Number.isInteger(42),
         \\    nan: Number.isNaN(42),
         \\    finite: Number.isFinite(42),
-        \\    int: Number.parseInt("42", 10),
-        \\    float: Number.parseFloat("4.2"),
+        \\    int: parseInt("42", 10),
+        \\    float: parseFloat("4.2"),
         \\  });
         \\}
     ;

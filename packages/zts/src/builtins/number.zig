@@ -70,7 +70,7 @@ pub fn numberIsFinite(_: *context.Context, _: value.JSValue, args: []const value
     return value.JSValue.fromBool(false);
 }
 
-/// Number.parseFloat(string) - Parse string as float
+/// parseFloat(string) - Parse string as float
 pub fn numberParseFloat(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.nan_val;
     const val = args[0];
@@ -141,7 +141,7 @@ pub fn numberParseFloat(ctx: *context.Context, _: value.JSValue, args: []const v
     return value.JSValue.fromFloat(result);
 }
 
-/// Number.parseInt(string, radix) - Parse string as integer
+/// parseInt(string, radix) - Parse string as integer
 pub fn numberParseInt(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.nan_val;
     const val = args[0];

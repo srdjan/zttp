@@ -374,7 +374,7 @@ pub const operation_rows =
     rowsOf("Object", .object_keys, .drop_html, "", &.{"keys"}) ++
     rowsOf("Object", .object_values, .keep, "", &.{"values"}) ++
     rowsOf("Object", .object_entries, .drop_html, "", &.{"entries"}) ++
-    rowsOf("Number", .deep_scalar, .keep, "", &.{ "isInteger", "isNaN", "isFinite", "parseFloat", "parseInt" }) ++
+    rowsOf("Number", .deep_scalar, .keep, "", &.{ "isInteger", "isNaN", "isFinite" }) ++
     rowsOf("Response", .response_static, .keep, "", &.{ "json", "text", "html", "redirect", "rawJson" }) ++
     rowsOf("console", .log, .keep, "", &.{"log"}) ++
     rowsOf("Date", .nondeterministic, .keep, "", &.{"now"}) ++

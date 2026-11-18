@@ -128,6 +128,13 @@ pub fn getNamedGlobalPrototype(ctx: *zq.Context, name: []const u8) ?*zq.JSObject
     return getGlobalPrototype(ctx, atom);
 }
 
+/// The runtime installs the headers prototype without a global name, so the
+/// lookup goes through the runtime that owns the context.
+fn headersPrototype(ctx: *zq.Context) ?*zq.JSObject {
+    const rt = @import("handler_instance.zig").HandlerInstance.fromContext(ctx) orelse return null;
+    return rt.http_state.headers_prototype;
+}
+
 pub fn throwTypeError(ctx: *zq.Context, message: []const u8) zq.JSValue {
     const message_val = ctx.createString(message) catch {
         ctx.throwException(zq.JSValue.exception_val);
@@ -209,7 +216,7 @@ pub fn setHeaderValue(
 }
 
 pub fn createHeadersObjectDynamic(ctx: *zq.Context) !*zq.JSObject {
-    return ctx.createObject(getNamedGlobalPrototype(ctx, "Headers"));
+    return ctx.createObject(headersPrototype(ctx));
 }
 
 pub fn copyHeadersIntoObject(ctx: *zq.Context, src_val: zq.JSValue, dst_obj: *zq.JSObject) !void {
@@ -303,7 +310,7 @@ pub fn upgradeResponseValue(ctx: *zq.Context, value: zq.JSValue) !zq.JSValue {
     const pool = ctx.hidden_class_pool orelse return value;
     if (response_obj.getProperty(pool, zq.Atom.headers)) |headers_val| {
         if (headers_val.isObject()) {
-            headers_val.toPtr(zq.JSObject).prototype = getNamedGlobalPrototype(ctx, "Headers");
+            headers_val.toPtr(zq.JSObject).prototype = headersPrototype(ctx);
         }
     }
     return value;

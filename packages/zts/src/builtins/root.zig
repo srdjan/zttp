@@ -187,8 +187,6 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, number_obj, "isInteger", wrap(number.numberIsInteger), 1);
     try addMethodDynamic(ctx, number_obj, "isNaN", wrap(number.numberIsNaN), 1);
     try addMethodDynamic(ctx, number_obj, "isFinite", wrap(number.numberIsFinite), 1);
-    try addMethodDynamic(ctx, number_obj, "parseFloat", wrap(number.numberParseFloat), 1);
-    try addMethodDynamic(ctx, number_obj, "parseInt", wrap(number.numberParseInt), 2);
 
     // Number constants
     const max_value_atom = try ctx.atoms.intern("MAX_VALUE");

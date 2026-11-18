@@ -30,7 +30,6 @@ const headersHasNative = http.headersHasNative;
 const headersSetNative = http.headersSetNative;
 const headersAppendNative = http.headersAppendNative;
 const headersDeleteNative = http.headersDeleteNative;
-const headersConstructorNative = http.headersConstructorNative;
 const requestConstructorNative = http.requestConstructorNative;
 const responseConstructorNative = http.responseConstructorNative;
 const responseJsonStaticNative = http.responseJsonStaticNative;
@@ -497,22 +496,6 @@ pub const HandlerInstance = struct {
         try self.addDynamicMethod(headers_proto, "append", headersAppendNative, 2);
         try self.addDynamicMethod(headers_proto, "has", headersHasNative, 1);
         try self.addDynamicMethod(headers_proto, "delete", headersDeleteNative, 1);
-
-        const headers_ctor_atom = try self.ctx.atoms.intern("Headers");
-        const headers_ctor = try zq.JSObject.createNativeFunction(
-            self.allocator,
-            pool,
-            root_class_idx,
-            headersConstructorNative,
-            headers_ctor_atom,
-            1,
-        );
-        var headers_ctor_unowned = true;
-        errdefer if (headers_ctor_unowned) headers_ctor.destroyBuiltin(self.allocator, pool);
-        try self.ctx.setPropertyChecked(headers_ctor, .prototype, headers_proto.toValue());
-        try self.ctx.builtin_objects.append(self.allocator, headers_ctor);
-        headers_ctor_unowned = false;
-        try self.ctx.setGlobal(headers_ctor_atom, headers_ctor.toValue());
 
         const request_ctor_atom = try self.ctx.atoms.intern("Request");
         const request_ctor = try zq.JSObject.createNativeFunction(

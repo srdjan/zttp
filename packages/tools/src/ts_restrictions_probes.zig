@@ -876,6 +876,14 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("function g(): string[] {\n  return Object.keys({ a: 1 });\n}")),
     },
     .{
+        .key = "`Number.parseInt` and `Number.parseFloat`",
+        .refused = &.{
+            r("Number.parseInt", top("function g(): number {\n  return Number.parseInt(\"1\");\n}")),
+            r("Number.parseFloat", top("function g(): number {\n  return Number.parseFloat(\"1\");\n}")),
+        },
+        .clean = c(body("  const n = parseInt(\"1\");")),
+    },
+    .{
         .key = "An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, or `xs.indexOf(v, i)`, and a callback with a third parameter, such as `xs.map((x, i, all) => x)`",
         .refused = &.{
             arr_call("xs.slice(1)", "xs.slice(1)"),
@@ -1118,6 +1126,16 @@ const refusal_rows_b = [_]RefusalRow{
             r("Symbol", body("  const s = Symbol;")),
         },
         .clean = c(top("import { env } from \"zttp:env\";\nfunction g(): string | undefined {\n  return env(\"A\");\n}")),
+    },
+    .{
+        .key = "`Boolean(x)`",
+        .refused = &.{r("Boolean(x)", body("  const a = Boolean(1);"))},
+        .clean = c(body("  const a = 1 > 0;")),
+    },
+    .{
+        .key = "`Headers`",
+        .refused = &.{r("Headers", body("  const a = Headers;"))},
+        .clean = c(top("function g(req: Request): string | undefined {\n  return req.headers[\"x-a\"];\n}")),
     },
     .{
         .key = "`eval`, `Proxy`, and `Reflect`",
