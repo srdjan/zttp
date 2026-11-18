@@ -1374,6 +1374,10 @@ pub const TypeChecker = struct {
     /// iterable, an empty tuple, and an element with no type leave the
     /// variable untyped, as before.
     fn bindForOfElement(self: *TypeChecker, fi: Node.ForIterStmt) void {
+        // A loop variable is never a declared function. Without this entry, a
+        // call of a loop variable named like a builtin, such as `isDict`,
+        // took that builtin's signature by name.
+        self.bindCallableMetadata(fi.binding, .unavailable);
         // `range(...)` returns a lazy iterator of integers (`globalRange`).
         // Only the builtin counts: a parameter named `range` is another binding.
         if (self.isBuiltinRangeCall(fi.iterable)) {

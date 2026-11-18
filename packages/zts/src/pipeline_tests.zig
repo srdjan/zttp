@@ -4839,6 +4839,30 @@ test "builtin result: JSON.parse is refused as an unpublished ambient global" {
     , Probe.run);
 }
 
+test "for-of binding: a loop variable named like a builtin function does not take its signature" {
+    // `isDict` here is a number. The call must be untyped, as it is for a
+    // loop variable with any other name, and not typed as the builtin.
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.strictDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(strict_checker_mod.DiagnosticKind.implicit_unknown, diagnostics[0].kind);
+            try testing.expectEqualStrings("call result has implicit unknown type", diagnostics[0].message);
+            const location = session.parsed.ir_view.getLoc(diagnostics[0].node) orelse return error.TestUnexpectedResult;
+            try testing.expectEqual(@as(u32, 3), location.line);
+            try testing.expectEqual(@as(u32, 18), location.column);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function f(xs: number[]): boolean {
+        \\  for (const isDict of xs) {
+        \\    return isDict(5);
+        \\  }
+        \\  return false;
+        \\}
+    , Probe.run);
+}
+
 /// The one strict diagnostic of `session`: ZTS630 at `line:column` with
 /// `message`.
 fn expectOneInitializerEffect(session: Session, line: u32, column: u32, message: []const u8) !void {
