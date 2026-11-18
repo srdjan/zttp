@@ -389,19 +389,117 @@ fn dischargeKernelIdentity(
     repaired: []const u8,
 ) error{OutOfMemory}!Discharge {
     return switch (intent) {
-        .replace_chained_ternary_with_match,
-        .lead_with_spread,
-        => switch (try kernel_identity.compareExpressions(allocator, original, repaired, .{})) {
-            .identical => .equivalent,
-            .differs => |why| .{ .not_law_shape = why },
-            .unsupported => .{ .undecided = "the repair reaches an expression outside the M3 kernel" },
-            .unparsable => |side| switch (side) {
-                .original => .{ .undecided = "the original repair target does not parse as an expression" },
-                .repaired => .{ .not_law_shape = "the repaired target does not parse as an expression" },
-            },
+        .replace_chained_ternary_with_match => switch (splitBoundTernary(original, repaired)) {
+            .refused => |why| .{ .not_law_shape = why },
+            .split => |split| kernelDischarge(try kernel_identity.compareExpressions(
+                allocator,
+                split.original_expression,
+                split.repaired_expression,
+                .{ .binding = split.binding },
+            )),
         },
+        .lead_with_spread => kernelDischarge(try kernel_identity.compareExpressions(allocator, original, repaired, .{})),
         else => .no_validator,
     };
+}
+
+fn kernelDischarge(verdict: kernel_identity.Verdict) Discharge {
+    return switch (verdict) {
+        .identical => .equivalent,
+        .differs => |why| .{ .not_law_shape = why },
+        .unsupported => .{ .undecided = "the repair reaches an expression outside the M3 kernel" },
+        .unparsable => |side| switch (side) {
+            .original => .{ .undecided = "the original repair target does not parse as an expression" },
+            .repaired => .{ .not_law_shape = "the repaired target does not parse as an expression" },
+        },
+    };
+}
+
+/// A ternary repair that binds its condition: the replacement is
+/// `const NAME = !!(cond);`, a newline, the indentation, the statement head,
+/// and the `match` over NAME. The snapshot is the original statement without
+/// its terminator.
+const BoundTernarySplit = struct {
+    binding: kernel_identity.Binding,
+    original_expression: []const u8,
+    repaired_expression: []const u8,
+};
+
+const BoundTernary = union(enum) {
+    split: BoundTernarySplit,
+    refused: []const u8,
+};
+
+fn splitBoundTernary(original: []const u8, replacement: []const u8) BoundTernary {
+    const shape = "the replacement is not a condition binding followed by the rewritten statement";
+    const declaration = "const ";
+    if (!std.mem.startsWith(u8, replacement, declaration)) return .{ .refused = shape };
+    const name_end = std.mem.indexOfPos(u8, replacement, declaration.len, " = ") orelse return .{ .refused = shape };
+    const name = replacement[declaration.len..name_end];
+    if (!isIdentifier(name)) return .{ .refused = shape };
+    const initializer_start = name_end + " = ".len;
+    // The binding ends at the first `;`, and a space or a line break follows it.
+    // A `;` inside the condition's own text can end it early; the initializer
+    // then fails to parse and the repair is refused, never accepted.
+    const initializer_end = std.mem.indexOfScalarPos(u8, replacement, initializer_start, ';') orelse
+        return .{ .refused = shape };
+    const after_semicolon = initializer_end + 1;
+    if (after_semicolon >= replacement.len or
+        (replacement[after_semicolon] != '\n' and replacement[after_semicolon] != ' '))
+    {
+        return .{ .refused = shape };
+    }
+    const initializer = replacement[initializer_start..initializer_end];
+    const statement = std.mem.trimStart(u8, replacement[after_semicolon..], " \t\n");
+
+    const scrutinee = std.mem.indexOf(u8, statement, "match (") orelse return .{ .refused = shape };
+    const head = statement[0..scrutinee];
+    const rewritten = statement[scrutinee..];
+    const scrutinee_text = rewritten["match (".len..];
+    if (!std.mem.startsWith(u8, scrutinee_text, name) or
+        !std.mem.startsWith(u8, scrutinee_text[name.len..], ")"))
+    {
+        return .{ .refused = shape };
+    }
+    if (!bindableHead(head)) return .{ .refused = "the statement head is not a const initializer or a return" };
+    if (!std.mem.startsWith(u8, original, head)) {
+        return .{ .refused = "the original statement does not begin with the rewritten statement head" };
+    }
+    return .{ .split = .{
+        .binding = .{ .name = name, .initializer = initializer },
+        .original_expression = original[head.len..],
+        .repaired_expression = rewritten,
+    } };
+}
+
+/// The text before a ternary that makes it the whole value of a statement:
+/// `return `, `const name = `, `export const name = `, and `const name: T = `.
+/// A binding inserted before such a statement runs before nothing else that the
+/// statement evaluates.
+fn bindableHead(head: []const u8) bool {
+    const trimmed = std.mem.trimEnd(u8, head, " \t");
+    if (std.mem.eql(u8, trimmed, "return")) return trimmed.len < head.len;
+    var rest = trimmed;
+    if (std.mem.startsWith(u8, rest, "export ")) rest = rest["export ".len..];
+    if (!std.mem.startsWith(u8, rest, "const ")) return false;
+    rest = std.mem.trimStart(u8, rest["const ".len..], " \t");
+    var name_len: usize = 0;
+    while (name_len < rest.len and isIdentContinue(rest[name_len])) name_len += 1;
+    if (name_len == 0 or !isIdentStart(rest[0])) return false;
+    rest = std.mem.trimStart(u8, rest[name_len..], " \t");
+    if (rest.len == 0 or rest[rest.len - 1] != '=') return false;
+    const middle = rest[0 .. rest.len - 1];
+    if (middle.len == 0) return true;
+    if (middle[0] != ':') return false;
+    return std.mem.indexOfAny(u8, middle, "=;\n") == null;
+}
+
+fn isIdentifier(text: []const u8) bool {
+    if (text.len == 0 or !isIdentStart(text[0])) return false;
+    for (text) |c| {
+        if (!isIdentContinue(c)) return false;
+    }
+    return true;
 }
 
 /// M2, parse identity: the two sources build the same tree, so the edit moved
@@ -1230,17 +1328,47 @@ test "a planned intent has no validator" {
         std.testing.allocator,
         .replace_effectful_ternary_with_match,
         "const a = ready ? load() : 0;",
-        "const a = match (!!ready) { when true: load(), default: 0 };",
+        "const cond = !!(ready);\nconst a = match (cond) { when true: load(), default: 0 };",
         1,
     );
     try std.testing.expect(answer == .no_validator);
 }
 
+/// Run `validateSpanApplication` over a splice that the test spells as the
+/// original statement and the replacement; the repaired source is built here.
+fn validateTernaryReplacement(
+    original: []const u8,
+    snapshot: []const u8,
+    replacement: []const u8,
+    code: []const u8,
+) !Discharge {
+    const allocator = std.testing.allocator;
+    const start = std.mem.indexOf(u8, original, snapshot).?;
+    const repaired = try std.mem.concat(allocator, u8, &.{
+        original[0..start],
+        replacement,
+        original[start + snapshot.len ..],
+    });
+    defer allocator.free(repaired);
+    return validateSpanApplication(
+        allocator,
+        .replace_chained_ternary_with_match,
+        code,
+        original,
+        repaired,
+        start,
+        start + snapshot.len,
+        snapshot,
+        replacement,
+        1,
+    );
+}
+
 test "M3 discharges only the exact chained ternary diagnostic splice" {
     const original = "const x = ready ? 1 : fallback ? 2 : 3;\n";
-    const snapshot = "ready ? 1 : fallback ? 2 : 3";
-    const replacement = "match (!!(ready)) { when true: 1, default: fallback ? 2 : 3 }";
-    const repaired = "const x = match (!!(ready)) { when true: 1, default: fallback ? 2 : 3 };\n";
+    const snapshot = "const x = ready ? 1 : fallback ? 2 : 3";
+    const replacement = "const cond = !!(ready);\nconst x = match (cond) { when true: 1, default: fallback ? 2 : 3 }";
+    const repaired = "const cond = !!(ready);\nconst x = match (cond) { when true: 1, default: fallback ? 2 : 3 };\n";
     const start = std.mem.indexOf(u8, original, snapshot).?;
     try std.testing.expectEqual(
         Discharge.equivalent,
@@ -1272,7 +1400,7 @@ test "M3 discharges only the exact chained ternary diagnostic splice" {
     );
     try std.testing.expect(wrong_code == .not_law_shape);
 
-    const extra_edit = "const y = match (!!(ready)) { when true: 1, default: fallback ? 2 : 3 };\n";
+    const extra_edit = "const cond = !!(ready);\nconst y = match (cond) { when true: 1, default: fallback ? 2 : 3 };\n";
     const widened = try validateSpanApplication(
         std.testing.allocator,
         .replace_chained_ternary_with_match,
@@ -1286,6 +1414,65 @@ test "M3 discharges only the exact chained ternary diagnostic splice" {
         1,
     );
     try std.testing.expect(widened == .not_law_shape);
+}
+
+test "M3 discharges a bound return, a one-line body, and an export const" {
+    try std.testing.expectEqual(
+        Discharge.equivalent,
+        try validateTernaryReplacement(
+            "function f(x: number): number { return ready ? 1 : 2; }\n",
+            "return ready ? 1 : 2",
+            "const cond = !!(ready); return match (cond) { when true: 1, default: 2 }",
+            "ZTS621",
+        ),
+    );
+    try std.testing.expectEqual(
+        Discharge.equivalent,
+        try validateTernaryReplacement(
+            "  return ready ? 1 : 2;\n",
+            "return ready ? 1 : 2",
+            "const cond = !!(ready);\n  return match (cond) { when true: 1, default: 2 }",
+            "ZTS621",
+        ),
+    );
+    try std.testing.expectEqual(
+        Discharge.equivalent,
+        try validateTernaryReplacement(
+            "export const x: number = ready ? 1 : 2;\n",
+            "export const x: number = ready ? 1 : 2",
+            "const cond = !!(ready);\nexport const x: number = match (cond) { when true: 1, default: 2 }",
+            "ZTS621",
+        ),
+    );
+}
+
+test "M3 refuses a replacement that moves the condition away from the statement" {
+    // The head of the rewritten statement differs from the original's.
+    const head_differs = try validateTernaryReplacement(
+        "const x = ready ? 1 : 2;\n",
+        "const x = ready ? 1 : 2",
+        "const cond = !!(ready);\nconst y = match (cond) { when true: 1, default: 2 }",
+        "ZTS621",
+    );
+    try std.testing.expect(head_differs == .not_law_shape);
+
+    // The head is an argument position: the binding would run before `f(a)`.
+    const argument = try validateTernaryReplacement(
+        "const x = f(a, b = ready ? 1 : 2);\n",
+        "const x = f(a, b = ready ? 1 : 2",
+        "const cond = !!(ready);\nconst x = f(a, b = match (cond) { when true: 1, default: 2 }",
+        "ZTS621",
+    );
+    try std.testing.expect(argument == .not_law_shape);
+
+    // A bare condition without the binding is not the repair.
+    const no_binding = try validateTernaryReplacement(
+        "const x = ready ? 1 : 2;\n",
+        "const x = ready ? 1 : 2",
+        "const x = match (!!(ready)) { when true: 1, default: 2 }",
+        "ZTS621",
+    );
+    try std.testing.expect(no_binding == .not_law_shape);
 }
 
 test "M3 does not advertise spread moves while object order is observable" {

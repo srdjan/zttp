@@ -1018,7 +1018,7 @@ fn buildSpanRepairs(
             const intent = diag.repair_intent orelse continue;
             if (intent != .replace_effectful_ternary_with_match and
                 intent != .replace_chained_ternary_with_match) continue;
-            const rw = ternaryToMatchRewrite(allocator, source, diag.line, diag.column, intent, diag.code) catch |err| switch (err) {
+            const rw = ternaryToMatchRewrite(allocator, source, diag.line, diag.column, intent, diag.code, result.repairs.items) catch |err| switch (err) {
                 error.UnsupportedRefactor => continue,
                 else => return err,
             };
@@ -1032,8 +1032,20 @@ fn buildSpanRepairs(
 /// initializers and return positions, where an if/else statement cannot. A pure
 /// unchained `?:` is idiomatic under spec 5.4 and is never rewritten.
 ///
-/// Canonical target: `match (!!(cond)) { when true: a, default: b }` (the
-/// condition is parenthesized so `!!` coerces the whole expression).
+/// Canonical target, when the ternary is the whole initializer of a `const` or
+/// the whole operand of a `return`:
+///
+///     const cond = !!(c);
+///     const x = match (cond) { when true: a, default: b };
+///
+/// The `match` scrutinee is a name (spec 5.5), so the repair binds the
+/// condition before the statement. Nothing runs between the binding and the
+/// statement, so the condition is still the first thing evaluated. In any other
+/// position (an object value, an arrow body, an argument, part of a larger
+/// expression) the repair is not exact and is refused with
+/// `error.UnsupportedRefactor`, which leaves the ternary a flagged hard error.
+/// The bound name is fresh in the source and in the other repairs of the pass
+/// (`taken`).
 ///
 /// The double-negation `!!cond` is load-bearing for behavior preservation, not
 /// cosmetic. A ternary tests the *truthiness* of `cond` (the VM's `if_false`
@@ -1061,6 +1073,7 @@ fn ternaryToMatchRewrite(
     column: u32,
     intent: RepairIntent,
     diagnostic_code: []const u8,
+    taken: []const Repair,
 ) !Repair {
     const q = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
     if (q >= source.len or source[q] != '?') return error.UnsupportedRefactor;
@@ -1080,27 +1093,124 @@ fn ternaryToMatchRewrite(
     const else_branch = std.mem.trim(u8, source[colon + 1 .. else_end], " \t");
     if (cond.len == 0 or then_branch.len == 0 or else_branch.len == 0) return error.UnsupportedRefactor;
 
-    // The spliced span begins at the first non-space byte of the condition so
-    // the surrounding indentation/operators are preserved verbatim.
+    // The repair is exact only when the ternary is the whole value of a
+    // statement: the binding then runs where the statement's own evaluation
+    // begins, and nothing runs between them. The statement begins the line, or
+    // follows a `{` or `;` on the line (`function f() { return c ? a : b; }`,
+    // the shape of an arrow function after `replace_arrow_with_function`).
     const real_start = cond_start + leadingSpaces(source[cond_start..q]);
+    const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..real_start], '\n')) |nl| nl + 1 else 0;
+    const line_prefix = source[line_start..real_start];
+    var statement_start = line_start + leadingSpaces(line_prefix);
+    var separator: []const u8 = "\n";
+    var indent: []const u8 = source[line_start..statement_start];
+    if (std.mem.lastIndexOfAny(u8, line_prefix, "{;")) |boundary| {
+        const after_boundary = line_start + boundary + 1;
+        statement_start = after_boundary + leadingSpaces(source[after_boundary..real_start]);
+        separator = " ";
+        indent = "";
+    }
+    const head = source[statement_start..real_start];
+    if (!bindableHead(head)) return error.UnsupportedRefactor;
+    if (!endsStatement(source, else_end)) return error.UnsupportedRefactor;
+
+    const name = try freshBindingName(allocator, source, taken);
+    defer allocator.free(name);
 
     // Parenthesize the condition: `!!` is unary and binds tighter than the
     // relational/equality operators a condition usually ends in, so `!!a === b`
     // would mis-parse as `(!!a) === b`. `!!(a === b)` coerces the whole
     // condition to a strict boolean, reproducing the ternary's truthiness test.
-    const replacement = try allocator.print("match (!!({s})) {{ when true: {s}, default: {s} }}", .{ cond, then_branch, else_branch });
+    const replacement = try allocator.print(
+        "const {s} = !!({s});{s}{s}{s}match ({s}) {{ when true: {s}, default: {s} }}",
+        .{ name, cond, separator, indent, head, name, then_branch, else_branch },
+    );
     errdefer allocator.free(replacement);
-    const original = try allocator.dupe(u8, source[real_start..else_end]);
+    const original = try allocator.dupe(u8, source[statement_start..else_end]);
     errdefer allocator.free(original);
 
     return .{
         .intent = intent,
         .diagnostic_code = diagnostic_code,
-        .start_offset = real_start,
+        .start_offset = statement_start,
         .end_offset = else_end,
         .replacement = replacement,
         .original = original,
     };
+}
+
+/// The base name of the condition binding. `freshBindingName` adds a number
+/// when the source or another repair of the same pass already uses it.
+const binding_base_name = "cond";
+
+/// A name that occurs nowhere in `source` as an identifier, and nowhere in the
+/// replacement of a repair already collected in this pass (two bindings in one
+/// scope must not collide). The caller owns the result.
+fn freshBindingName(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    taken: []const Repair,
+) ![]u8 {
+    var n: u32 = 1;
+    while (n < 10_000) : (n += 1) {
+        const name = if (n == 1)
+            try allocator.dupe(u8, binding_base_name)
+        else
+            try allocator.print("{s}{d}", .{ binding_base_name, n });
+        errdefer allocator.free(name);
+        var is_taken = containsIdentifier(source, name);
+        for (taken) |repair| {
+            if (containsIdentifier(repair.replacement, name)) is_taken = true;
+        }
+        if (!is_taken) return name;
+        allocator.free(name);
+    }
+    return error.UnsupportedRefactor;
+}
+
+fn containsIdentifier(text: []const u8, name: []const u8) bool {
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, text, from, name)) |at| : (from = at + 1) {
+        const before_ok = at == 0 or !isIdentByte(text[at - 1]);
+        const after = at + name.len;
+        const after_ok = after >= text.len or !isIdentByte(text[after]);
+        if (before_ok and after_ok) return true;
+    }
+    return false;
+}
+
+fn isIdentByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
+}
+
+/// True when the statement text before a ternary is `return `, `const name = `,
+/// `export const name = `, or `const name: T = `: the ternary is then the whole
+/// operand or initializer. `repair_validator.zig` checks the same head again
+/// on its own, so the two copies guard each other.
+fn bindableHead(head: []const u8) bool {
+    const trimmed = std.mem.trimEnd(u8, head, " \t");
+    if (std.mem.eql(u8, trimmed, "return")) return trimmed.len < head.len;
+    var rest = trimmed;
+    if (std.mem.startsWith(u8, rest, "export ")) rest = rest["export ".len..];
+    if (!std.mem.startsWith(u8, rest, "const ")) return false;
+    rest = std.mem.trimStart(u8, rest["const ".len..], " \t");
+    var name_len: usize = 0;
+    while (name_len < rest.len and isIdentByte(rest[name_len])) name_len += 1;
+    if (name_len == 0 or std.ascii.isDigit(rest[0])) return false;
+    rest = std.mem.trimStart(u8, rest[name_len..], " \t");
+    if (rest.len == 0 or rest[rest.len - 1] != '=') return false;
+    const middle = rest[0 .. rest.len - 1];
+    if (middle.len == 0) return true;
+    if (middle[0] != ':') return false;
+    return std.mem.indexOfAny(u8, middle, "=;\n") == null;
+}
+
+/// True when only blanks separate `end` from the statement terminator, a line
+/// break, or the end of the source.
+fn endsStatement(source: []const u8, end: usize) bool {
+    var i = end;
+    while (i < source.len and (source[i] == ' ' or source[i] == '\t')) i += 1;
+    return i >= source.len or source[i] == ';' or source[i] == '\n' or source[i] == '\r';
 }
 
 fn leadingSpaces(s: []const u8) usize {
@@ -3088,7 +3198,7 @@ test "normalizeSource: ternary with a relational condition parenthesizes the who
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match (!!(req.method === \"GET\"))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const cond = !!(req.method === \"GET\");") != null);
     // The broken precedence form must never appear.
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "!!req.method") == null);
 }
@@ -3153,10 +3263,28 @@ test "normalizeSource is idempotent on a reused arrow helper" {
     try std.testing.expectEqual(@as(u32, 0), second.iterations);
 }
 
-test "normalizeSource: a ternary in an arrow body bounds the condition at `=>`" {
-    // Regression: ternaryConditionStart must treat `=>` as a boundary, not sweep
-    // the arrow params into the condition (which would yield an always-truthy
-    // `match (!!((x) => cond))`).
+test "normalizeSource leaves a chained ternary in an arrow body unrepaired" {
+    // The ternary is not the whole value of a `const` or a `return`, so a
+    // binding before the statement would not be exact. The finding stays.
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const signs = [3, 0].map((x: number): number => x > 0 ? 1 : x === 0 ? 0 : -1);
+        \\  return Response.json({ signs: signs });
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(nr.converged);
+    try std.testing.expect(!nr.fully_canonical);
+    try std.testing.expectEqual(@as(u32, 1), nr.residual);
+    try std.testing.expectEqual(@as(usize, 0), nr.rewrite_trace.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "x > 0 ? 1 : x === 0 ? 0 : -1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match") == null);
+}
+
+test "normalizeSource binds the condition inside a function that replaces an arrow" {
+    // `replace_arrow_with_function` leaves `{ return c ? a : b; }` on one
+    // line. The binding goes after the `{`, before the `return`.
     const source =
         \\const clamp = (x: number): number => x > 0 ? 1 : x === 0 ? 0 : -1;
         \\function handler(req: Request): Response {
@@ -3167,9 +3295,8 @@ test "normalizeSource: a ternary in an arrow body bounds the condition at `=>`" 
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match (!!(x > 0))") != null);
-    // The broken form would have swept the arrow params into the condition.
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "!!((x") == null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const cond = !!(x > 0);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "return match (cond) {") != null);
 }
 
 test "scanOperandTokenBack refuses a member tail of a call/index chain" {
@@ -3193,16 +3320,16 @@ test "applyRepairs splices a single span and validates the snapshot" {
     const source = "const x = a ? 1 : 2;\n";
     const rw = Repair{
         .intent = .replace_chained_ternary_with_match,
-        .start_offset = 10,
+        .start_offset = 0,
         .end_offset = 19,
-        .replacement = try std.testing.allocator.dupe(u8, "match (!!a) { when true: 1, default: 2 }"),
-        .original = try std.testing.allocator.dupe(u8, "a ? 1 : 2"),
+        .replacement = try std.testing.allocator.dupe(u8, "const cond = !!(a);\nconst x = match (cond) { when true: 1, default: 2 }"),
+        .original = try std.testing.allocator.dupe(u8, "const x = a ? 1 : 2"),
     };
     var rws = [_]Repair{rw};
     defer for (&rws) |*r| r.deinit(std.testing.allocator);
     const out = try applyRepairs(std.testing.allocator, source, &rws);
     defer std.testing.allocator.free(out);
-    try std.testing.expectEqualStrings("const x = match (!!a) { when true: 1, default: 2 };\n", out);
+    try std.testing.expectEqualStrings("const cond = !!(a);\nconst x = match (cond) { when true: 1, default: 2 };\n", out);
 }
 
 test "applyRepairs rejects a stale snapshot" {
@@ -3252,21 +3379,83 @@ test "lineColToOffset maps a 1-based position to a byte offset" {
 test "ternaryToMatchRewrite builds the canonical match form for a const initializer" {
     const source = "  const status = ok ? 200 : 500;\n";
     // `?` is at 1-based column 21 on line 1.
-    var rw = try ternaryToMatchRewrite(std.testing.allocator, source, 1, 21, .replace_chained_ternary_with_match, "ZTS621");
+    var rw = try ternaryToMatchRewrite(std.testing.allocator, source, 1, 21, .replace_chained_ternary_with_match, "ZTS621", &.{});
     defer rw.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("ok ? 200 : 500", rw.original);
-    try std.testing.expectEqualStrings("match (!!(ok)) { when true: 200, default: 500 }", rw.replacement);
+    try std.testing.expectEqualStrings("const status = ok ? 200 : 500", rw.original);
+    try std.testing.expectEqualStrings(
+        "const cond = !!(ok);\n  const status = match (cond) { when true: 200, default: 500 }",
+        rw.replacement,
+    );
+    try std.testing.expectEqual(@as(usize, 2), rw.start_offset);
     try std.testing.expectEqual(RepairIntent.replace_chained_ternary_with_match, rw.intent);
+}
+
+test "ternaryToMatchRewrite binds inside a one-line function body" {
+    const source = "function f(x: number): number { return ok ? 1 : 2; }\n";
+    var rw = try ternaryToMatchRewrite(std.testing.allocator, source, 1, 43, .replace_chained_ternary_with_match, "ZTS621", &.{});
+    defer rw.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("return ok ? 1 : 2", rw.original);
+    try std.testing.expectEqualStrings(
+        "const cond = !!(ok); return match (cond) { when true: 1, default: 2 }",
+        rw.replacement,
+    );
+    try std.testing.expectEqual(@as(usize, 32), rw.start_offset);
+}
+
+test "ternaryToMatchRewrite takes a fresh name when the base name is taken" {
+    const source = "  const cond = 1;\n  const status = ok ? 200 : 500;\n";
+    // `?` is at 1-based column 21 on line 2.
+    var rw = try ternaryToMatchRewrite(std.testing.allocator, source, 2, 21, .replace_chained_ternary_with_match, "ZTS621", &.{});
+    defer rw.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(
+        "const cond2 = !!(ok);\n  const status = match (cond2) { when true: 200, default: 500 }",
+        rw.replacement,
+    );
+}
+
+test "ternaryToMatchRewrite avoids the name of another repair in the same pass" {
+    const source = "  const status = ok ? 200 : 500;\n";
+    var earlier = Repair{
+        .intent = .replace_chained_ternary_with_match,
+        .replacement = try std.testing.allocator.dupe(u8, "const cond = !!(a);\nconst x = match (cond) { when true: 1, default: 2 }"),
+        .original = try std.testing.allocator.dupe(u8, "const x = a ? 1 : 2"),
+    };
+    defer earlier.deinit(std.testing.allocator);
+    var rw = try ternaryToMatchRewrite(std.testing.allocator, source, 1, 21, .replace_chained_ternary_with_match, "ZTS621", &.{earlier});
+    defer rw.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(
+        "const cond2 = !!(ok);\n  const status = match (cond2) { when true: 200, default: 500 }",
+        rw.replacement,
+    );
+}
+
+test "ternaryToMatchRewrite refuses a ternary that is not the whole value of a statement" {
+    const Case = struct { source: []const u8, column: u32 };
+    // An object literal value, an argument, an arrow body, a larger
+    // expression, and a statement that does not begin the line.
+    const cases = [_]Case{
+        .{ .source = "  const o = { code: ok ? 200 : 500 };\n", .column = 24 },
+        .{ .source = "  const o = f(ok ? 200 : 500);\n", .column = 18 },
+        .{ .source = "  const f = (x: number) => ok ? 200 : 500;\n", .column = 31 },
+        .{ .source = "  const n = 1 + (ok ? 200 : 500);\n", .column = 21 },
+        .{ .source = "  if (a) return ok ? 200 : 500;\n", .column = 20 },
+    };
+    for (cases) |case| {
+        try std.testing.expectError(
+            error.UnsupportedRefactor,
+            ternaryToMatchRewrite(std.testing.allocator, case.source, 1, case.column, .replace_chained_ternary_with_match, "ZTS621", &.{}),
+        );
+    }
 }
 
 test "ternaryToMatchRewrite handles a return-position ternary" {
     const source = "  return ok ? Response.text(\"y\") : Response.text(\"n\");\n";
     // `?` after `ok` is at column 13.
-    var rw = try ternaryToMatchRewrite(std.testing.allocator, source, 1, 13, .replace_chained_ternary_with_match, "ZTS621");
+    var rw = try ternaryToMatchRewrite(std.testing.allocator, source, 1, 13, .replace_chained_ternary_with_match, "ZTS621", &.{});
     defer rw.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("ok ? Response.text(\"y\") : Response.text(\"n\")", rw.original);
+    try std.testing.expectEqualStrings("return ok ? Response.text(\"y\") : Response.text(\"n\")", rw.original);
     try std.testing.expectEqualStrings(
-        "match (!!(ok)) { when true: Response.text(\"y\"), default: Response.text(\"n\") }",
+        "const cond = !!(ok);\n  return match (cond) { when true: Response.text(\"y\"), default: Response.text(\"n\") }",
         rw.replacement,
     );
 }
@@ -3274,9 +3463,9 @@ test "ternaryToMatchRewrite handles a return-position ternary" {
 test "ternaryToMatchRewrite refuses an optional chain and a nullish operator" {
     // `?.` is at column 4; `??` is at column 4 in the second source.
     const oc = "  a?.b;\n";
-    try std.testing.expectError(error.UnsupportedRefactor, ternaryToMatchRewrite(std.testing.allocator, oc, 1, 4, .replace_chained_ternary_with_match, "ZTS621"));
+    try std.testing.expectError(error.UnsupportedRefactor, ternaryToMatchRewrite(std.testing.allocator, oc, 1, 4, .replace_chained_ternary_with_match, "ZTS621", &.{}));
     const nc = "  a ?? b;\n";
-    try std.testing.expectError(error.UnsupportedRefactor, ternaryToMatchRewrite(std.testing.allocator, nc, 1, 5, .replace_chained_ternary_with_match, "ZTS621"));
+    try std.testing.expectError(error.UnsupportedRefactor, ternaryToMatchRewrite(std.testing.allocator, nc, 1, 5, .replace_chained_ternary_with_match, "ZTS621", &.{}));
 }
 
 test "normalizeSource ternary rewrite is behavior-equivalent (contract diff)" {
@@ -3296,7 +3485,8 @@ test "normalizeSource ternary rewrite is behavior-equivalent (contract diff)" {
     const reference =
         \\function handler(req: Request): Response {
         \\  const ok = req.method === "GET";
-        \\  const message = match (!!ok) { when true: "ready", default: req.method === "POST" ? "post" : "not" };
+        \\  const cond = !!(ok);
+        \\  const message = match (cond) { when true: "ready", default: req.method === "POST" ? "post" : "not" };
         \\  return Response.text(message);
         \\}
     ;
@@ -3340,7 +3530,8 @@ test "normalizeSource unchains a right-associative nested ternary and stops" {
     try std.testing.expect(nr.converged);
     try std.testing.expect(nr.fully_canonical);
     try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match (!!(a)) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const cond = !!(a);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const status = match (cond) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "when true: 200,") != null);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "default: b ? 201 : 500") != null);
 
@@ -3370,7 +3561,7 @@ test "normalizeSource ternary rewrite preserves strings containing ? and :" {
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "default: alt ? \"no:x?y\" : \"z\"") != null);
 }
 
-test "normalizeSource ternary inside an object-literal value is rewritten in place" {
+test "normalizeSource leaves a chained ternary in an object-literal value unrepaired" {
     const source =
         \\function handler(req: Request): Response {
         \\  const ok = req.method === "GET";
@@ -3380,10 +3571,43 @@ test "normalizeSource ternary inside an object-literal value is rewritten in pla
     ;
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(nr.converged);
+    try std.testing.expect(!nr.fully_canonical);
+    try std.testing.expectEqual(@as(usize, 0), nr.rewrite_trace.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "code: ok ? 200 : alt ? 201 : 500") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match") == null);
+}
+
+test "normalizeSource binds each condition once under its own name" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const ok = req.method === "GET";
+        \\  const alt = req.method === "POST";
+        \\  const first = ok ? 200 : alt ? 201 : 500;
+        \\  const second = alt ? 1 : ok ? 2 : 3;
+        \\  return Response.json({ first: first, second: second });
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
+    defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "code: match (!!(ok)) {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "when true: 200,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "default: alt ? 201 : 500") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const cond = !!(ok);\n  const first = match (cond) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const cond2 = !!(alt);\n  const second = match (cond2) {") != null);
+}
+
+test "normalizeSource binds the condition of a chained return ternary" {
+    const source =
+        \\function pick(ok: boolean, alt: boolean): number {
+        \\  return ok ? 1 : alt ? 2 : 3;
+        \\}
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ n: pick(true, false) });
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(nr.fully_canonical);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const cond = !!(ok);\n  return match (cond) {") != null);
 }
 
 test "normalizeSource leaves a closed literal spread residual because key order is observable" {

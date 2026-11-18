@@ -5,7 +5,10 @@
 //! semantic forms:
 //!
 //! - a conditional expression and the exact two-arm boolean `match` emitted by
-//!   the canonicalizer both lower to `select(truthy(c), a, b)`;
+//!   the canonicalizer both lower to `select(truthy(c), a, b)`. The `match`
+//!   scrutinee is a name that the repair binds before the statement
+//!   (`const c = !!(cond);`). The caller passes that binding in `Options`, and
+//!   the kernel reads the name as the lowered initializer;
 //! - a closed object literal lowers to an insertion-ordered record after
 //!   recursively flattening literal spreads.
 //!
@@ -34,8 +37,20 @@ pub const Verdict = union(enum) {
     unparsable: Side,
 };
 
+/// One `const name = initializer;` that the repair inserts before the statement
+/// that holds the repaired expression. The initializer is `!!(condition)`.
+pub const Binding = struct {
+    name: []const u8,
+    initializer: []const u8,
+};
+
 pub const Options = struct {
     max_depth: u32 = 128,
+    /// The binding that the repaired expression reads. The kernel refuses a
+    /// binding whose initializer it cannot lower, a name that the original
+    /// expression also uses, and a name that the repaired expression does not
+    /// use exactly once, as its `match` scrutinee.
+    binding: ?Binding = null,
 };
 
 pub fn compareExpressions(
@@ -58,12 +73,42 @@ pub fn compareExpressions(
     };
     defer right.deinit();
 
+    var init_parsed: ?Parsed = null;
+    defer if (init_parsed) |*parsed| parsed.deinit();
+    var init_lowerer: Lowerer = undefined;
+    var bound: Bound = undefined;
+    const forbidden: ?[]const u8 = if (options.binding) |binding| binding.name else null;
+    if (options.binding) |binding| {
+        init_parsed = Parsed.init(allocator, binding.initializer, &atoms) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoExpression => return .{ .unparsable = .repaired },
+        };
+        init_lowerer = .{
+            .allocator = allocator,
+            .view = init_parsed.?.view(),
+            .constants = &init_parsed.?.parser.constants,
+            .atoms = &atoms,
+            .max_depth = options.max_depth,
+            .forbidden = forbidden,
+        };
+        // The initializer is `!!(condition)`. Any other form does not give the
+        // truthiness test that a ternary applies, so it is not lowered.
+        const condition = init_lowerer.unwrapDoubleNot(init_parsed.?.root) orelse
+            return .{ .unsupported = .repaired };
+        _ = init_lowerer.digest(condition) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Unsupported => return .{ .unsupported = .repaired },
+        };
+        bound = .{ .name = binding.name, .lowerer = &init_lowerer, .condition = condition };
+    }
+
     var left_lowerer = Lowerer{
         .allocator = allocator,
         .view = left.view(),
         .constants = &left.parser.constants,
         .atoms = &atoms,
         .max_depth = options.max_depth,
+        .forbidden = forbidden,
     };
     const left_digest = left_lowerer.digest(left.root) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -76,11 +121,14 @@ pub fn compareExpressions(
         .constants = &right.parser.constants,
         .atoms = &atoms,
         .max_depth = options.max_depth,
+        .forbidden = forbidden,
+        .bound = if (options.binding != null) &bound else null,
     };
     const right_digest = right_lowerer.digest(right.root) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Unsupported => return .{ .unsupported = .repaired },
     };
+    if (options.binding != null and bound.uses != 1) return .{ .unsupported = .repaired };
 
     if (std.mem.eql(u8, &left_digest, &right_digest)) return .identical;
     return .{ .differs = "the expressions lower to different semantic kernel terms" };
@@ -121,12 +169,27 @@ const Parsed = struct {
 
 const LowerError = error{ OutOfMemory, Unsupported };
 
+/// The repaired side's view of the inserted binding. `condition` is a node in
+/// the initializer's own parse, so `lowerer` encodes it. `uses` counts the
+/// `match` scrutinees that read the name.
+const Bound = struct {
+    name: []const u8,
+    lowerer: *Lowerer,
+    condition: NodeIndex,
+    uses: u32 = 0,
+};
+
 const Lowerer = struct {
     allocator: std.mem.Allocator,
     view: IrView,
     constants: *const ConstantPool,
     atoms: *AtomTable,
     max_depth: u32,
+    /// An identifier with this name is refused wherever it is read as an
+    /// ordinary expression. Only the repaired side's scrutinee may read it, and
+    /// that read does not pass through `encodeNode`.
+    forbidden: ?[]const u8 = null,
+    bound: ?*Bound = null,
 
     fn digest(self: *Lowerer, node: NodeIndex) LowerError![32]u8 {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -175,9 +238,11 @@ const Lowerer = struct {
             .lit_undefined => frame(hasher, "undefined"),
             .identifier => {
                 frame(hasher, "identifier");
-                const binding = self.view.getBinding(node) orelse return error.Unsupported;
-                const atom: object.Atom = @fromBackingInt(@intCast(binding.name_atom));
-                frame(hasher, self.atoms.getName(atom) orelse return error.Unsupported);
+                const name = self.identifierName(node) orelse return error.Unsupported;
+                if (self.forbidden) |forbidden| {
+                    if (std.mem.eql(u8, name, forbidden)) return error.Unsupported;
+                }
+                frame(hasher, name);
             },
             .binary_op => {
                 const binary = self.view.getBinary(node) orelse return error.Unsupported;
@@ -196,6 +261,7 @@ const Lowerer = struct {
                 const ternary = self.view.getTernary(node) orelse return error.Unsupported;
                 try self.encodeSelect(
                     hasher,
+                    self,
                     ternary.condition,
                     ternary.then_branch,
                     ternary.else_branch,
@@ -265,9 +331,19 @@ const Lowerer = struct {
         }
     }
 
+    fn identifierName(self: *Lowerer, node: NodeIndex) ?[]const u8 {
+        if (self.view.getTag(node) != .identifier) return null;
+        const binding = self.view.getBinding(node) orelse return null;
+        const atom: object.Atom = @fromBackingInt(@intCast(binding.name_atom));
+        return self.atoms.getName(atom);
+    }
+
+    /// `condition` is a node of `condition_lowerer`'s parse. That is `self`
+    /// for a ternary, and the binding's initializer for a bound `match`.
     fn encodeSelect(
         self: *Lowerer,
         hasher: *std.crypto.hash.sha2.Sha256,
+        condition_lowerer: *Lowerer,
         condition: NodeIndex,
         then_branch: NodeIndex,
         else_branch: NodeIndex,
@@ -275,7 +351,7 @@ const Lowerer = struct {
     ) LowerError!void {
         frame(hasher, "select");
         frame(hasher, "truthy");
-        try self.encodeNode(hasher, condition, depth + 1);
+        try condition_lowerer.encodeNode(hasher, condition, depth + 1);
         try self.encodeNode(hasher, then_branch, depth + 1);
         try self.encodeNode(hasher, else_branch, depth + 1);
     }
@@ -298,8 +374,12 @@ const Lowerer = struct {
         {
             return error.Unsupported;
         }
-        const condition = self.unwrapDoubleNot(match.discriminant) orelse return error.Unsupported;
-        try self.encodeSelect(hasher, condition, first.body, second.body, depth);
+        // The scrutinee is the bound name and nothing else.
+        const bound = self.bound orelse return error.Unsupported;
+        const name = self.identifierName(match.discriminant) orelse return error.Unsupported;
+        if (!std.mem.eql(u8, name, bound.name)) return error.Unsupported;
+        bound.uses += 1;
+        try self.encodeSelect(hasher, bound.lowerer, bound.condition, first.body, second.body, depth);
     }
 
     fn unwrapDoubleNot(self: *Lowerer, node: NodeIndex) ?NodeIndex {
@@ -388,24 +468,115 @@ fn frameCount(hasher: *std.crypto.hash.sha2.Sha256, value: anytype) void {
 
 const testing = std.testing;
 
-test "pure chained conditional and boolean match share one kernel term" {
+const ready_binding = Binding{ .name = "c", .initializer = "!!(ready)" };
+
+test "pure chained conditional and bound boolean match share one kernel term" {
     const original = "ready ? 1 : fallback ? 2 : 3";
-    const repaired = "match (!!(ready)) { when true: 1, default: fallback ? 2 : 3 }";
+    const repaired = "match (c) { when true: 1, default: fallback ? 2 : 3 }";
     try testing.expectEqual(
         Verdict.identical,
-        try compareExpressions(testing.allocator, original, repaired, .{}),
+        try compareExpressions(testing.allocator, original, repaired, .{ .binding = ready_binding }),
     );
 }
 
 test "conditional near misses do not discharge" {
     const original = "ready ? 1 : fallback ? 2 : 3";
-    const swapped = "match (!!(ready)) { when true: fallback ? 2 : 3, default: 1 }";
-    const answer = try compareExpressions(testing.allocator, original, swapped, .{});
+    const swapped = "match (c) { when true: fallback ? 2 : 3, default: 1 }";
+    const answer = try compareExpressions(testing.allocator, original, swapped, .{ .binding = ready_binding });
     try testing.expect(answer == .differs);
 
-    const missing_truthiness = "match (ready) { when true: 1, default: fallback ? 2 : 3 }";
-    const unsupported = try compareExpressions(testing.allocator, original, missing_truthiness, .{});
-    try testing.expectEqual(Side.repaired, unsupported.unsupported);
+    const other_condition = Binding{ .name = "c", .initializer = "!!(other)" };
+    const wrong_binding = try compareExpressions(
+        testing.allocator,
+        original,
+        "match (c) { when true: 1, default: fallback ? 2 : 3 }",
+        .{ .binding = other_condition },
+    );
+    try testing.expect(wrong_binding == .differs);
+
+    const missing_name = "match (ready) { when true: 1, default: fallback ? 2 : 3 }";
+    const unsupported = try compareExpressions(testing.allocator, original, missing_name, .{ .binding = ready_binding });
+    try testing.expectEqual(Verdict{ .unsupported = .repaired }, unsupported);
+}
+
+test "a scrutinee that is not the bound name is refused" {
+    try testing.expectEqual(
+        Verdict{ .unsupported = .repaired },
+        try compareExpressions(
+            testing.allocator,
+            "ready ? 1 : 2",
+            "match (!!(ready)) { when true: 1, default: 2 }",
+            .{ .binding = ready_binding },
+        ),
+    );
+    try testing.expectEqual(
+        Verdict{ .unsupported = .repaired },
+        try compareExpressions(
+            testing.allocator,
+            "ready ? 1 : 2",
+            "match (!!(ready)) { when true: 1, default: 2 }",
+            .{},
+        ),
+    );
+}
+
+test "a binding whose initializer is not a lowered truthiness test is refused" {
+    const original = "ready ? 1 : 2";
+    const repaired = "match (c) { when true: 1, default: 2 }";
+    try testing.expectEqual(
+        Verdict{ .unsupported = .repaired },
+        try compareExpressions(testing.allocator, original, repaired, .{
+            .binding = .{ .name = "c", .initializer = "!!(load())" },
+        }),
+    );
+    try testing.expectEqual(
+        Verdict{ .unsupported = .repaired },
+        try compareExpressions(testing.allocator, original, repaired, .{
+            .binding = .{ .name = "c", .initializer = "ready" },
+        }),
+    );
+}
+
+test "a bound name that the original also uses is refused" {
+    try testing.expectEqual(
+        Verdict{ .unsupported = .original },
+        try compareExpressions(
+            testing.allocator,
+            "ready ? c : 2",
+            "match (c) { when true: c, default: 2 }",
+            .{ .binding = ready_binding },
+        ),
+    );
+}
+
+test "a bound name that the repaired expression uses twice or never is refused" {
+    try testing.expectEqual(
+        Verdict{ .unsupported = .repaired },
+        try compareExpressions(
+            testing.allocator,
+            "ready ? 1 : 2",
+            "match (c) { when true: 1, default: match (c) { when true: 1, default: 2 } }",
+            .{ .binding = ready_binding },
+        ),
+    );
+    try testing.expectEqual(
+        Verdict{ .unsupported = .repaired },
+        try compareExpressions(
+            testing.allocator,
+            "ready ? 1 : 2",
+            "match (c) { when true: c, default: 2 }",
+            .{ .binding = ready_binding },
+        ),
+    );
+    try testing.expectEqual(
+        Verdict{ .unsupported = .repaired },
+        try compareExpressions(
+            testing.allocator,
+            "ready ? 1 : 2",
+            "ready ? 1 : 2",
+            .{ .binding = ready_binding },
+        ),
+    );
 }
 
 test "moving a nonempty literal spread changes observable insertion order" {
@@ -444,8 +615,8 @@ test "calls stay outside the M3 slice even when both sides spell one" {
     const answer = try compareExpressions(
         testing.allocator,
         "ready ? load() : 0",
-        "match (!!(ready)) { when true: load(), default: 0 }",
-        .{},
+        "match (c) { when true: load(), default: 0 }",
+        .{ .binding = ready_binding },
     );
-    try testing.expectEqual(Side.original, answer.unsupported);
+    try testing.expectEqual(Verdict{ .unsupported = .original }, answer);
 }
