@@ -869,7 +869,7 @@ const good_source =
 const parse_bad_source =
     \\// A default arm that is not last is refused by the parser.
     \\function handler(req: Request): Response {
-    \\    return match (1) { when 1: Response.text("a") default: Response.text("b") when 2: Response.text("c") };
+    \\    return match (req.method) { when "GET": Response.text("a") default: Response.text("b") when "POST": Response.text("c") };
     \\}
     \\
 ;

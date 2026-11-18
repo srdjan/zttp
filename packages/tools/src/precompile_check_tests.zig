@@ -8251,7 +8251,8 @@ const io_match_a =
     \\import { cacheSet } from "zttp:cache";
     \\export function handler(req: Request): Response {
     \\  cacheSet("items", "k", "v", 60);
-    \\  const out = match (String(cacheSet("items", "k2", "v", 60))) {
+    \\  const flag = String(cacheSet("items", "k2", "v", 60));
+    \\  const out = match (flag) {
     \\    when "true": "yes"
     \\    default: "no"
     \\  };
@@ -8263,7 +8264,8 @@ const io_match_b =
     \\import { cacheSet } from "zttp:cache";
     \\export function handler(req: Request): Response {
     \\  cacheSet("items", "k", "v", 60);
-    \\  const out = match (String(true)) {
+    \\  const flag = String(true);
+    \\  const out = match (flag) {
     \\    when "true": "yes"
     \\    default: "no"
     \\  };
@@ -10172,17 +10174,6 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  return Response.json({ a: p?.q.age });
     \\}
     },
-    .{ .name = "p20_match_nonident_scrutinee", .expect = "ZTS309@7,ZTS500@3", .source =
-    \\structural Q = { age: number };
-    \\structural P = { q: Q | undefined };
-    \\function handler(req: Request): Response {
-    \\  const ps: P[] = [{ q: undefined }];
-    \\  return match (ps[0]) {
-    \\    when undefined: Response.json({ a: 0 })
-    \\    when { q: v }: Response.json({ a: v.age })
-    \\  };
-    \\}
-    },
     .{ .name = "p38_both_branches_assign", .expect = "ZTS309@6,ZTS500@2", .source =
     \\structural P = { age: number };
     \\function handler(req: Request): Response {
@@ -10204,7 +10195,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  };
     \\}
     },
-    .{ .name = "q10_match_call_result", .expect = "ZTS309@10,ZTS500@6", .source =
+    .{ .name = "q10_match_call_result", .expect = "ZTS309@11,ZTS500@6", .source =
     \\structural Q = { age: number };
     \\structural P = { q: Q | undefined };
     \\function first(ps: P[]): P | undefined {
@@ -10212,7 +10203,8 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [{ q: undefined }];
-    \\  return match (first(ps)) {
+    \\  const p = first(ps);
+    \\  return match (p) {
     \\    when undefined: Response.json({ a: 0 })
     \\    when { q: v }: Response.json({ a: v.age })
     \\  };

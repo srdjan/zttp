@@ -499,9 +499,9 @@ test "conditional near misses do not discharge" {
     try testing.expectEqual(Verdict{ .unsupported = .repaired }, unsupported);
 }
 
-test "a scrutinee that is not the bound name is refused" {
+test "a scrutinee that is not the bound name is never identical" {
     try testing.expectEqual(
-        Verdict{ .unsupported = .repaired },
+        Verdict{ .unparsable = .repaired },
         try compareExpressions(
             testing.allocator,
             "ready ? 1 : 2",
@@ -510,7 +510,7 @@ test "a scrutinee that is not the bound name is refused" {
         ),
     );
     try testing.expectEqual(
-        Verdict{ .unsupported = .repaired },
+        Verdict{ .unparsable = .repaired },
         try compareExpressions(
             testing.allocator,
             "ready ? 1 : 2",

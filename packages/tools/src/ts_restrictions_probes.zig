@@ -1037,6 +1037,16 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("function g(n: number): number {\n  return match (n) {\n    default: 0\n  };\n}")),
     },
     .{
+        .key = "A `match` scrutinee that is not a name or a member path, such as `match (g())`, `match (xs[0])`, or `match (r.a?.b)`",
+        .refused = &.{
+            r("match", top(g_fn ++ "function h(): number {\n  return match (g()) {\n    when 1: 1\n    default: 0\n  };\n}")),
+            r("match (g())", top(g_fn ++ "function h(): number {\n  return match (g()) {\n    when 1: 1\n    default: 0\n  };\n}")),
+            r("match (xs[0])", top("function h(xs: number[]): number {\n  return match (xs[0]) {\n    when 1: 1\n    default: 0\n  };\n}")),
+            r("match (r.a?.b)", top("structural R = { a: { b: number } | null };\nfunction h(r: R): number {\n  return match (r.a?.b) {\n    when 1: 1\n    default: 0\n  };\n}")),
+        },
+        .clean = c(top(g_fn ++ "function h(): number {\n  const v = g();\n  return match (v) {\n    when 1: 1\n    default: 0\n  };\n}")),
+    },
+    .{
         .key = "A rename to the same name, such as `{ text: text }` in a pattern",
         .refused = &.{r("{ text: text }", top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text: text }: text\n    when { kind: \"b\", text }: text\n  };\n}"))},
         .clean = c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n  };\n}")),
@@ -1572,10 +1582,6 @@ pub const refusal_rows = refusal_rows_a ++ refusal_rows_b;
 // ---------------------------------------------------------------------------
 
 pub const gap_rows = [_]GapRow{
-    .{
-        .key = "`match` on a call, such as `match (g()) { ... }`",
-        .sources = &.{c(top("function g(): number {\n  return 1;\n}\nfunction h(): number {\n  return match (g()) {\n    when 1: 1\n    default: 0\n  };\n}"))},
-    },
     .{
         .key = "`import { ... } from \"zttp:types\"`",
         .sources = &.{

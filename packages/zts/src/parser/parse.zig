@@ -3883,7 +3883,12 @@ pub const Parser = struct {
         self.advance(); // consume 'match'
 
         try self.expect(.lparen, "'('");
+        const scrutinee_tok = self.current;
         const discriminant = try self.parseExpression(.none);
+        if (!self.isNamePath(discriminant)) {
+            self.errors.addErrorAt(.unsupported_feature, scrutinee_tok, "a match scrutinee is a name or a member path; bind the value to a const first and match on that");
+            return error.ParseError;
+        }
         try self.expect(.rparen, "')'");
         try self.expect(.lbrace, "'{'");
 
@@ -4041,20 +4046,11 @@ pub const Parser = struct {
 
     /// Build a type-test pattern and the narrowing test it lowers to (spec
     /// 5.5): `typeof s === "..."` for the three scalars, `Array.isArray(s)` for
-    /// the array. The test reads the scrutinee a second time, so the scrutinee
-    /// must be a name or a member path - which is what spec 5.5 requires of it
-    /// anyway, with this diagnostic carrying the repair.
+    /// the array. The test reads the scrutinee a second time, which is safe
+    /// because `parseMatchExpression` admits only a name or a member path.
     fn parseTypeTestPattern(self: *Parser, kind: Node.TypeTestKind) anyerror!NodeIndex {
         const loc = self.current.location();
         const scrutinee = self.current_match_scrutinee;
-        const readable = scrutinee != null_node and blk: {
-            const scrutinee_tag = self.nodes.getTag(scrutinee);
-            break :blk scrutinee_tag == .identifier or scrutinee_tag == .member_access;
-        };
-        if (!readable) {
-            self.errors.addErrorAt(.unsupported_feature, self.current, "a type-test pattern needs a scrutinee that is a name or a member path; bind the scrutinee to a const first and match on that");
-            return error.ParseError;
-        }
         self.advance(); // consume the kind name
 
         const predicate = switch (kind) {
@@ -5161,6 +5157,22 @@ pub const Parser = struct {
                     current = member.object;
                 },
                 else => return current,
+            }
+        }
+    }
+
+    /// Whether `node` is `Ident ("." Ident)*`, the one scrutinee form of spec 5.5.
+    fn isNamePath(self: *Parser, node: NodeIndex) bool {
+        const view = ir.IrView.fromIRStore(&self.nodes, &self.constants);
+        var current = node;
+        while (true) {
+            switch (self.nodes.getTag(current)) {
+                .identifier => return true,
+                .member_access => {
+                    const member = view.getMember(current) orelse return false;
+                    current = member.object;
+                },
+                else => return false,
             }
         }
     }
@@ -10261,27 +10273,37 @@ test "the Dict type test parses now that Dict exists" {
     try std.testing.expect(!parser.hasErrors());
 }
 
-test "a type test over a scrutinee that is not a name is refused" {
-    // The test reads the scrutinee a second time, so a call in that position
-    // would be evaluated twice. Spec 5.5 already requires a name or a member
-    // path there; this is the diagnostic that says so.
-    var parser = try Parser.initAdmission(
-        std.testing.allocator,
-        std.testing.allocator,
-        \\const x = match (compute()) {
-        \\  when string: 1,
-        \\  default: 2
-        \\};
-    ,
-        .compile,
-    );
+fn expectScrutineeAdmitted(source: []const u8) !void {
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
+    _ = try parser.parse();
+    try std.testing.expectEqual(@as(usize, 0), parser.getErrors().len);
+}
 
-    _ = parser.parse() catch {
-        try std.testing.expect(parser.hasErrors());
-        return;
-    };
-    try std.testing.expect(false);
+fn expectScrutineeRefused(source: []const u8) !void {
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
+    try std.testing.expectEqualStrings("a match scrutinee is a name or a member path; bind the value to a const first and match on that", errors[0].message);
+}
+
+test "a match scrutinee that is a name or a member path is admitted" {
+    try expectScrutineeAdmitted("const r = match (x) { when 1: 1, default: 2 };");
+    try expectScrutineeAdmitted("const r = match (a.b.c) { when 1: 1, default: 2 };");
+    try expectScrutineeAdmitted("const r = match (a.b) { when string: 1, default: 2 };");
+    // The parser drops the parentheses, so `(x)` is the name `x`.
+    try expectScrutineeAdmitted("const r = match ((x)) { when 1: 1, default: 2 };");
+}
+
+test "a match scrutinee that is not a name or a member path is refused" {
+    try expectScrutineeRefused("const r = match (g()) { when 1: 1, default: 2 };");
+    try expectScrutineeRefused("const r = match (xs[0]) { when 1: 1, default: 2 };");
+    try expectScrutineeRefused("const r = match (a?.b) { when 1: 1, default: 2 };");
+    try expectScrutineeRefused("const r = match (typeof t) { when 1: 1, default: 2 };");
+    try expectScrutineeRefused("const r = match (g()) { when string: 1, default: 2 };");
 }
 
 test "a match binding is scoped to its arm" {

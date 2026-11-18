@@ -267,6 +267,7 @@ absence handling.
 | A `default` arm before a `when` arm, or a second `default` arm | ZTS062 | One `default`, after every `when` arm |
 | A type-test name below the top level of a pattern, such as `when { v: string }` | ZTS001 | Bind the field and match it in a nested `match` |
 | `when _:` | ZTS001 | `default:` |
+| A `match` scrutinee that is not a name or a member path, such as `match (g())`, `match (xs[0])`, or `match (r.a?.b)` | ZTS001 | Bind the value to a `const` first and match on that |
 | A rename to the same name, such as `{ text: text }` in a pattern | ZTS625 (advisory) | `{ text }` |
 | An arm that reads a field off the scrutinee | ZTS626 (advisory) | Bind the field in the pattern |
 | A `default` arm after full coverage of a closed union, or a duplicate `when` arm | ZTS216 | Remove the `default` arm or the duplicate arm |
@@ -414,7 +415,6 @@ against the compiler.
 
 | Form | Observed result | Required |
 |---|---|---|
-| `match` on a call, such as `match (g()) { ... }` | Accepted, exit 0. The specification requires an identifier or a member path | A targeted refusal. Bind the value to a `const` first |
 | `import { ... } from "zttp:types"` | Refused with ZTS206 for a value import, and with ZTS053 for `import type` | ZTS053 for both. Write `Proof<T, P>` or `Effects<T, R>` directly. Both are ambient |
 | C-style `for (;;)` | Refused with ZTS001 and ZTS002 | ZTS001 only. Write `for (const i of range(n))` |
 | Labeled `break` and `continue` | Refused with ZTS001 and ZTS047 | ZTS001 only. Write a conditional |
