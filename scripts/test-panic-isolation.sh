@@ -215,13 +215,14 @@ else
 fi
 stop_server
 
-step "stack check 3: zttp test on depth 185 with a JSON.stringify leaf nested 500 deep"
+step "stack check 3: zttp test on depth 185 with a stringifyJson leaf nested 500 deep"
 LEAF_DIR="$TMP_DIR/json-leaf-app"
 make_stack_app "$LEAF_DIR"
 cat > "$LEAF_DIR/src/handler.ts" <<'HANDLER'
+import { stringifyJson } from "zttp:json";
 structural Tree = number | Tree[];
 function build(k: number): Tree { let o: Tree = 1; for (const i of range(k)) { o = [o]; } return o; }
-function leaf(): number { const t = build(500); const s = JSON.stringify(t); if (s === undefined) { return 0; } return s.length; }
+function leaf(): number { const t = build(500); const r = stringifyJson(t); if (!r.ok) { return 0; } const s = r.value; if (typeof s !== "string") { return 0; } return s.length; }
 function down(n: number): number { if (n === 0) { return leaf(); } return down(n - 1) + 1; }
 export function handler(req: Request): Proof<Response, "state_isolated"> { return Response.text(String(down(185))); }
 HANDLER
@@ -241,8 +242,8 @@ fi
 # Check 4 runs a bounded native leaf at every level of unbounded recursion, so
 # the leaf runs just above the floor. The headroom in
 # packages/zts/src/stack_floor.zig must leave room for it. The leaves are the
-# deepest bounded native calls that were measured: JSON.stringify at nesting 500
-# (writer limit 512) and renderToString at 254 nested h() elements.
+# deepest bounded native calls that were measured: stringifyJson at nesting 500
+# (encoder limit 512) and renderToString at 254 nested h() elements.
 step "stack check 4: zttp test on unbounded recursion with a native leaf at every level"
 LEVEL_FAILED=0
 # level_leaf_case NAME: read a leaf() definition from stdin, recurse with it.
@@ -267,9 +268,10 @@ level_leaf_case() {
     fi
 }
 level_leaf_case json <<'LEAF'
+import { stringifyJson } from "zttp:json";
 structural Tree = number | Tree[];
 function build(k: number): Tree { let o: Tree = 1; for (const i of range(k)) { o = [o]; } return o; }
-function leaf(): number { const t = build(500); const s = JSON.stringify(t); if (s === undefined) { return 0; } return s.length; }
+function leaf(): number { const t = build(500); const r = stringifyJson(t); if (!r.ok) { return 0; } const s = r.value; if (typeof s !== "string") { return 0; } return s.length; }
 LEAF
 level_leaf_case render <<'LEAF'
 function leaf(): number { let n = h("b", null, "x"); for (const i of range(254)) { n = h("div", null, n); } const s = renderToString(n); if (s.length > 0) { return 1; } return 0; }

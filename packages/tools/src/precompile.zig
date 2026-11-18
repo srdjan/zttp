@@ -2681,25 +2681,25 @@ test "compileHandler graph unions the fetch URLs of a dependency" {
 fn schemaEntry(comptime schema: []const u8) []const u8 {
     return "import { schemaCompile } from \"zttp:validate\";\n" ++
         "import { f } from \"./dep.ts\";\n" ++
-        "schemaCompile(\"user\", JSON.stringify(" ++ schema ++ "));\n" ++
+        "schemaCompile(\"user\", " ++ schema ++ ");\n" ++
         "export function handler(req: Request): Proof<Response, \"result_safe\"> {\n" ++
         "  return Response.text(f());\n}\n";
 }
 
 fn schemaDep(comptime schema: []const u8) []const u8 {
     return "import { schemaCompile } from \"zttp:validate\";\n" ++
-        "schemaCompile(\"user\", JSON.stringify(" ++ schema ++ "));\n" ++
+        "schemaCompile(\"user\", " ++ schema ++ ");\n" ++
         "export function f(): string {\n  return \"x\";\n}\n";
 }
 
 test "compileHandler graph refuses two modules that register one schema name with different JSON" {
-    var fixture = try importFixture(schemaEntry("{ type: \"object\" }"), schemaDep("{ type: \"string\" }"));
+    var fixture = try importFixture(schemaEntry("'{\"type\":\"object\"}'"), schemaDep("'{\"type\":\"string\"}'"));
     defer fixture.deinit();
     try std.testing.expectError(error.ApiSchemaConflict, fixture.compile(graph_verified));
 }
 
 test "compileHandler graph accepts two modules that register one schema name with identical JSON" {
-    var fixture = try importFixture(schemaEntry("{ type: \"object\" }"), schemaDep("{ type: \"object\" }"));
+    var fixture = try importFixture(schemaEntry("'{\"type\":\"object\"}'"), schemaDep("'{\"type\":\"object\"}'"));
     defer fixture.deinit();
     var compiled = try fixture.compile(graph_verified);
     defer compiled.deinit(std.testing.allocator);
@@ -3365,7 +3365,7 @@ fn parityEntry(comptime capsule: []const u8) []const u8 {
 const parity_schema_entry =
     \\import { schemaCompile } from "zttp:validate";
     \\import { f } from "./lib.ts";
-    \\schemaCompile("user", JSON.stringify({ type: "object" }));
+    \\schemaCompile("user", '{"type":"object"}');
     \\export function handler(req: Request): Proof<Response, "result_safe"> {
     \\  return Response.text(f());
     \\}
@@ -3374,7 +3374,7 @@ const parity_schema_entry =
 
 const parity_schema_lib =
     \\import { schemaCompile } from "zttp:validate";
-    \\schemaCompile("user", JSON.stringify({ type: "string" }));
+    \\schemaCompile("user", '{"type":"string"}');
     \\export function f(): string {
     \\  return "x";
     \\}

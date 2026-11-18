@@ -394,9 +394,7 @@ A result has a type only when each argument has the type that the runtime reads.
 | `s.repeat(n)`, `req.headers.get("x")` | `string \| undefined` |
 | `xs.slice(0, 1)`, `xs.map(f)` | an array |
 | `xs.reduce(f, seed)` | the seed type or the callback's return type |
-| `JSON.parse(s)` | `unknown` |
-| `JSON.tryParse(s)` | a Result with an `unknown` value and a `string` error |
-| `JSON.stringify(v)` | `string`; `string \| undefined` for a recursive type; no type when a part is `unknown` |
+| `JSON.parse(s)`, `JSON.tryParse(s)`, `JSON.stringify(v)` | refused with ZTS629; use `parseJson` and `stringifyJson` from `zttp:json` |
 | `Object.keys(o)` | `string[]` |
 | `Object.values(o)` | `unknown[]`: a record can hold a field that its type does not name |
 | `Object.entries(o)` | `[string, unknown][]` |

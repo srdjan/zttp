@@ -33,11 +33,7 @@ structural CrudGuarantees<T> = Proof<T,
 
 schemaCompile(
   "todo.create",
-  JSON.stringify({
-    type: "object",
-    required: ["title"],
-    properties: { title: { type: "string", minLength: 1, maxLength: 120 } },
-  }),
+  '{"type":"object","required":["title"],"properties":{"title":{"type":"string","minLength":1,"maxLength":120}}}',
 );
 
 sql("listTodos", "SELECT id, title, done FROM todos ORDER BY id ASC");

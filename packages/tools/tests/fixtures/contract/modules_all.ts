@@ -6,6 +6,7 @@ import { env } from "zttp:env";
 import { schemaCompile, validateJson } from "zttp:validate";
 import { cacheSet, cacheStats } from "zttp:cache";
 import { sha256 } from "zttp:crypto";
+import { stringifyJson } from "zttp:json";
 
 structural RequestBody = {
     name: string;
@@ -13,14 +14,7 @@ structural RequestBody = {
 };
 
 // Compile a schema on startup
-const schema_ok = schemaCompile("user", JSON.stringify({
-    type: "object",
-    required: ["name", "age"],
-    properties: {
-        name: { type: "string", minLength: 1, maxLength: 100 },
-        age: { type: "integer", minimum: 0, maximum: 200 }
-    }
-}));
+const schema_ok = schemaCompile("user", '{"type":"object","required":["name","age"],"properties":{"name":{"type":"string","minLength":1,"maxLength":100},"age":{"type":"integer","minimum":0,"maximum":200}}}');
 
 function handler(req: Request): Response {
     // Auth: check JWT from Authorization header
@@ -36,7 +30,13 @@ function handler(req: Request): Response {
             const result = jwtVerify(token, secret);
             if (result.ok) {
                 // Cache the verified user
-                cacheSet("users", sha256(token), JSON.stringify(result.value), 300);
+                const cached = stringifyJson(result.value);
+                if (cached.ok) {
+                    const encoded = cached.value;
+                    if (typeof encoded === "string") {
+                      cacheSet("users", sha256(token), encoded, 300);
+                    }
+                }
             }
         }
     }
@@ -54,7 +54,7 @@ function handler(req: Request): Response {
         }
 
         // Sign a response token
-        const jwt = jwtSign(JSON.stringify({ sub: "user-123", iat: 1700000000 }), secret);
+        const jwt = jwtSign('{"sub":"user-123","iat":1700000000}', secret);
 
         return Response.json({
             user: validation.value,

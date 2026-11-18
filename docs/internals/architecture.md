@@ -191,7 +191,8 @@ The type checker and contract builder share `ir_json_literal.zig` for static
 JSON literal output. The helper reads an immutable IR view and uses the caller's
 atom resolver. It returns complete owned JSON bytes or no literal, and releases
 partial output on refusal or failure. Each caller still recognizes
-`JSON.stringify`, handles raw schema strings, and interprets schema types.
+`JSON.stringify` on a path that skips the strict check, handles raw schema strings,
+and interprets schema types. The strict check refuses `JSON` with ZTS629.
 
 ### Typed source and semantic types
 

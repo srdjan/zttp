@@ -4,19 +4,12 @@ import { decodeJson, decodeQuery } from "zttp:decode";
 
 schemaCompile(
   "profile.update",
-  JSON.stringify({
-    type: "object",
-    properties: { displayName: { type: "string" } },
-    required: ["displayName"],
-  }),
+  '{"type":"object","properties":{"displayName":{"type":"string"}},"required":["displayName"]}',
 );
 
 schemaCompile(
   "profile.query",
-  JSON.stringify({
-    type: "object",
-    properties: { verbose: { type: "boolean" } },
-  }),
+  '{"type":"object","properties":{"verbose":{"type":"boolean"}}}',
 );
 
 function updateProfile(req: Request): Response {

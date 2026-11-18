@@ -1,5 +1,7 @@
 // Shared utility functions for handler examples
 
+import { stringifyJson } from "zttp:json";
+
 export structural GreetingName = string;
 export structural GreetingText = string;
 export structural JsonData = { greeting: GreetingText; status: string };
@@ -10,5 +12,12 @@ export function greet(name: GreetingName): GreetingText {
 }
 
 export function formatJson(data: JsonData): JsonText {
-  return JSON.stringify(data);
+  const text = stringifyJson(data);
+  if (text.ok) {
+    const encoded = text.value;
+    if (typeof encoded === "string") {
+      return encoded;
+    }
+  }
+  return "{}";
 }

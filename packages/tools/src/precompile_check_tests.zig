@@ -11193,13 +11193,18 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\  return Response.json({ a: 0 });
     \\}
     },
-    .{ .name = "control_stringify_then_validate", .expect = "ZTS500@3", .source =
+    .{ .name = "control_stringify_then_validate", .expect = "ZTS500@4", .source =
     \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\import { stringifyJson } from "zttp:json";
     \\schemaCompile("todo", "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"}},\"required\":[\"title\"]}");
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
     \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
-    \\  const checked = validateJson("todo", JSON.stringify(parsed.value));
+    \\  const text = stringifyJson(parsed.value);
+    \\  if (!text.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
+    \\  const encoded = text.value;
+    \\  if (typeof encoded !== "string") { return Response.json({ error: "bad" }, { status: 400 }); }
+    \\  const checked = validateJson("todo", encoded);
     \\  if (!checked.ok) { return Response.json({ error: "invalid" }, { status: 400 }); }
     \\  return Response.json({ a: checked.value.title });
     \\}
@@ -11587,14 +11592,14 @@ test "result value: a read of a value that may be undefined after the ok check i
 const absent_read_untyped_operand = [_]AbsentReadCase{
     .{ .name = "u3_member_read_on_unknown_in_multiplication", .expect = "ZTS104@3", .source =
     \\function handler(req: Request): Proof<Response, "read_only"> {
-    \\  const u: unknown = JSON.parse("{}");
+    \\  const u: unknown = req.url;
     \\  const n = u.n * 2;
     \\  return Response.text(String(n));
     \\}
     },
     .{ .name = "u3_member_read_on_unknown_in_addition", .expect = "ZTS106@3", .source =
     \\function handler(req: Request): Proof<Response, "read_only"> {
-    \\  const u: unknown = JSON.parse("{}");
+    \\  const u: unknown = req.url;
     \\  const n = u.n + 1;
     \\  return Response.text(String(n));
     \\}
@@ -11938,7 +11943,7 @@ const absent_read_untyped_receiver = [_]AbsentReadCase{
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const o = { a: 1 };
     \\  const m = Math.max(1, 2);
-    \\  const j = JSON.stringify({ a: 1 });
+    \\  const j = Number("1");
     \\  const k = Object.keys(o).length;
     \\  const h = req.headers.get("x");
     \\  return Response.json({ m: m, j: j, k: k, h: h });
@@ -11998,9 +12003,10 @@ const absent_read_untyped_receiver = [_]AbsentReadCase{
     \\  return Response.text("x");
     \\}
     },
-    .{ .name = "n1_member_of_parsed_json_is_refused", .expect = "ZTS201@2", .source =
+    .{ .name = "n1_member_of_an_unknown_value_is_refused", .expect = "ZTS201@3", .source =
     \\function handler(req: Request): Proof<Response, "read_only"> {
-    \\  const s = JSON.parse(req.url).name.trim();
+    \\  const u: unknown = req.url;
+    \\  const s = u.name.trim();
     \\  return Response.text(s);
     \\}
     },
@@ -14825,7 +14831,7 @@ const resisted_dep_forwarder =
     \\import { schemaCompile } from "zttp:validate";
     \\import { decodeJson } from "zttp:decode";
     \\
-    \\schemaCompile("charge", JSON.stringify({ type: "object", properties: { name: { type: "string" } }, required: ["name"] }));
+    \\schemaCompile("charge", '{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}');
     \\
     \\export function forward(raw: string): boolean {
     \\  const parsed = decodeJson("charge", raw);

@@ -912,11 +912,13 @@ const hand_written = [_]Hand{
         .expect = .hold,
         .reason = "validateJson discharges user_input, so the egress body receives only validated input",
         .body =
-        \\schemaCompile("todo", "{\"type\":\"object\"}");
+        \\schemaCompile("todo", "{\"type\":\"string\"}");
         \\function forward(body: string): number {
         \\  const parsed = validateJson("todo", body);
         \\  if (!parsed.ok) { return 0; }
-        \\  const r = fetch("https://api.example.com/x", { method: "POST", body: JSON.stringify(parsed.value) });
+        \\  const encoded = parsed.value;
+        \\  if (typeof encoded !== "string") { return 0; }
+        \\  const r = fetch("https://api.example.com/x", { method: "POST", body: encoded });
         \\  return 1;
         \\}
         \\function handler(req: Request): Claim<Response> {
@@ -931,11 +933,13 @@ const hand_written = [_]Hand{
         .expect = .hold,
         .reason = "validateJson discharges user_input, so the egress body receives only validated input",
         .body =
-        \\schemaCompile("todo", "{\"type\":\"object\"}");
+        \\schemaCompile("todo", "{\"type\":\"string\"}");
         \\function handler(req: Request): Claim<Response> {
         \\  const parsed = validateJson("todo", req.body ?? "");
         \\  if (!parsed.ok) { return Response.json({ ok: 0 }); }
-        \\  const r = fetch("https://api.example.com/x", { method: "POST", body: JSON.stringify(parsed.value) });
+        \\  const encoded = parsed.value;
+        \\  if (typeof encoded !== "string") { return Response.json({ ok: 0 }); }
+        \\  const r = fetch("https://api.example.com/x", { method: "POST", body: encoded });
         \\  return Response.json({ ok: 1 });
         \\}
         ,
@@ -1098,12 +1102,14 @@ const hand_written = [_]Hand{
         .expect = .refuse,
         .reason = "validateJson discharges user_input only, so a secret through it still reaches the egress body (ZTS406)",
         .body =
-        \\schemaCompile("todo", "{\"type\":\"object\"}");
+        \\schemaCompile("todo", "{\"type\":\"string\"}");
         \\function handler(req: Request): Claim<Response> {
         \\  const t = env("API_TOKEN") ?? "";
         \\  const parsed = validateJson("todo", t);
         \\  if (!parsed.ok) { return Response.json({ ok: 0 }); }
-        \\  const r = fetch("https://api.example.com/x", { method: "POST", body: JSON.stringify(parsed.value) });
+        \\  const encoded = parsed.value;
+        \\  if (typeof encoded !== "string") { return Response.json({ ok: 0 }); }
+        \\  const r = fetch("https://api.example.com/x", { method: "POST", body: encoded });
         \\  return Response.json({ ok: 1 });
         \\}
         ,
@@ -1114,11 +1120,13 @@ const hand_written = [_]Hand{
         .expect = .refuse,
         .reason = "validateJson discharges user_input only, so a secret through it in a helper still reaches the egress body (ZTS406)",
         .body =
-        \\schemaCompile("todo", "{\"type\":\"object\"}");
+        \\schemaCompile("todo", "{\"type\":\"string\"}");
         \\function forward(body: string): number {
         \\  const parsed = validateJson("todo", body);
         \\  if (!parsed.ok) { return 0; }
-        \\  const r = fetch("https://api.example.com/x", { method: "POST", body: JSON.stringify(parsed.value) });
+        \\  const encoded = parsed.value;
+        \\  if (typeof encoded !== "string") { return 0; }
+        \\  const r = fetch("https://api.example.com/x", { method: "POST", body: encoded });
         \\  return 1;
         \\}
         \\function handler(req: Request): Claim<Response> {

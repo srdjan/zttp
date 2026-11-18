@@ -105,8 +105,11 @@ function handler(req: Request): Response {
         return Response.json({ items: [] });
     }
     if (req.method === "POST" && req.path === "/todos") {
-        const body = JSON.parse(req.body ?? "{}");
-        return Response.json({ title: body.title }, { status: 201 });
+        const body = requestJson(req);
+        if (!body.ok) {
+            return Response.text("Bad Request", { status: 400 });
+        }
+        return Response.json({ created: true }, { status: 201 });
     }
     return Response.text("Not Found", { status: 404 });
 }
@@ -140,8 +143,9 @@ function handler(req: Request): Proof<Response, "state_isolated" | "no_secret_le
 
 ## JSON And Validation
 
-Use normal `JSON.parse` and `Response.json` for basic JSON. Use
-`zttp:validate` or `zttp:decode` when the handler needs schema-backed
+Use `parseJson` and `stringifyJson` from `zttp:json`, and `Response.json`, for basic
+JSON. Both functions return a `Result`. Use `zttp:validate` or `zttp:decode` when
+the handler needs schema-backed
 validation.
 
 ```ts

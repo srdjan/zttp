@@ -2,16 +2,7 @@
 
 import { schemaCompile, validateJson } from "zttp:validate";
 
-schemaCompile("FormatInput", JSON.stringify({
-  type: "object",
-  properties: {
-    email: { type: "string", format: "email" },
-    id: { type: "string", format: "uuid" },
-    date: { type: "string", format: "iso-date" },
-    timestamp: { type: "string", format: "iso-datetime" }
-  },
-  required: ["email"]
-}));
+schemaCompile("FormatInput", '{"type":"object","properties":{"email":{"type":"string","format":"email"},"id":{"type":"string","format":"uuid"},"date":{"type":"string","format":"iso-date"},"timestamp":{"type":"string","format":"iso-datetime"}},"required":["email"]}');
 
 export function handler(req: Request): Proof<Response, "state_isolated" | "no_secret_leakage" | "injection_safe"> {
   const result = validateJson("FormatInput", req.body ?? "");

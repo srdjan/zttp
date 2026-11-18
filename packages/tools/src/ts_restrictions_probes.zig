@@ -1172,6 +1172,15 @@ const refusal_rows_b = [_]RefusalRow{
         },
         .clean = c(top("import { dictGet } from \"zttp:collections\";\nfunction g(req: Request): unknown {\n  const j = requestJson(req);\n  if (j.ok) {\n    const v: unknown = j.value;\n    if (isDict(v)) {\n      return dictGet(v, \"name\");\n    }\n  }\n  return undefined;\n}")),
     },
+    .{
+        .key = "`JSON.parse`, `JSON.stringify`, and `JSON.tryParse`",
+        .refused = &.{
+            r("JSON.parse", body("  const a = JSON.parse(\"1\");")),
+            r("JSON.stringify", body("  const a = JSON.stringify(1);")),
+            r("JSON.tryParse", body("  const a = JSON.tryParse(\"1\");")),
+        },
+        .clean = c(top("import { parseJson } from \"zttp:json\";\nfunction g(): boolean {\n  const a = parseJson(\"1\");\n  return a.ok;\n}")),
+    },
     // ----- U2a rows -----
     .{
         .key = "Assignment in expression position, such as `const m = (n = 2);`, `a = b = 3;`, and `(a = 2);`",
@@ -1484,13 +1493,6 @@ pub const refusal_rows = refusal_rows_a ++ refusal_rows_b;
 // ---------------------------------------------------------------------------
 
 pub const gap_rows = [_]GapRow{
-    .{
-        .key = "`JSON.parse` and `JSON.stringify`",
-        .sources = &.{
-            c(body("  const a = JSON.parse(\"1\");")),
-            c(body("  const a = JSON.stringify(1);")),
-        },
-    },
     .{
         .key = "`match` on a call, such as `match (g()) { ... }`",
         .sources = &.{c(top("function g(): number {\n  return 1;\n}\nfunction h(): number {\n  return match (g()) {\n    when 1: 1\n    default: 0\n  };\n}"))},

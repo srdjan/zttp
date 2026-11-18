@@ -481,13 +481,7 @@ pub const module_examples = [_]ModuleExample{
         \\import { fetch } from "zttp:fetch";
         \\import { schemaCompile, validateObject } from "zttp:validate";
         \\
-        \\schemaCompile("cityQuery", JSON.stringify({
-        \\  type: "object",
-        \\  required: ["city"],
-        \\  properties: {
-        \\    city: { type: "string", minLength: 1, maxLength: 64 }
-        \\  }
-        \\}));
+        \\schemaCompile("cityQuery", '{"type":"object","required":["city"],"properties":{"city":{"type":"string","minLength":1,"maxLength":64}}}');
         \\
         \\export function handler(req: Request): Proof<Response,
         \\  | "state_isolated"

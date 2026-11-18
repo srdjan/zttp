@@ -6122,7 +6122,7 @@ test "census C1: every registered builtin has a row and every row names a builti
         .{ counts.globals, counts.properties, counts.rows },
     );
     // A floor on the input: a census that enumerated nothing would pass.
-    try testing.expect(counts.globals >= 19);
+    try testing.expect(counts.globals >= 18);
     try testing.expect(counts.properties >= 76);
     try testing.expectEqual(operation_rows.len, counts.rows);
     // Every property belongs to one row, and a global function has a row of

@@ -269,6 +269,27 @@ follows U5 because five registrations pass `JSON.stringify(...)`, which is
 not a literal argument. The rejected option was (b), which moves
 Decisions 3 and 4 into a separate plan after U6.
 
+### Decision 21: a validated value that `stringifyJson` encodes
+
+A probe on 2026-11-17 measured this. A handler validates a body with
+`validateJson`, encodes the value with `stringifyJson`, and sends the
+text as a `fetch` body. The flow check refuses `injection_safe` with
+ZTS407. With `JSON.stringify` the same handler held, because its flow row
+kept every defense except `html_escaped`. An export result keeps no
+defense unless `defense_sources` establishes one, and a row that only
+keeps a defense has no effect (`packages/zts/src/flow_interp.zig#FlowInterp.applyExportCall`).
+The result fails closed. Four census hand probes now send the validated
+value, narrowed to a string, without an encode step.
+
+- (a) Accept the refusal. A handler cannot prove `injection_safe` when it
+  forwards encoded validated JSON.
+- (b) Recommended. Give `stringifyJson` a row that keeps `schema_checked`
+  and removes `html_escaped`, as `JSON.stringify` did. The flow check must
+  apply a keep-only row, and the kept defense must be the intersection over
+  every part that the argument reaches. Probes: a secret still refused, an
+  unvalidated input still refused, and a record that mixes a validated
+  part with a raw part still refused.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -1166,3 +1187,25 @@ later.
     cannot carry that type. The row `{ cb: (x?: number) => number }` still
     prints a function type, so the count of compound rows moves from 20
     to 19.
+- U5 measurement, 2026-11-17: removing `JSON` from `known_globals.zig` and
+  its three rows from `builtin_results.zig` breaks 22 distinct aggregate
+  tests (the codegen replay already fails), one test-zruntime test, and
+  smoke-v1, through `examples/handler/utils.ts`. The runtime still installs
+  `JSON`, and three paths analyze source with `strict = false`, so they never
+  report ZTS629: `packages/runtime/src/runtime_cli.zig#validateSourceAuthority`,
+  `packages/runtime/src/handler_instance.zig`, and the contract flow
+  extraction in `packages/tools/src/precompile_contract.zig`. For this reason
+  U5 removes `JSON` only from the strict `names` and keeps it in
+  `runtime_only_names`, so that a module cannot bind it. The `JSON` builtin
+  result rows, the flow rows in `flow_interp.zig` and `flow_rules.zig`, the
+  `Response.json(JSON.parse(...))` detection in `handler_analyzer.zig`, and
+  the runtime object stay. The U5 audit decides each one with a probe. A
+  probable finding goes to the same audit: `zttp serve` on a file may run a
+  handler that the strict check refuses. A probe of `zttp serve` with
+  `JSON.parse` can confirm it.
+- U5 migrated each `JSON.*` call. A schema text argument became a compact
+  string literal, and a value encoding became `stringifyJson` from
+  `zttp:json`. The `.value` of a successful `stringifyJson` has the type
+  `unknown`, so each caller narrows it with `typeof v === "string"` before
+  it passes the text on. A direct read gave ZTS203 or ZTS204. The binding
+  could return a `string` value; U6 records the decision.

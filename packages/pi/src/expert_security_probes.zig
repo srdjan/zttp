@@ -108,6 +108,7 @@ pub const corpus = [_]Probe{
         .source =
         \\import { parseBearer, jwtVerify } from "zttp:auth";
         \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\import { stringifyJson } from "zttp:json";
         \\structural Guard<T> = Proof<T, "no_credential_leakage">;
         \\function handler(req: Request): Guard<Response> {
         \\  const token = parseBearer(req.headers.authorization ?? "");
@@ -119,7 +120,15 @@ pub const corpus = [_]Probe{
         \\    return Response.json({ error: "unauthorized" }, { status: 401 });
         \\  }
         \\  schemaCompile("claims", "{}");
-        \\  const checked = validateJson("claims", JSON.stringify(verified.value));
+        \\  const text = stringifyJson(verified.value);
+        \\  if (!text.ok) {
+        \\    return Response.json({ error: "invalid" }, { status: 400 });
+        \\  }
+        \\  const encoded = text.value;
+        \\  if (typeof encoded !== "string") {
+        \\    return Response.json({ error: "invalid" }, { status: 400 });
+        \\  }
+        \\  const checked = validateJson("claims", encoded);
         \\  if (!checked.ok) {
         \\    return Response.json({ error: "invalid" }, { status: 400 });
         \\  }

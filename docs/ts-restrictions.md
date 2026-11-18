@@ -328,8 +328,6 @@ The type checker admits these members on an array, on a string, and on each ambi
 
 `Date`: `now`
 
-`JSON`: `parse`, `stringify`, `tryParse`
-
 `Math`: `PI`, `abs`, `ceil`, `cos`, `exp`, `floor`, `log`, `max`, `min`, `pow`, `random`, `round`, `sin`, `sqrt`, `tan`, `trunc`
 
 `Number`: `EPSILON`, `MAX_SAFE_INTEGER`, `MAX_VALUE`, `MIN_SAFE_INTEGER`, `MIN_VALUE`, `NEGATIVE_INFINITY`, `NaN`, `POSITIVE_INFINITY`, `isFinite`, `isInteger`, `isNaN`, `parseFloat`, `parseInt`
@@ -343,8 +341,8 @@ The type checker admits these members on an array, on a string, and on each ambi
 ## Ambient Names And Effects
 
 The closed ambient value namespace is: `Array`, `Boolean`, `Date`, `Headers`,
-`JSON`, `Math`, `Number`, `Object`, `Request`, `Response`, `String`, `assert`,
-`h`, `hole`, `isBytes`, `isDict`, `parseFloat`, `parseInt`, `range`,
+`Math`, `Number`, `Object`, `Request`, `Response`, `String`, `assert`, `h`,
+`hole`, `isBytes`, `isDict`, `parseFloat`, `parseInt`, `range`,
 `renderToString`, `requestBody`, `requestJson`, and `requestText`. The `meta`
 operation of `zttp agent --stdin-json` publishes this list as
 `payload.ambient_names`.
@@ -368,6 +366,7 @@ capsule, the default proof profile then reports ZTS500.
 | `Response.redirect(url, { status: 301 })` | ZTS203 | `Response.redirect(url, 301)` |
 | A `Response.json` payload that JSON cannot carry, such as `Dict<number, string>` | ZTS213 | A string-keyed payload |
 | A member or index read on the `.value` of `requestJson(req)` | ZTS201 | `decodeJson` with a schema, or `isDict(v)` and `dictGet(v, key)` |
+| `JSON.parse`, `JSON.stringify`, and `JSON.tryParse` | ZTS629 | `parseJson` or `stringifyJson` from `zttp:json`, or `decodeJson` from `zttp:decode` |
 
 `requestBody(req)` returns `Bytes`. `requestText(req)` and `requestJson(req)`
 return a `Result`.
@@ -403,7 +402,6 @@ against the compiler.
 
 | Form | Observed result | Required |
 |---|---|---|
-| `JSON.parse` and `JSON.stringify` | Accepted | ZTS629. Use `parseJson` or `stringifyJson` from `zttp:json`, or `decodeJson` from `zttp:decode` |
 | `match` on a call, such as `match (g()) { ... }` | Accepted, exit 0. The specification requires an identifier or a member path | A targeted refusal. Bind the value to a `const` first |
 | `for...of` over a fixed record | Accepted by the type and strict checks | A targeted refusal. Iterate an array, such as `Object.keys(r)` |
 | `import { ... } from "zttp:types"` | Refused with ZTS206 for a value import, and with ZTS053 for `import type` | ZTS053 for both. Write `Proof<T, P>` or `Effects<T, R>` directly. Both are ambient |

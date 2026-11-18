@@ -9,14 +9,13 @@
 
 const std = @import("std");
 
-/// Callable globals the runtime provides. Object namespaces (`Math`, `JSON`)
+/// Callable globals the runtime provides. Object namespaces (`Math`, `Number`)
 /// appear because they are the callee object of a member call.
 pub const names = [_][]const u8{
     "Array",
     "Boolean",
     "Date",
     "Headers",
-    "JSON",
     "Math",
     "Number",
     "Object",
@@ -45,6 +44,7 @@ pub const names = [_][]const u8{
 pub const runtime_only_names = [_][]const u8{
     "Error",
     "Fragment",
+    "JSON",
     "RangeError",
     "ReferenceError",
     "Result",

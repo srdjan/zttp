@@ -362,10 +362,17 @@ pub const fixtures = [_]Fixture{
     // runtime: none. `Response.rawJson` sends its first argument as the body.
     .{ .name = "raw_json_secret_through_binding", .property = .no_secret_leakage, .source =
     \\import { env } from "zttp:env";
+    \\import { stringifyJson } from "zttp:json";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const secret: string = env("SECRET_KEY") ?? "";
-    \\  const body: string = JSON.stringify({ k: secret });
-    \\  return Response.rawJson(body);
+    \\  const body = stringifyJson({ k: secret });
+    \\  if (body.ok) {
+    \\    const encoded = body.value;
+    \\    if (typeof encoded === "string") {
+    \\      return Response.rawJson(encoded);
+    \\    }
+    \\  }
+    \\  return Response.json({ error: "unencodable" }, { status: 500 });
     \\}
     },
     // -- A response status computed from a secret.
@@ -455,10 +462,17 @@ pub const contrasts = [_]Fixture{
     // runtime: none.
     .{ .name = "raw_json_clean_contrast", .property = .no_secret_leakage, .expected = .held, .policy_source = region_public_policy, .source =
     \\import { env } from "zttp:env";
+    \\import { stringifyJson } from "zttp:json";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const region: string = env("REGION") ?? "";
-    \\  const body: string = JSON.stringify({ k: region });
-    \\  return Response.rawJson(body);
+    \\  const body = stringifyJson({ k: region });
+    \\  if (body.ok) {
+    \\    const encoded = body.value;
+    \\    if (typeof encoded === "string") {
+    \\      return Response.rawJson(encoded);
+    \\    }
+    \\  }
+    \\  return Response.json({ error: "unencodable" }, { status: 500 });
     \\}
     },
     // runtime: none.

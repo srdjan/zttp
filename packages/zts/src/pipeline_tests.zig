@@ -4822,54 +4822,23 @@ test "builtin result: an array method through an optional chain stays untyped" {
     );
 }
 
-test "builtin result: JSON.stringify of a number array is string" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[]): number { const p: Nope = JSON.stringify(xs); return 0; }
-    , "type 'string' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: JSON.stringify of a recursive type may be undefined" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\structural Tree = { kids: Tree[] };
-        \\function f(t: Tree): number { const p: Nope = JSON.stringify(t); return 0; }
-    , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: JSON.stringify of an unknown value stays untyped" {
-    try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
-        \\function f(u: unknown): number { const p: Nope = JSON.stringify(u); return 0; }
-    );
-}
-
-test "builtin result: JSON.stringify of a function stays untyped" {
-    try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
-        \\function f(cb: (n: number) => number): number { const p: Nope = JSON.stringify(cb); return 0; }
-    );
-}
-
-test "builtin result: JSON.stringify with no argument stays untyped" {
-    try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
-        \\function f(): number { const p: Nope = JSON.stringify(); return 0; }
-    );
-}
-
-test "builtin result: JSON.parse is unknown" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(s: string): number { const p: Nope = JSON.parse(s); return 0; }
-    , "type 'unknown' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "builtin result: JSON.tryParse is a Result with an unknown value" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(s: string): number { const p: Nope = JSON.tryParse(s); return 0; }
-    , "type '{ ok: boolean; value?: unknown; error?: string; errors?: never }' is not assignable to type '{ zz: Bytes }'");
+test "builtin result: JSON.parse is refused as an unpublished ambient global" {
+    // JSON left `known_globals.names`, so the strict checker names the object
+    // and the call has no builtin result type.
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.strictDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(strict_checker_mod.DiagnosticKind.unpublished_ambient_global, diagnostics[0].kind);
+            try testing.expectEqualStrings("unpublished ambient global 'JSON'", diagnostics[0].message);
+            const location = session.parsed.ir_view.getLoc(diagnostics[0].node) orelse return error.TestUnexpectedResult;
+            try testing.expectEqual(@as(u32, 1), location.line);
+            try testing.expectEqual(@as(u32, 43), location.column);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function f(s: string): number { const p = JSON.parse(s); return 0; }
+    , Probe.run);
 }
 
 test "result error type: the error of err(5) is not a string at a string parameter" {

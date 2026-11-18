@@ -1,7 +1,7 @@
 // Proves: reading result.value without checking result.ok is refused (ZTS303).
 import { validateJson, schemaCompile } from "zttp:validate";
 
-const ok = schemaCompile("test", JSON.stringify({ type: "object" }));
+const ok = schemaCompile("test", '{"type":"object"}');
 
 structural Guardrails<T> = Proof<T, "result_safe">;
 
