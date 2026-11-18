@@ -367,6 +367,7 @@ capsule, the default proof profile then reports ZTS500.
 | A Response init that is not a record, or a `status` that is not a number | ZTS203 | `Response.text("x", { status: 404 })` |
 | `Response.redirect(url, { status: 301 })` | ZTS203 | `Response.redirect(url, 301)` |
 | A `Response.json` payload that JSON cannot carry, such as `Dict<number, string>` | ZTS213 | A string-keyed payload |
+| `stringifyJson` of a value that JSON cannot carry, such as a function or a `Dict<number, string>` | ZTS213 | A string-keyed payload. Call a function rather than encoding it |
 | A member or index read on the `.value` of `requestJson(req)` | ZTS201 | `decodeJson` with a schema, or `isDict(v)` and `dictGet(v, key)` |
 | `JSON.parse`, `JSON.stringify`, and `JSON.tryParse` | ZTS629 | `parseJson` or `stringifyJson` from `zttp:json`, or `decodeJson` from `zttp:decode` |
 
@@ -418,5 +419,4 @@ against the compiler.
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |
 | `for...of` over a number, such as `for (const k of 5)` | Accepted, exit 0 | A targeted refusal. Iterate an array, a string, or `range(n)` |
-| `stringifyJson` of a value that JSON cannot carry, such as a function or a `Dict<number, string>` | Accepted, exit 0. `Response.json` refuses the same payload with ZTS213 | ZTS213. Pass a string-keyed payload |
 | A `default` arm on a closed union that is already covered, or a duplicate `when` arm | Accepted, exit 2. The check reports ZTS216 as a warning | ZTS216 as an error. Remove the `default` arm or the duplicate arm |

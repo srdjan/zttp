@@ -1165,6 +1165,14 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("import { dictEmpty } from \"zttp:collections\";\nfunction g(): Response {\n  const d: Dict<string, string> = dictEmpty();\n  return Response.json(d);\n}")),
     },
     .{
+        .key = "`stringifyJson` of a value that JSON cannot carry, such as a function or a `Dict<number, string>`",
+        .refused = &.{
+            r("stringifyJson", top("import { stringifyJson } from \"zttp:json\";\nfunction f(x: number): number {\n  return x;\n}\nfunction g(): boolean {\n  const s = stringifyJson(f);\n  return s.ok;\n}")),
+            r("Dict<number, string>", top("import { stringifyJson } from \"zttp:json\";\nimport { dictEmpty } from \"zttp:collections\";\nfunction g(): boolean {\n  const d: Dict<number, string> = dictEmpty();\n  const s = stringifyJson(d);\n  return s.ok;\n}")),
+        },
+        .clean = c(top("import { stringifyJson } from \"zttp:json\";\nimport { dictEmpty } from \"zttp:collections\";\nfunction g(): boolean {\n  const d: Dict<string, string> = dictEmpty();\n  const s = stringifyJson(d);\n  return s.ok;\n}")),
+    },
+    .{
         .key = "A member or index read on the `.value` of `requestJson(req)`",
         .refused = &.{
             r(".value", body("  const j = requestJson(req);\n  if (j.ok) {\n    const n = j.value.name;\n  }")),
@@ -1585,13 +1593,6 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "`for...of` over a number, such as `for (const k of 5)`",
         .sources = &.{c(top("function g(): number {\n  for (const k of 5) {\n    const y = k;\n  }\n  return 1;\n}"))},
-    },
-    .{
-        .key = "`stringifyJson` of a value that JSON cannot carry, such as a function or a `Dict<number, string>`",
-        .sources = &.{
-            c(top("import { stringifyJson } from \"zttp:json\";\nimport { dictEmpty } from \"zttp:collections\";\nfunction g(): boolean {\n  const d: Dict<number, string> = dictEmpty();\n  const s = stringifyJson(d);\n  return s.ok;\n}")),
-            c(top("import { stringifyJson } from \"zttp:json\";\nfunction f(x: number): number {\n  return x;\n}\nfunction g(): boolean {\n  const s = stringifyJson(f);\n  return s.ok;\n}")),
-        },
     },
     .{
         .key = "A `default` arm on a closed union that is already covered, or a duplicate `when` arm",

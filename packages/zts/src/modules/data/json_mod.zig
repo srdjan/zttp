@@ -57,7 +57,7 @@ pub const binding = mb.ModuleBinding{
     .exports = &.{
         .{ .name = "parseJson", .func = parseJsonNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.string}, .param_names = &.{"text"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
         .{ .name = "parseJsonBytes", .func = parseJsonBytesNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.bytes}, .param_names = &.{"bytes"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "stringifyJson", .func = stringifyJsonNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.unknown}, .param_names = &.{"value"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "stringifyJson", .func = stringifyJsonNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.unknown}, .param_names = &.{"value"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true, .json_encodable_args = &.{0} },
     },
 };
 
