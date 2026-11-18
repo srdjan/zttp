@@ -1491,6 +1491,17 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("structural M = { kind: \"a\"; from: number } | { kind: \"b\" };\nfunction g(m: M): number {\n  const x = { assert: 1, set: 2 };\n  assert x.assert + x.set > 0;\n  return match (m) {\n    when { kind: \"a\", from: f }: f\n    when { kind: \"b\" }: 0\n  };\n}")),
     },
     .{
+        .key = "`for...of` over a value that is not an array, a tuple, or range(n), such as a record, a number, a string, or a Dict",
+        .refused = &.{
+            r("for...of", body("  const o = { a: 1 };\n  for (const v of o) {\n    const y = v;\n  }")),
+            r("for...of", body("  for (const k of 5) {\n    const y = k;\n  }")),
+            r("for...of", body("  const s = \"abc\";\n  for (const c of s) {\n    const y = c;\n  }")),
+            r("for...of", top("function g(d: Dict<string, number>): number {\n  for (const e of d) {\n    const y = e;\n  }\n  return 1;\n}")),
+            r("for...of", top("function g(u: unknown): number {\n  for (const e of u) {\n    const y = e;\n  }\n  return 1;\n}")),
+        },
+        .clean = c(top("import { dictEntries } from \"zttp:collections\";\nfunction g(xs: number[], t: [number, string], d: Dict<string, number>, s: string): number {\n  for (const a of xs) {\n    const y = a;\n  }\n  for (const b of t) {\n    const y = b;\n  }\n  for (const i of range(3)) {\n    const y = i;\n  }\n  for (const e of dictEntries(d)) {\n    const y = e;\n  }\n  for (const ch of s.split(\"\")) {\n    const y = ch;\n  }\n  return 1;\n}")),
+    },
+    .{
         .key = "Destructuring in a `for...of` head",
         .refused = &.{
             r("for...of", top("function g(xs: number[][]): number {\n  for (const [a, b] of xs) {\n  }\n  return 1;\n}")),
@@ -1548,10 +1559,6 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "`match` on a call, such as `match (g()) { ... }`",
         .sources = &.{c(top("function g(): number {\n  return 1;\n}\nfunction h(): number {\n  return match (g()) {\n    when 1: 1\n    default: 0\n  };\n}"))},
-    },
-    .{
-        .key = "`for...of` over a fixed record",
-        .sources = &.{c(body("  const o = { a: 1 };\n  for (const v of o) {\n    const y = v;\n  }"))},
     },
     .{
         .key = "`import { ... } from \"zttp:types\"`",
@@ -1615,9 +1622,5 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "`DictKey` with no import, such as `<K extends DictKey>`",
         .sources = &.{c(top("function f<K extends DictKey>(k: K): K {\n  return k;\n}"))},
-    },
-    .{
-        .key = "`for...of` over a number, such as `for (const k of 5)`",
-        .sources = &.{c(top("function g(): number {\n  for (const k of 5) {\n    const y = k;\n  }\n  return 1;\n}"))},
     },
 };

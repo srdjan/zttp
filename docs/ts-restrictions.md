@@ -161,12 +161,13 @@ and local function declaration. A block is only the body of a function, `if`,
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | ZTS070 | Write the body as a block, such as `if (c) { g(); }`. `else if` stays |
 | A fallback `assert` form | ZTS002 | `if (!predicate) { return fallback; }` |
 | A `for...of` body that mutates the collection that it iterates | ZTS622 | Read one collection and build the changed one separately |
+| `for...of` over a value that is not an array, a tuple, or range(n), such as a record, a number, a string, or a Dict | ZTS218 | `Object.keys(r)` for a record, `dictEntries(d)` for a `Dict`, `s.split("")` for a string, and `range(n)` for a count |
 | `range(n).map(f)` and other array members on `range(n)` | ZTS201 | `for (const i of range(n))` |
 | Destructuring in a `for...of` head | ZTS001 | Bind the element to one name, then read each member in the body |
 
 `for...of` evaluates its iterable once and iterates a snapshot. The admitted
-iterables are arrays, tuples, strings, `range(n)`, and `Dict` entries. There is
-no user-defined iterator protocol.
+iterables are arrays, tuples, and `range(n)`. A record, a number, a string, and
+a `Dict` are refused with ZTS218. There is no user-defined iterator protocol.
 
 ## Operators And Expressions
 
@@ -410,7 +411,6 @@ against the compiler.
 | Form | Observed result | Required |
 |---|---|---|
 | `match` on a call, such as `match (g()) { ... }` | Accepted, exit 0. The specification requires an identifier or a member path | A targeted refusal. Bind the value to a `const` first |
-| `for...of` over a fixed record | Accepted by the type and strict checks | A targeted refusal. Iterate an array, such as `Object.keys(r)` |
 | `import { ... } from "zttp:types"` | Refused with ZTS206 for a value import, and with ZTS053 for `import type` | ZTS053 for both. Write `Proof<T, P>` or `Effects<T, R>` directly. Both are ambient |
 | C-style `for (;;)` | Refused with ZTS001 and ZTS002 | ZTS001 only. Write `for (const i of range(n))` |
 | Labeled `break` and `continue` | Refused with ZTS001 and ZTS047 | ZTS001 only. Write a conditional |
@@ -422,4 +422,3 @@ against the compiler.
 | A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | Accepted, exit 0 | ZTS209. Pass a type argument that satisfies the constraint |
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |
-| `for...of` over a number, such as `for (const k of 5)` | Accepted, exit 0 | A targeted refusal. Iterate an array, a string, or `range(n)` |

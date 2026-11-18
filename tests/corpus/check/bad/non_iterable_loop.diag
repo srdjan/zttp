@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS218","severity":"error","message":"for...of iterates only an array, a tuple, or range(n)","file":"check/bad/non_iterable_loop.ts","line":4,"column":21,"suggestion":"Iterate Object.keys(r) for a record, dictEntries(d) for a Dict, s.split(\"\") for a string, or range(n) for a count.","repair_intent":null}

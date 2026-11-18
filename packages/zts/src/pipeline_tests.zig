@@ -5589,8 +5589,21 @@ test "for...of over a tuple of numbers refuses a string method on the variable" 
     , non_record_member_message, non_record_member_help);
 }
 
-test "for...of over a union with a member that is not an array or tuple leaves the variable untyped" {
-    try expectNoTypeDiagnostic(
+/// The one ZTS218 (`non_iterable_loop`) that `source` must report.
+fn expectOneNonIterableLoop(source: []const u8) !void {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.typeDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(type_checker_mod.DiagnosticKind.non_iterable_loop, diagnostics[0].kind);
+            try testing.expectEqualStrings("for...of iterates only an array, a tuple, or range(n)", diagnostics[0].message);
+        }
+    };
+    try withSession(testing.allocator, source, Probe.run);
+}
+
+test "for...of over a union with a member that is not an array or tuple is refused with ZTS218" {
+    try expectOneNonIterableLoop(
         \\structural Nope = { zz: Bytes };
         \\function f(u: number[] | string): number { for (const v of u) { const p: Nope = v; } return 0; }
     );

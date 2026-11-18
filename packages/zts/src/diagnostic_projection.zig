@@ -283,6 +283,8 @@ const all_codes: [code_count]CodeEntry = blk: {
 };
 
 test "checker diagnostic codes are globally unique" {
+    // 66 with the non-iterable loop kind (ZTS218, Decision 25). It was 65 with
+    // the strict top-level initializer rule (ZTS630) in place.
     // 64 with the function-value binding kind (ZTS217, Decision 20). It was
     // 63 after the ZTS608 and ZTS609 kinds went: the parser refuses what they
     // named with ZTS072, a parser-band code. Before that it was 65. It was 64
@@ -300,7 +302,7 @@ test "checker diagnostic codes are globally unique" {
     // The count is here so a projection that silently stops enumerating a
     // checker cannot pass the uniqueness loop below over a shorter list; it
     // moves whenever a checker's kind set does.
-    try std.testing.expectEqual(@as(usize, 65), allCodes().len);
+    try std.testing.expectEqual(@as(usize, 66), allCodes().len);
 
     var seen: std.StringHashMapUnmanaged(CodeEntry) = .empty;
     defer seen.deinit(std.testing.allocator);

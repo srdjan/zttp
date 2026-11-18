@@ -113,6 +113,7 @@ pub const DiagnosticKind = enum {
     nominal_constructor_call, // a nominal type name used in call position
     readonly_mutation, // a mutating array method called on a readonly receiver
     function_value_binding, // a `const` or `let` whose type is a function type
+    non_iterable_loop, // a `for...of` over a value that is not an array, a tuple, or `range(n)`
 };
 
 pub const Diagnostic = struct {
@@ -1367,9 +1368,10 @@ pub const TypeChecker = struct {
     /// Record the type of a for-of element variable. An array binds its
     /// element type. A tuple binds the union of its widened element types, so
     /// `[1, 2, 3]` binds `number`. A union whose members are all arrays or
-    /// tuples binds the union of each member's element type. Any other
-    /// iterable, an empty tuple, and an element with no type leave the
-    /// variable untyped, as before.
+    /// tuples binds the union of each member's element type. A value that is
+    /// not an array, a tuple, or `range(n)` is refused with ZTS218. A
+    /// nullable iterable, an empty tuple, and an element with no type leave
+    /// the variable untyped.
     fn bindForOfElement(self: *TypeChecker, fi: Node.ForIterStmt) void {
         // A loop variable is never a declared function. Without this entry, a
         // call of a loop variable named like a builtin, such as `isDict`,
@@ -1383,9 +1385,46 @@ pub const TypeChecker = struct {
         }
         const iterable = self.env.resolveRef(self.inferType(fi.iterable));
         if (iterable == null_type_idx) return;
+        if (!self.isIterableShape(iterable)) {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .non_iterable_loop,
+                .node = fi.iterable,
+                .message = "for...of iterates only an array, a tuple, or range(n)",
+                .help = "Iterate Object.keys(r) for a record, dictEntries(d) for a Dict, s.split(\"\") for a string, or range(n) for a count.",
+            });
+            return;
+        }
         const element = self.forOfElementType(iterable);
         if (element == null_type_idx) return;
         self.binding_types.put(self.allocator, bindingKey(fi.binding), element) catch self.markAllocationFailure();
+    }
+
+    /// Whether a `for...of` may iterate a value of type `iterable`: an array,
+    /// a tuple, or a union of those. A `null` or `undefined` member does not
+    /// count against the type, because ZTS309 reports the read of it. A type
+    /// that is already refused (`t_error`) passes, so one fault gives one
+    /// diagnostic.
+    fn isIterableShape(self: *TypeChecker, iterable: TypeIndex) bool {
+        const pool = self.env.pool;
+        const shape = pool.unwrapNominal(self.env.resolveRef(iterable));
+        const tag = pool.getTag(shape) orelse return false;
+        switch (tag) {
+            .t_array, .t_tuple, .t_error => return true,
+            .t_nullable => return self.isIterableShape(pool.getNullableInner(shape)),
+            .t_union => {
+                var seen_sequence = false;
+                for (pool.getUnionMembers(shape)) |member| {
+                    const member_tag = pool.getTag(pool.unwrapNominal(self.env.resolveRef(member))) orelse return false;
+                    if (member_tag == .t_null or member_tag == .t_undefined) continue;
+                    if (!self.isIterableShape(member)) return false;
+                    seen_sequence = true;
+                }
+                return seen_sequence;
+            },
+            // exhaustive: any other type is not iterable.
+            else => return false,
+        }
     }
 
     /// The element type that a loop variable takes over `iterable`, or
@@ -10351,6 +10390,97 @@ test "TypeChecker: a declaration that holds a function value is refused with ZTS
         \\  const alias = format;
         \\}
     , 1, "a declaration cannot hold a function value", "call the module-level function by its name, or pass the arrow directly as a call argument");
+}
+
+test "TypeChecker: a for...of over a value that is not an array, a tuple, or range(n) is refused with ZTS218" {
+    try std.testing.expectEqualStrings("ZTS218", diagnostic_catalog.typeCode(.non_iterable_loop));
+    const help = "Iterate Object.keys(r) for a record, dictEntries(d) for a Dict, s.split(\"\") for a string, or range(n) for a count.";
+    const message = "for...of iterates only an array, a tuple, or range(n)";
+    try checkTypedSourceHelping(
+        \\function f(r: { a: number }): number {
+        \\  for (const k of r) { const y = k; }
+        \\  return 1;
+        \\}
+    , 1, message, help);
+    try checkTypedSourceHelping(
+        \\function f(): number {
+        \\  for (const k of 5) { const y = k; }
+        \\  return 1;
+        \\}
+    , 1, message, help);
+    try checkTypedSourceHelping(
+        \\function f(s: string): number {
+        \\  for (const k of s) { const y = k; }
+        \\  return 1;
+        \\}
+    , 1, message, help);
+    try checkTypedSourceHelping(
+        \\function f(d: Dict<string, number>): number {
+        \\  for (const k of d) { const y = k; }
+        \\  return 1;
+        \\}
+    , 1, message, help);
+    try checkTypedSourceHelping(
+        \\function f(u: unknown): number {
+        \\  for (const k of u) { const y = k; }
+        \\  return 1;
+        \\}
+    , 1, message, help);
+    try checkTypedSourceHelping(
+        \\function f(u: number[] | string): number {
+        \\  for (const k of u) { const y = k; }
+        \\  return 1;
+        \\}
+    , 1, message, help);
+}
+
+test "TypeChecker: a for...of over an array, a tuple, range(n), or an entry list is not refused" {
+    try checkTypedSource(
+        \\function f(xs: number[]): number {
+        \\  for (const k of xs) { const y = k; }
+        \\  return 1;
+        \\}
+    , 0, 0);
+    try checkTypedSource(
+        \\function f(t: [number, string]): number {
+        \\  for (const k of t) { const y = k; }
+        \\  return 1;
+        \\}
+    , 0, 0);
+    try checkTypedSource(
+        \\function f(u: number[] | [number, number]): number {
+        \\  for (const k of u) { const y = k; }
+        \\  return 1;
+        \\}
+    , 0, 0);
+    try checkTypedSource(
+        \\function f(n: number): number {
+        \\  for (const i of range(n)) { const y = i; }
+        \\  return 1;
+        \\}
+    , 0, 0);
+    try checkTypedSource(
+        \\import { dictEntries } from "zttp:collections";
+        \\function f(d: Dict<string, number>): number {
+        \\  for (const e of dictEntries(d)) { const y = e; }
+        \\  return 1;
+        \\}
+    , 0, 0);
+    try checkTypedSource(
+        \\function f(s: string): number {
+        \\  for (const c of s.split("")) { const y = c; }
+        \\  return 1;
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: a for...of over an array that may be undefined gets no ZTS218" {
+    try checkTypedSource(
+        \\function f(xs: number[] | undefined): number {
+        \\  for (const k of xs) { const y = k; }
+        \\  return 1;
+        \\}
+    , 0, 0);
 }
 
 test "TypeChecker: a function and an arrow on one line keep separate signatures" {
