@@ -1348,6 +1348,7 @@ pub const TypeChecker = struct {
     /// with no declared return type, and a value whose type is unknown, pass.
     fn checkReturnedValue(self: *TypeChecker, node: NodeIndex, value: NodeIndex) void {
         if (self.current_return_type == null_type_idx) return;
+        if (self.holdsAliasBreach(self.current_return_type)) return;
         const inferred = self.inferType(value);
         if (inferred != null_type_idx and !self.env.isAssignableTo(inferred, self.current_return_type)) {
             const result_subject = if (self.env.pool.isResultRecord(self.env.pool.unwrapNominal(self.env.resolveRef(inferred)))) self.identifierName(value) else null;
@@ -1483,7 +1484,7 @@ pub const TypeChecker = struct {
     /// is on the stack of enclosing functions while its body is walked.
     fn walkFunctionBody(self: *TypeChecker, fn_node: NodeIndex, body: NodeIndex) void {
         if (self.sourceFunctionSignature(fn_node)) |sig| {
-            self.reportBadDictKey(sig.return_type, fn_node, sig.typeParams());
+            self.reportTypeBreach(sig.return_type, fn_node, sig.typeParams());
         }
         if (self.function_depth < max_function_stack) self.function_stack[self.function_depth] = fn_node;
         self.function_depth += 1;
@@ -1534,7 +1535,7 @@ pub const TypeChecker = struct {
                     self.unannotated_decls.put(self.allocator, bindingKey(vd.binding), {}) catch self.markAllocationFailure();
                 }
                 self.reportIfNonContractive(declared, node);
-                self.reportBadDictKey(declared, node, &.{});
+                self.reportTypeBreach(declared, node, &.{});
                 self.bindCallableMetadata(vd.binding, .unavailable);
                 if (vd.init != null_node) {
                     self.walkExpr(vd.init);
@@ -1545,7 +1546,7 @@ pub const TypeChecker = struct {
                     const binding = vd.binding;
                     const key = bindingKey(binding);
 
-                    if (declared != null_type_idx and inferred != null_type_idx) {
+                    if (declared != null_type_idx and inferred != null_type_idx and !self.holdsAliasBreach(declared)) {
                         if (!self.env.isAssignableTo(inferred, declared) and
                             !self.brandsAtDeclaration(declared, inferred))
                         {
@@ -5840,7 +5841,7 @@ pub const TypeChecker = struct {
             }
             self.bindCallableMetadata(binding, callable);
             if (param_type == null_type_idx) continue;
-            self.reportBadDictKey(param_type, param_idx, sig.typeParams());
+            self.reportTypeBreach(param_type, param_idx, sig.typeParams());
             const key = bindingKey(binding);
             self.param_types.put(self.allocator, key, param_type) catch self.markAllocationFailure();
             self.env.bindVarType(binding.scope_id, binding.name_atom, param_type) catch self.markAllocationFailure();
@@ -6521,7 +6522,7 @@ pub const TypeChecker = struct {
     /// stacking a second diagnostic on the first.
     fn reportInstantiation(self: *TypeChecker, node: NodeIndex, inst: Instantiation) Instantiation {
         if (self.explicitTypeArgs(node)) |explicit| {
-            for (explicit.args[0..explicit.count]) |arg| self.reportBadDictKey(arg, node, &.{});
+            for (explicit.args[0..explicit.count]) |arg| self.reportTypeBreach(arg, node, &.{});
         }
         switch (inst) {
             .none, .ok => return inst,
@@ -8453,49 +8454,77 @@ pub const TypeChecker = struct {
         return self.dictKeyViolatesBound(constraint, own, depth + 1);
     }
 
-    /// The first Dict key inside `idx` that `dictKeyViolatesBound` refuses.
+    /// A type that breaks a bound a written annotation owes.
+    const TypeBreach = union(enum) {
+        /// A Dict key outside `DictKey`.
+        dict_key: TypeIndex,
+        /// A generic alias argument outside the `extends` bound of its parameter.
+        alias_arg: type_env_mod.AliasBreach,
+    };
+
+    /// The first argument of the generic alias application `idx` that is outside
+    /// the bound of its parameter. `TypeEnv` leaves such an application
+    /// uninstantiated, so a written annotation reaches this walk as an
+    /// application at every position.
+    fn firstBadAliasArg(self: *const TypeChecker, idx: TypeIndex) ?TypeBreach {
+        const pool = self.env.pool;
+        const info = pool.getGenericAppInfo(idx);
+        if (info.base == null_type_idx) return null;
+        const alias = self.env.generic_aliases.get(pool.getRefName(info.base)) orelse return null;
+        if (info.args.len != alias.param_count) return null;
+        // Copy the arguments: `info.args` points into the pool's shared member
+        // list, which an instantiation may reallocate.
+        var args: [8]TypeIndex = undefined;
+        @memcpy(args[0..alias.param_count], info.args);
+        const breach = self.env.firstAliasArgBreach(alias, args[0..alias.param_count]) orelse return null;
+        return .{ .alias_arg = breach };
+    }
+
+    /// The first Dict key that `dictKeyViolatesBound` refuses, or generic alias
+    /// argument outside the bound of its parameter, inside `idx`.
     /// The walk reaches every position a source type can name a Dict: a record
     /// field, an array or tuple element, a union or intersection member, a
     /// function parameter or return, a generic argument, and the body of an
     /// alias that the type names.
-    fn firstBadDictKey(
+    fn firstTypeBreach(
         self: *const TypeChecker,
         idx: TypeIndex,
         own: []const type_env_mod.GenericParam,
         depth: u8,
-    ) ?TypeIndex {
+    ) ?TypeBreach {
         if (idx == null_type_idx or depth >= 16) return null;
         const pool = self.env.pool;
         const tag = pool.getTag(idx) orelse return null;
         return switch (tag) {
             .t_dict => if (self.dictKeyViolatesBound(pool.getDictKey(idx), own, 0))
-                pool.getDictKey(idx)
+                .{ .dict_key = pool.getDictKey(idx) }
             else
-                self.firstBadDictKey(pool.getDictKey(idx), own, depth + 1) orelse
-                    self.firstBadDictKey(pool.getDictValue(idx), own, depth + 1),
-            .t_array => self.firstBadDictKey(pool.getArrayElement(idx), own, depth + 1),
-            .t_nullable => self.firstBadDictKey(pool.getNullableInner(idx), own, depth + 1),
+                self.firstTypeBreach(pool.getDictKey(idx), own, depth + 1) orelse
+                    self.firstTypeBreach(pool.getDictValue(idx), own, depth + 1),
+            .t_array => self.firstTypeBreach(pool.getArrayElement(idx), own, depth + 1),
+            .t_nullable => self.firstTypeBreach(pool.getNullableInner(idx), own, depth + 1),
             .t_ref => blk: {
                 const resolved = self.env.resolveRef(idx);
                 if (resolved == idx) break :blk null;
-                break :blk self.firstBadDictKey(resolved, own, depth + 1);
+                break :blk self.firstTypeBreach(resolved, own, depth + 1);
             },
-            .t_union => self.firstBadDictKeyIn(pool.getUnionMembers(idx), own, depth),
-            .t_intersection => self.firstBadDictKeyIn(pool.getIntersectionMembers(idx), own, depth),
-            .t_tuple => self.firstBadDictKeyIn(pool.getTupleElements(idx), own, depth),
-            .t_generic_app => self.firstBadDictKeyIn(pool.getGenericAppInfo(idx).args, own, depth),
+            .t_union => self.firstTypeBreachIn(pool.getUnionMembers(idx), own, depth),
+            .t_intersection => self.firstTypeBreachIn(pool.getIntersectionMembers(idx), own, depth),
+            .t_tuple => self.firstTypeBreachIn(pool.getTupleElements(idx), own, depth),
+            .t_generic_app => self.firstBadAliasArg(idx) orelse
+                self.firstTypeBreachIn(pool.getGenericAppInfo(idx).args, own, depth),
             .t_record => blk: {
                 for (pool.getRecordFields(idx)) |field| {
-                    if (self.firstBadDictKey(field.type_idx, own, depth + 1)) |bad| break :blk bad;
+                    if (self.firstTypeBreach(field.type_idx, own, depth + 1)) |bad| break :blk bad;
                 }
                 break :blk null;
             },
             .t_function => blk: {
                 const info = pool.getFunctionInfo(idx);
                 for (info.params) |param| {
-                    if (self.firstBadDictKey(param.type_idx, own, depth + 1)) |bad| break :blk bad;
+                    if (self.firstTypeBreach(param.type_idx, own, depth + 1)) |bad| break :blk bad;
                 }
-                break :blk self.firstBadDictKey(info.ret, own, depth + 1);
+                break :blk self.firstTypeBreach(info.ret, own, depth + 1);
             },
             // exhaustive: every other tag is a leaf that holds no Dict, so it
             // owes no key check. This walk reports a diagnostic; it decides no
@@ -8504,37 +8533,66 @@ pub const TypeChecker = struct {
         };
     }
 
-    fn firstBadDictKeyIn(
+    fn firstTypeBreachIn(
         self: *const TypeChecker,
         members: []const TypeIndex,
         own: []const type_env_mod.GenericParam,
         depth: u8,
-    ) ?TypeIndex {
+    ) ?TypeBreach {
         for (members) |member| {
-            if (self.firstBadDictKey(member, own, depth + 1)) |bad| return bad;
+            if (self.firstTypeBreach(member, own, depth + 1)) |bad| return bad;
         }
         return null;
     }
 
+    /// True when `declared` holds a generic alias argument outside its bound.
+    /// The annotation is already refused with ZTS209, and the application stays
+    /// uninstantiated, so a value compared with it would add a second report.
+    fn holdsAliasBreach(self: *const TypeChecker, declared: TypeIndex) bool {
+        const breach = self.firstTypeBreach(declared, &.{}, 0) orelse return false;
+        return switch (breach) {
+            .alias_arg => true,
+            .dict_key => false,
+        };
+    }
+
     /// Report ZTS209 when a declared annotation holds a Dict whose key type
-    /// does not satisfy `DictKey`.
-    fn reportBadDictKey(
+    /// does not satisfy `DictKey`, or a generic alias argument outside the
+    /// bound of its parameter.
+    fn reportTypeBreach(
         self: *TypeChecker,
         declared: TypeIndex,
         node: NodeIndex,
         own: []const type_env_mod.GenericParam,
     ) void {
         if (declared == null_type_idx or node == null_node) return;
-        const bad = self.firstBadDictKey(declared, own, 0) orelse return;
+        const breach = self.firstTypeBreach(declared, own, 0) orelse return;
         var buf: [128]u8 = undefined;
-        self.addGenericDiagnostic(
-            .type_constraint_violation,
-            node,
-            "type argument {s} for 'K' does not satisfy constraint DictKey",
-            .{self.env.pool.formatType(bad, &buf)},
-            "a Dict key type does not satisfy DictKey",
-            "Use `string` or `number` as the key type.",
-        );
+        switch (breach) {
+            .dict_key => |bad| self.addGenericDiagnostic(
+                .type_constraint_violation,
+                node,
+                "type argument {s} for 'K' does not satisfy constraint DictKey",
+                .{self.env.pool.formatType(bad, &buf)},
+                "a Dict key type does not satisfy DictKey",
+                "Use `string` or `number` as the key type.",
+            ),
+            .alias_arg => |bad| {
+                var bound_buf: [128]u8 = undefined;
+                self.addGenericDiagnostic(
+                    .type_constraint_violation,
+                    node,
+                    "type argument {s} for '{s}' does not satisfy constraint {s}",
+                    .{
+                        self.env.pool.formatType(bad.arg, &buf),
+                        bad.name,
+                        self.env.pool.formatType(bad.constraint, &bound_buf),
+                    },
+                    "a type argument does not satisfy its constraint",
+                    "Pass a type argument that satisfies the constraint.",
+                );
+            },
+        }
     }
 
     /// Report ZTS212 when a declared annotation names an alias whose cycle no

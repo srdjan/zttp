@@ -2537,7 +2537,7 @@ const application_fixtures = [_]ApplicationFixture{
 const GenericAliasCase = enum {
     spaced_list,
     empty_list,
-    ignored_constraint,
+    enforced_constraint,
     eight_item_projection,
     generic_then_plain,
     plain_then_generic,
@@ -2561,7 +2561,7 @@ const GenericAliasFixture = struct {
 const generic_alias_fixtures = [_]GenericAliasFixture{
     .{ .case = .spaced_list, .source = "structural Box <T> = { value: T };\nconst value: Box<number> = undefined;" },
     .{ .case = .empty_list, .source = "structural Box<> = number;\nconst value: Box<> = undefined;" },
-    .{ .case = .ignored_constraint, .source = "structural Box<T extends string> = { value: T };\nconst value: Box<number> = undefined;" },
+    .{ .case = .enforced_constraint, .source = "structural Box<T extends string> = { value: T };\nconst value: Box<number> = undefined;" },
     .{ .case = .eight_item_projection, .source = "structural Wide<A,B,C,D,E,F,G,H> = H;\nconst value: Wide<string,string,string,string,string,string,string,number> = undefined;" },
     .{ .case = .generic_then_plain, .source = "structural Both<T> = T;\nstructural Both = number;" },
     .{ .case = .plain_then_generic, .source = "structural Both = number;\nstructural Both<T> = T;" },
@@ -2569,10 +2569,10 @@ const generic_alias_fixtures = [_]GenericAliasFixture{
     .{ .case = .alias_before_parameter, .source = "structural T = number;\nstructural Box<T> = T;\nconst value: Box<string> = undefined;" },
     .{ .case = .nested_substitution, .source = "structural Box<T> = { values: T[] };\nconst value: Box<number> = undefined;" },
     .{ .case = .nested_application_projection, .source = "structural Inner<T> = { value: T };\nstructural Outer<U> = Inner<U>;\nconst value: Outer<number> = undefined;" },
-    .{ .case = .constraint_closer, .source = "structural Box<T extends { value: Missing > }> = number;\nconst value: Box<string> = undefined;" },
+    .{ .case = .constraint_closer, .source = "structural Box<T extends Dict<string, number>> = number;\nconst value: Box<Dict<string, number>> = undefined;" },
     .{ .case = .constraint_less_than, .source = "structural Box<T extends { value: Missing < }> = number;\nconst value: Box<> = undefined;" },
     .{ .case = .wrapped_constraint_less_than, .source = "structural Box<T extends Wrap<{ value: Missing < }, string>> = number;\nconst value: Box<> = undefined;" },
-    .{ .case = .quoted_equals, .source = "structural Box<T extends \"a=b\"> = number;\nconst value: Box<string> = undefined;" },
+    .{ .case = .quoted_equals, .source = "structural Box<T extends \"a=b\"> = number;\nconst value: Box<\"a=b\"> = undefined;" },
     .{ .case = .adjacent_alias_equals, .source = "structural Box<T>=T;\nconst value: Box<number> = undefined;" },
     .{ .case = .adjacent_annotation_equals, .source = "structural Box<T> = T;\nconst value:Box<number>=undefined;" },
 };
@@ -3018,7 +3018,7 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
         );
     };
     switch (case) {
-        .spaced_list, .ignored_constraint => {
+        .spaced_list => {
             const owner = parser.type_store.generic_owners.items[0];
             const authored = parser.type_store.genericParameterSlice(owner.authored_parameters) orelse
                 return error.TestUnexpectedResult;
@@ -3031,6 +3031,21 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
             const fields = pool.getRecordFields(value_type orelse return error.TestUnexpectedResult);
             try std.testing.expectEqual(@as(usize, 1), fields.len);
             try std.testing.expectEqual(pool.idx_number, fields[0].type_idx);
+        },
+        .enforced_constraint => {
+            const owner = parser.type_store.generic_owners.items[0];
+            const projected = parser.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(usize, 1), projected.len);
+            try std.testing.expectEqual(@as(?u32, 0), projected[0].bound_fragment);
+            try std.testing.expectEqual(@as(usize, 1), parser.type_store.semantic_fragments.items.len);
+            const alias = env.generic_aliases.get("Box") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(pool.idx_string, alias.param_constraints[0]);
+            // An argument outside its bound leaves the application uninstantiated.
+            try std.testing.expectEqual(
+                type_pool_mod.TypeTag.t_generic_app,
+                pool.getTag(value_type orelse return error.TestUnexpectedResult).?,
+            );
         },
         .empty_list => {
             const owner = parser.type_store.generic_owners.items[0];
@@ -3075,7 +3090,7 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
         .constraint_closer => {
             const owner = parser.type_store.generic_owners.items[0];
             try std.testing.expectEqualStrings(
-                "<T extends { value: Missing > }>",
+                "<T extends Dict<string, number>>",
                 owner.list_span.text(source),
             );
             try std.testing.expectEqual(pool.idx_number, value_type orelse return error.TestUnexpectedResult);

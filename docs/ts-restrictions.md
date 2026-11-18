@@ -305,6 +305,7 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | A wrong number of explicit type arguments, or a violated constraint | ZTS210, ZTS209 | Match the declaration |
 | A ninth type parameter in one generic declaration, such as `function f<A, B, C, D, E, F, G, H, I>(a: A): A` | ZTS028 | Use at most eight type parameters |
 | A Dict key type other than string or number, such as `Dict<boolean, string>`, `Dict<undefined, string>`, `Dict<unknown, string>`, and `Dict<string \| undefined, string>` | ZTS209 | Use `string` or `number` as the key type |
+| A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | ZTS209 | Pass a type argument that satisfies the constraint |
 | A `structural` or `nominal` declaration inside a function | ZTS002 | Declare the type at the top level |
 | A generic default, such as `function f<T = string>(a: T): T` | ZTS001 | Remove the default. Pass the type argument at each use |
 | A type-parameter modifier, such as `in`, `out`, or `const` | ZTS001 | Remove the modifier |
@@ -424,6 +425,5 @@ against the compiler.
 
 | Form | Observed result | Required |
 |---|---|---|
-| A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | Accepted, exit 0 | ZTS209. Pass a type argument that satisfies the constraint |
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |

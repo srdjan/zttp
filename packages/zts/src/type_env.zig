@@ -350,8 +350,17 @@ pub const TypePredicate = struct {
 
 pub const GenericAlias = struct {
     param_names: [8][]const u8 = undefined,
+    /// The `extends` bound of each parameter, or `null_type_idx` for none.
+    param_constraints: [8]TypeIndex = @splat(null_type_idx),
     param_count: u8 = 0,
     body: TypeIndex = null_type_idx,
+};
+
+/// An alias argument outside the bound of its parameter.
+pub const AliasBreach = struct {
+    name: []const u8,
+    arg: TypeIndex,
+    constraint: TypeIndex,
 };
 
 // ---------------------------------------------------------------------------
@@ -1229,6 +1238,28 @@ pub const TypeEnv = struct {
                 inputs[index] = .{ .name = parameter.name_span.text(store.source) };
             }
             var scope = try self.beginParsedGenerics(inputs[0..projected.len]);
+            for (projected, 0..) |parameter, index| {
+                if (index >= scope.count) break;
+                const fragment_index = parameter.bound_fragment orelse continue;
+                const constraint_result = self.lowerParsedGenericBound(
+                    store,
+                    application_bases,
+                    lowered,
+                    &scope,
+                    fragment_index,
+                );
+                inputs[index].constraint = if (constraint_result) |constraint|
+                    constraint
+                else |err|
+                    return @as(anyerror!void, self.closeParsedScopeAfterError(&scope, err));
+            }
+            const installation_result = self.installParsedConstraints(
+                &scope,
+                inputs[0..projected.len],
+            );
+            if (installation_result) |_| {} else |err| {
+                return @as(anyerror!void, self.closeParsedScopeAfterError(&scope, err));
+            }
             const lowered_result = self.lowerParsedGenericRoot(
                 store,
                 application_bases,
@@ -1495,12 +1526,37 @@ pub const TypeEnv = struct {
         return .{ .changed = new_members };
     }
 
+    /// The first argument of an application of `alias` that is outside the
+    /// bound of its parameter. `args` is rewritten in place with each nested
+    /// application instantiated, which a bound is judged against. A bound
+    /// may name an earlier parameter, so it is instantiated with `args` first.
+    /// A type parameter used as an argument is admitted: only its own
+    /// declaration knows its constraint.
+    pub fn firstAliasArgBreach(self: *TypeEnv, alias: GenericAlias, args: []TypeIndex) ?AliasBreach {
+        for (args) |*arg| arg.* = self.tryInstantiateGenericApp(arg.*);
+        for (args, 0..) |arg, i| {
+            const declared = alias.param_constraints[i];
+            if (declared == null_type_idx) continue;
+            if (self.pool.getTag(arg) == .t_generic_param) continue;
+            const bound = self.pool.instantiate(
+                self.allocator,
+                declared,
+                alias.param_names[0..alias.param_count],
+                args,
+                0,
+            );
+            if (self.isAssignableTo(arg, bound)) continue;
+            return .{ .name = alias.param_names[i], .arg = arg, .constraint = bound };
+        }
+        return null;
+    }
+
     /// If idx is a t_generic_app whose base resolves to a generic alias,
     /// instantiate the alias body with the provided type arguments.
     /// Recurses through intersection and union members so a generic
     /// application nested inside `Proof<Response, ...>` or
     /// `Result<T> | Foo` is instantiated as well.
-    fn tryInstantiateGenericApp(self: *TypeEnv, idx: TypeIndex) TypeIndex {
+    pub fn tryInstantiateGenericApp(self: *TypeEnv, idx: TypeIndex) TypeIndex {
         if (idx == null_type_idx) return idx;
         const tag = self.pool.getTag(idx) orelse return idx;
 
@@ -1583,6 +1639,9 @@ pub const TypeEnv = struct {
                 for (0..argc) |i| {
                     inst_args[i] = self.tryInstantiateGenericApp(inst_args[i]);
                 }
+                // An argument outside its bound leaves the application
+                // uninstantiated: the checker reports it from the annotation.
+                if (self.firstAliasArgBreach(alias, inst_args[0..argc]) != null) return idx;
                 return self.pool.instantiate(
                     self.allocator,
                     alias.body,
@@ -2379,6 +2438,7 @@ pub const TypeEnv = struct {
         var alias: GenericAlias = .{ .body = body };
         for (owner.params[0..owner.count], 0..) |parameter, index| {
             alias.param_names[index] = parameter.name;
+            alias.param_constraints[index] = parameter.constraint;
         }
         alias.param_count = owner.count;
         const owned_name = self.internName(name);

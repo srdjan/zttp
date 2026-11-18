@@ -1415,6 +1415,9 @@ fn parseDeclarationAndStoreCore(
         }
 
         if (raw_start != raw_end) {
+            // Bound fragments of a generic owner sit before the body, so the
+            // body owns only the nodes that its own parse adds.
+            const body_node_start = store.nodes.items.len;
             var parser = SyntaxParser.init(store, source, raw_start, raw_end);
             defer parser.deinit();
             const parsed = parser.parse() catch |err| switch (err) {
@@ -1435,8 +1438,8 @@ fn parseDeclarationAndStoreCore(
             body = .{ .present = .{
                 .root = parsed.child,
                 .node_range = .{
-                    .start = @intCast(checkpoint.nodes),
-                    .count = @intCast(store.nodes.items.len - checkpoint.nodes),
+                    .start = @intCast(body_node_start),
+                    .count = @intCast(store.nodes.items.len - body_node_start),
                 },
                 .raw_span = .{ .start = raw_start, .end = raw_end },
                 .admission_end = admission_end,

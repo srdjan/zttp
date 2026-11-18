@@ -5819,8 +5819,8 @@ test "CHECK preserves ignored generic syntax and raw semantic projection" {
         "structural Box<T> = T;\nconst value: Box<number>=\"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
         "structural Box<T extends { value: Missing < }> = number;\nconst value: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
         "structural Box<T extends Wrap<{ value: Missing < }, string>> = number;\nconst value: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-        "structural Box<T extends { value: Missing > }> = number;\nconst value: Box<string> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-        "structural Box<T extends \"a=b\"> = number;\nconst value: Box<string> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "structural Box<T extends Dict<string, number>> = number;\nconst value: Box<Dict<string, number>> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "structural Box<T extends \"a=b\"> = number;\nconst value: Box<\"a=b\"> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
     };
     const stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
     var observed: usize = 0;

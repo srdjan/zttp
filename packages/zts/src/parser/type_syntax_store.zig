@@ -974,7 +974,7 @@ pub const Store = struct {
         const projection = try appendProjectedParametersWithBounds(
             self,
             projectedListBody(self.source, options.capture_spans.recorded_span),
-            options.policy == .callable,
+            options.policy != .ignored,
         );
 
         const compatibility: GenericOwnerCompatibility = switch (options.policy) {
@@ -2108,9 +2108,14 @@ pub const Store = struct {
                 if (std.meta.activeTag(owner.compatibility) != .declaration_parameters) {
                     return error.InvalidGenericOwner;
                 }
-                for (projected) |parameter| {
-                    if (parameter.bound_fragment != null) return error.InvalidGenericOwner;
-                }
+                for (projected) |parameter| if (parameter.bound_fragment) |fragment_index| {
+                    if (@as(usize, fragment_index) >= self.semantic_fragments.items.len) {
+                        return error.InvalidTypeRange;
+                    }
+                    const fragment = self.semantic_fragments.items[fragment_index];
+                    const bound_span = parameter.bound_span orelse return error.InvalidGenericOwner;
+                    if (!std.meta.eql(fragment.raw_span, bound_span)) return error.InvalidGenericOwner;
+                };
                 if (@as(usize, declaration_index) >= self.declarations.items.len) return error.InvalidGenericOwner;
                 if (self.declarations.items[declaration_index].kind != .structural or
                     self.declarations.items[declaration_index].generic_owner != @as(u32, @intCast(owner_index)))

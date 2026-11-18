@@ -93,6 +93,7 @@ fn arr_call(comptime span: []const u8, comptime e: []const u8) Refusal {
     return r(span, top("function g(xs: number[]): unknown {\n  return " ++ e ++ ";\n}"));
 }
 
+const box_alias = "structural Box<T extends string> = { value: T };\n";
 const boundary_proof = "structural Boundary<T> = Proof<T, \"deterministic\" | \"read_only\">;\n";
 
 const dict_round_trip = "import { dictEmpty, dictSet, dictEntries, dictFromEntries } from \"zttp:collections\";\nfunction g(): boolean {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const pairs = dictEntries(d).map((p) => [p[0], p[1] * 2]);\n  const rebuilt = dictFromEntries(pairs);\n  return rebuilt.ok;\n}\n" ++ tail;
@@ -1172,6 +1173,21 @@ const refusal_rows_b = [_]RefusalRow{
         },
         .clean = param("Dict<string, number>"),
     },
+    .{
+        .key = "A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };`",
+        .refused = &.{
+            r("Box<number>", top(box_alias ++ "function g(b: Box<number>): number {\n  return 1;\n}")),
+            r("Box<number>", top(box_alias ++ "const v: Box<number> = { value: 1 };")),
+            r("Box<number>", top(box_alias ++ "function g(): Box<number> {\n  return { value: 1 };\n}")),
+            r("Box<number>", top(box_alias ++ "structural Holder = { box: Box<number> };\nfunction g(h: Holder): number {\n  return 1;\n}")),
+            r("Box<number>", top(box_alias ++ "function g(xs: Box<number>[]): number {\n  return 1;\n}")),
+            r("Box<number>", top(box_alias ++ "function g(u: Box<number> | undefined): number {\n  return 1;\n}")),
+            r("Box<number>", top(box_alias ++ "function g(f: (b: Box<number>) => number): number {\n  return 1;\n}")),
+            r("Box<number>", top(box_alias ++ "structural Wrapped = Box<number>;\nfunction g(w: Wrapped): number {\n  return 1;\n}")),
+            r("structural Box<T extends string> = { value: T };", top("structural Bag<K extends DictKey, V> = Dict<K, V>;\nfunction g(b: Bag<boolean, string>): number {\n  return 1;\n}")),
+        },
+        .clean = c(top(box_alias ++ "function g(b: Box<string>): number {\n  return 1;\n}")),
+    },
 
     // ----- Ambient Names And Effects -----
     .{
@@ -1644,10 +1660,6 @@ pub const refusal_rows = refusal_rows_a ++ refusal_rows_b;
 
 pub const gap_rows = [_]GapRow{
     // ----- U1b rows, in the order of the row assignment of the plan -----
-    .{
-        .key = "A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };`",
-        .sources = &.{c(top("structural Box<T extends string> = { value: T };\nfunction g(b: Box<number>): number {\n  return b.value;\n}"))},
-    },
     .{
         .key = "`FetchOptions` with no import",
         .sources = &.{c(top("function g(o: FetchOptions): number {\n  return 1;\n}"))},
