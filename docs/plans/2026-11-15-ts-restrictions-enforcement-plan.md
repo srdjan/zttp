@@ -351,6 +351,46 @@ The binding order that causes it also keeps an initializer from reading a
 - (b) Defer to the roadmap, and state that mutual recursion is not
   admitted.
 
+### Decision 25: `for...of` over a string
+
+Spec 5.5 admits arrays, tuples, strings, `range(n)`, and `Dict` entries as
+iterables. A probe on 2026-11-18 at 709b1111 ran `zttp serve` on loops that
+count their iterations. A loop over the string `"abc"` ran 0 times. A loop
+over a fixed record and a loop over a `Dict` also ran 0 times, and
+`zts check` reported nothing for any of them. The `for_of_next` opcode in
+`packages/zts/src/interpreter.zig` steps only an array and a `range`
+iterator, and ends the loop for every other value. `s.split("")` splits by
+code point: for `"aé€"` it gave 3 parts, and `s.length` gave 6. The U4d-1
+measurement refused a string loop and broke no test, fixture, or example.
+
+- (a) Recommended. U4d-1 refuses a string iterable with the same code as a
+  record or a number, and spec 5.5 names arrays, tuples, and `range(n)`
+  only. The replacement is `s.split("")`. `Dict` entries means the array
+  that `dictEntries(d)` returns.
+- (b) The runtime iterates a string by code point, as `split("")` does.
+  This adds an opcode path and a second spelling of one loop.
+
+The owner has not answered.
+
+### Decision 26: a builtin argument that breaks its row parameter
+
+A probe on 2026-11-18 at 709b1111 found a type hole outside the U4d rows.
+`const n: number = Math.pow(true, 2);` and `Math.floor("x")` pass every
+check, and `n` holds `undefined` at run time. A row of
+`builtin_results.zig` declares a `number` or `string` parameter, but the
+checker does not compare the argument with it. A mismatch leaves the call
+with no type, and the `number` annotation accepts a value with no type.
+
+- (a) Recommended. U4d-5 reports ZTS203 when an argument of a builtin row
+  call has a known type that its row parameter does not admit. The
+  `Number` row takes a `string` parameter, so this rule also refuses
+  `Number(x)` with a known argument that is not a `string` (N3). A fallout
+  measurement comes first.
+- (b) U4d-5 refuses only `Number(x)` with a known argument that is not a
+  `string`, and the general hole stays an open item.
+
+The owner has not answered.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -630,6 +670,77 @@ commit, ZTS630 refuses a top-level initializer that reaches a module
 `const` declared at or after it, directly or through a function that it
 calls. A probe of that read under `zttp serve` failed with
 `PrewarmFailed`, so the refusal closes that path at the check.
+
+### U4d: iteration, encoding, match arms, and ambient names (five commits)
+
+Probes on 2026-11-18 at 709b1111, with `zts check` and `zttp serve`:
+
+| Row | Form | Result on HEAD |
+|---|---|---|
+| G6, X21 | `for...of` over a fixed record, a number, a string, or a `Dict` | No diagnostic. Each loop runs 0 times (Decision 25) |
+| X22 | `stringifyJson(f)` for a function, `stringifyJson(d)` for `Dict<number, string>` | No diagnostic. `Response.json(d)` gets ZTS213. The `stringifyJson` binding sets no `json_encodable_args` |
+| Decision 5 | A `default` arm after full coverage, a duplicate `when 1:` arm | ZTS216 warning, exit 0 |
+| N3 | `Boolean(1)` | No type diagnostic. The flow check gives the result every label. The runtime does not install `Boolean` |
+| N3 | `Number(true)` | No diagnostic |
+| N5 | `const h = Headers;` | Only ZTS305 |
+| N15 | `Number.parseInt("12")`, `Number.parseFloat("1.5")` | No diagnostic |
+
+On 2026-11-18 I measured U4d-1 to U4d-4. Each rough change ran in its own
+worktree from e715c5f4 through the commit gate in an empty cache. The
+baseline is 218/221 steps with one failed test, the codegen replay. Each
+list below names the failures beyond that baseline. Every extra route
+passed except where a list names it. Each unit is one commit, and the
+implementer gets the list and 120 calls.
+
+- U4d-1 (G6, X21, Decision 25). The type checker refuses, with a new kind
+  ZTS218, a `for...of` whose iterable type is not an array, a tuple, a
+  union of these, or a `range(n)` call. The site is
+  `type_checker.zig#TypeChecker.bindForOfElement`. The help names
+  `Object.keys(r)`, `dictEntries(d)`, `s.split("")`, and `range(n)`. A
+  `null` or `undefined` member of a union is skipped, so `xs` of type
+  `number[] | undefined` keeps ZTS309. The measured variant also refused
+  an `unknown` iterable and a string, and neither broke a test. Fallout
+  (206/221 steps): the two gap rows; the code count in
+  `diagnostic_projection.zig` (64 to 65); the pipeline test "for...of over
+  a union with a member that is not an array or tuple leaves the variable
+  untyped"; A3 case `r08_for_of`, which the union skip fixes; and the
+  corpus ratchet, which needs a bad case for ZTS218. Waits for Decision 25.
+- U4d-2 (X22). The `stringifyJson` binding in
+  `packages/zts/src/modules/data/json_mod.zig` sets
+  `json_encodable_args = &.{0}`, so `reportIfUnencodable` gives ZTS213, as
+  for `Response.json`. Fallout (216/221 steps): the gap row only.
+- U4d-3 (Decision 5). ZTS216 becomes an error, and its `describe-rule`
+  text drops "A warning." Fallout (205/221 steps): the gap row; the two
+  `type_checker.zig` tests that pin a ZTS216 warning; A3 case
+  `p03_match_arm_nullable_field`, whose redundant arm now stops the check
+  before ZTS309; one probe of "CHECK refuses termination claims when a
+  function value recurses without end"; the corpus goldens
+  `match_arm_excluded_by_type`, `match_redundant_arm`,
+  `match_redundant_default`, and `match_type_test_misses_record`; and the
+  R7c census over the corpus. The last golden also gains a ZTS205 warning,
+  because `check` drops ZTS205 before ZTS603 only when the type stage has
+  no error. The ZTS205 drop must hold with a ZTS216 error.
+- U4d-4 (N3 `Boolean`, N5, N15). Remove `Boolean` and `Headers` from
+  `known_globals.zig` and their skip rows in `builtin_results.zig`, so each
+  gets ZTS629. Delete the global `Headers` factory from
+  `packages/runtime/src/handler_instance.zig` and
+  `headersConstructorNative`, and keep the prototype that `req.headers`
+  uses. Delete `Number.parseInt` and `Number.parseFloat` from the runtime,
+  the result rows, and the flow rows, so the member census gives ZTS201.
+  Fallout (211/221 steps, `test-zruntime` red): the Admitted Members and
+  ambient name rows of `docs/ts-restrictions.md`; the flow tests "an
+  unknown global is refused by the strict checker" (its example is
+  `Boolean`), "census C1" (its property floor of 76), and "FlowChecker
+  preserves known request string and rawJson calls"; the `runtime_pool.zig`
+  repeat cases "Headers append combines two values in a loop" and "Headers
+  delete in a loop"; and the `zruntime_tests.zig` test "Headers Request and
+  Response factories share the HTTP model".
+- U4d-5 (N3 `Number`, Decision 26). The rule of the chosen option, after
+  its own measurement.
+
+A new code also needs a catalog row, a `describe-rule` row, a check corpus
+case, a restriction probe, and a defect seed, as ZTS217 had in c8138ac5.
+Each moved gap row goes to a refusal table of `docs/ts-restrictions.md`.
 
 ### U6: close-out (Opus)
 
