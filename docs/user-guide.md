@@ -364,7 +364,7 @@ The build checks each file as it checks the handler. A check that fails in any f
 | Two files bind one top-level value name, a file binds a built-in name, or a dependency binds `handler` | Rename one binding. An import local name counts, unless it names the identical export. Type names do not count |
 | A named import has no matching export | Export the name from the file, or correct the import |
 | A file import has no type that can cross modules | Export a non-generic function, or a value with a declared type |
-| A dependency holds a top-level `assert` | Move the `assert` into a function |
+| A file holds a top-level `assert` | Move the `assert` into a function. The parser refuses it with ZTS074 in every file |
 | Two files register one schema name with different JSON | Use one schema definition, or rename one schema |
 | `GraphResultLimit` or `ModuleNotClassified` | Reduce the Result bindings. The limit is 64 in total across all files |
 

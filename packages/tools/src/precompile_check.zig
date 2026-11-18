@@ -76,9 +76,8 @@ pub const CheckResult = struct {
     /// corpus case; any other count clears the proven properties.
     flow_unresolved: usize = 0,
     /// Refusals of the module graph of a handler with file imports: a link
-    /// failure, an import with no type, a dependency top-level assert, an API
-    /// schema conflict, or a proof fold. Dependency checker errors count in the
-    /// field of their stage.
+    /// failure, an import with no type, an API schema conflict, or a proof fold.
+    /// Dependency checker errors count in the field of their stage.
     link_errors: u32 = 0,
     canonical_errors: u32 = 0,
     /// Capability-policy violations (POL0xx). Only ever non-zero when the

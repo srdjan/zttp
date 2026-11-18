@@ -1075,28 +1075,6 @@ pub const GraphModuleChecks = struct {
     }
 };
 
-const max_assert_walk_depth: u16 = 1024;
-
-/// True when a top-level statement of the program is an `assert`, in the
-/// program body or in a block that is not inside a function. The walk stops at
-/// each function and descends through the shared child map. A program nested
-/// beyond the depth limit counts as holding one, so the walk fails closed.
-fn hasTopLevelAssert(view: zts.IrView, node: ir.NodeIndex, depth: u16) bool {
-    if (depth >= max_assert_walk_depth) return true;
-    const tag = view.getTag(node) orelse return false;
-    switch (tag) {
-        .assert_stmt => return true,
-        .function_decl, .function_expr, .arrow_function => return false,
-        else => {
-            var children = view.expressionChildren(node);
-            while (children.next()) |child| {
-                if (hasTopLevelAssert(view, child, depth + 1)) return true;
-            }
-            return false;
-        },
-    }
-}
-
 fn printGraphDiagnostics(
     allocator: std.mem.Allocator,
     owner: anytype,
@@ -1110,9 +1088,6 @@ fn printGraphDiagnostics(
     output = writer.toArrayList();
     if (output.items.len > 0) debugPrint("{s}", .{output.items});
 }
-
-/// The message of a dependency that holds a top-level `assert`.
-const dependency_assert_message = "a dependency may not hold a top-level assert, because a failed one leaves the later exports undefined";
 
 /// The format of the refusal of a file import that has no type across modules.
 /// It takes the imported name.
@@ -1252,13 +1227,6 @@ pub fn checkGraphModule(
     var link_arena = std.heap.ArenaAllocator.init(allocator);
     defer link_arena.deinit();
     const file_imports = try precompile_contract_mod.fileImportSignatures(link_arena.allocator(), graph, module.path, view, atoms, exports);
-
-    if (!is_entry and hasTopLevelAssert(view, root, 0)) {
-        if (sink) |s| {
-            try s.appendLink(.module_link_refused, module.path, dependency_assert_message);
-        } else if (!builtin.is_test) debugPrint("{s}: " ++ dependency_assert_message ++ "\n", .{module.path});
-        return error.DependencyTopLevelAssert;
-    }
 
     var parsed = zts.pipeline.ParsedModule.fromTypedExisting(view, root, atoms, &parser.type_store);
     parsed.scopes = &parser.scopes;

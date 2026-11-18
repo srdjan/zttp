@@ -808,7 +808,6 @@ Each refusal exits 1 and writes no binary.
 | A module binds a built-in name, or a dependency binds `handler` | The build names the identifier |
 | A named import has no matching export | The build refuses the import |
 | A check fails in any module | The build runs the boolean, type, strict, verifier, virtual import, and bytecode checks on each module. ZTS061 is exempt on a dependency |
-| A dependency holds a top-level `assert` | `DependencyTopLevelAssert`, because a failed `assert` leaves the later exports undefined |
 | A file import has no type that can cross modules | `FileImportUntyped`. Export a non-generic function or a value with a declared type |
 | Two modules register one `api.schemas` name with different JSON | The build refuses the graph |
 | A dependency breaks a property of the entry's capsule | ZTS500 |
@@ -837,7 +836,7 @@ A diagnostic in a dependency keeps its code and names the dependency in `file`. 
 
 | Code | Name | Cause |
 |---|---|---|
-| ZTS063 | `module_link_refused` | The modules cannot run as one program: a file that cannot be read, an import cycle, a binding refusal, a dependency top-level `assert`, an API schema conflict, or proof evidence that does not fold |
+| ZTS063 | `module_link_refused` | The modules cannot run as one program: a file that cannot be read, an import cycle, a binding refusal, an API schema conflict, or proof evidence that does not fold |
 | ZTS064 | `file_import_untyped` | A file import has no type that can cross modules |
 
 The proof card shows a `Module graph` line only when one of these refusals occurs. A single-module handler keeps its output. Every top-level function is a root for the state checks, so a same-file helper that mutates module state clears `state_isolated`.
