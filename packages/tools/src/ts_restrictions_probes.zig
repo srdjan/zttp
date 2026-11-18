@@ -122,22 +122,22 @@ const refusal_rows_a = [_]RefusalRow{
     .{
         .key = "`import X from \"mod\"` (default import)",
         .refused = &.{rf("import X from \"mod\"", top("import X from \"./mod.ts\";"), mod_file)},
-        .clean = cf(top("import { x } from \"./mod.ts\";\nconst y: number = x();"), mod_file),
+        .clean = cf(top("import { x } from \"./mod.ts\";\nfunction y(): number {\n  return x();\n}"), mod_file),
     },
     .{
         .key = "`import * as X from \"mod\"` (namespace import)",
         .refused = &.{rf("import * as X from \"mod\"", top("import * as X from \"./mod.ts\";"), mod_file)},
-        .clean = cf(top("import { x } from \"./mod.ts\";\nconst y: number = x();"), mod_file),
+        .clean = cf(top("import { x } from \"./mod.ts\";\nfunction y(): number {\n  return x();\n}"), mod_file),
     },
     .{
         .key = "`import \"mod\"` (side-effect import)",
         .refused = &.{rf("import \"mod\"", top("import \"./mod.ts\";"), mod_file)},
-        .clean = cf(top("import { x } from \"./mod.ts\";\nconst y: number = x();"), mod_file),
+        .clean = cf(top("import { x } from \"./mod.ts\";\nfunction y(): number {\n  return x();\n}"), mod_file),
     },
     .{
         .key = "`import(\"mod\")` (dynamic import)",
         .refused = &.{rf("import(\"mod\")", body("  const m = import(\"./mod.ts\");"), mod_file)},
-        .clean = cf(top("import { x } from \"./mod.ts\";\nconst y: number = x();"), mod_file),
+        .clean = cf(top("import { x } from \"./mod.ts\";\nfunction y(): number {\n  return x();\n}"), mod_file),
     },
     .{
         .key = "`export { x } from \"mod\"` and `export { x }` of an imported name",
@@ -145,12 +145,12 @@ const refusal_rows_a = [_]RefusalRow{
             rf("export { x } from \"mod\"", top("export { x } from \"./mod.ts\";"), mod_file),
             rf("export { x }", top("import { x } from \"./mod.ts\";\nexport { x };"), mod_file),
         },
-        .clean = cf(top("import { x } from \"./mod.ts\";\nconst n: number = x();"), mod_file),
+        .clean = cf(top("import { x } from \"./mod.ts\";\nfunction n(): number {\n  return x();\n}"), mod_file),
     },
     .{
         .key = "`export * from \"mod\"`",
         .refused = &.{rf("export * from \"mod\"", top("export * from \"./mod.ts\";"), mod_file)},
-        .clean = cf(top("import { x } from \"./mod.ts\";\nconst y: number = x();"), mod_file),
+        .clean = cf(top("import { x } from \"./mod.ts\";\nfunction y(): number {\n  return x();\n}"), mod_file),
     },
     .{
         .key = "`export default ...`",
@@ -186,7 +186,7 @@ const refusal_rows_a = [_]RefusalRow{
             r("namespace", top("namespace N {\n  export const a = 1;\n}")),
             r("module", top("module M {\n  export const a = 1;\n}")),
         },
-        .clean = cf(top("import { x } from \"./mod.ts\";\nconst y: number = x();"), mod_file),
+        .clean = cf(top("import { x } from \"./mod.ts\";\nfunction y(): number {\n  return x();\n}"), mod_file),
     },
 
     // ----- Lexical Rules -----
@@ -1226,6 +1226,15 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("import { schemaCompile as register } from \"zttp:validate\";\nregister(\"x\", \"{}\");\nregister(\"y\", \"{}\");")),
     },
     .{
+        .key = "A top-level initializer with an effect, such as `const t: number = Date.now();`, `const k: string = env(\"K\") ?? \"\";`, and `const n: number = bump();` for a helper that writes module state",
+        .refused = &.{
+            r("const t: number = Date.now();", top("const t: number = Date.now();")),
+            r("const k: string = env(\"K\") ?? \"\";", top("import { env } from \"zttp:env\";\nconst k: string = env(\"K\") ?? \"\";")),
+            r("const n: number = bump();", top("const log: number[] = [];\nfunction bump(): number {\n  log.push(1);\n  return log.length;\n}\nconst n: number = bump();")),
+        },
+        .clean = c(top("function double(n: number): number {\n  return n * 2;\n}\nconst d: number = double(2);\nconst xs: number[] = [1, 2].map((x: number): number => x * 2);")),
+    },
+    .{
         .key = "`import type X from \"./x.ts\";`",
         .refused = &.{r("import type X from \"./x.ts\";", top("import type X from \"./x.ts\";"))},
         .clean = c(top("import type { X } from \"./x.ts\";")),
@@ -1572,10 +1581,6 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "`DictKey` with no import, such as `<K extends DictKey>`",
         .sources = &.{c(top("function f<K extends DictKey>(k: K): K {\n  return k;\n}"))},
-    },
-    .{
-        .key = "A top-level initializer with an effect, such as `const t: number = Date.now();`",
-        .sources = &.{c(top("const t: number = Date.now();"))},
     },
     .{
         .key = "`for...of` over a number, such as `for (const k of 5)`",

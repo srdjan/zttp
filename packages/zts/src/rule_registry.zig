@@ -355,6 +355,14 @@ const strict_meta = [_]struct {
         .repair = null,
     },
     .{
+        .kind = .effectful_module_initializer,
+        .code = "ZTS630",
+        .description = "A top-level initializer has an effect: it reads the clock or random, calls an effectful import, writes module state, or calls a function that does.",
+        .example = "const started: number = Date.now();",
+        .help = "Compute the value inside a function, such as the handler. Write a registration as a bare statement.",
+        .repair = null,
+    },
+    .{
         .kind = .canonical_redundant_pattern_rename,
         .code = "ZTS625",
         .description = "A match record pattern renames a field to the name it already has.",

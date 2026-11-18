@@ -1610,6 +1610,29 @@ pub const seeds = [_]DefectSeed{
         .ask = "Fix the ZTS629 compiler error in handler.ts",
     },
     .{
+        .id = "effectful-module-initializer",
+        .code = "ZTS630",
+        .class = .model_retry,
+        .seed_source = clean_count,
+        .bad_draft =
+        \\const started: number = Date.now();
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const count = started;
+        \\  return Response.json({ count: count });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const count = 4;
+        \\  return Response.json({ count: count });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS630 compiler error in handler.ts",
+    },
+    .{
         .id = "exported-open-type",
         .code = "ZTS061",
         .class = .model_retry,

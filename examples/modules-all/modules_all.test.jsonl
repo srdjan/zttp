@@ -1,6 +1,6 @@
-{"type":"test","name":"GET returns schema status and cache stats"}
+{"type":"test","name":"GET returns the registered schema and cache stats"}
 {"type":"request","method":"GET","url":"/","headers":{},"body":null}
-{"type":"expect","status":200,"bodyContains":"schema_compiled"}
+{"type":"expect","status":200,"bodyContains":"\"schema\":\"user\""}
 
 {"type":"test","name":"POST with valid body returns 201 with user and token"}
 {"type":"request","method":"POST","url":"/","headers":{},"body":"{\"name\":\"Alice\",\"age\":30}"}

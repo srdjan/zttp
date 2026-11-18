@@ -14,7 +14,7 @@ structural RequestBody = {
 };
 
 // Compile a schema on startup
-const schema_ok = schemaCompile("user", '{"type":"object","required":["name","age"],"properties":{"name":{"type":"string","minLength":1,"maxLength":100},"age":{"type":"integer","minimum":0,"maximum":200}}}');
+schemaCompile("user", '{"type":"object","required":["name","age"],"properties":{"name":{"type":"string","minLength":1,"maxLength":100},"age":{"type":"integer","minimum":0,"maximum":200}}}');
 
 function handler(req: Request): Response {
     // Auth: check JWT from Authorization header
@@ -64,7 +64,6 @@ function handler(req: Request): Response {
     }
 
     return Response.json({
-        schema_compiled: schema_ok,
         cache: cacheStats()
     });
 }

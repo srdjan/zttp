@@ -293,6 +293,7 @@ pub fn strictCode(kind: strict_checker.DiagnosticKind) []const u8 {
         .canonical_unbound_field_read => "ZTS626",
         .canonical_dict_entry_round_trip => "ZTS627",
         .canonical_dict_entries_reduce => "ZTS628",
+        .effectful_module_initializer => "ZTS630",
     };
 }
 
@@ -460,7 +461,7 @@ fn strictMetadata(kind: strict_checker.DiagnosticKind) Metadata {
             .raw_exported_boundary_type,
             => .type_safety,
             .non_exhaustive_profile_match => .control_flow,
-            .mutable_live_iteration => .state_isolation,
+            .mutable_live_iteration, .effectful_module_initializer => .state_isolation,
             .nullish_operator_on_null => .runtime_safety,
             else => .canonical_form,
         },

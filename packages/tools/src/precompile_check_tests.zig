@@ -3061,9 +3061,9 @@ test "CHECK keeps state_isolated when a dependency writes a local array during m
     try std.testing.expectEqual(@as(usize, 0), countDiagnosticsWithCode(&result, "ZTS310"));
 }
 
-// The verifier names the push inside `build` whether or not a request runs it,
-// so a write during initialization alone still removes state_isolated.
-test "CHECK reports the verifier ZTS310 for a dependency helper that writes its module array during initialization" {
+// Spec 5.1: module initialization is pure. The initializer of `table` calls a
+// helper that pushes onto a module array, and the check refuses the call.
+test "CHECK refuses a dependency helper that writes its module array during initialization with ZTS630" {
     var fixture = try SiblingFixture.init(
         \\import { table } from "./dep.ts";
         \\function handler(req: Request): Proof<Response, "result_safe"> {
@@ -3084,8 +3084,14 @@ test "CHECK reports the verifier ZTS310 for a dependency helper that writes its 
 
     var result = try fixture.check();
     defer result.deinit(std.testing.allocator);
-    try std.testing.expect(!result.state_isolated);
-    try expectOneStateWriteAt(&fixture, &result, "dep.ts", 3);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), countDiagnosticsWithCode(&result, "ZTS630"));
+    const diagnostic = diagnosticWithCode(&result, "ZTS630") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("error", diagnostic.severity);
+    try std.testing.expectEqualStrings("dep.ts", std.fs.path.basename(diagnostic.file));
+    try std.testing.expectEqual(@as(u32, 6), diagnostic.line);
+    try std.testing.expectEqual(@as(u32, 37), diagnostic.column);
+    try std.testing.expectEqualStrings("a top-level initializer must be pure, and this one writes module state", diagnostic.message);
 }
 
 test "CHECK does not classify a factory-produced holder as data" {
@@ -3568,8 +3574,8 @@ test "router public checks prove clean routes and fail closed on unresolved disp
         \\function route(req: Request): Response { return Response.text("ok"); }
         \\const routes = { "GET /probe": route };
         \\function reinstall(): number { routes["GET /probe"] = route; return 0; }
-        \\const reinstalled: number = reinstall();
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  const reinstalled: number = reinstall();
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
@@ -12395,17 +12401,6 @@ test "state isolation across helper shapes" {
         \\  return Response.text(String(touch()));
         \\}
         },
-        .{ .name = "helper called only at module initialization", .state_isolated = false, .source =
-        \\let count = 0;
-        \\function seed(): number {
-        \\  count = 5;
-        \\  return count;
-        \\}
-        \\const start = seed();
-        \\export function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  return Response.text(String(start));
-        \\}
-        },
         .{ .name = "helper that writes only its own locals", .state_isolated = true, .source =
         \\const count = 0;
         \\function local(): number {
@@ -14504,7 +14499,6 @@ test "a response chosen by a branch on a varying value is not deterministic" {
         .{ .name = "s15_assert", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  assert t % 2 === 0;\n  return Response.text(\"ok\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "s18_rate", .source = "import { rateCheck } from \"zttp:ratelimit\";\n\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const r = rateCheck(\"k\", 5, 60);\n  if (r.ok) {\n    return Response.text(\"ok\");\n  }\n  return Response.text(\"slow down\");\n}\n", .line = 3, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "s19_cache", .source = "import { cacheGet } from \"zttp:cache\";\n\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const v = cacheGet(\"ns\", \"k\");\n  if (v === undefined) {\n    return Response.text(\"miss\");\n  }\n  return Response.text(\"hit\");\n}\n", .line = 3, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
-        .{ .name = "p_modinit", .source = "const SEED = Date.now() % 2 === 0 ? \"a\" : \"b\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(SEED);\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 1:35 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "p_call_after_branch", .source = "function pick(req: Request): string {\n  if (req.url.length > 5) {\n    return \"long\";\n  }\n  return \"short\";\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  let s = \"even\";\n  if (t % 2 === 1) {\n    s = pick(req);\n  }\n  return Response.text(s);\n}\n", .line = 7, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 10:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "p_map_branch", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = [\"a\", \"b\"].map((x) => {\n    if (t % 2 === 0) {\n      return \"even\";\n    }\n    return \"odd\";\n  });\n  return Response.text(xs.join(\",\"));\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:5 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "p_recurse", .source = "function rep(n: number): string {\n  if (n === 0) {\n    return \"\";\n  }\n  return [\"x\", rep(n - 1)].join(\"\");\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  return Response.text(rep(t % 3));\n}\n", .line = 7, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 2:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },

@@ -1864,25 +1864,6 @@ test "compileHandler graph refuses a let data export before the evaluator sees i
     try std.testing.expectError(error.MutableExport, fixture.compile(graph_verified));
 }
 
-test "compileHandler graph carries the secret label through a const data export" {
-    var fixture = try importFixture(
-        \\import { key } from "./dep.ts";
-        \\export function handler(req: Request): Proof<Response, "result_safe"> {
-        \\  return Response.text(key);
-        \\}
-        \\
-    ,
-        \\import { env } from "zttp:env";
-        \\export const key: string = env("SECRET_KEY") ?? "";
-        \\
-    );
-    defer fixture.deinit();
-    var compiled = try fixture.compile(graph_verified);
-    defer compiled.deinit(std.testing.allocator);
-    const props = try graphProperties(&compiled);
-    try std.testing.expect(!props.no_secret_leakage);
-}
-
 test "compileHandler graph clears state_isolated for a write through an imported const array" {
     var fixture = try importFixture(
         \\import { seen } from "./dep.ts";
@@ -2021,9 +2002,9 @@ test "compileHandler graph keeps state_isolated when a dependency writes a local
     try std.testing.expect((try graphProperties(&local_compiled)).state_isolated);
 }
 
-// The verifier names the push inside `build` whether or not a request runs it,
-// so a write during initialization alone still removes state_isolated.
-test "compileHandler graph clears state_isolated for a dependency helper that writes its module array during initialization" {
+// Spec 5.1: module initialization is pure. The initializer of `table` calls a
+// helper that pushes onto a module array, so the graph compile refuses it.
+test "compileHandler graph refuses a dependency helper that writes its module array during initialization with ZTS630" {
     var module_fixture = try importFixture(table_entry,
         \\const log: number[] = [];
         \\function build(): number[] {
@@ -2034,9 +2015,14 @@ test "compileHandler graph clears state_isolated for a dependency helper that wr
         \\
     );
     defer module_fixture.deinit();
-    var module_compiled = try module_fixture.compile(graph_verified);
-    defer module_compiled.deinit(std.testing.allocator);
-    try std.testing.expect(!(try graphProperties(&module_compiled)).state_isolated);
+    try std.testing.expectError(error.SoundModeViolation, module_fixture.compile(graph_verified));
+    var checked = try parityCheck(&module_fixture, null);
+    defer checked.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), checked.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS630", checked.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("dep.ts", std.fs.path.basename(checked.json_diagnostics.items[0].file));
+    try std.testing.expectEqual(@as(u32, 6), checked.json_diagnostics.items[0].line);
+    try std.testing.expectEqual(@as(u32, 37), checked.json_diagnostics.items[0].column);
 }
 
 const entry_write_entry =

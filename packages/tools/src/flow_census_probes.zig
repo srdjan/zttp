@@ -575,40 +575,6 @@ const t_clean_arg =
     \\}
 ;
 
-// The kinds that plan F0 adds. A module-level constant needs a source that
-// does not read `req`, so those three kinds take the secret and clean labels.
-const t_module_const_handler =
-    \\@PRE@
-    \\const token = @SRC@;
-    \\function handler(req: Request): Claim<Response> {
-    \\  const x = token;
-    \\  @STMT@
-    \\  @TAIL@
-    \\}
-;
-const t_module_const_helper =
-    \\@PRE@
-    \\const token = @SRC@;
-    \\function helper(): @RT@ {
-    \\  const x = token;
-    \\  @BODY@
-    \\}
-    \\function handler(req: Request): Claim<Response> {
-    \\  @USE{helper()}USE@
-    \\}
-;
-const t_module_const_closure =
-    \\@PRE@
-    \\const token = @SRC@;
-    \\function id<F>(f: F): F { return f; }
-    \\function handler(req: Request): Claim<Response> {
-    \\  const inner = { go: id((): @RT@ => {
-    \\    const x = token;
-    \\    @BODY@
-    \\  }) };
-    \\  @USE{inner.go()}USE@
-    \\}
-;
 // Nine helpers: the ninth holds the sink, one past the summary depth cap of 8.
 const t_chain9 =
     \\@PRE@
@@ -714,7 +680,6 @@ const t_import2 =
     \\}
 ;
 const all_labels = [_]Label{ .secret, .credential, .user_input, .clean };
-const env_labels = [_]Label{ .secret, .clean };
 /// The kinds whose unresolved call can only fail closed take no clean label:
 /// the fail-closed answer for a clean value would be an over-refusal that the
 /// unit F1b chooses on purpose.
@@ -766,9 +731,6 @@ const specs = [_]Spec{
     .{ .name = "twice_secret_first", .group = .matrix, .template = t_twice_secret_first, .discards_result = true },
     .{ .name = "clean_arg", .group = .matrix, .template = t_clean_arg, .never_reaches = true },
 
-    .{ .name = "module_const_handler", .group = .extended, .labels = &env_labels, .template = t_module_const_handler },
-    .{ .name = "module_const_helper", .group = .extended, .labels = &env_labels, .template = t_module_const_helper },
-    .{ .name = "module_const_closure", .group = .extended, .labels = &env_labels, .template = t_module_const_closure },
     .{ .name = "chain9", .group = .extended, .labels = &leaking_labels, .template = t_chain9, .unresolved = true, .past_cap = true },
     .{ .name = "param9", .group = .extended, .labels = &leaking_labels, .template = t_param9, .unresolved = true, .past_cap = true },
     .{ .name = "apply_cb", .group = .extended, .labels = &leaking_labels, .template = t_apply_cb, .unresolved = true },
@@ -1162,18 +1124,6 @@ const hand_written = [_]Hand{
         ,
     },
     .{
-        .name = "x21_module_const_returned_by_handler",
-        .property = .no_secret_leakage,
-        .expect = .refuse,
-        .reason = "the module-level constant holds a secret and the handler returns it in a response (ZTS400)",
-        .body =
-        \\const token = env("API_TOKEN") ?? "";
-        \\function handler(req: Request): Claim<Response> {
-        \\  return Response.json({ k: token });
-        \\}
-        ,
-    },
-    .{
         .name = "x22_returned_record_method_discarded",
         .property = .no_secret_leakage,
         .expect = .refuse_or_unprove,
@@ -1367,8 +1317,10 @@ pub fn generate(a: std.mem.Allocator) ![]Probe {
 /// Never lower one to make a deletion pass.
 pub const minimum_matrix: usize = 448;
 // Measured by the unfiltered Phase 3 census; every retained probe matched.
-pub const minimum_extended: usize = 206;
-pub const minimum_hand: usize = 29;
+// ZTS630 (spec 5.1) lowered these from 206 and 29: no labeled value can be a
+// module constant, so the three module_const kinds and x21 lost their subject.
+pub const minimum_extended: usize = 164;
+pub const minimum_hand: usize = 28;
 /// The fewest probes a (label, sink) column holds: the 18 research kinds.
 pub const minimum_per_column: usize = 18;
 

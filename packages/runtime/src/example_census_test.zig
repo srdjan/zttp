@@ -64,7 +64,7 @@ const runnable = [_]Row{
     .{ .file = "examples/handler/spec-fails-idempotent.ts", .expect = "{\"now\":", .contains = true },
     .{ .file = "examples/handler/spec-guardrails.ts", .expect = "{\"ok\":true}" },
     .{ .file = "examples/handler/sugar.ts", .expect = "{\"score\":150,\"evens\":[2,4],\"doubled\":[4,8],\"total\":12,\"piped\":300,\"keys\":[\"a\",\"b\"]}" },
-    .{ .file = "examples/modules-all/modules_all.ts", .expect = "schema_compiled", .contains = true },
+    .{ .file = "examples/modules-all/modules_all.ts", .expect = "{\"schema\":\"user\"", .contains = true },
     .{ .file = "examples/modules/modules.ts", .method = "POST", .body = "hello world", .expect = "\"bodyHash\":\"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9\"", .contains = true },
     .{ .file = "examples/patterns/annotate-not-assert.ts", .expect = "{\"port\":8080,\"host\":\"0.0.0.0\",\"version\":\"1.0\"}" },
     .{ .file = "examples/patterns/boundary-types.ts", .expect = "{\"id\":\"u-1\",\"enabled\":true,\"count\":1,\"method\":\"GET\"}" },

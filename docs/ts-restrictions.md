@@ -55,6 +55,7 @@ type error hides a `ZTS624` strict error in the same function.
 | An `import` after a declaration | ZTS002 | Move each `import` above the first declaration |
 | An `import` or `export` inside a function body | ZTS002 | Move the `import` or `export` to the top level |
 | A top-level statement other than a registration call with literal arguments, such as `f();`, `if (c) { f(); }`, and `schemaCompile("x", text);` | ZTS074 | Move the statement into a function. A bare `schemaCompile(...)` or `sql(...)` call with literal arguments stays admitted |
+| A top-level initializer with an effect, such as `const t: number = Date.now();`, `const k: string = env("K") ?? "";`, and `const n: number = bump();` for a helper that writes module state | ZTS630 | Compute the value inside a function, such as the handler. Write a registration as a bare statement |
 | `import type X from "./x.ts";` | ZTS002 | `import type { X } from "./x.ts";` |
 | A module specifier that is not a string literal, such as `import { ok } from m;` and `import type { T } from m;` | ZTS003 | A string literal, such as `"./lib.ts"` |
 
@@ -416,7 +417,6 @@ against the compiler.
 | A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | Accepted, exit 0 | ZTS209. Pass a type argument that satisfies the constraint |
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |
-| A top-level initializer with an effect, such as `const t: number = Date.now();` | Accepted, exit 0 | A targeted refusal. Compute the value inside a function |
 | `for...of` over a number, such as `for (const k of 5)` | Accepted, exit 0 | A targeted refusal. Iterate an array, a string, or `range(n)` |
 | `stringifyJson` of a value that JSON cannot carry, such as a function or a `Dict<number, string>` | Accepted, exit 0. `Response.json` refuses the same payload with ZTS213 | ZTS213. Pass a string-keyed payload |
 | A `default` arm on a closed union that is already covered, or a duplicate `when` arm | Accepted, exit 2. The check reports ZTS216 as a warning | ZTS216 as an error. Remove the `default` arm or the duplicate arm |

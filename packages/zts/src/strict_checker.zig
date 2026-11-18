@@ -133,6 +133,9 @@ pub const DiagnosticKind = enum {
     /// `dictFold` folds the dictionary directly, without materializing the
     /// entry array the reduce only walks once.
     canonical_dict_entries_reduce,
+    /// A top-level initializer that has an effect. Spec 5.1: module
+    /// initialization MUST be pure.
+    effectful_module_initializer,
 };
 
 pub const Diagnostic = struct {
@@ -331,6 +334,7 @@ pub const StrictChecker = struct {
         self.collectEntriesDerivedBindings(root);
         self.collectAssignments(root);
         self.walkStmt(root);
+        try self.checkModuleInitializers(root);
         if (self.type_env) |env| {
             try env.ensureHealthy();
             try env.pool.ensureHealthy();
@@ -426,6 +430,291 @@ pub const StrictChecker = struct {
 
     fn markAllocationFailure(self: *StrictChecker) void {
         self.allocation_failed = true;
+    }
+
+    /// Why a top-level initializer is not pure.
+    const InitEffect = enum {
+        varying_read,
+        effectful_import,
+        module_write,
+        shared_write,
+        unreadable_callee,
+
+        fn message(self: InitEffect) []const u8 {
+            return switch (self) {
+                .varying_read => "a top-level initializer must be pure, and this one reads a value that varies between runs",
+                .effectful_import => "a top-level initializer must be pure, and this one calls an import that has an effect",
+                .module_write => "a top-level initializer must be pure, and this one writes module state",
+                .shared_write => "a top-level initializer must be pure, and this one writes a value that can be module state",
+                .unreadable_callee => "a top-level initializer must be pure, and this one calls a function whose body this module cannot read",
+            };
+        }
+    };
+
+    const InitFinding = struct { node: NodeIndex, effect: InitEffect };
+
+    /// What the walk knows about a module-level function body.
+    const BodyState = union(enum) {
+        /// The walk is inside the body. A call back into it adds no effect
+        /// that the outer walk of the same body does not find.
+        visiting,
+        /// The first effect that the body reaches, or null for a pure body.
+        done: ?InitEffect,
+    };
+
+    /// The bodies of the module-level functions and what each one reaches.
+    /// `cycle_hits` counts the calls that reached a body still `visiting`.
+    /// `fresh` holds each `const` local that an array or object literal
+    /// initializes: a value that no other binding can reach yet.
+    const InitWalk = struct {
+        bodies: std.AutoHashMapUnmanaged(u32, NodeIndex) = .empty,
+        states: std.AutoHashMapUnmanaged(u32, BodyState) = .empty,
+        fresh: std.AutoHashMapUnmanaged(u32, void) = .empty,
+        cycle_hits: u32 = 0,
+    };
+
+    /// Spec 5.1: module initialization MUST be pure. A top-level `const`
+    /// initializer is refused when it reads the clock or random, calls an
+    /// import that declares an effect or a capability, writes module state, or
+    /// calls a module function whose body does one of these. A function value
+    /// that the initializer only holds runs nothing. A callback runs when a
+    /// builtin or a method receives it. A call whose body this module cannot
+    /// read, such as an import from another application module or a function
+    /// held in a record field, is refused: answering pure for it would report
+    /// the absence of information as a fact. For the same reason a write is
+    /// pure only when it changes a fresh local directly. A parameter or a
+    /// field can hold module state, and this walk does not track aliases.
+    fn checkModuleInitializers(self: *StrictChecker, root: NodeIndex) std.mem.Allocator.Error!void {
+        const block = self.ir_view.getBlock(root) orelse return;
+        var walk: InitWalk = .{};
+        defer walk.bodies.deinit(self.allocator);
+        defer walk.states.deinit(self.allocator);
+        defer walk.fresh.deinit(self.allocator);
+        try self.collectFreshLocals(root, &walk);
+        for (0..block.stmts_count) |i| {
+            const stmt = self.topLevelDeclaration(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
+            if (self.ir_view.getTag(stmt) != .function_decl) continue;
+            const decl = self.ir_view.getVarDecl(stmt) orelse continue;
+            const func = self.ir_view.getFunction(decl.init) orelse continue;
+            try walk.bodies.put(self.allocator, bindingKey(decl.binding), func.body);
+        }
+        for (0..block.stmts_count) |i| {
+            const stmt = self.topLevelDeclaration(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
+            if (self.ir_view.getTag(stmt) != .var_decl) continue;
+            const decl = self.ir_view.getVarDecl(stmt) orelse continue;
+            const finding = try self.initEffect(decl.init, &walk) orelse continue;
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .effectful_module_initializer,
+                .node = finding.node,
+                .message = finding.effect.message(),
+                .help = "Compute the value inside a function, such as the handler. Write a registration as a bare statement.",
+            });
+        }
+    }
+
+    /// The declaration that a top-level statement holds: the statement
+    /// itself, or the declaration of an `export`.
+    fn topLevelDeclaration(self: *const StrictChecker, stmt: NodeIndex) NodeIndex {
+        if (self.ir_view.getTag(stmt) != .export_decl) return stmt;
+        const export_decl = self.ir_view.getExportDecl(stmt) orelse return stmt;
+        return export_decl.declaration;
+    }
+
+    fn collectFreshLocals(self: *StrictChecker, node: NodeIndex, walk: *InitWalk) std.mem.Allocator.Error!void {
+        if (node == null_node) return;
+        if (self.ir_view.getTag(node) == .var_decl) {
+            if (self.ir_view.getVarDecl(node)) |decl| {
+                const init_tag = self.ir_view.getTag(decl.init);
+                if (decl.kind == .@"const" and decl.binding.kind == .local and
+                    (init_tag == .array_literal or init_tag == .object_literal))
+                {
+                    try walk.fresh.put(self.allocator, bindingKey(decl.binding), {});
+                }
+            }
+        }
+        var children = self.ir_view.expressionChildren(node);
+        while (children.next()) |child| try self.collectFreshLocals(child, walk);
+    }
+
+    fn initEffect(self: *StrictChecker, node: NodeIndex, walk: *InitWalk) std.mem.Allocator.Error!?InitFinding {
+        if (node == null_node) return null;
+        const tag = self.ir_view.getTag(node) orelse return null;
+        switch (tag) {
+            .assignment => if (self.ir_view.getAssignment(node)) |assign| {
+                if (self.assignmentEffect(assign.target, walk)) |effect| return .{ .node = node, .effect = effect };
+            },
+            .call => if (try self.initCallEffect(node, walk)) |effect| return .{ .node = node, .effect = effect },
+            // Holding a function value runs nothing.
+            .arrow_function, .function_expr => return null,
+            // exhaustive: every other tag has no effect of its own, and the walk below visits its children.
+            else => {},
+        }
+        var children = self.ir_view.expressionChildren(node);
+        while (children.next()) |child| {
+            if (try self.initEffect(child, walk)) |finding| return finding;
+        }
+        return null;
+    }
+
+    /// A rebinding of a local or a parameter changes no shared value. A write
+    /// to a member changes the object that holds it.
+    fn assignmentEffect(self: *const StrictChecker, target: NodeIndex, walk: *const InitWalk) ?InitEffect {
+        if (self.ir_view.getTag(target) == .identifier) {
+            const binding = self.ir_view.getBinding(target) orelse return .module_write;
+            return switch (binding.kind) {
+                .local, .argument => null,
+                .global, .undeclared_global, .upvalue => .module_write,
+            };
+        }
+        const member = self.ir_view.getMember(target) orelse return .shared_write;
+        return self.mutationEffect(member.object, walk);
+    }
+
+    /// The effect of changing `changed` in place: none for a fresh local,
+    /// a module write when the path starts at a module-level binding, and a
+    /// shared write for any other path, such as a parameter or a field.
+    fn mutationEffect(self: *const StrictChecker, changed: NodeIndex, walk: *const InitWalk) ?InitEffect {
+        if (self.ir_view.getTag(changed) == .identifier) {
+            const binding = self.ir_view.getBinding(changed) orelse return .shared_write;
+            if (binding.kind == .local and walk.fresh.contains(bindingKey(binding))) return null;
+        }
+        var node = changed;
+        while (true) {
+            switch (self.ir_view.getTag(node) orelse return .shared_write) {
+                .identifier => {
+                    const binding = self.ir_view.getBinding(node) orelse return .shared_write;
+                    return switch (binding.kind) {
+                        .global, .undeclared_global => .module_write,
+                        .local, .argument, .upvalue => .shared_write,
+                    };
+                },
+                .member_access, .optional_chain, .computed_access => {
+                    const member = self.ir_view.getMember(node) orelse return .shared_write;
+                    node = member.object;
+                },
+                // exhaustive: any other root, such as a call result, can return module state.
+                else => return .shared_write,
+            }
+        }
+    }
+
+    /// The name of a published ambient object, such as `Math` or `Response`,
+    /// when `node` names one.
+    fn ambientObjectName(self: *const StrictChecker, node: NodeIndex) ?[]const u8 {
+        if (self.ir_view.getTag(node) != .identifier) return null;
+        const binding = self.ir_view.getBinding(node) orelse return null;
+        if (binding.kind != .undeclared_global) return null;
+        const name = self.resolveAtomName(binding.name_atom) orelse return null;
+        return if (isKnownGlobalFunction(name)) name else null;
+    }
+
+    /// True when the type of `receiver` has only builtin methods, so a member
+    /// call on it names no user function. A record can hold a function in a
+    /// field, and a call of that field runs a body that this walk does not
+    /// resolve.
+    fn hasOnlyBuiltinMethods(self: *const StrictChecker, receiver: NodeIndex) bool {
+        const tc = self.type_checker orelse return false;
+        const pool = tc.env.pool;
+        const ty = pool.widenLiteral(tc.inferTypeWithoutDiagnostics(receiver));
+        return switch (pool.getTag(ty) orelse return false) {
+            .t_array, .t_tuple, .t_string, .t_number, .t_boolean, .t_bytes => true,
+            // exhaustive: a record, a union, `unknown`, and every other type can hold a function value or hide one.
+            else => false,
+        };
+    }
+
+    /// The effect of the call itself and of the callbacks it receives. The
+    /// arguments that are not callbacks are walked by the caller.
+    fn initCallEffect(self: *StrictChecker, node: NodeIndex, walk: *InitWalk) std.mem.Allocator.Error!?InitEffect {
+        const call = self.ir_view.getCall(node) orelse return .unreadable_callee;
+        switch (self.ir_view.getTag(call.callee) orelse return .unreadable_callee) {
+            .identifier => {
+                if (self.importedFunctionForCallee(call.callee)) |imported| {
+                    if (importEffect(imported)) |effect| return effect;
+                    return self.callbackEffect(call, walk);
+                }
+                const binding = self.ir_view.getBinding(call.callee) orelse return .unreadable_callee;
+                if (walk.bodies.contains(bindingKey(binding))) return self.functionEffect(bindingKey(binding), walk);
+                if (binding.kind == .undeclared_global) {
+                    const name = self.resolveAtomName(binding.name_atom) orelse return .unreadable_callee;
+                    if (isKnownGlobalFunction(name)) return self.callbackEffect(call, walk);
+                }
+                return .unreadable_callee;
+            },
+            .member_access, .optional_chain => {
+                const member = self.ir_view.getMember(call.callee) orelse return .unreadable_callee;
+                const property = self.resolveAtomName(member.property) orelse return .unreadable_callee;
+                if (self.ambientObjectName(member.object)) |object_name| {
+                    if (known_globals.isVaryingRead(object_name, property)) return .varying_read;
+                    return self.callbackEffect(call, walk);
+                }
+                if (!self.hasOnlyBuiltinMethods(member.object)) return .unreadable_callee;
+                if (isMutatingArrayMethod(property)) {
+                    if (self.mutationEffect(member.object, walk)) |effect| return effect;
+                }
+                return self.callbackEffect(call, walk);
+            },
+            // exhaustive: any other callee, such as a computed member, names no body that this walk can read.
+            else => return .unreadable_callee,
+        }
+    }
+
+    /// A builtin or a method may run a function it receives, so the body of
+    /// a function argument counts: an inline one, or a named one.
+    fn callbackEffect(self: *StrictChecker, call: ir.Node.CallExpr, walk: *InitWalk) std.mem.Allocator.Error!?InitEffect {
+        for (0..call.args_count) |i| {
+            const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
+            if (self.ir_view.getFunction(arg)) |func| {
+                if (try self.initEffect(func.body, walk)) |finding| return finding.effect;
+                continue;
+            }
+            if (self.ir_view.getTag(arg) != .identifier) continue;
+            if (self.importedFunctionForCallee(arg)) |imported| {
+                if (importEffect(imported)) |effect| return effect;
+                continue;
+            }
+            const binding = self.ir_view.getBinding(arg) orelse continue;
+            if (!walk.bodies.contains(bindingKey(binding))) continue;
+            if (try self.functionEffect(bindingKey(binding), walk)) |effect| return effect;
+        }
+        return null;
+    }
+
+    /// A pure answer that passed through a body still `visiting` is not
+    /// final: that body may reach an effect after the call. Such an answer
+    /// is not stored, so the next call walks the body again. An effect is
+    /// final as soon as it is found.
+    fn functionEffect(self: *StrictChecker, key: u32, walk: *InitWalk) std.mem.Allocator.Error!?InitEffect {
+        if (walk.states.get(key)) |state| switch (state) {
+            .visiting => {
+                walk.cycle_hits += 1;
+                return null;
+            },
+            .done => |effect| return effect,
+        };
+        const body = walk.bodies.get(key) orelse return .unreadable_callee;
+        const hits_before = walk.cycle_hits;
+        try walk.states.put(self.allocator, key, .visiting);
+        const finding = try self.initEffect(body, walk);
+        const effect: ?InitEffect = if (finding) |found| found.effect else null;
+        if (effect == null and walk.cycle_hits != hits_before) {
+            _ = walk.states.remove(key);
+        } else {
+            try walk.states.put(self.allocator, key, .{ .done = effect });
+        }
+        return effect;
+    }
+
+    /// The effect of calling an import: none for a registered export that
+    /// declares no effect and needs no capability. An import from an
+    /// application module has no registered entry, and its body is in
+    /// another module.
+    fn importEffect(imported: ImportedFunction) ?InitEffect {
+        const entry = builtin_modules.findExport(imported.module, imported.name) orelse return .unreadable_callee;
+        const caps = entry.func.required_capabilities orelse entry.binding.required_capabilities;
+        if (entry.func.effect == .none and caps.len == 0) return null;
+        return .effectful_import;
     }
 
     fn canonicalSeverity(self: *const StrictChecker) Severity {
@@ -1989,6 +2278,7 @@ fn literalRequiredArg(module: []const u8, name: []const u8) ?u8 {
 }
 
 const isKnownGlobalFunction = known_globals.isKnownGlobalFunction;
+const isMutatingArrayMethod = @import("mutating_methods.zig").isMutatingArrayMethod;
 
 fn isArrayMutator(name: []const u8) bool {
     const names = [_][]const u8{

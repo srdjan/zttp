@@ -3201,7 +3201,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "isDict",
         "boolean",
         3291,
-        "f1fcab6d062833c28fa3e6b1a5d2d1b9bab8f408682516dff411af1a0b0f973a",
+        "8ca31c396d9a79d115a68f81dd1358731ae4883f7a8239f7ad7ea8965e813658",
     );
 
     const helper_source =
@@ -3219,7 +3219,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "helper",
         "unknown",
         3295,
-        "e531867bab47cd9dd8d9d41bdcd24693330e0d94618f557004eec3dcb080561c",
+        "e61e079e8451946cec5642a455a5049a353f2de52563cd29c95c447678d80cd9",
     );
 }
 
@@ -4836,6 +4836,67 @@ test "builtin result: JSON.parse is refused as an unpublished ambient global" {
     };
     try withSession(testing.allocator,
         \\function f(s: string): number { const p = JSON.parse(s); return 0; }
+    , Probe.run);
+}
+
+/// The one strict diagnostic of `session`: ZTS630 at `line:column` with
+/// `message`.
+fn expectOneInitializerEffect(session: Session, line: u32, column: u32, message: []const u8) !void {
+    const diagnostics = session.resolved.strictDiagnostics();
+    try testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try testing.expectEqual(strict_checker_mod.DiagnosticKind.effectful_module_initializer, diagnostics[0].kind);
+    try testing.expectEqualStrings(message, diagnostics[0].message);
+    const location = session.parsed.ir_view.getLoc(diagnostics[0].node) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(line, location.line);
+    try testing.expectEqual(column, location.column);
+}
+
+test "module initializer: a helper that writes a module array through a parameter is refused with ZTS630" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try expectOneInitializerEffect(session, 6, 22, "a top-level initializer must be pure, and this one writes a value that can be module state");
+        }
+    };
+    try withSession(testing.allocator,
+        \\const log: number[] = [];
+        \\function add(xs: number[]): number {
+        \\  xs.push(1);
+        \\  return xs.length;
+        \\}
+        \\const n: number = add(log);
+    , Probe.run);
+}
+
+test "module initializer: a call of a function held in a record field is refused with ZTS630" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try expectOneInitializerEffect(session, 5, 26, "a top-level initializer must be pure, and this one calls a function whose body this module cannot read");
+        }
+    };
+    try withSession(testing.allocator,
+        \\function stamp(): number {
+        \\  return Date.now();
+        \\}
+        \\const ops = { run: stamp };
+        \\const t: number = ops.run();
+    , Probe.run);
+}
+
+test "module initializer: a helper that fills a fresh local array is admitted" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 0), session.resolved.strictDiagnostics().len);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function build(n: number): number[] {
+        \\  const out: number[] = [];
+        \\  for (const i of range(n)) {
+        \\    out.push(i * 2);
+        \\  }
+        \\  return out;
+        \\}
+        \\const table: number[] = build(3);
     , Probe.run);
 }
 

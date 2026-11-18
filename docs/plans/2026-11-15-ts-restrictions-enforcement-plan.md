@@ -290,6 +290,35 @@ value, narrowed to a string, without an encode step.
   unvalidated input still refused, and a record that mixes a validated
   part with a raw part still refused.
 
+### Decision 22: which top-level initializers X2 refuses
+
+Spec 5.1 says that module initialization MUST be pure. X2 refuses, with
+ZTS630, a top-level `const` initializer that reads the clock or random,
+calls an import that declares an effect or a capability, writes module
+state, or calls a module function whose body does one of these. A call
+whose body the module cannot read, such as a call of an import from
+another application module, is also refused. The question is whether an
+`env` read and a registration bound to a `const` are effects.
+
+A measurement on 2026-11-17 ran the full gate for two variants in
+worktrees from 759f9fd0. Both variants pass every extra route.
+
+- Both variants break 5 tests whose subject is an effect at
+  initialization: the `p_modinit` row, two tests of a dependency helper
+  that writes its module array during initialization, one state
+  isolation row, and the router test that writes its route table during
+  initialization. Both also break 7 clean restriction probes that call
+  an import from `./mod.ts` at top level.
+- (a) Recommended. Refuse every effect, with no exemption. Variant A
+  also refuses 4 sources that write `const x = schemaCompile(...)` (the
+  `modules_all.ts` example, its contract fixture, and two corpus cases)
+  and 43 flow census probes whose module constant reads `env`. Those three
+  census kinds lose their subject, because no labeled value can exist at
+  module level. A registration keeps only the bare statement form of
+  Decision 3.
+- (b) Exempt `env` reads and a registration bound to a `const`. Variant B
+  breaks only the shared set.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -1245,3 +1274,38 @@ later.
   - The skill text in canonical-style.md shows top-level statements, such
     as `count = count + 1;`. The skill census lists ZTS074 for those
     blocks. A prose fix can move the corpus identity, so it waits for U7.
+- U4c-X2 refuses, with ZTS630, a top-level initializer with an effect
+  (spec 5.1), in the variant (a) of Decision 22 that the plan
+  recommends. The pass is
+  packages/zts/src/strict_checker.zig#StrictChecker.checkModuleInitializers.
+  It follows the body of each module function that an initializer calls,
+  and the body of each callback that a builtin or a method receives. A
+  function value that the initializer only holds runs nothing. The pass
+  does not track aliases, so a write is pure only when it changes a fresh
+  `const` local directly, and a member call is a builtin method only when
+  the receiver type is an array, a string, a number, a boolean, or `Bytes`.
+  Review found two fail-opens in the first draft, and probes confirmed
+  both: a helper that pushed onto a module array through a parameter, and
+  a call of a function that a record field holds. Pipeline tests pin
+  both refusals and a fresh-local control. The fallout: 5 tests whose
+  subject is an effect at initialization (two ZTS630 pins, two deleted
+  rows, and the router test, which now writes its route table from the
+  handler), 7 clean restriction probes that called an import at top
+  level, 4 sources with `const x = schemaCompile(...)`, 43 flow census
+  probes and one precompile test whose module constant read `env`, and the
+  fixed costs of a new code: the policy hash, the meta and expert goldens,
+  six contract hashes, two certificate hashes, the frozen search
+  response, a defect seed, the stand-in range document, the skill census, and R7c. These
+  findings stay open:
+  - The audit of X2 starts from code that probably only a labeled module
+    constant or an initialization write reached. This list is
+    unconfirmed: packages/zts/src/flow_interp.zig#FlowInterp.loadGlobal,
+    packages/zts/src/flow_interp.zig#FlowInterp.storeGlobal,
+    packages/zts/src/flow_interp.zig#FlowInterp.notePersistentGlobalWrite,
+    and the label carry across an exported `const` in
+    packages/tools/src/precompile.zig#checkGraphModule.
+  - A call of a module function that is declared later in the file
+    reports ZTS629, "unpublished ambient global". Spec 5.6 gives mutual
+    recursion a call semantics, so this refusal is a probable defect that
+    predates X2. A probe of two functions, where the first calls the
+    second, can confirm it.

@@ -1,7 +1,7 @@
 // Proves: reading result.value after a result.ok check passes every stage.
 import { validateJson, schemaCompile } from "zttp:validate";
 
-const ok = schemaCompile("test", '{"type":"object"}');
+schemaCompile("test", '{"type":"object"}');
 
 structural Guardrails<T> = Proof<T, "result_safe">;
 

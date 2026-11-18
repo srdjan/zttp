@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS630","severity":"error","message":"a top-level initializer must be pure, and this one reads a value that varies between runs","file":"check/bad/effectful_module_initializer.ts","line":6,"column":30,"suggestion":"Compute the value inside a function, such as the handler. Write a registration as a bare statement.","repair_intent":null}
