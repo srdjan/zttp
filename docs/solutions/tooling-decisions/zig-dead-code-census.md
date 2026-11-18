@@ -1,6 +1,7 @@
 ---
 title: Find dead code in a Zig monorepo with an identifier-frequency census
 date: 2026-07-31
+last_updated: 2026-11-18
 category: tooling-decisions
 module: repo-wide (zts, runtime, tools, pi, modules)
 problem_type: tooling_decision
@@ -10,6 +11,7 @@ applies_when:
   - "Auditing this repo for unreferenced functions, constants, types, or files"
   - "Deciding whether a pub declaration in Zig is genuinely unreachable"
   - "Removing code that spans several packages behind the module-boundary gate"
+  - "Finding branches that only a refused source form reaches, with a coverage census"
 tags:
   - zig
   - dead-code
@@ -17,6 +19,8 @@ tags:
   - refactoring
   - module-boundary
   - lazy-analysis
+  - coverage-census
+  - comptime
 ---
 
 # Find dead code in a Zig monorepo with an identifier-frequency census
@@ -88,6 +92,44 @@ the row in the same commit and read the gate's own counts back as proof.
 **Separate mechanical deletions from judgment calls.** Wire-format fields,
 `packed struct` bits, and documented deferrals score exactly like accidental
 leftovers. Classify before cutting; see "When to Apply".
+
+### A branch that a refused form alone reaches
+
+A name census cannot see a switch arm or an `if` branch whose function is
+still called. After a parser refusal, such a branch can be dead while every
+name around it stays referenced. The U4f audit of 2026-11-18 (plan
+`docs/plans/2026-11-15-ts-restrictions-enforcement-plan.md`) found these
+branches in two steps.
+
+1. A coverage census. A marker at each branch appends its id to a file,
+   once per process and id. One run of the full test graph, `test-zruntime`,
+   and the smoke steps gives the processes that reached each branch.
+2. Probes. Zero hits shows only that no test reaches a branch. For each
+   branch, try admitted sources on every surface (`zts check`, `zttp
+   compile`, `zttp serve`, and the others), or break on the marker in lldb.
+   Delete only a branch that no admitted source reaches, and say what the
+   code then does with that node shape.
+
+A once-per-process flag must be keyed on the marker id. In Zig 0.17, a
+container type declared in the body of a generic function is one type for
+every instantiation when its body names no comptime parameter. The first
+census used this marker, and every marker shared one flag:
+
+```zig
+pub fn hit(comptime id: []const u8) void {
+    const S = struct {
+        const key = id; // without this line, every id shares one `done`
+        var done = std.atomic.Value(bool).init(false);
+    };
+    if (S.done.swap(true, .monotonic)) return;
+    // append id ++ "\n" to the hit file
+}
+```
+
+Without `const key = id;`, each process recorded only its first marker, and
+the census reported zero hits for branches that tests reached. Before the
+full run, prove that one process records two different markers, not only
+one.
 
 ## Why This Matters
 
