@@ -139,7 +139,7 @@ strict error[ZTS603]: match expression must be exhaustive in strict ZigTS
    = help: missing case: when { kind: "c" }. Add an arm for it, or add a 'default:' arm.
 ```
 
-A `default` arm after full coverage of a closed type, and any arm that no value can reach, is the warning ZTS216 (`default arm is unreachable` or `match arm is unreachable`). The type checker reports ZTS205 for the same missing case when the strict check does not run. A match that is not proved exhaustive has the type of its arms or `undefined`.
+A `default` arm after full coverage of a closed type, and any arm that no value can reach, is the error ZTS216 (`default arm is unreachable` or `match arm is unreachable`). The type checker reports ZTS205 for the same missing case when the strict check does not run. A match that is not proved exhaustive has the type of its arms or `undefined`.
 
 ### 6. Exhaustive Optional Handling
 

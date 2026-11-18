@@ -1085,7 +1085,7 @@ The rule depends on the type of the matched value (spec 5.5):
   type tests (`boolean`, `number`, `string`, `array`, `Dict`, `Bytes`). Several
   arms may split one case, for example `{ x: true, y: true }`,
   `{ x: true, y: false }`, and `{ x: false }`. A `default` after full coverage
-  is unreachable, and the check reports it as the warning ZTS216.
+  is unreachable, and the check reports it as the error ZTS216.
 - An open type needs a `default`. Open types are `string`, `number`, `unknown`,
   an array `T[]` (its length has no bound), a type the checker cannot enumerate,
   and a function. Literal arms never cover them. The `array` type test covers

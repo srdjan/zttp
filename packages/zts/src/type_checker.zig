@@ -380,8 +380,11 @@ pub const TypeChecker = struct {
         }
         try self.ensureHealthy();
         var error_count: u32 = 0;
+        var blocking_error_count: u32 = 0;
         for (self.diagnostics.items) |diag| {
-            if (diag.severity == .err) error_count += 1;
+            if (diag.severity != .err) continue;
+            error_count += 1;
+            if (diag.kind != .redundant_match_arm) blocking_error_count += 1;
         }
         // The check pipeline stops at the type stage when it found an error
         // (`precompile.runCheckOnlyFromSourceWithOptions`), so the strict
@@ -389,8 +392,10 @@ pub const TypeChecker = struct {
         // checker found none. Then ZTS603 answers for it and ZTS205 would be a
         // second diagnostic for the same mistake. With a type error present,
         // strict never reports, and ZTS205 stays: it would otherwise sit
-        // behind the type error its `| undefined` result type caused.
-        if (self.strict_checker_follows and error_count == 0) self.dropDiagnosticsOfKind(.non_exhaustive_match);
+        // behind the type error its `| undefined` result type caused. A
+        // redundant arm (ZTS216) does not count: it types no expression, and
+        // `check` still runs the strict stage and reports ZTS603 beside it.
+        if (self.strict_checker_follows and blocking_error_count == 0) self.dropDiagnosticsOfKind(.non_exhaustive_match);
         return error_count;
     }
 
@@ -5818,8 +5823,9 @@ pub const TypeChecker = struct {
     }
 
     /// Report a match that is not provably exhaustive (ZTS205) and the first
-    /// arm that no value reaches (ZTS216). Both are warnings. `check` drops
-    /// ZTS205 again when the strict checker follows and reports ZTS603.
+    /// arm that no value reaches (ZTS216). ZTS205 is a warning and ZTS216 is
+    /// an error. `check` drops ZTS205 again when the strict checker follows
+    /// and reports ZTS603.
     fn reportMatchCoverage(self: *TypeChecker, node: NodeIndex, me: ir.Node.MatchExpr) void {
         var coverage = self.matchCoverage(me, true);
         defer coverage.deinit(self.allocator);
@@ -5842,7 +5848,7 @@ pub const TypeChecker = struct {
         if (coverage.redundant) |redundant| {
             const arm_idx = self.ir_view.getListIndex(me.arms_start, redundant.arm);
             self.addDiagnostic(.{
-                .severity = .warning,
+                .severity = .err,
                 .kind = .redundant_match_arm,
                 .node = arm_idx,
                 .message = if (redundant.is_default)
@@ -10112,7 +10118,7 @@ test "TypeChecker: a match not proved exhaustive has type T or undefined" {
     , 0, 0);
 }
 
-test "TypeChecker: a redundant arm is a ZTS216 warning at the first such arm" {
+test "TypeChecker: a redundant arm is a ZTS216 error at the first such arm" {
     const allocator = std.testing.allocator;
     const seen = try typedDiagnostics(allocator,
         \\function run(s: "a" | "b"): number {
@@ -10128,11 +10134,11 @@ test "TypeChecker: a redundant arm is a ZTS216 warning at the first such arm" {
     defer freeSeenDiagnostics(allocator, seen);
     try std.testing.expectEqual(@as(usize, 1), seen.len);
     try std.testing.expectEqual(DiagnosticKind.redundant_match_arm, seen[0].kind);
-    try std.testing.expectEqual(Severity.warning, seen[0].severity);
+    try std.testing.expectEqual(Severity.err, seen[0].severity);
     try std.testing.expectEqualStrings("match arm is unreachable", seen[0].message);
 }
 
-test "TypeChecker: a default arm after full coverage is a ZTS216 warning about the default" {
+test "TypeChecker: a default arm after full coverage is a ZTS216 error about the default" {
     const allocator = std.testing.allocator;
     const seen = try typedDiagnostics(allocator,
         \\function run(s: "a" | "b"): number {
@@ -10147,6 +10153,7 @@ test "TypeChecker: a default arm after full coverage is a ZTS216 warning about t
     defer freeSeenDiagnostics(allocator, seen);
     try std.testing.expectEqual(@as(usize, 1), seen.len);
     try std.testing.expectEqual(DiagnosticKind.redundant_match_arm, seen[0].kind);
+    try std.testing.expectEqual(Severity.err, seen[0].severity);
     try std.testing.expectEqualStrings("default arm is unreachable", seen[0].message);
 }
 
@@ -10169,9 +10176,8 @@ test "TypeChecker: param-discriminant match with default arm is exhaustive (no w
 }
 
 test "TypeChecker: a default arm after full coverage of a closed union is redundant" {
-    // Spec 5.5: a closed union MUST NOT include `default`. A warning, not an
-    // error (owner decision T1 (a)): it reaches the expert loop as a veto
-    // violation and does not stop a build.
+    // Spec 5.5: a closed union MUST NOT include `default`. ZTS216 is an
+    // error, so it stops a build.
     try checkTypedSource(
         \\structural C = { kind: "echo"; text: string } | { kind: "ping"; text: string };
         \\function run(c: C): string {
@@ -10181,7 +10187,7 @@ test "TypeChecker: a default arm after full coverage of a closed union is redund
         \\    default: "u",
         \\  };
         \\}
-    , 0, 1);
+    , 1, 0);
 }
 
 test "TypeChecker: typed return satisfies a marker-carrying declared return type" {

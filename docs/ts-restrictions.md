@@ -264,6 +264,7 @@ absence handling.
 | `when _:` | ZTS001 | `default:` |
 | A rename to the same name, such as `{ text: text }` in a pattern | ZTS625 (advisory) | `{ text }` |
 | An arm that reads a field off the scrutinee | ZTS626 (advisory) | Bind the field in the pattern |
+| A `default` arm after full coverage of a closed union, or a duplicate `when` arm | ZTS216 | Remove the `default` arm or the duplicate arm |
 
 An advisory names a better form for code that is already correct. An advisory
 never fails a build (spec section 4.2.1).
@@ -422,4 +423,3 @@ against the compiler.
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |
 | `for...of` over a number, such as `for (const k of 5)` | Accepted, exit 0 | A targeted refusal. Iterate an array, a string, or `range(n)` |
-| A `default` arm on a closed union that is already covered, or a duplicate `when` arm | Accepted, exit 2. The check reports ZTS216 as a warning | ZTS216 as an error. Remove the `default` arm or the duplicate arm |

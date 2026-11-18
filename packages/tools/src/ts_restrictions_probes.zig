@@ -1038,6 +1038,14 @@ const refusal_rows_b = [_]RefusalRow{
         .refused = &.{r("", top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\" }: c.text\n    when { kind: \"b\", text }: text\n  };\n}"))},
         .clean = c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n  };\n}")),
     },
+    .{
+        .key = "A `default` arm after full coverage of a closed union, or a duplicate `when` arm",
+        .refused = &.{
+            r("default", top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n    default: \"\"\n  };\n}")),
+            r("when", top("function g(n: number): number {\n  return match (n) {\n    when 1: 1\n    when 1: 2\n    default: 0\n  };\n}")),
+        },
+        .clean = c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n  };\n}")),
+    },
 
     // ----- Types -----
     .{
@@ -1611,12 +1619,5 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "`for...of` over a number, such as `for (const k of 5)`",
         .sources = &.{c(top("function g(): number {\n  for (const k of 5) {\n    const y = k;\n  }\n  return 1;\n}"))},
-    },
-    .{
-        .key = "A `default` arm on a closed union that is already covered, or a duplicate `when` arm",
-        .sources = &.{
-            c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n    default: \"\"\n  };\n}")),
-            c(top("function g(n: number): number {\n  return match (n) {\n    when 1: 1\n    when 1: 2\n    default: 0\n  };\n}")),
-        },
     },
 };

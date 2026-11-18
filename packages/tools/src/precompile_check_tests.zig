@@ -7854,7 +7854,6 @@ test "CHECK refuses termination claims when a function value recurses without en
         \\  const o: Ops = { a: down };
         \\  return match (o) {
         \\    when { a: g }: [1].map(g)[0] ?? n
-        \\    default: n
         \\  };
         \\}
         \\function handler(req: Request): Proof<Response, "cost_bounded"> {
@@ -10123,11 +10122,10 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  return Response.json({ a: q.age });
     \\}
     },
-    .{ .name = "p03_match_arm_nullable_field", .expect = "ZTS216@6,ZTS309@7,ZTS500@3", .source =
+    .{ .name = "p03_match_arm_nullable_field", .expect = "ZTS309@6,ZTS500@3", .source =
     \\structural Q = { age: number };
     \\structural P = { q: Q | undefined };
-    \\function handler(req: Request): Response {
-    \\  const p: P | undefined = { q: undefined };
+    \\function handler(req: Request, p: P | undefined): Response {
     \\  return match (p) {
     \\    when undefined: Response.json({ a: 0 })
     \\    when { q: v }: Response.json({ a: v.age })

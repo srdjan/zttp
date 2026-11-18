@@ -252,7 +252,7 @@ A record pattern matches only a record and an array pattern only an array of
 its exact length, so `when { w }` does not cover a `string`. When the arms do
 not cover the type, the check reports ZTS603 and names the first missing case,
 for example `missing case: when { kind: "c" }`. A `default` after full coverage,
-and an arm no value can reach, is the warning ZTS216. Exactly one arm's
+and an arm no value can reach, is the error ZTS216. Exactly one arm's
 expression is evaluated, and an arm expression may be effectful. A match that
 no arm covers evaluates to `undefined`, so its type includes `undefined`.
 

@@ -1287,9 +1287,9 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
     try testing.expectEqual(cases.items.len, compared);
     try testing.expectEqual(@as(usize, 165), with_diagnostics);
     // Every error carries a plan, and the tiers show where plans come from.
-    try testing.expectEqual(@as(usize, 103), error_codes.count());
+    try testing.expectEqual(@as(usize, 104), error_codes.count());
     try testing.expectEqual(@as(usize, 1), tier_result);
     try testing.expectEqual(@as(usize, 16), tier_intent);
-    try testing.expectEqual(@as(usize, 152), tier_help);
+    try testing.expectEqual(@as(usize, 156), tier_help);
     try testing.expectEqual(@as(usize, 15), tier_other);
 }
