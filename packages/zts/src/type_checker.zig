@@ -1253,19 +1253,13 @@ pub const TypeChecker = struct {
     /// assignment, and the body of a nested function. A closure can run during
     /// the loop, so an assignment inside its body kills the narrowing too.
     ///
-    /// A captured binding has a different `bindingKey` inside the closure
-    /// (kind `upvalue`, the closure's scope and capture slot) than the binding
-    /// has where it is declared, so the key cannot name the narrowing to kill.
-    /// An assignment to a captured binding inside a nested function therefore
-    /// kills every narrowing.
-    ///
     /// A shape this walk fails to reach is the unsound direction. The set it
     /// kills only ever grows, and over-killing widens a binding back to its
     /// declared type, which costs precision. A kill that never happens keeps a
     /// narrowing the body has already invalidated, and nothing else catches
     /// it. When the nesting passes `max_kill_depth`, the walk gives up and kills
     /// every narrowing, for the same reason.
-    fn killNarrowingsAssignedIn(self: *TypeChecker, node: NodeIndex, depth: u16, in_closure: bool) void {
+    fn killNarrowingsAssignedIn(self: *TypeChecker, node: NodeIndex, depth: u16) void {
         if (node == null_node) return;
         if (depth > max_kill_depth) {
             self.killAllNarrowings();
@@ -1277,19 +1271,16 @@ pub const TypeChecker = struct {
             if (self.ir_view.getTag(asgn.target) == .identifier) {
                 if (self.ir_view.getBinding(asgn.target)) |binding| {
                     self.killNarrowing(bindingKey(binding));
-                    if (in_closure and binding.kind == .upvalue) self.killAllNarrowings();
                 }
             }
             // The target can hold an assignment of its own: `a[x = 1] = 2`.
-            self.killNarrowingsAssignedIn(asgn.target, depth + 1, in_closure);
-            self.killNarrowingsAssignedIn(asgn.value, depth + 1, in_closure);
+            self.killNarrowingsAssignedIn(asgn.target, depth + 1);
+            self.killNarrowingsAssignedIn(asgn.value, depth + 1);
             return;
         }
-        const child_in_closure = in_closure or tag == .function_decl or
-            tag == .function_expr or tag == .arrow_function;
         var children = self.ir_view.expressionChildren(node);
         while (children.next()) |child| {
-            self.killNarrowingsAssignedIn(child, depth + 1, child_in_closure);
+            self.killNarrowingsAssignedIn(child, depth + 1);
         }
     }
 
@@ -1306,11 +1297,12 @@ pub const TypeChecker = struct {
     }
 
     /// Set `closure_writes_outer` when a function body, at any depth, assigns
-    /// an identifier whose binding is a captured one (`upvalue`) or a
-    /// module-level one (`global`). Only an assignment to an identifier writes
-    /// a binding: the profile refuses compound assignment, so `asgn.op` is
-    /// null in an accepted program, and a `for...of` loop declares its own
-    /// binding. The rule is program-wide on purpose. A call can run a closure
+    /// an identifier whose binding is a module-level one (`global`). ZTS073
+    /// refuses a write to a binding of an enclosing function. Only an
+    /// assignment to an identifier writes a binding: the profile refuses
+    /// compound assignment, so `asgn.op` is null in an accepted program, and
+    /// a `for...of` loop declares its own binding. The rule is program-wide
+    /// on purpose. A call can run a closure
     /// that the analyzer cannot name: `route_resolution.zig` resolves some
     /// immutable identifiers to their function, but not a function value in
     /// general. A closure that writes an outer binding anywhere therefore
@@ -1330,7 +1322,7 @@ pub const TypeChecker = struct {
             const asgn = self.ir_view.getAssignment(node) orelse return;
             if (self.ir_view.getTag(asgn.target) == .identifier) {
                 if (self.ir_view.getBinding(asgn.target)) |binding| {
-                    if (binding.kind == .upvalue or binding.kind == .global) {
+                    if (binding.kind == .global) {
                         self.closure_writes_outer = true;
                         return;
                     }
@@ -1700,7 +1692,7 @@ pub const TypeChecker = struct {
                 // valid inside it if the body never reassigns the binding, and
                 // a narrowing established inside the body does not survive the
                 // back edge.
-                self.killNarrowingsAssignedIn(fi.body, 0, false);
+                self.killNarrowingsAssignedIn(fi.body, 0);
                 // The body's scope puts back every narrowing the body changed,
                 // which is the state before the body. It also undoes the kills
                 // the body made, so they are applied again after the loop.

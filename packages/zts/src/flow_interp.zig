@@ -2092,12 +2092,6 @@ pub const FlowInterp = struct {
         if (persists) try self.appendPersistentWrite(node);
     }
 
-    /// Record a program write to the single site `site`, such as a capture cell.
-    fn notePersistentSiteWrite(self: *FlowInterp, node: NodeIndex, site: SiteKey) Error!void {
-        const entry = self.pass_entry orelse return;
-        if (sitePersists(entry, site)) try self.appendPersistentWrite(node);
-    }
-
     /// Record a program write to a module binding during a request pass.
     fn notePersistentGlobalWrite(self: *FlowInterp, node: NodeIndex) Error!void {
         if (self.pass_entry == null) return;
@@ -3726,19 +3720,12 @@ pub const FlowInterp = struct {
                         try self.storeLocal(st, key, assigned);
                         return assigned;
                     },
-                    // A closure writes the cell of the captured binding, weakly.
+                    // ZTS073 refuses a write to a binding of an enclosing
+                    // function, so an accepted program never reaches this arm.
+                    // Fail closed if one does.
                     .upvalue => {
-                        const key = self.upvalueKey(binding) orelse {
-                            const assigned = try self.eval(asg.value, st);
-                            try self.record(node, .assignment, .capture_unplaced);
-                            return assigned;
-                        };
-                        const assigned = if (asg.op) |op|
-                            try self.compoundValue(node, op, self.captureValue(st, key), asg.value, st)
-                        else
-                            try self.eval(asg.value, st);
-                        try self.notePersistentSiteWrite(node, self.captureSite(key));
-                        try self.weakWriteCapture(st, key, assigned);
+                        const assigned = try self.eval(asg.value, st);
+                        try self.record(node, .assignment, .capture_unplaced);
                         return assigned;
                     },
                     // Module state has no cell here unless globals persist.
