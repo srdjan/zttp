@@ -1028,12 +1028,14 @@ test "buildTestContractForSource keeps decodeQuery schemas out of request bodies
         \\import { schemaCompile } from "zttp:validate";
         \\import { decodeQuery } from "zttp:decode";
         \\
-        \\schemaCompile("search.query", JSON.stringify({
-        \\  type: "object",
-        \\  properties: {
-        \\    verbose: { type: "boolean" },
-        \\  },
-        \\}));
+        \\function register() {
+        \\  schemaCompile("search.query", JSON.stringify({
+        \\    type: "object",
+        \\    properties: {
+        \\      verbose: { type: "boolean" },
+        \\    },
+        \\  }));
+        \\}
         \\
         \\function search(req) {
         \\  const query = decodeQuery("search.query", req.query ?? {});
@@ -1075,18 +1077,20 @@ test "schema contract preserves supported JSON stringify literal bytes" {
     const allocator = std.testing.allocator;
     const source =
         \\import { schemaCompile } from "zttp:validate";
-        \\schemaCompile("matrix", JSON.stringify({
-        \\  type: "object",
-        \\  required: ["title", "count", "enabled", "items"],
-        \\  properties: {
-        \\    title: { type: "string", description: "line\nquote:\" slash:\\ tab:\t" },
-        \\    count: { type: "number", minimum: -1.5, maximum: 2.25 },
-        \\    enabled: { type: "boolean", default: true },
-        \\    items: { type: "array", items: { type: "integer" } },
-        \\    absent: null,
-        \\    examples: [0, -2, 3.5, false, null],
-        \\  },
-        \\}));
+        \\function register() {
+        \\  schemaCompile("matrix", JSON.stringify({
+        \\    type: "object",
+        \\    required: ["title", "count", "enabled", "items"],
+        \\    properties: {
+        \\      title: { type: "string", description: "line\nquote:\" slash:\\ tab:\t" },
+        \\      count: { type: "number", minimum: -1.5, maximum: 2.25 },
+        \\      enabled: { type: "boolean", default: true },
+        \\      items: { type: "array", items: { type: "integer" } },
+        \\      absent: null,
+        \\      examples: [0, -2, 3.5, false, null],
+        \\    },
+        \\  }));
+        \\}
         \\function handler(req) { return Response.json({ ok: true }); }
     ;
 
@@ -1124,27 +1128,27 @@ test "schema contract marks readable dynamic forms and malformed raw JSON dynami
     const cases = [_][]const u8{
         \\import { schemaCompile } from "zttp:validate";
         \\const schema = { type: "object" };
-        \\schemaCompile("direct", schema);
+        \\function register() { schemaCompile("direct", schema); }
         \\function handler(req) { return Response.text("ok"); }
         ,
         \\import { schemaCompile } from "zttp:validate";
         \\const schema = { type: "object" };
-        \\schemaCompile("stringify-root", JSON.stringify(schema));
+        \\function register() { schemaCompile("stringify-root", JSON.stringify(schema)); }
         \\function handler(req) { return Response.text("ok"); }
         ,
         \\import { schemaCompile } from "zttp:validate";
         \\const base = { type: "object" };
-        \\schemaCompile("spread", JSON.stringify({ ...base, properties: {} }));
+        \\function register() { schemaCompile("spread", JSON.stringify({ ...base, properties: {} })); }
         \\function handler(req) { return Response.text("ok"); }
         ,
         \\import { schemaCompile } from "zttp:validate";
         \\const values = ["string", "number"];
-        \\schemaCompile("array-spread", JSON.stringify({ enum: ["boolean", ...values] }));
+        \\function register() { schemaCompile("array-spread", JSON.stringify({ enum: ["boolean", ...values] })); }
         \\function handler(req) { return Response.text("ok"); }
         ,
         \\import { schemaCompile } from "zttp:validate";
         \\function schemaType() { return "object"; }
-        \\schemaCompile("call", JSON.stringify({ type: schemaType() }));
+        \\function register() { schemaCompile("call", JSON.stringify({ type: schemaType() })); }
         \\function handler(req) { return Response.text("ok"); }
         ,
         \\import { schemaCompile } from "zttp:validate";
@@ -1153,7 +1157,7 @@ test "schema contract marks readable dynamic forms and malformed raw JSON dynami
         \\  const JSON = { stringify: ignoredStringify };
         \\  schemaCompile("local-shadow", JSON.stringify({ type: "object" }));
         \\}
-        \\register();
+        \\const registered = register();
         \\function handler(req) { return Response.text("ok"); }
         ,
         \\import { schemaCompile } from "zttp:validate";
@@ -1175,7 +1179,7 @@ test "schema contract keeps the current top-level JSON shadow behavior" {
         \\import { schemaCompile } from "zttp:validate";
         \\function ignoredStringify(value) { return "ignored"; }
         \\const JSON = { stringify: ignoredStringify };
-        \\schemaCompile("global-shadow", JSON.stringify({ type: "string" }));
+        \\function register() { schemaCompile("global-shadow", JSON.stringify({ type: "string" })); }
         \\function handler(req) { return Response.text("ok"); }
     ;
 
@@ -1195,7 +1199,7 @@ test "schema contract refuses computed object keys before extraction" {
     const source =
         \\import { schemaCompile } from "zttp:validate";
         \\const key = "type";
-        \\schemaCompile("computed", JSON.stringify({ [key]: "object" }));
+        \\function register() { schemaCompile("computed", JSON.stringify({ [key]: "object" })); }
         \\function handler(req) { return Response.text("ok"); }
     ;
 

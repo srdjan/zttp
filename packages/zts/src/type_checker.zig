@@ -10510,9 +10510,9 @@ test "TypeChecker import diagnostics preserve aliases" {
     const allocator = std.testing.allocator;
     const Case = struct { source: []const u8, errors: usize, message: []const u8 = "expected 1, got 2" };
     const cases = [_]Case{
-        .{ .source = "import { sha256 as digest } from 'zttp:crypto'; digest('a', 'b');", .errors = 1 },
-        .{ .source = "import { sha256 as digest } from 'zttp-ext:unknown'; digest('a', 'b');", .errors = 0 },
-        .{ .source = "function sha256(a, b) { return a; } sha256('a', 'b');", .errors = 0 },
+        .{ .source = "import { sha256 as digest } from 'zttp:crypto'; function run() { digest('a', 'b'); }", .errors = 1 },
+        .{ .source = "import { sha256 as digest } from 'zttp-ext:unknown'; function run() { digest('a', 'b'); }", .errors = 0 },
+        .{ .source = "function sha256(a, b) { return a; } function run() { sha256('a', 'b'); }", .errors = 0 },
     };
     for ([_]bool{ false, true }) |borrow_imports| {
         for (cases) |case| {
@@ -10549,7 +10549,7 @@ test "TypeChecker import policy compares named kind and slot without scope or lo
             for ([_]bool{ false, true }) |same_kind| {
                 var atoms = context.AtomTable.init(allocator);
                 defer atoms.deinit();
-                var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "digest('a', 'b');", .compile);
+                var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "function run() { digest('a', 'b'); }", .compile);
                 defer parser.deinit();
                 parser.setAtomTable(&atoms);
                 const root = try parser.parse();
@@ -10614,7 +10614,7 @@ test "TypeChecker owned import cache survives moving a checked value" {
     const allocator = std.testing.allocator;
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "import { sha256 as digest } from 'zttp:crypto'; digest('a', 'b');", .compile);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "import { sha256 as digest } from 'zttp:crypto'; function run() { digest('a', 'b'); }", .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -10642,7 +10642,7 @@ test "TypeChecker owned import cache survives moving a checked value" {
 
 test "TypeChecker import cache allocation failure stays unproven after allocator recovery" {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "import { sha256 } from 'zttp:crypto'; sha256('a', 'b');", .compile);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "import { sha256 } from 'zttp:crypto'; function run() { sha256('a', 'b'); }", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -10783,7 +10783,7 @@ test "TypeChecker: rejects assignment to readonly property" {
     try checkTypedSource(
         \\structural Config = { readonly port: number; host: string };
         \\const cfg: Config = { port: 3000, host: "localhost" };
-        \\cfg.port = 8080;
+        \\function update() { cfg.port = 8080; }
     , 1, 0);
 }
 
@@ -10791,7 +10791,7 @@ test "TypeChecker: allows assignment to non-readonly property" {
     try checkTypedSource(
         \\structural Config = { readonly port: number; host: string };
         \\const cfg: Config = { port: 3000, host: "localhost" };
-        \\cfg.host = "other";
+        \\function update() { cfg.host = "other"; }
     , 0, 0);
 }
 
@@ -11071,6 +11071,7 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
 test "TypeChecker infers every supported JSON stringify schema literal" {
     try checkTypedSourceSaying(
         \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\function register() {
         \\schemaCompile("matrix", JSON.stringify({
         \\  type: "object",
         \\  required: ["title", "count", "enabled", "items"],
@@ -11083,6 +11084,7 @@ test "TypeChecker infers every supported JSON stringify schema literal" {
         \\    examples: [0, -2, 3.5, false, null],
         \\  },
         \\}));
+        \\}
         \\const parsed = validateJson("matrix", "{}");
         \\const title: string = parsed.value.title;
         \\const count: number = parsed.value.count;
@@ -11113,7 +11115,7 @@ test "TypeChecker preserves raw schema typing and skips unreadable schemas" {
     try checkTypedSource(
         \\import { schemaCompile, validateJson } from "zttp:validate";
         \\const schema = { type: "object", properties: { title: { type: "string" } } };
-        \\schemaCompile("dynamic", JSON.stringify(schema));
+        \\function register() { schemaCompile("dynamic", JSON.stringify(schema)); }
         \\const parsed = validateJson("dynamic", "{}");
         \\const title: number = parsed.value.title;
     , 0, 0);
@@ -11123,10 +11125,12 @@ test "TypeChecker refuses a partially written dynamic schema without leaking" {
     try checkTypedSource(
         \\import { schemaCompile, validateJson } from "zttp:validate";
         \\function schemaType() { return "object"; }
+        \\function register() {
         \\schemaCompile("partial", JSON.stringify({
         \\  type: schemaType(),
         \\  properties: { title: { type: "string" } },
         \\}));
+        \\}
         \\const parsed = validateJson("partial", "{}");
         \\const title: number = parsed.value.title;
     , 0, 0);
@@ -11139,10 +11143,12 @@ test "TypeChecker keeps the current JSON binding distinction for schemas" {
         \\  return "ignored";
         \\}
         \\const JSON = { stringify: ignored };
+        \\function register() {
         \\schemaCompile("global-shadow", JSON.stringify({
         \\  type: "object",
         \\  properties: { title: { type: "string" } },
         \\}));
+        \\}
         \\const parsed = validateJson("global-shadow", "{}");
         \\const title: number = parsed.value.title;
     , 1, "type 'string | undefined' is not assignable to type 'number'");
@@ -11159,7 +11165,6 @@ test "TypeChecker keeps the current JSON binding distinction for schemas" {
         \\    properties: { title: { type: "string" } },
         \\  }));
         \\}
-        \\register();
         \\const parsed = validateJson("local-shadow", "{}");
         \\const title: number = parsed.value.title;
     , 0, 0);

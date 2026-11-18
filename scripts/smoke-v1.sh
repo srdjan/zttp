@@ -347,7 +347,7 @@ export function value(): number {
   return 1;
 }
 TS
-dep_check_case top-level-assert "dep.ts: a dependency may not hold a top-level assert, because a failed one leaves the later exports undefined"
+dep_check_case top-level-assert "error at 1:1: a top-level statement must be a declaration, or a registration call with literal arguments; move the statement into a function"
 
 step "negative: a string imported from a file is refused where a Response is declared"
 mkdir -p "$TMP_DIR/import-type-app"

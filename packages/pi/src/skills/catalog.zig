@@ -133,15 +133,15 @@ const census_known_failures = [_]CensusFailure{
     .{ .skill = "canonical-style", .block = 1, .codes = &.{"ZTS065"}, .reason = "fragment: names the types Input and User and calls makeUser, which the block does not declare" },
     .{ .skill = "canonical-style", .block = 2, .codes = &.{ "ZTS600", "ZTS629" }, .reason = "fragment: uses load, pickStatus, ready, and fallback, which the block does not declare" },
     .{ .skill = "canonical-style", .block = 3, .codes = &.{"ZTS629"}, .reason = "fragment: uses a and b, which the block does not declare" },
-    .{ .skill = "canonical-style", .block = 4, .codes = &.{ "ZTS106", "ZTS629" }, .reason = "fragment: uses count, which the block does not declare" },
+    .{ .skill = "canonical-style", .block = 4, .codes = &.{ "ZTS074", "ZTS106", "ZTS629" }, .reason = "fragment: uses count, which the block does not declare; a top-level statement" },
     .{ .skill = "canonical-style", .block = 5, .codes = &.{"ZTS629"}, .reason = "fragment: uses base, which the block does not declare" },
-    .{ .skill = "canonical-style", .block = 6, .codes = &.{ "ZTS600", "ZTS629" }, .reason = "fragment: uses send and args, which the block does not declare" },
-    .{ .skill = "canonical-style", .block = 7, .codes = &.{"ZTS500"}, .reason = "finding: a complete module without a handler is refused with ZTS500" },
-    .{ .skill = "canonical-style", .block = 8, .codes = &.{ "ZTS600", "ZTS629" }, .reason = "fragment: uses payload, items, and use, which the block does not declare" },
-    .{ .skill = "canonical-style", .block = 9, .codes = &.{"ZTS002"}, .reason = "fragment: elided `{ ... }` body" },
-    .{ .skill = "canonical-style", .block = 10, .codes = &.{"ZTS002"}, .reason = "fragment: a statement list with a top-level return" },
-    .{ .skill = "canonical-style", .block = 11, .codes = &.{"ZTS002"}, .reason = "fragment: a statement list with a top-level return" },
-    .{ .skill = "canonical-style", .block = 12, .codes = &.{"ZTS002"}, .reason = "fragment: a statement list with a top-level return" },
+    .{ .skill = "canonical-style", .block = 6, .codes = &.{ "ZTS074", "ZTS600", "ZTS629" }, .reason = "fragment: uses send and args, which the block does not declare; a top-level statement" },
+    .{ .skill = "canonical-style", .block = 7, .codes = &.{ "ZTS074", "ZTS500" }, .reason = "finding: a complete module without a handler is refused with ZTS500; a top-level statement" },
+    .{ .skill = "canonical-style", .block = 8, .codes = &.{ "ZTS074", "ZTS600", "ZTS629" }, .reason = "fragment: uses payload, items, and use, which the block does not declare; a top-level statement" },
+    .{ .skill = "canonical-style", .block = 9, .codes = &.{ "ZTS002", "ZTS074" }, .reason = "fragment: elided `{ ... }` body; a top-level statement" },
+    .{ .skill = "canonical-style", .block = 10, .codes = &.{ "ZTS002", "ZTS074" }, .reason = "fragment: a statement list with a top-level return; a top-level statement" },
+    .{ .skill = "canonical-style", .block = 11, .codes = &.{ "ZTS002", "ZTS074" }, .reason = "fragment: a statement list with a top-level return; a top-level statement" },
+    .{ .skill = "canonical-style", .block = 12, .codes = &.{ "ZTS002", "ZTS074" }, .reason = "fragment: a statement list with a top-level return; a top-level statement" },
 };
 
 const census_block_count = 15;

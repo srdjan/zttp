@@ -1856,7 +1856,7 @@ pub const BoolChecker = struct {
 
 test "BoolChecker fails closed when analysis state cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "if ({}) { const enabled = true; }", .compile);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "function f() { if ({}) { const enabled = true; } }", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1898,23 +1898,23 @@ fn checkSourceFull(source: []const u8, expect_errors: u32, expect_warnings: ?u32
 // S1: if/ternary conditions
 
 test "sound: boolean literal in if passes" {
-    try checkSource("if (true) { let x = 1; }", 0);
+    try checkSource("function f() { if (true) { let x = 1; } }", 0);
 }
 
 test "sound: comparison in if passes" {
-    try checkSource("let x = 5; if (x === 0) { let y = 1; }", 0);
+    try checkSource("function f() { let x = 5; if (x === 0) { let y = 1; } }", 0);
 }
 
 test "sound: boolean && boolean in if passes" {
-    try checkSource("let a = 1; let b = 2; if (a === 1 && b !== 3) { let c = 1; }", 0);
+    try checkSource("function f() { let a = 1; let b = 2; if (a === 1 && b !== 3) { let c = 1; } }", 0);
 }
 
 test "sound: tracked const boolean in if passes" {
-    try checkSource("const done = 1 > 0; if (done) { let x = 1; }", 0);
+    try checkSource("function f() { const done = 1 > 0; if (done) { let x = 1; } }", 0);
 }
 
 test "sound: unknown function result in if fails closed" {
-    try checkSource("const ok = validate(); if (ok) { let x = 1; }", 1);
+    try checkSource("function f() { const ok = validate(); if (ok) { let x = 1; } }", 1);
 }
 
 test "sound: unknown parameter in ternary fails closed" {
@@ -1922,19 +1922,19 @@ test "sound: unknown parameter in ternary fails closed" {
 }
 
 test "sound: number literal in if fails" {
-    try checkSource("if (0) { let x = 1; }", 1);
+    try checkSource("function f() { if (0) { let x = 1; } }", 1);
 }
 
 test "sound: string literal in if fails" {
-    try checkSource("if (\"hello\") { let x = 1; }", 1);
+    try checkSource("function f() { if (\"hello\") { let x = 1; } }", 1);
 }
 
 test "sound: undefined literal in if fails" {
-    try checkSourceFull("if (undefined) { let x = 1; }", 1, 0);
+    try checkSourceFull("function f() { if (undefined) { let x = 1; } }", 1, 0);
 }
 
 test "sound: tracked const number in if fails" {
-    try checkSource("const count = 42; if (count) { let x = 1; }", 1);
+    try checkSource("function f() { const count = 42; if (count) { let x = 1; } }", 1);
 }
 
 // S2: && and || operands
@@ -1962,8 +1962,8 @@ test "sound: !boolean passes" {
 }
 
 test "sound: assert requires a boolean condition" {
-    try checkSource("assert 1;", 1);
-    try checkSource("assert true;", 0);
+    try checkSource("function f() { assert 1; }", 1);
+    try checkSource("function f() { assert true; }", 0);
 }
 
 // S4: ?? warnings
@@ -1984,42 +1984,50 @@ test "sound: unknown LHS for ?? no warning" {
 
 test "sound: nested number condition fails" {
     try checkSource(
-        \\const flag = true;
-        \\if (flag) {
-        \\  const count = 5;
-        \\  if (count) { let x = 1; }
+        \\function f() {
+        \\  const flag = true;
+        \\  if (flag) {
+        \\    const count = 5;
+        \\    if (count) { let x = 1; }
+        \\  }
         \\}
     , 1);
 }
 
 test "sound: complex boolean expression passes" {
     try checkSource(
-        \\const a = 1;
-        \\const b = 2;
-        \\const c = 3;
-        \\if (a > 0 && b !== c || a === b) { let x = 1; }
+        \\function f() {
+        \\  const a = 1;
+        \\  const b = 2;
+        \\  const c = 3;
+        \\  if (a > 0 && b !== c || a === b) { let x = 1; }
+        \\}
     , 0);
 }
 
 // Let variable tracking
 
 test "sound: tracked let number in if fails" {
-    try checkSource("let count = 0; if (count) { let x = 1; }", 1);
+    try checkSource("function f() { let count = 0; if (count) { let x = 1; } }", 1);
 }
 
 test "sound: let reassigned to boolean passes" {
     try checkSource(
-        \\let flag = 0;
-        \\flag = 1 > 0;
-        \\if (flag) { let x = 1; }
+        \\function f() {
+        \\  let flag = 0;
+        \\  flag = 1 > 0;
+        \\  if (flag) { let x = 1; }
+        \\}
     , 0);
 }
 
 test "sound: let reassigned to number fails in if" {
     try checkSource(
-        \\let flag = true;
-        \\flag = 42;
-        \\if (flag) { let x = 1; }
+        \\function f() {
+        \\  let flag = true;
+        \\  flag = 42;
+        \\  if (flag) { let x = 1; }
+        \\}
     , 1);
 }
 
@@ -2050,7 +2058,9 @@ test "sound: block function returning boolean passes" {
         \\function check(x) {
         \\  return x > 0;
         \\}
-        \\if (check(1)) { let y = 1; }
+        \\function f() {
+        \\  if (check(1)) { let y = 1; }
+        \\}
     , 0);
 }
 
@@ -2060,7 +2070,9 @@ test "sound: block function with mixed return types fails closed" {
         \\  if (x > 0) { return true; }
         \\  return 0;
         \\}
-        \\if (mixed(1)) { let y = 1; }
+        \\function f() {
+        \\  if (mixed(1)) { let y = 1; }
+        \\}
     , 1);
 }
 
@@ -2069,7 +2081,9 @@ test "sound: declared function returning boolean passes in if" {
         \\function ok(x) {
         \\  return x > 0;
         \\}
-        \\if (ok(1)) { let y = 1; }
+        \\function f() {
+        \\  if (ok(1)) { let y = 1; }
+        \\}
     , 0);
 }
 
@@ -2078,12 +2092,14 @@ test "sound: declared function returning number fails in if" {
         \\function double(n) {
         \\  return n * 2;
         \\}
-        \\if (double(5)) { let x = 1; }
+        \\function f() {
+        \\  if (double(5)) { let x = 1; }
+        \\}
     , 1);
 }
 
 test "sound: untracked function call fails closed" {
-    try checkSource("if (someFunc()) { let x = 1; }", 1);
+    try checkSource("function f() { if (someFunc()) { let x = 1; } }", 1);
 }
 
 // Diagnostic context messages
@@ -2091,7 +2107,7 @@ test "sound: untracked function call fails closed" {
 test "sound: diagnostic gives explicit boolean repair" {
     const allocator = std.testing.allocator;
 
-    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "if ({}) { let x = 1; }", .compile);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "function f() { if ({}) { let x = 1; } }", .compile);
     defer parser.deinit();
 
     const root = try parser.parse();
@@ -2227,24 +2243,30 @@ test "sound: virtual module boolean return type catches non-boolean use" {
     // verifyWebhookSignature returns boolean - using it in if is fine
     try checkSource(
         \\import { verifyWebhookSignature } from "zttp:auth";
-        \\const ok = verifyWebhookSignature("payload", "secret", "sig");
-        \\if (ok) { let x = 1; }
+        \\function f() {
+        \\  const ok = verifyWebhookSignature("payload", "secret", "sig");
+        \\  if (ok) { let x = 1; }
+        \\}
     , 0);
 }
 
 test "sound: virtual module number return type fails in boolean context" {
     try checkSource(
         \\import { cacheIncr } from "zttp:cache";
-        \\const count = cacheIncr("ns", "key");
-        \\if (count) { let x = 1; }
+        \\function f() {
+        \\  const count = cacheIncr("ns", "key");
+        \\  if (count) { let x = 1; }
+        \\}
     , 1);
 }
 
 test "sound: virtual module string return type fails in boolean context" {
     try checkSource(
         \\import { sha256 } from "zttp:crypto";
-        \\const hash = sha256("data");
-        \\if (hash) { let x = 1; }
+        \\function f() {
+        \\  const hash = sha256("data");
+        \\  if (hash) { let x = 1; }
+        \\}
     , 1);
 }
 
@@ -2252,16 +2274,20 @@ test "sound: virtual module object return type fails in boolean context" {
     // jwtVerify returns object (Result) - objects are always truthy, still an error
     try checkSource(
         \\import { jwtVerify } from "zttp:auth";
-        \\const result = jwtVerify("token", "secret");
-        \\if (result) { let x = 1; }
+        \\function f() {
+        \\  const result = jwtVerify("token", "secret");
+        \\  if (result) { let x = 1; }
+        \\}
     , 1);
 }
 
 test "sound: virtual module optional return type fails in boolean context" {
     try checkSource(
         \\import { env } from "zttp:env";
-        \\const val = env("KEY");
-        \\if (val) { let x = 1; }
+        \\function f() {
+        \\  const val = env("KEY");
+        \\  if (val) { let x = 1; }
+        \\}
     , 1);
 }
 
@@ -2269,14 +2295,14 @@ test "sound: virtual module direct call in boolean context" {
     // timingSafeEqual returns boolean - direct call in if is fine
     try checkSource(
         \\import { timingSafeEqual } from "zttp:auth";
-        \\if (timingSafeEqual("a", "b")) { let x = 1; }
+        \\function f() { if (timingSafeEqual("a", "b")) { let x = 1; } }
     , 0);
 }
 
 test "sound: virtual module direct number call fails in boolean context" {
     try checkSource(
         \\import { cacheIncr } from "zttp:cache";
-        \\if (cacheIncr("ns", "key")) { let x = 1; }
+        \\function f() { if (cacheIncr("ns", "key")) { let x = 1; } }
     , 1);
 }
 
@@ -2288,8 +2314,10 @@ test "sound: virtual module direct number call fails in boolean context" {
 test "sound: string resolved by ?? still fails in boolean context" {
     try checkSourceFull(
         \\import { env } from "zttp:env";
-        \\const val = env("KEY") ?? "default";
-        \\if (val) { let x = 1; }
+        \\function f() {
+        \\  const val = env("KEY") ?? "default";
+        \\  if (val) { let x = 1; }
+        \\}
     , 1, 0);
 }
 
@@ -2330,8 +2358,10 @@ test "sound: result.ok with ?? still warns" {
 test "sound: optional cacheGet fails in boolean context" {
     try checkSource(
         \\import { cacheGet } from "zttp:cache";
-        \\const val = cacheGet("ns", "key");
-        \\if (val) { let x = 1; }
+        \\function f() {
+        \\  const val = cacheGet("ns", "key");
+        \\  if (val) { let x = 1; }
+        \\}
     , 1);
 }
 
@@ -2341,8 +2371,10 @@ test "sound: function returning string or undefined fails in boolean context" {
         \\  if (arr.length > 0) { return "found"; }
         \\  return undefined;
         \\}
-        \\const r = find([1]);
-        \\if (r) { let x = 1; }
+        \\function f() {
+        \\  const r = find([1]);
+        \\  if (r) { let x = 1; }
+        \\}
     , 1);
 }
 
@@ -2351,31 +2383,39 @@ test "sound: function returning string or undefined fails in boolean context" {
 test "sound: result.ok is boolean - passes in boolean context" {
     try checkSource(
         \\import { jwtVerify } from "zttp:auth";
-        \\const result = jwtVerify("token", "secret", "opts");
-        \\if (result.ok) { let x = 1; }
+        \\function f() {
+        \\  const result = jwtVerify("token", "secret", "opts");
+        \\  if (result.ok) { let x = 1; }
+        \\}
     , 0);
 }
 
 test "sound: aliased result-producing import preserves result shape" {
     try checkSource(
         \\import { jwtVerify as verify } from "zttp:auth";
-        \\const result = verify("token", "secret", "opts");
-        \\if (result.ok) { let x = 1; }
+        \\function f() {
+        \\  const result = verify("token", "secret", "opts");
+        \\  if (result.ok) { let x = 1; }
+        \\}
     , 0);
 }
 
 test "sound: result.error string fails in boolean context" {
     try checkSource(
         \\import { validateJson } from "zttp:validate";
-        \\const result = validateJson("schema", "data");
-        \\if (result.error) { let x = 1; }
+        \\function f() {
+        \\  const result = validateJson("schema", "data");
+        \\  if (result.error) { let x = 1; }
+        \\}
     , 1);
 }
 
 test "sound: non-result object property fails closed" {
     try checkSource(
-        \\const obj = { x: 1 };
-        \\if (obj.x) { let y = 1; }
+        \\function f() {
+        \\  const obj = { x: 1 };
+        \\  if (obj.x) { let y = 1; }
+        \\}
     , 1);
 }
 
@@ -2384,9 +2424,11 @@ test "sound: non-result object property fails closed" {
 test "sound: x !== undefined narrows optional but string remains non-boolean" {
     try checkSource(
         \\import { env } from "zttp:env";
-        \\const val = env("KEY");
-        \\if (val !== undefined) {
-        \\  if (val) { let x = 1; }
+        \\function f() {
+        \\  const val = env("KEY");
+        \\  if (val !== undefined) {
+        \\    if (val) { let x = 1; }
+        \\  }
         \\}
     , 1);
 }
@@ -2394,9 +2436,11 @@ test "sound: x !== undefined narrows optional but string remains non-boolean" {
 test "sound: x !== undefined on string does not make it boolean" {
     try checkSource(
         \\import { sha256 } from "zttp:crypto";
-        \\const hash = sha256("data");
-        \\if (hash !== undefined) {
-        \\  if (hash) { let x = 1; }
+        \\function f() {
+        \\  const hash = sha256("data");
+        \\  if (hash !== undefined) {
+        \\    if (hash) { let x = 1; }
+        \\  }
         \\}
     , 1);
 }
@@ -2404,9 +2448,11 @@ test "sound: x !== undefined on string does not make it boolean" {
 test "sound: reversed undefined narrowing leaves string non-boolean" {
     try checkSource(
         \\import { env } from "zttp:env";
-        \\const val = env("KEY");
-        \\if (undefined !== val) {
-        \\  if (val) { let x = 1; }
+        \\function f() {
+        \\  const val = env("KEY");
+        \\  if (undefined !== val) {
+        \\    if (val) { let x = 1; }
+        \\  }
         \\}
     , 1);
 }
@@ -2414,9 +2460,11 @@ test "sound: reversed undefined narrowing leaves string non-boolean" {
 test "sound: x === undefined narrows to undefined type in then-branch" {
     try checkSourceFull(
         \\import { env } from "zttp:env";
-        \\const val = env("KEY");
-        \\if (val === undefined) {
-        \\  if (val) { let x = 1; }
+        \\function f() {
+        \\  const val = env("KEY");
+        \\  if (val === undefined) {
+        \\    if (val) { let x = 1; }
+        \\  }
         \\}
     , 1, 0);
 }
@@ -2424,44 +2472,46 @@ test "sound: x === undefined narrows to undefined type in then-branch" {
 test "sound: narrowing does not leak outside undefined guard branch" {
     try checkSource(
         \\import { env } from "zttp:env";
-        \\const val = env("KEY");
-        \\if (val !== undefined) {
-        \\  let y = val;
+        \\function f() {
+        \\  const val = env("KEY");
+        \\  if (val !== undefined) {
+        \\    let y = val;
+        \\  }
+        \\  if (val) { let z = 1; }
         \\}
-        \\if (val) { let z = 1; }
     , 1);
 }
 
 // Boolean-only refusal tests
 
 test "sound: if (42) fails" {
-    try checkSource("if (42) { let x = 1; }", 1);
+    try checkSource("function f() { if (42) { let x = 1; } }", 1);
 }
 
 test "sound: if (0) fails" {
-    try checkSource("if (0) { let x = 1; }", 1);
+    try checkSource("function f() { if (0) { let x = 1; } }", 1);
 }
 
 test "sound: if string fails" {
-    try checkSource("if (\"hello\") { let x = 1; }", 1);
+    try checkSource("function f() { if (\"hello\") { let x = 1; } }", 1);
 }
 
 test "sound: if empty string fails" {
-    try checkSource("if (\"\") { let x = 1; }", 1);
+    try checkSource("function f() { if (\"\") { let x = 1; } }", 1);
 }
 
 test "sound: if undefined fails" {
-    try checkSourceFull("if (undefined) { let x = 1; }", 1, 0);
+    try checkSourceFull("function f() { if (undefined) { let x = 1; } }", 1, 0);
 }
 
 test "sound: if ({}) fails - object always truthy" {
-    try checkSource("if ({}) { let x = 1; }", 1);
+    try checkSource("function f() { if ({}) { let x = 1; } }", 1);
 }
 
 test "sound: if (fn) fails - function always truthy" {
     try checkSource(
         \\function one() { return 1; }
-        \\if (one) { let x = 1; }
+        \\function f() { if (one) { let x = 1; } }
     , 1);
 }
 
@@ -2470,17 +2520,21 @@ test "sound: if (named_object_literal) - static check rejects pointless conditio
     // named-local bound to an object literal and rejects the pointless
     // condition, matching the anonymous-literal case above.
     try checkSource(
-        \\const found = { kind: "fake" };
-        \\if (found) { let x = 1; }
+        \\function f() {
+        \\  const found = { kind: "fake" };
+        \\  if (found) { let x = 1; }
+        \\}
     , 1);
 }
 
 test "sound: bare optional does not narrow and fails" {
     try checkSource(
         \\import { env } from "zttp:env";
-        \\const x = env("K");
-        \\if (x) {
-        \\  const upper = x;
+        \\function f() {
+        \\  const x = env("K");
+        \\  if (x) {
+        \\    const upper = x;
+        \\  }
         \\}
     , 1);
 }
@@ -2488,15 +2542,17 @@ test "sound: bare optional does not narrow and fails" {
 test "sound: negated optional does not narrow and fails" {
     try checkSource(
         \\import { env } from "zttp:env";
-        \\const x = env("K");
-        \\if (!x) {
-        \\  let y = 1;
+        \\function f() {
+        \\  const x = env("K");
+        \\  if (!x) {
+        \\    let y = 1;
+        \\  }
         \\}
     , 1);
 }
 
 test "sound: && with number and string rejects both operands" {
-    try checkSource("if (1 && \"ok\") { let x = 1; }", 2);
+    try checkSource("function f() { if (1 && \"ok\") { let x = 1; } }", 2);
 }
 
 test "sound: optional from function fails in boolean context" {
@@ -2505,8 +2561,10 @@ test "sound: optional from function fails in boolean context" {
         \\  if (arr.length > 0) { return "found"; }
         \\  return undefined;
         \\}
-        \\const r = find([1]);
-        \\if (r) { let x = r; }
+        \\function f() {
+        \\  const r = find([1]);
+        \\  if (r) { let x = r; }
+        \\}
     , 1);
 }
 
@@ -2751,10 +2809,12 @@ test "sound: env() ?? default resolves to string, catches arithmetic" {
 test "sound: bare optional condition does not narrow derived binding" {
     try checkSource(
         \\import { env } from "zttp:env";
-        \\const val = env("K");
-        \\if (val) {
-        \\  const s = val;
-        \\  const r = [s, "_ok"].join("");
+        \\function f() {
+        \\  const val = env("K");
+        \\  if (val) {
+        \\    const s = val;
+        \\    const r = [s, "_ok"].join("");
+        \\  }
         \\}
     , 1);
 }

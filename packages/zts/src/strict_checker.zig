@@ -2538,9 +2538,16 @@ test "a literal SQL statement inside a handler is accepted" {
         "function handler(req: Request): Response { sql(\"q\", \"SELECT 1\"); return Response.json({}); }\n", false);
 }
 
-test "a computed SQL statement at module scope is accepted" {
-    try expectRegistrationVerdict(sql_import ++
-        "const statement = JSON.stringify({});\nsql(\"q\", statement);\nfunction handler(req: Request): Response { return Response.json({}); }\n", false);
+test "a computed SQL statement at module scope is refused with ZTS074" {
+    const source = sql_import ++ "const statement = \"SELECT 1\";\nsql(\"q\", statement);\n";
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
+    defer parser.deinit();
+    try testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try testing.expectEqual(@as(usize, 1), errors.len);
+    try testing.expectEqualStrings("ZTS074", @import("diagnostic_catalog.zig").parserCode(errors[0].kind));
+    try testing.expectEqual(@as(u32, 3), errors[0].location.line);
+    try testing.expectEqual(@as(u32, 1), errors[0].location.column);
 }
 
 test "a computed SQL statement registered by a helper function is refused" {
@@ -2553,11 +2560,6 @@ test "a computed SQL statement in a function body or callback is refused" {
         "function reg(s: string): undefined { sql(\"q\", s); }\nfunction handler(req: Request): Response { reg(req.url); return Response.json({}); }\n", true);
     try expectRegistrationVerdict(sql_import ++
         "function handler(req: Request): Response { const ids = [1].map((n: number): number => { sql(\"q\", req.url); return n; }); return Response.json({ ids: ids }); }\n", true);
-}
-
-test "a function declaration does not leak function scope to later module code" {
-    try expectRegistrationVerdict(sql_import ++
-        "function noop(): undefined { return; }\nconst statement = JSON.stringify({});\nsql(\"q\", statement);\nfunction handler(req: Request): Response { return Response.json({}); }\n", false);
 }
 
 test "a function body keeps function scope after an inner arrow callback ends" {
@@ -2577,11 +2579,6 @@ test "a renamed SQL import is still refused for a computed statement" {
 test "a schema computed from the request inside a handler is refused" {
     try expectRegistrationVerdict(validate_import ++
         "function handler(req: Request): Response { schemaCompile(\"b\", req.headers.get(\"x\") ?? \"{}\"); return Response.json({}); }\n", true);
-}
-
-test "a schema built at module scope is accepted" {
-    try expectRegistrationVerdict(validate_import ++
-        "schemaCompile(\"b\", JSON.stringify({ type: \"object\" }));\nfunction handler(req: Request): Response { return Response.json({}); }\n", false);
 }
 
 test "a literal schema inside a handler is accepted" {
@@ -3495,4 +3492,24 @@ test "canonical_redundant_bool_compare fires inside an assert condition" {
     );
     defer h.deinit();
     try expectKind(&h.checker, .canonical_redundant_bool_compare);
+}
+
+test "census: the parser admits a top-level call of exactly the exports that declare a registration" {
+    var registrations: usize = 0;
+    for (&builtin_modules.all) |*binding| {
+        for (binding.exports) |*func| {
+            const registers = for (func.contract_extractions) |extraction| {
+                if (extraction.category == .sql_registration or extraction.category == .schema_compile) break true;
+            } else false;
+            const listed = for (engine_parser.registration_exports) |row| {
+                if (std.mem.eql(u8, row.specifier, binding.specifier) and std.mem.eql(u8, row.name, func.name)) break true;
+            } else false;
+            if (registers != listed) std.debug.print("registration census: {s}#{s} registers={} listed={}\n", .{ binding.specifier, func.name, registers, listed });
+            try std.testing.expectEqual(registers, listed);
+            if (registers) registrations += 1;
+        }
+    }
+    // A floor on the input: a census that found no registration would pass.
+    try std.testing.expectEqual(@as(usize, 2), registrations);
+    try std.testing.expectEqual(registrations, engine_parser.registration_exports.len);
 }

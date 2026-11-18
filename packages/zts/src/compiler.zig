@@ -107,14 +107,14 @@ test "simple compile API" {
 
 test "compile erases annotations from a fragment" {
     const allocator = std.testing.allocator;
-    const annotated = try compile(allocator, "const value: number = 1; value;");
+    const annotated = try compile(allocator, "const value: number = 1; const copy = value;");
     defer {
         allocator.free(annotated.code);
         allocator.free(annotated.constants);
         if (annotated.line_table) |lines| allocator.free(lines);
         allocator.destroy(annotated);
     }
-    const plain = try compile(allocator, "const value         = 1; value;");
+    const plain = try compile(allocator, "const value         = 1; const copy = value;");
     defer {
         allocator.free(plain.code);
         allocator.free(plain.constants);

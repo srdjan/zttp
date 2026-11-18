@@ -2382,13 +2382,13 @@ test "expressionChildren of a ternary are condition then and else" {
 }
 
 test "expressionChildren of a call are the callee then each argument" {
-    try expectChildrenOf("f(1, 2, a);", .call, 0, &.{
+    try expectChildrenOf("function g() { f(1, 2, a); }", .call, 0, &.{
         .{ .tag = .identifier },
         .{ .tag = .lit_int, .int = 1 },
         .{ .tag = .lit_int, .int = 2 },
         .{ .tag = .identifier },
     });
-    try expectChildrenOf("f();", .call, 0, &.{.{ .tag = .identifier }});
+    try expectChildrenOf("function g() { f(); }", .call, 0, &.{.{ .tag = .identifier }});
 }
 
 test "expressionChildren of a member access is its object" {
@@ -2407,7 +2407,7 @@ test "expressionChildren of an optional chain is its object" {
 }
 
 test "expressionChildren of an assignment are the target then the value" {
-    try expectChildrenOf("a.b = 1;", .assignment, 0, &.{
+    try expectChildrenOf("function g() { a.b = 1; }", .assignment, 0, &.{
         .{ .tag = .member_access },
         .{ .tag = .lit_int, .int = 1 },
     });
@@ -2453,11 +2453,11 @@ test "expressionChildren of a function expression is its body and not its parame
 }
 
 test "expressionChildren of an arrow function is its body and not its parameters" {
-    try expectChildrenOf("f((a) => { return a; });", .arrow_function, 0, &.{
+    try expectChildrenOf("function g() { f((a) => { return a; }); }", .arrow_function, 0, &.{
         .{ .tag = .block },
     });
     // An expression body is wrapped in a return statement.
-    try expectChildrenOf("f((a) => a + 1);", .arrow_function, 0, &.{
+    try expectChildrenOf("function g() { f((a) => a + 1); }", .arrow_function, 0, &.{
         .{ .tag = .return_stmt },
     });
 }
@@ -2534,7 +2534,7 @@ test "expressionChildren of an array match pattern is empty" {
 }
 
 test "expressionChildren of an expression statement is its expression" {
-    try expectChildrenOf("f();", .expr_stmt, 0, &.{.{ .tag = .call }});
+    try expectChildrenOf("function g() { f(); }", .expr_stmt, 0, &.{.{ .tag = .call }});
 }
 
 test "expressionChildren of a variable declaration is its initializer" {
@@ -2542,19 +2542,19 @@ test "expressionChildren of a variable declaration is its initializer" {
 }
 
 test "expressionChildren of an if statement are condition then and else" {
-    try expectChildrenOf("if (a) { f(); } else { g(); }", .if_stmt, 0, &.{
+    try expectChildrenOf("function h() { if (a) { f(); } else { g(); } }", .if_stmt, 0, &.{
         .{ .tag = .identifier },
         .{ .tag = .block },
         .{ .tag = .block },
     });
-    try expectChildrenOf("if (a) { f(); }", .if_stmt, 0, &.{
+    try expectChildrenOf("function h() { if (a) { f(); } }", .if_stmt, 0, &.{
         .{ .tag = .identifier },
         .{ .tag = .block },
     });
 }
 
 test "expressionChildren of a for-of are the iterable then the body" {
-    try expectChildrenOf("for (const x of xs) { f(x); }", .for_of_stmt, 0, &.{
+    try expectChildrenOf("function g() { for (const x of xs) { f(x); } }", .for_of_stmt, 0, &.{
         .{ .tag = .identifier },
         .{ .tag = .block },
     });
@@ -2568,7 +2568,7 @@ test "expressionChildren of a return statement is its value" {
 }
 
 test "expressionChildren of an assert contains its condition" {
-    try expectChildrenOf("assert a;", .assert_stmt, 0, &.{.{ .tag = .identifier }});
+    try expectChildrenOf("function g() { assert a; }", .assert_stmt, 0, &.{.{ .tag = .identifier }});
 }
 
 test "expressionChildren of a block are its statements in order" {
@@ -2579,9 +2579,9 @@ test "expressionChildren of a block are its statements in order" {
 }
 
 test "expressionChildren of a program are its top-level statements in order" {
-    try expectChildrenOf("const a = 1; f();", .program, 0, &.{
+    try expectChildrenOf("const a = 1; function f() { return 1; }", .program, 0, &.{
         .{ .tag = .var_decl },
-        .{ .tag = .expr_stmt },
+        .{ .tag = .function_decl },
     });
 }
 
@@ -2705,7 +2705,7 @@ test "subtreeContains finds a node inside an object spread operand" {
 
 test "subtreeContains finds a node inside an assert condition" {
     const allocator = std.testing.allocator;
-    var parser = try @import("parse.zig").Parser.initAdmission(allocator, allocator, "assert a;", .compile);
+    var parser = try @import("parse.zig").Parser.initAdmission(allocator, allocator, "function g() { assert a; }", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);

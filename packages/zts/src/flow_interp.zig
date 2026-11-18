@@ -8543,7 +8543,7 @@ test "writes to request-local state are no persistent write" {
 test "a push during module initialization is no persistent write" {
     const found = try persistentWriteLines(
         \\const seen = [];
-        \\seen.push(1);
+        \\const pushed = seen.push(1);
         \\function handler(req) {
         \\  return Response.text(String(seen.length));
         \\}
@@ -8729,7 +8729,7 @@ test "imported functions preserve same object aliases and property spelling acro
 test "imported bindings copy current shared globals and returned closures retain captures" {
     const overwritten = try probeImported(
         "import { published as copied } from \"./helper.ts\"; function handler(req) { return copied(req); }",
-        "import { env } from \"zttp:env\"; export function published(req) { return \"public\"; } function leak(req) { return env(\"SECRET_KEY\"); } published = leak;",
+        "import { env } from \"zttp:env\"; export function published(req) { return \"public\"; } function leak(req) { return env(\"SECRET_KEY\"); } function overwrite() { published = leak; return 0; } const overwrote = overwrite();",
         "copied",
         "published",
     );
@@ -8966,9 +8966,12 @@ test "ambiguous callable selection never witnesses an unselected internal sink" 
 }
 
 test "a replaced root handler cannot prove the stale lexical body" {
-    const p = try probeReport("import { env } from \"zttp:env\"; function handler(req) { return \"public\"; } function replacement(req) { return env(\"API_TOKEN\"); } handler = replacement;");
+    const p = try probeReport("import { env } from \"zttp:env\"; function handler(req) { return \"public\"; } function replacement(req) { return env(\"API_TOKEN\"); } function replace() { handler = replacement; return 0; } const replaced = replace();");
     try testing.expect(p.cleared);
     try testing.expect(!p.properties.no_secret_leakage);
+    // The control: without the replacement, the handler leaks nothing.
+    const control = try probeReport("import { env } from \"zttp:env\"; function handler(req) { return \"public\"; } function replacement(req) { return env(\"API_TOKEN\"); }");
+    try testing.expect(control.properties.no_secret_leakage);
 }
 
 test "speculative method sinks cannot enlarge an earlier complete event" {

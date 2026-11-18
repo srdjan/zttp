@@ -1217,6 +1217,15 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("import { dictEmpty } from \"zttp:collections\";\nexport const q: number = 1;\nfunction f(): Dict<string, number> {\n  return dictEmpty();\n}")),
     },
     .{
+        .key = "A top-level statement other than a registration call with literal arguments, such as `f();`, `if (c) { f(); }`, and `schemaCompile(\"x\", text);`",
+        .refused = &.{
+            r("f();", top("function f(): number {\n  return 1;\n}\nf();")),
+            r("if (c) { f(); }", top("const c: boolean = true;\nif (c) {\n  const y = 1;\n}")),
+            r("schemaCompile(\"x\", text);", top("import { schemaCompile } from \"zttp:validate\";\nconst text: string = \"{}\";\nschemaCompile(\"x\", text);")),
+        },
+        .clean = c(top("import { schemaCompile as register } from \"zttp:validate\";\nregister(\"x\", \"{}\");\nregister(\"y\", \"{}\");")),
+    },
+    .{
         .key = "`import type X from \"./x.ts\";`",
         .refused = &.{r("import type X from \"./x.ts\";", top("import type X from \"./x.ts\";"))},
         .clean = c(top("import type { X } from \"./x.ts\";")),
@@ -1563,13 +1572,6 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "`DictKey` with no import, such as `<K extends DictKey>`",
         .sources = &.{c(top("function f<K extends DictKey>(k: K): K {\n  return k;\n}"))},
-    },
-    .{
-        .key = "A top-level statement other than a registration call, such as `f();` and `if (c) { f(); }`",
-        .sources = &.{
-            c(top("function f(): number {\n  return 1;\n}\nf();")),
-            c(top("if (true) {\n  const y = 1;\n}")),
-        },
     },
     .{
         .key = "A top-level initializer with an effect, such as `const t: number = Date.now();`",

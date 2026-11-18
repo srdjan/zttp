@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS074","severity":"error","message":"a top-level statement must be a declaration, or a registration call with literal arguments; move the statement into a function","file":"parse/bad/top_level_statement.ts","line":6,"column":1,"suggestion":"Move the statement into a function, or call `schemaCompile` or `sql` with literal arguments.","repair_intent":null}

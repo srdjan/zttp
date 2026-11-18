@@ -1281,7 +1281,7 @@ test "type-only module matrix preserves public runtime admission and exact recor
             .rejected_at = "export",
         },
         .{
-            .source = "if (true) { import type { A } from \"./a\"; const live = 1; }\n" ++
+            .source = "function helper(): number { if (true) { import type { A } from \"./a\"; const live = 1; } return 1; }\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
@@ -1372,9 +1372,12 @@ test "type-only module matrix preserves public runtime admission and exact recor
             .rejected_at = "export",
         },
         .{
-            .source = "if (true) {\n" ++
-                "  import type { A } from \"./a\";\n" ++
-                "  const live = 1;\n" ++
+            .source = "function helper(): number {\n" ++
+                "  if (true) {\n" ++
+                "    import type { A } from \"./a\";\n" ++
+                "    const live = 1;\n" ++
+                "  }\n" ++
+                "  return 1;\n" ++
                 "}\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
@@ -1382,7 +1385,7 @@ test "type-only module matrix preserves public runtime admission and exact recor
             .rejected_at = "import",
         },
         .{
-            .source = "if (true) {import type { A } from \"./a\";}\n" ++
+            .source = "function helper(): number {if (true) {import type { A } from \"./a\";}return 1;}\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
@@ -1403,8 +1406,11 @@ test "type-only module matrix preserves public runtime admission and exact recor
             .rejected_at = "export",
         },
         .{
-            .source = "if (true) {\n" ++
+            .source = "function helper(): number {\n" ++
+                "if (true) {\n" ++
                 "import type { A } from \"./a\";\n" ++
+                "}\n" ++
+                "return 1;\n" ++
                 "}\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},

@@ -1209,3 +1209,39 @@ later.
   `unknown`, so each caller narrows it with `typeof v === "string"` before
   it passes the text on. A direct read gave ZTS203 or ZTS204. The binding
   could return a `string` value; U6 records the decision.
+- U4c-Decision 3 refuses, with ZTS074, a top-level statement other than a
+  registration call with literal arguments, such as `f();` and
+  `if (c) { f(); }` (spec 5.1). The parser admits a declaration, an
+  import, an export, and a call of a name that the module imports as
+  `schemaCompile` from `zttp:validate` or as `sql` from `zttp:sql`, with
+  only literal arguments. An alias, such as
+  `import { schemaCompile as register }`, stays a registration. A census
+  in strict_checker.zig checks the parser table against the bindings that
+  declare a `sql_registration` or `schema_compile` extraction. A
+  measurement on 2026-11-17, after U5, broke 126 distinct tests,
+  smoke-v1, and check-semantics-spec.sh. Five units fix the fallout:
+  D3-1a and D3-1b split the 54 bool_checker tests at line 2264, D3-2
+  takes the parser, type checker, and strict checker tests, D3-3 takes the
+  pipeline, interpreter, flow, and precompile tests and smoke-v1, and D3-4
+  takes the semantics corpus, whose cases compile a fragment that ends in
+  an expression statement.
+  The units migrated each incidental statement into a function or a
+  `const` initializer, and no verdict moved. The semantics corpus now
+  ends each case in `const r = <expr>;` and reads the value that the last
+  `const` stores, with no dropped value. These findings stay open:
+  - The audit of Decision 3 starts from code that probably only a
+    refused top-level statement reached. This list is unconfirmed:
+    packages/zts/src/bool_checker.zig#BoolChecker.check (a module-level
+    `if` and `assert` walk),
+    packages/zts/src/strict_checker.zig#StrictChecker.walkFunctionBody
+    (the module-scope exemption for a computed registration),
+    packages/zts/src/handler_verifier.zig#HandlerVerifier.verify (a
+    module-initialization mutation),
+    packages/zts/src/type_checker.zig#TypeChecker.collectSchemaCompileCall
+    (a non-literal registration at top level),
+    packages/tools/src/precompile.zig#hasTopLevelAssert and the ZTS063
+    branch of packages/tools/src/precompile.zig#checkGraphModule, and the
+    drop capture in packages/zts/src/semantics_corpus.zig#recover.
+  - The skill text in canonical-style.md shows top-level statements, such
+    as `count = count + 1;`. The skill census lists ZTS074 for those
+    blocks. A prose fix can move the corpus identity, so it waits for U7.

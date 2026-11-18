@@ -77,6 +77,7 @@ pub const ErrorKind = @import("error.zig").ErrorKind;
 pub const JsParser = @import("parse.zig").Parser;
 pub const AdmissionFailure = @import("parse.zig").AdmissionFailure;
 pub const AdmissionParseOutcome = @import("parse.zig").AdmissionParseOutcome;
+pub const registration_exports = @import("parse.zig").registration_exports;
 pub const CodeGen = @import("codegen.zig").CodeGen;
 pub const ir_opt = @import("ir_opt.zig");
 

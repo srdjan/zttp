@@ -61,6 +61,7 @@ pub const ErrorKind = enum {
     local_function_declaration,
     arrow_outside_call_argument,
     captured_binding_write,
+    top_level_statement,
     invalid_break,
     invalid_continue,
     invalid_return,
@@ -197,6 +198,7 @@ pub const ErrorList = struct {
             .local_function_declaration => "Move the function to module level.",
             .arrow_outside_call_argument => "Write a module-level `function`, or pass the arrow directly as a call argument.",
             .captured_binding_write => "Return the value from the callback, or build the result with `for...of` in the enclosing function.",
+            .top_level_statement => "Move the statement into a function, or call `schemaCompile` or `sql` with literal arguments.",
             else => null,
         };
     }

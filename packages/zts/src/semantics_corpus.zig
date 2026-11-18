@@ -9,11 +9,13 @@
 //! codegen.zig ever lowered `+` to `sub`, mechanism 3 would still pass (the
 //! declared lowering is unchanged) and mechanism 4 would fail.
 //!
-//! How the recovery works (measured, not assumed): a top-level expression
-//! statement compiles to `<operand pushes> <operator> drop ret_undefined`, with
-//! `const` bindings becoming `put_global`/`get_global`. The expression's value is
-//! always consumed by exactly one `drop`. Symbolically executing the stream and
-//! capturing what that `drop` discards yields the expression's denotation, with
+//! How the recovery works (measured, not assumed): a top-level `const result =
+//! <expression>;` compiles to `<operand pushes> <operator> put_global
+//! ret_undefined`, with `const` bindings becoming `put_global`/`get_global`.
+//! The subject binding is the last `const` in the snippet, so its value is the
+//! last one that a `put_global` consumes. A top-level expression statement is
+//! refused by ZTS074, so the stream must hold no `drop`. Symbolically executing
+//! the stream and capturing that last bound value yields the denotation, with
 //! every leaf operand (literal push, global/local read) canonicalized to a single
 //! operand sentinel - so the check is about the OPERATOR STRUCTURE the compiler
 //! emits, not operand identity.
@@ -57,16 +59,16 @@ const Case = struct {
 };
 
 pub const corpus = [_]Case{
-    .{ .tag = .lit_int, .source = "7;", .required_opcode = .push_i8 },
-    .{ .tag = .lit_bool, .source = "true;", .required_opcode = .push_true },
-    .{ .tag = .identifier, .source = "const a = 5; a;" },
-    .{ .tag = .binary_op, .binop = .add, .source = "const a = 5; const b = 3; a + b;" },
-    .{ .tag = .binary_op, .binop = .sub, .source = "const a = 5; const b = 3; a - b;" },
-    .{ .tag = .binary_op, .binop = .mul, .source = "const a = 5; const b = 3; a * b;" },
-    .{ .tag = .binary_op, .binop = .lt, .source = "const a = 5; const b = 3; a < b;" },
-    .{ .tag = .unary_op, .unop = .neg, .source = "const a = 5; -a;" },
-    .{ .tag = .unary_op, .unop = .not, .source = "const a = true; !a;" },
-    .{ .tag = .ternary, .shape = .branch, .source = "const c = true; const t = 7; const e = 9; c ? t : e;" },
+    .{ .tag = .lit_int, .source = "const r = 7;", .required_opcode = .push_i8 },
+    .{ .tag = .lit_bool, .source = "const r = true;", .required_opcode = .push_true },
+    .{ .tag = .identifier, .source = "const a = 5; const r = a;" },
+    .{ .tag = .binary_op, .binop = .add, .source = "const a = 5; const b = 3; const r = a + b;" },
+    .{ .tag = .binary_op, .binop = .sub, .source = "const a = 5; const b = 3; const r = a - b;" },
+    .{ .tag = .binary_op, .binop = .mul, .source = "const a = 5; const b = 3; const r = a * b;" },
+    .{ .tag = .binary_op, .binop = .lt, .source = "const a = 5; const b = 3; const r = a < b;" },
+    .{ .tag = .unary_op, .unop = .neg, .source = "const a = 5; const r = -a;" },
+    .{ .tag = .unary_op, .unop = .not, .source = "const a = true; const r = !a;" },
+    .{ .tag = .ternary, .shape = .branch, .source = "const c = true; const t = 7; const e = 9; const r = c ? t : e;" },
 };
 
 // ---------------------------------------------------------------------------
@@ -79,13 +81,15 @@ pub const corpus = [_]Case{
 const operand: Term = .imm;
 
 const Recovered = struct {
-    /// What the most recent `drop` discarded. Only meaningful when `drop_count`
-    /// is exactly 1 (the single-expression-statement invariant the corpus relies
-    /// on); the caller checks that and fails loud otherwise.
+    /// What the most recent `put_global`/`put_loc*` stored: the value of the
+    /// last `const` binding, which is the subject of a corpus snippet.
+    bound: ?[]const Term,
+    /// What the most recent `drop` discarded.
     dropped: ?[]const Term,
-    /// How many `drop`s the stream issued. A clean single-expression snippet
-    /// drops exactly once; anything else means the snippet did not lower the way
-    /// the corpus assumes, so the recovered denotation cannot be trusted.
+    /// How many `drop`s the stream issued. ZTS074 refuses a top-level
+    /// expression statement, so a clean snippet drops zero times; anything else
+    /// means the snippet did not lower the way the corpus assumes, so the
+    /// recovered denotation cannot be trusted.
     drop_count: usize,
     /// Whether the stream used the branch control opcodes (if_false / goto).
     has_if_false: bool,
@@ -136,6 +140,7 @@ fn isIgnorable(op: Opcode) bool {
 /// discarded by the (single) expression-statement `drop`. Operands are generic.
 fn recover(scratch: std.mem.Allocator, code: []const u8) !Recovered {
     var result: Recovered = .{
+        .bound = null,
         .dropped = null,
         .drop_count = 0,
         .has_if_false = false,
@@ -178,13 +183,6 @@ fn recover(scratch: std.mem.Allocator, code: []const u8) !Recovered {
             result.dropped = dropped;
             result.drop_count += 1;
             stack.items.len -= 1;
-            if (result.has_if_false and result.has_goto) {
-                if (result.branch_cond) |cond| {
-                    if (result.branch_then) |then_value| {
-                        result.branch_value = try std.mem.concat(scratch, Term, &.{ cond, then_value, dropped, &.{.select} });
-                    }
-                }
-            }
         } else if (isOperandPush(op)) {
             try stack.append(scratch, try scratch.dupe(Term, &.{operand}));
         } else if (isConsumer(op)) {
@@ -192,7 +190,16 @@ fn recover(scratch: std.mem.Allocator, code: []const u8) !Recovered {
                 result.unhandled = op;
                 return result;
             }
+            const bound = stack.items[stack.items.len - 1];
+            result.bound = bound;
             stack.items.len -= 1;
+            if (result.has_if_false and result.has_goto) {
+                if (result.branch_cond) |cond| {
+                    if (result.branch_then) |then_value| {
+                        result.branch_value = try std.mem.concat(scratch, Term, &.{ cond, then_value, bound, &.{.select} });
+                    }
+                }
+            }
         } else if (semantics.opTransition(op)) |tr| {
             switch (tr) {
                 .binop => |k| {
@@ -333,19 +340,22 @@ pub fn runCorpus(backing: std.mem.Allocator) !CorpusResult {
             continue;
         }
 
-        // The recovery trusts exactly one expression-statement `drop` to carry the
+        // The recovery trusts the last bound `const` value to carry the
         // denotation. Enforce that invariant rather than assume it: a snippet that
-        // lowers to zero or several drops is not one the corpus can read, so fail
-        // loud instead of silently checking the last drop.
-        if (rec.drop_count != 1) {
-            try result.fail(where, try ra.print("expected exactly one dropped expression value, saw {d}", .{rec.drop_count}));
+        // drops a value (an expression statement) or binds nothing is not one the
+        // corpus can read, so fail loud instead of silently checking a leftover.
+        if (rec.drop_count != 0) {
+            try result.fail(where, try ra.print("expected no dropped expression value, saw {d}", .{rec.drop_count}));
             continue;
         }
+        const bound = rec.bound orelse {
+            try result.fail(where, "real codegen bound no const value");
+            continue;
+        };
 
         switch (c.shape) {
             .straight => {
-                // drop_count == 1 (checked above) guarantees `dropped` is set.
-                const got = rec.dropped.?;
+                const got = bound;
                 const want = try expectedDenote(scratch, c);
                 if (!semantics.termsEql(got, want)) {
                     const w = try termsToString(ra, want);
@@ -396,17 +406,17 @@ test "differential corpus: registry denotations match real codegen" {
     try std.testing.expectEqual(corpus.len, result.cases_total);
 }
 
-test "recover reads the dropped expression denotation from real bytecode" {
+test "recover reads the bound expression denotation from real bytecode" {
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
 
-    const func = try compiler.compile(scratch.allocator(), "const a = 5; const b = 3; a + b;");
+    const func = try compiler.compile(scratch.allocator(), "const a = 5; const b = 3; const r = a + b;");
     const rec = try recover(scratch.allocator(), func.code);
     try std.testing.expect(rec.unhandled == null);
-    // A single-expression snippet drops exactly once - the invariant the corpus
+    // A const-binding snippet drops nothing - the invariant the corpus
     // enforces before trusting the recovered denotation.
-    try std.testing.expectEqual(@as(usize, 1), rec.drop_count);
-    const got = rec.dropped.?;
+    try std.testing.expectEqual(@as(usize, 0), rec.drop_count);
+    const got = rec.bound.?;
     // operand operand add
     try std.testing.expect(semantics.termsEql(got, &.{ operand, operand, .{ .binop = .add } }));
 }
@@ -431,7 +441,7 @@ test "recover reconstructs ternary branch denotation" {
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
 
-    const func = try compiler.compile(scratch.allocator(), "const c = true; const t = 7; const e = 9; c ? t : e;");
+    const func = try compiler.compile(scratch.allocator(), "const c = true; const t = 7; const e = 9; const r = c ? t : e;");
     const rec = try recover(scratch.allocator(), func.code);
     try std.testing.expect(rec.unhandled == null);
     try std.testing.expect(rec.has_if_false);
@@ -444,11 +454,11 @@ test "literal corpus cases require exact literal opcodes" {
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
 
-    const true_func = try compiler.compile(scratch.allocator(), "true;");
+    const true_func = try compiler.compile(scratch.allocator(), "const r = true;");
     try std.testing.expect(containsOpcode(true_func.code, .push_true));
     try std.testing.expect(!containsOpcode(true_func.code, .push_false));
 
-    const int_func = try compiler.compile(scratch.allocator(), "7;");
+    const int_func = try compiler.compile(scratch.allocator(), "const r = 7;");
     try std.testing.expect(containsOpcode(int_func.code, .push_i8));
 
     const wrong_true = [_]u8{
@@ -466,9 +476,9 @@ test "a corpus case whose expected operator is wrong is caught" {
 
     // Real codegen for `a - b` recovers `opnd opnd sub`; assert it does NOT match
     // an add expectation - i.e. the differential would catch a sub-for-add bug.
-    const func = try compiler.compile(s, "const a = 5; const b = 3; a - b;");
+    const func = try compiler.compile(s, "const a = 5; const b = 3; const r = a - b;");
     const rec = try recover(s, func.code);
-    const got = rec.dropped.?;
+    const got = rec.bound.?;
     try std.testing.expect(!semantics.termsEql(got, &.{ operand, operand, .{ .binop = .add } }));
     try std.testing.expect(semantics.termsEql(got, &.{ operand, operand, .{ .binop = .sub } }));
 }

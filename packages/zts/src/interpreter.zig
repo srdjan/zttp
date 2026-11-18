@@ -2793,7 +2793,7 @@ test "End-to-end: parse and execute JS" {
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = try parser_mod.Parser.initTyped(allocator, allocator, "function f() { return 1 + 2; } f();", &strings, null);
+    var p = try parser_mod.Parser.initTyped(allocator, allocator, "function f() { return 1 + 2; } const r = f();", &strings, null);
     defer p.deinit();
 
     const code = try admittedCodeForTest(&p, allocator);
@@ -3251,7 +3251,7 @@ test "End-to-end: function declaration" {
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();
 
-    const code_str = "function add(a, b) { return a + b; } function outer() { return add(3, 4); } outer();";
+    const code_str = "function add(a, b) { return a + b; } function outer() { return add(3, 4); } const r = outer();";
     var p = try parser_mod.Parser.initTyped(allocator, allocator, code_str, &strings, null);
     defer p.deinit();
 
@@ -3538,7 +3538,7 @@ test "End-to-end: optional method call short-circuits on nullish receiver" {
     defer ctx.deinit();
 
     var strings = string_mod.StringTable.init(allocator);
-    const code_str = "function outer() { const a = undefined; return a?.foo(); } outer();";
+    const code_str = "function outer() { const a = undefined; return a?.foo(); } const r = outer();";
     var p = try parser_mod.Parser.initTyped(allocator, allocator, code_str, &strings, null);
     defer p.deinit();
 
@@ -4789,7 +4789,8 @@ test "End-to-end: computed compound assignment evaluates key once (object)" {
         \\let calls = 0;
         \\let obj = { x: 10 };
         \\function key() { calls = calls + 1; return "x"; }
-        \\obj[key()] += 5;
+        \\function bump() { obj[key()] += 5; return 0; }
+        \\const done = bump();
         \\let result = calls * 1000 + obj.x;
     ;
 
@@ -4849,7 +4850,8 @@ test "End-to-end: computed compound assignment evaluates key once (array)" {
         \\let n = 0;
         \\let arr = [10, 20, 30];
         \\function idx() { n = n + 1; return 1; }
-        \\arr[idx()] += 5;
+        \\function bump() { arr[idx()] += 5; return 0; }
+        \\const done = bump();
         \\let result = n * 1000 + arr[1];
     ;
 

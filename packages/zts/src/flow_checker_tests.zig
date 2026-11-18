@@ -4012,8 +4012,8 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\function changed(req) { return Response.html("changed"); }
         \\function replacement(table) { table["GET /probe"] = changed; return false; }
         \\const routes = { "GET /probe": clean };
-        \\Array.isArray = replacement;
-        \\Array.isArray(routes);
+        \\function setup() { Array.isArray = replacement; return Array.isArray(routes); }
+        \\const ready = setup();
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.json({ error: "not found" }); }
@@ -4026,7 +4026,8 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\function changed(req) { return Response.html("changed"); }
         \\const routes = { "GET /probe": clean };
         \\const alias = [routes][0];
-        \\alias["GET /probe"] = changed;
+        \\function install() { alias["GET /probe"] = changed; return 0; }
+        \\const installed = install();
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.json({ error: "not found" }); }
@@ -4052,7 +4053,8 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\function clean(req) { return Response.json({ ok: true }); }
         \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
         \\const routes = { "GET /probe": clean };
-        \\routes["GET /probe"] = leak;
+        \\function install() { routes["GET /probe"] = leak; return 0; }
+        \\const installed = install();
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.json({ error: "not found" }); }
@@ -4066,7 +4068,8 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
         \\const routes = { "GET /probe": clean };
         \\const alias = routes;
-        \\alias["GET /probe"] = leak;
+        \\function install() { alias["GET /probe"] = leak; return 0; }
+        \\const installed = install();
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.json({ error: "not found" }); }
@@ -4096,7 +4099,8 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\}
         \\function clean(req) { return Response.json({ ok: true }); }
         \\let routes = { "POST /send": send };
-        \\routes = { "POST /send": clean };
+        \\function swap() { routes = { "POST /send": clean }; return 0; }
+        \\const swapped = swap();
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.json({ error: "not found" }); }
@@ -4110,7 +4114,8 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
         \\const routes = { "GET /probe": clean };
         \\const box = { table: routes };
-        \\box.table["GET /probe"] = leak;
+        \\function install() { box.table["GET /probe"] = leak; return 0; }
+        \\const installed = install();
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.json({ error: "not found" }); }
@@ -4124,7 +4129,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
         \\function mutate(table) { table["GET /probe"] = leak; }
         \\const routes = { "GET /probe": clean };
-        \\mutate(routes);
+        \\const mutated = mutate(routes);
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.json({ error: "not found" }); }
@@ -4151,7 +4156,8 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\function clean(req) { return Response.json({ ok: true }); }
         \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
         \\let route = clean;
-        \\route = leak;
+        \\function repoint() { route = leak; return 0; }
+        \\const repointed = repoint();
         \\const routes = { "GET /probe": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);

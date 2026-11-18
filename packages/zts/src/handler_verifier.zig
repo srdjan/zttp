@@ -2892,7 +2892,6 @@ test "a member or index write through a builtin or module-scope binding breaks s
         .{ .source = "function handler(req) { const xs = [1]; const ys = xs; ys.push(2); return Response.text(\"ok\"); }", .mutations = 0 },
         .{ .source = "const seen = [1];\nfunction handler(req) { const xs = [...seen]; xs.push(2); return Response.text(\"ok\"); }", .mutations = 0 },
         .{ .source = "const seen = [1];\nfunction handler(req) { return Response.text(String(seen.length)); }", .mutations = 0 },
-        .{ .source = "const seen = [];\nseen.push(1);\nfunction handler(req) { return Response.text(String(seen.length)); }", .mutations = 0 },
     };
     for (cases) |case| {
         const counts = try routeVerifierCounts(case.source);
@@ -2900,6 +2899,18 @@ test "a member or index write through a builtin or module-scope binding breaks s
         try std.testing.expectEqual(case.mutations, counts.module_mutation);
         try std.testing.expectEqual(case.mutations > 0, counts.has_module_mutation);
     }
+}
+
+test "a module-scope mutation call is refused with ZTS074 before the verifier runs" {
+    const source = "const seen = [];\nseen.push(1);\nfunction handler(req) { return Response.text(String(seen.length)); }";
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getProjectedErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqualStrings("ZTS074", diagnostic_catalog.parserCode(errors[0].kind));
+    try std.testing.expectEqual(@as(u32, 2), errors[0].location.line);
+    try std.testing.expectEqual(@as(u32, 1), errors[0].location.column);
 }
 
 test "response total checks routerMatch route functions" {

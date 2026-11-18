@@ -191,6 +191,19 @@ const late_import_message = "an `import` after a declaration is not supported; m
 const module_specifier_message = "a module specifier must be a string literal, such as \"./lib.ts\"";
 const nested_type_message = "a `structural` or `nominal` declaration is not supported inside a block; declare the type at the top level";
 const bitwise_message = "bitwise operators are not supported; use arithmetic or a comparison";
+const top_level_statement_message = "a top-level statement must be a declaration, or a registration call with literal arguments; move the statement into a function";
+
+/// A registration export that a module may call at top level (Decision 3,
+/// spec 5.1). A census in `packages/zts/src/strict_checker.zig` checks this
+/// table against the bindings that declare a registration extraction.
+pub const RegistrationExport = struct { specifier: []const u8, name: []const u8 };
+pub const registration_exports = [_]RegistrationExport{
+    .{ .specifier = "zttp:sql", .name = "sql" },
+    .{ .specifier = "zttp:validate", .name = "schemaCompile" },
+};
+/// A module that imports more registration names than this is refused at
+/// each call of the extra names, which fails closed.
+const registration_capacity = 8;
 
 pub const Parser = struct {
     allocator: std.mem.Allocator,
@@ -255,6 +268,10 @@ pub const Parser = struct {
     /// Set once the program has parsed a statement or type declaration that is
     /// not an import. An `import` after that point is refused (spec 5.5).
     declaration_seen: bool = false,
+    /// The local name atoms of the registration exports that this module
+    /// imports. A top-level call of one of them is admitted (Decision 3).
+    registration_atoms: [registration_capacity]u16 = undefined,
+    registration_count: u8 = 0,
     /// The source offset of the call argument that the parser reads now. An
     /// arrow is admitted only when it starts there (spec 5.2).
     call_argument_start: u32 = std.math.maxInt(u32),
@@ -693,6 +710,50 @@ pub const Parser = struct {
         return position == 4 or !isAsciiIdentifierContinue(self.observedByte(position - 5));
     }
 
+    /// A top-level statement (spec 5.1, Decision 3). Module initialization
+    /// runs once and must be pure, so the only top-level statement is a
+    /// declaration, an import, an export, or a registration call with
+    /// literal arguments.
+    fn parseModuleStatement(self: *Parser) anyerror!NodeIndex {
+        const stmt = try self.parseStatement();
+        if (self.topLevelStatementAdmitted(stmt)) return stmt;
+        self.errors.addError(.top_level_statement, self.nodes.getLoc(stmt), top_level_statement_message);
+        return error.ParseError;
+    }
+
+    fn topLevelStatementAdmitted(self: *Parser, stmt: NodeIndex) bool {
+        switch (self.nodes.getTag(stmt)) {
+            .var_decl, .function_decl, .import_decl, .export_decl => return true,
+            .expr_stmt => {},
+            else => return false,
+        }
+        const view = ir.IrView.fromIRStore(&self.nodes, &self.constants);
+        const expr = view.getOptValue(stmt) orelse return false;
+        if (self.nodes.getTag(expr) != .call) return false;
+        const call = self.nodes.getCallData(expr) orelse return false;
+        if (call.args_count == 0) return false;
+        if (self.nodes.getTag(call.callee) != .identifier) return false;
+        const callee = self.nodes.getBinding(call.callee).name_atom;
+        if (std.mem.indexOfScalar(u16, self.registration_atoms[0..self.registration_count], callee) == null) return false;
+        for (0..call.args_count) |i| {
+            switch (self.nodes.getTag(self.nodes.getListIndex(call.args_start, @intCast(i)))) {
+                .lit_int, .lit_float, .lit_string, .lit_bool, .lit_null => {},
+                else => return false,
+            }
+        }
+        return true;
+    }
+
+    fn recordRegistration(self: *Parser, specifier: []const u8, name: []const u8, atom: u16) void {
+        for (registration_exports) |row| {
+            if (!std.mem.eql(u8, row.specifier, specifier) or !std.mem.eql(u8, row.name, name)) continue;
+            if (self.registration_count == registration_capacity) return;
+            self.registration_atoms[self.registration_count] = atom;
+            self.registration_count += 1;
+            return;
+        }
+    }
+
     fn parseProgram(self: *Parser) anyerror!NodeIndex {
         const stmts = self.beginScratchList();
         defer stmts.deinit();
@@ -716,7 +777,7 @@ pub const Parser = struct {
             }
             const statement_start = self.current.start;
             const is_import = self.check(.kw_import);
-            if (self.parseStatement()) |stmt| {
+            if (self.parseModuleStatement()) |stmt| {
                 if (!is_import) self.declaration_seen = true;
                 try stmts.append(stmt);
             } else |err| {
@@ -4320,6 +4381,10 @@ pub const Parser = struct {
 
         self.advance(); // consume '{'
 
+        // A registration export is recorded once the module specifier is read.
+        var candidates: [registration_capacity]struct { name: []const u8, atom: u16 } = undefined;
+        var candidate_count: usize = 0;
+
         // Parse specifier list: { name1, name2, name3 as alias }
         var progress: ProgressGuard = .{};
         while (!self.check(.rbrace) and !self.check(.eof)) {
@@ -4345,6 +4410,10 @@ pub const Parser = struct {
                 imported_name;
 
             const local_atom = try self.addAtom(local_name.text(self.source));
+            if (candidate_count < candidates.len) {
+                candidates[candidate_count] = .{ .name = imported_name.text(self.source), .atom = local_atom };
+                candidate_count += 1;
+            }
 
             // Declare local binding in scope
             const binding = self.scopes.declareBinding(
@@ -4387,6 +4456,7 @@ pub const Parser = struct {
         const raw = module_token.text(self.source);
         const module_str = if (raw.len >= 2) raw[1 .. raw.len - 1] else raw;
         const module_idx = try self.addString(module_str);
+        for (candidates[0..candidate_count]) |candidate| self.recordRegistration(module_str, candidate.name, candidate.atom);
 
         try self.expectSemicolon();
 
@@ -8027,7 +8097,7 @@ test "the compatibility mode still parses what insertion accepted" {
 }
 
 test "parse simple expression" {
-    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "1 + 2;", .compile);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const r = 1 + 2;", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -8270,7 +8340,7 @@ test "parse local Promise identifier" {
         std.testing.allocator,
         std.testing.allocator,
         \\const Promise = 1;
-        \\Promise;
+        \\const r = Promise;
     ,
         .compile,
     );
@@ -8636,7 +8706,7 @@ test "unsupported: switch statement" {
 
 test "assert statement parses" {
     const allocator = std.testing.allocator;
-    var parser = try Parser.initAdmission(allocator, allocator, "assert isString(val);", .compile);
+    var parser = try Parser.initAdmission(allocator, allocator, "function f(val) { assert isString(val); }", .compile);
     defer parser.deinit();
     _ = parser.parse() catch {
         try std.testing.expect(false);
@@ -8646,7 +8716,7 @@ test "assert statement parses" {
 }
 
 test "break in for-of" {
-    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "for (const x of arr) { break; }", .compile);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "function f(arr) { for (const x of arr) { break; } }", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -8659,7 +8729,7 @@ test "break in for-of" {
 }
 
 test "continue in for-of" {
-    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "for (const x of arr) { continue; }", .compile);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "function f(arr) { for (const x of arr) { continue; } }", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -8712,7 +8782,7 @@ test "labeled break rejected" {
 }
 
 test "break with conditional" {
-    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "for (const x of arr) { if (x === 3) { break; } }", .compile);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "function f(arr) { for (const x of arr) { if (x === 3) { break; } } }", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -9050,7 +9120,7 @@ test "unsupported: prefix increment ++" {
 }
 
 test "compound assignment +=" {
-    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "let x = 1; x += 5;", .compile);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "function f() { let x = 1; x += 5; }", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -9062,7 +9132,7 @@ test "compound assignment +=" {
 }
 
 test "compound assignments: all arithmetic operators" {
-    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "let x = 10; x += 1; x -= 2; x *= 3; x /= 4; x %= 5; x **= 2;", .compile);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "function f() { let x = 10; x += 1; x -= 2; x *= 3; x /= 4; x %= 5; x **= 2; }", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -9074,7 +9144,7 @@ test "compound assignments: all arithmetic operators" {
 }
 
 test "compound assignments: bitwise operators" {
-    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "let x = 255; x &= 15; x |= 240; x ^= 255; x <<= 2; x >>= 1; x >>>= 1;", .compile);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "function f() { let x = 255; x &= 15; x |= 240; x ^= 255; x <<= 2; x >>= 1; x >>>= 1; }", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {

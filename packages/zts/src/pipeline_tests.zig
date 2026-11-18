@@ -340,7 +340,7 @@ test "partial contract facts do not suppress imported export type diagnostics" {
     const allocator = testing.allocator;
     var parsed_state = try parseSourceForTest(allocator,
         \\import { sha256 as digest } from "zttp:crypto";
-        \\digest("a", "b");
+        \\const digested = digest("a", "b");
     );
     defer parsed_state.js_parser.deinit();
     const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
@@ -512,8 +512,7 @@ test "ModuleAnalysisSession frozen imported effects retain slots and result kind
 test "ModuleAnalysisSession does not retry a refused sound analysis" {
     const allocator = testing.allocator;
     const source =
-        \\if ({}) { const unreachable = true; }
-        \\function handler(req) { return Response.text("ok"); }
+        \\function handler(req) { if ({}) { const unreachable = true; } return Response.text("ok"); }
     ;
     var parsed_state = try parseSourceForTest(allocator, source);
     defer parsed_state.js_parser.deinit();
@@ -1323,7 +1322,7 @@ test "pipeline.resolve runs BoolChecker on clean source" {
 test "pipeline.resolve flags pointless object truthy condition" {
     const allocator = testing.allocator;
     // Mirror bool_checker.zig:2258 — object literal in `if` is always truthy.
-    const source: []const u8 = "if ({}) { let x = 1; }";
+    const source: []const u8 = "function f() { if ({}) { let x = 1; } }";
 
     var js_parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     defer js_parser.deinit();
@@ -1346,7 +1345,7 @@ test "pipeline.resolve rejects optional module value in boolean context" {
     const source =
         \\import { env } from "zttp:env";
         \\const secret = env("TOKEN");
-        \\if (!secret) { const missing = true; }
+        \\function check() { if (!secret) { const missing = true; } }
     ;
     var parsed_state = try parseSourceForTest(allocator, source);
     defer parsed_state.js_parser.deinit();
@@ -1446,8 +1445,7 @@ test "extractContract preserves single-file custom callback output" {
 
 test "extractContract rejects boolean diagnostics with strict disabled" {
     const source =
-        \\if ({}) { const unreachable: boolean = true; }
-        \\function handler(req: Request): Response { return Response.text("ok"); }
+        \\function handler(req: Request): Response { if ({}) { const unreachable: boolean = true; } return Response.text("ok"); }
     ;
 
     try testing.expectError(
@@ -1709,7 +1707,7 @@ test "extractContract merges capabilities from relative imports" {
     try file_io.writeFile(
         allocator,
         dependency_path,
-        "if ({}) { const unreachable = true; } export function request() { return fetchSync('http://localhost:1'); }",
+        "export function request() { if ({}) { const unreachable = true; } return fetchSync('http://localhost:1'); }",
     );
     try testing.expectError(
         error.SoundModeViolation,
@@ -1965,7 +1963,7 @@ test "the error type exists only where a type error was reported" {
         "function f(n: number): string {\n  const s = n + \"y\" + \"z\";\n  return s;\n}",
         "function f(n: number): string {\n  const s = n + \"y\";\n  return s.toUpperCase();\n}",
         "function f(n: number): number {\n  return n === 1 ? n + \"y\" : 2;\n}",
-        "const n: number = 1;\nif (n + \"y\") { const k = 1; }",
+        "const n: number = 1;\nfunction f() { if (n + \"y\") { const k = 1; } }",
     };
     const clean = [_][]const u8{
         "function f(n: number): number {\n  const m: number = n + 2;\n  return m;\n}",
@@ -2033,7 +2031,7 @@ test "the public inference getter hides the error type and any type built from i
 test "a refused condition is still refused by the boolean checker" {
     // If the error type leaked, `isAssignableTo(error, boolean)` would answer
     // yes and the condition would pass as boolean.
-    try withSession(testing.allocator, "const n: number = 1;\nif (n + \"y\") { const k = 1; }", struct {
+    try withSession(testing.allocator, "const n: number = 1;\nfunction f() { if (n + \"y\") { const k = 1; } }", struct {
         fn run(session: Session) anyerror!void {
             try testing.expectEqual(@as(usize, 1), session.resolved.typeDiagnostics().len);
             try testing.expectEqual(
@@ -2164,7 +2162,7 @@ test "a request header read inside a spread operand is a header parameter of the
 // ---------------------------------------------------------------------------
 
 test "dropRepeatsOfTypeErrors removes a boolean diagnostic on the node a type error names" {
-    try withSession(testing.allocator, "const n: number = 1;\nif (n + \"y\") { const k = 1; }", struct {
+    try withSession(testing.allocator, "const n: number = 1;\nfunction f() { if (n + \"y\") { const k = 1; } }", struct {
         fn run(session: Session) anyerror!void {
             const resolved = session.resolved;
             // Both stages report the same expression before the drop.
@@ -2182,7 +2180,7 @@ test "dropRepeatsOfTypeErrors keeps a boolean diagnostic on a different node" {
     const source =
         \\const n: number = 1;
         \\const m: number = n + "y";
-        \\if (5) { const k = 1; }
+        \\function f() { if (5) { const k = 1; } }
     ;
     try withSession(testing.allocator, source, struct {
         fn run(session: Session) anyerror!void {
@@ -2223,7 +2221,7 @@ test "dropRepeatsOfTypeErrors removes a strict diagnostic below a type error and
 }
 
 test "dropRepeatsOfTypeErrors does nothing without a type error" {
-    try withSession(testing.allocator, "const n: number = 1;\nif (5) { const k = 1; }", struct {
+    try withSession(testing.allocator, "const n: number = 1;\nfunction f() { if (5) { const k = 1; } }", struct {
         fn run(session: Session) anyerror!void {
             const resolved = session.resolved;
             resolved.dropRepeatsOfTypeErrors();

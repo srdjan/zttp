@@ -182,7 +182,7 @@ test "interpreter TypeError records source line" {
         \\  const u = undefined;
         \\  return u + 1;
         \\}
-        \\handler(undefined);
+        \\const r = handler(undefined);
     ;
 
     var p = try parser_mod.Parser.initTyped(allocator, allocator, source, &strings, &ctx.atoms);

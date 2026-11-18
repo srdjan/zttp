@@ -2836,7 +2836,7 @@ test "compileHandler graph refuses an invalid virtual import in a dependency" {
     try std.testing.expectError(error.InvalidImportSpecifier, fixture.compile(.{ .emit_verify = true }));
 }
 
-test "compileHandler graph refuses a top-level assert in a dependency" {
+test "compileHandler graph refuses a top-level statement in a dependency" {
     var fixture = try graphDependencyFixture(
         \\assert 1 === 1;
         \\export function value(): number {
@@ -2845,21 +2845,7 @@ test "compileHandler graph refuses a top-level assert in a dependency" {
         \\
     );
     defer fixture.deinit();
-    try std.testing.expectError(error.DependencyTopLevelAssert, fixture.compile(.{ .emit_verify = true }));
-}
-
-test "compileHandler graph refuses an assert nested in a top-level block of a dependency" {
-    var fixture = try graphDependencyFixture(
-        \\if (1 === 1) {
-        \\  assert 1 === 1;
-        \\}
-        \\export function value(): number {
-        \\  return 1;
-        \\}
-        \\
-    );
-    defer fixture.deinit();
-    try std.testing.expectError(error.DependencyTopLevelAssert, fixture.compile(.{ .emit_verify = true }));
+    try std.testing.expectError(error.ParseError, fixture.compile(.{ .emit_verify = true }));
 }
 
 test "compileHandler graph accepts an assert inside a dependency function" {
@@ -3500,13 +3486,6 @@ const parity_refused_rows = [_]ParityRow{
         .file = "lib.ts",
     },
     .{
-        .label = "dependency top-level assert",
-        .entry = parityEntry("result_safe"),
-        .files = &.{.{ .name = "lib.ts", .source = "assert 1 === 1;\nexport function f(): string {\n  return \"x\";\n}\n" }},
-        .code = "ZTS063",
-        .file = "lib.ts",
-    },
-    .{
         // A mutation is a ZTS310 warning in the dependency. The capsule of the
         // entry demands state_isolated, so the compile refuses on the spec.
         .label = "dependency mutates module state under a state_isolated capsule",
@@ -3540,6 +3519,18 @@ test "check parity: zts check reports each refusal that zts compile makes, with 
         try std.testing.expect(checked.totalErrors() > 0);
         try std.testing.expect(try compileRefuses(&fixture, row.policy));
     }
+}
+
+test "check parity: a top-level assert in a dependency is ZTS074 at its position" {
+    var fixture = try parityFixture(parityEntry("result_safe"), &.{.{ .name = "lib.ts", .source = "assert 1 === 1;\nexport function f(): string {\n  return \"x\";\n}\n" }});
+    defer fixture.deinit();
+    var checked = try parityCheck(&fixture, null);
+    defer checked.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("ZTS074", checked.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("lib.ts", std.fs.path.basename(checked.json_diagnostics.items[0].file));
+    try std.testing.expectEqual(@as(u32, 1), checked.json_diagnostics.items[0].line);
+    try std.testing.expectEqual(@as(u32, 1), checked.json_diagnostics.items[0].column);
+    try std.testing.expect(try compileRefuses(&fixture, null));
 }
 
 const sibling_helper_handler =
