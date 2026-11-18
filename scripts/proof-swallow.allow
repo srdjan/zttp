@@ -407,6 +407,7 @@ packages/zts/src/strict_checker.zig addRawBoundaryDiagnostic catch-block
 packages/zts/src/strict_checker.zig addRawBoundaryDiagnostic catch-block@2
 packages/zts/src/strict_checker.zig checkAmbientGlobal catch-block
 packages/zts/src/strict_checker.zig checkAmbientGlobal catch-block@2
+packages/zts/src/strict_checker.zig checkModuleInitializers catch-block
 packages/zts/src/strict_checker.zig collectAnnotatedFunctions catch-poison
 packages/zts/src/strict_checker.zig collectAnnotatedFunctions catch-poison@2
 packages/zts/src/strict_checker.zig collectAnnotatedFunctions catch-poison@3

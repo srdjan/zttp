@@ -721,6 +721,13 @@ pub const IRStore = struct {
         };
     }
 
+    /// Rebind an identifier that resolved to `.undeclared_global` to the
+    /// module-level declaration of the same name. The slot is the name atom
+    /// for both kinds, so only the kind changes.
+    pub fn rebindUndeclaredToGlobal(self: *IRStore, idx: NodeIndex) void {
+        self.data.items[idx].b = @backingInt(BindingRef.BindingKind.global);
+    }
+
     /// Unpack call expression data
     pub fn getCallData(self: *const IRStore, idx: NodeIndex) ?Node.CallExpr {
         if (idx >= self.data.items.len) return null;

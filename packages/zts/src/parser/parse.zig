@@ -822,6 +822,8 @@ pub const Parser = struct {
             return error.ParseError;
         }
 
+        self.bindLaterModuleDeclarations();
+
         // Create program node
         const stmts_count = try self.checkedU16Count(.{ .line = 1, .column = 1, .offset = 0 }, stmts.slice().len, "too many top-level statements; limit is 65535");
         const stmts_start = try self.addStmtList(stmts.slice());
@@ -830,6 +832,28 @@ pub const Parser = struct {
             .stmts_count = stmts_count,
             .scope_id = 0,
         });
+    }
+
+    /// Spec 5.6: a reference to a module-level `function`, `const`, or `let`
+    /// that the module declares further down is admitted. The parser resolves
+    /// a name in one pass, so such a reference resolved to
+    /// `.undeclared_global`. Once the whole module is read, each one that
+    /// names a module declaration is bound to it. An unknown name, and a
+    /// local that a function declares after its use, stay undeclared.
+    fn bindLaterModuleDeclarations(self: *Parser) void {
+        const module_scope = &self.scopes.scopes.items[0];
+        for (self.nodes.tags.items, 0..) |tag, i| {
+            if (tag != .identifier) continue;
+            const node: NodeIndex = @intCast(i);
+            const binding = self.nodes.getBinding(node);
+            if (binding.kind != .undeclared_global) continue;
+            const declared = module_scope.findLocalMutByAtom(binding.name_atom) orelse continue;
+            switch (declared.kind) {
+                .variable, .function => self.nodes.rebindUndeclaredToGlobal(node),
+                // An import is declared before any statement, so no reference precedes it.
+                .parameter, .catch_param, .import => {},
+            }
+        }
     }
 
     fn admissionSelected(self: *const Parser) bool {

@@ -7749,11 +7749,11 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
     const expected_strict: []const strict_checker_mod.DiagnosticKind = switch (case) {
         .interleaved => &.{
             .implicit_unknown,
-            .unpublished_ambient_global,
             .missing_public_annotation,
             .implicit_unknown,
             .missing_public_annotation,
             .implicit_unknown,
+            .effectful_module_initializer,
         },
         .generic_scope_contrast, .generic_application_argument => &.{
             .missing_public_annotation,

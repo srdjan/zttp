@@ -4924,6 +4924,191 @@ test "module initializer: a helper that fills a fresh local array is admitted" {
     , Probe.run);
 }
 
+/// The one strict diagnostic of `session`: ZTS630 at `line:column`, naming
+/// `name` as the later declaration that the initializer reaches.
+fn expectOneInitializerReach(session: Session, line: u32, column: u32, comptime name: []const u8) !void {
+    try expectOneInitializerEffect(session, line, column, "a top-level initializer must not reach '" ++ name ++ "', which the module declares at or after it");
+}
+
+test "later module declaration: a call of a function declared further down is admitted" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 0), session.resolved.strictDiagnostics().len);
+            try testing.expectEqual(@as(usize, 0), session.resolved.typeDiagnostics().len);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function first(): number {
+        \\  return second();
+        \\}
+        \\function second(): number {
+        \\  return 1;
+        \\}
+    , Probe.run);
+}
+
+test "later module declaration: mutual recursion is admitted" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 0), session.resolved.strictDiagnostics().len);
+            try testing.expectEqual(@as(usize, 0), session.resolved.typeDiagnostics().len);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function isEven(n: number): boolean {
+        \\  if (n === 0) {
+        \\    return true;
+        \\  }
+        \\  return isOdd(n - 1);
+        \\}
+        \\function isOdd(n: number): boolean {
+        \\  if (n === 0) {
+        \\    return false;
+        \\  }
+        \\  return isEven(n - 1);
+        \\}
+    , Probe.run);
+}
+
+test "later module declaration: a function body that reads a later module const is admitted" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 0), session.resolved.strictDiagnostics().len);
+            try testing.expectEqual(@as(usize, 0), session.resolved.typeDiagnostics().len);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function read(): number {
+        \\  return later;
+        \\}
+        \\const later: number = 5;
+    , Probe.run);
+}
+
+test "later module declaration: a call of a later function has its declared return type" {
+    try expectOneArgMismatch(
+        \\function takeNumber(n: number): number {
+        \\  return n;
+        \\}
+        \\function first(): number {
+        \\  return takeNumber(second());
+        \\}
+        \\function second(): string {
+        \\  return "a";
+        \\}
+    , "argument type does not match parameter type: expected number, got string");
+}
+
+test "later module declaration: an initializer that calls a function which calls a later function is refused with ZTS630" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try expectOneInitializerReach(session, 4, 28, "second");
+        }
+    };
+    try withSession(testing.allocator,
+        \\function first(): number {
+        \\  return second();
+        \\}
+        \\const early: number = first();
+        \\function second(): number {
+        \\  return 1;
+        \\}
+    , Probe.run);
+}
+
+test "later module declaration: an initializer that calls a function which reads a later const is refused with ZTS630" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try expectOneInitializerReach(session, 4, 24, "later");
+        }
+    };
+    try withSession(testing.allocator,
+        \\function f(): number {
+        \\  return later;
+        \\}
+        \\const early: number = f();
+        \\const later: number = 5;
+    , Probe.run);
+}
+
+test "later module declaration: an initializer that names a later const is refused with ZTS630" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try expectOneInitializerReach(session, 1, 19, "b");
+        }
+    };
+    try withSession(testing.allocator,
+        \\const a: number = b;
+        \\const b: number = 1;
+    , Probe.run);
+}
+
+test "later module declaration: an initializer that reaches only earlier declarations is admitted" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 0), session.resolved.strictDiagnostics().len);
+        }
+    };
+    try withSession(testing.allocator,
+        \\const base: number = 5;
+        \\function f(): number {
+        \\  return base;
+        \\}
+        \\const early: number = f();
+        \\const later: number = 6;
+    , Probe.run);
+}
+
+test "later module declaration: a builtin callback that reads a later const is refused with ZTS630" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try expectOneInitializerReach(session, 4, 29, "later");
+        }
+    };
+    try withSession(testing.allocator,
+        \\function g(n: number): number {
+        \\  return later;
+        \\}
+        \\const xs: number[] = [1].map(g);
+        \\const later: number = 6;
+    , Probe.run);
+}
+
+test "later module declaration: an unknown name is still refused with ZTS629" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.strictDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(strict_checker_mod.DiagnosticKind.unpublished_ambient_global, diagnostics[0].kind);
+            try testing.expectEqualStrings("unpublished ambient global 'nowhere'", diagnostics[0].message);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function first(): number {
+        \\  const n: number = nowhere;
+        \\  return n;
+        \\}
+    , Probe.run);
+}
+
+test "later module declaration: a local declared later in the same function is still refused with ZTS629" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.strictDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(strict_checker_mod.DiagnosticKind.unpublished_ambient_global, diagnostics[0].kind);
+            try testing.expectEqualStrings("unpublished ambient global 'later'", diagnostics[0].message);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function first(): number {
+        \\  const early: number = later;
+        \\  const later: number = 1;
+        \\  return early;
+        \\}
+    , Probe.run);
+}
+
 test "result error type: the error of err(5) is not a string at a string parameter" {
     try expectOneArgMismatch(
         \\import { err } from "zttp:result";

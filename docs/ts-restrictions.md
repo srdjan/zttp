@@ -56,12 +56,15 @@ type error hides a `ZTS624` strict error in the same function.
 | An `import` or `export` inside a function body | ZTS002 | Move the `import` or `export` to the top level |
 | A top-level statement other than a registration call with literal arguments, such as `f();`, `if (c) { f(); }`, and `schemaCompile("x", text);` | ZTS074 | Move the statement into a function. A bare `schemaCompile(...)` or `sql(...)` call with literal arguments stays admitted |
 | A top-level initializer with an effect, such as `const t: number = Date.now();`, `const k: string = env("K") ?? "";`, and `const n: number = bump();` for a helper that writes module state | ZTS630 | Compute the value inside a function, such as the handler. Write a registration as a bare statement |
+| A top-level initializer that reaches a module declaration at or after it, such as `const a: number = b;` and `const n: number = f();` for a function that reads a name that the module declares later | ZTS630 | Declare the name above the initializer, or compute the value inside a function, such as the handler |
 | `import type X from "./x.ts";` | ZTS002 | `import type { X } from "./x.ts";` |
 | A module specifier that is not a string literal, such as `import { ok } from m;` and `import type { T } from m;` | ZTS003 | A string literal, such as `"./lib.ts"` |
 
 A module specifier must be a string literal. Relative modules and registered
 `zttp:*` or `zttp-ext:*` modules are permitted. Module initialization must be
-pure.
+pure. A function body may name a module `function`, `const`, or `let` that
+the module declares further down, so mutual recursion is permitted. Only a
+top-level initializer must not reach a declaration at or after it.
 
 ## Lexical Rules
 

@@ -393,6 +393,7 @@ pub const StrictChecker = struct {
 
     fn addDiagnostic(self: *StrictChecker, diag: Diagnostic) void {
         self.diagnostics.append(self.allocator, diag) catch {
+            if (diag.message_owned) self.allocator.free(diag.message);
             if (diag.help_owned) {
                 if (diag.help) |help| self.allocator.free(help);
             }
@@ -439,9 +440,11 @@ pub const StrictChecker = struct {
         module_write,
         shared_write,
         unreadable_callee,
+        later_declaration,
 
         fn message(self: InitEffect) []const u8 {
             return switch (self) {
+                .later_declaration => "a top-level initializer must not reach a declaration at or after it",
                 .varying_read => "a top-level initializer must be pure, and this one reads a value that varies between runs",
                 .effectful_import => "a top-level initializer must be pure, and this one calls an import that has an effect",
                 .module_write => "a top-level initializer must be pure, and this one writes module state",
@@ -466,10 +469,17 @@ pub const StrictChecker = struct {
     /// `cycle_hits` counts the calls that reached a body still `visiting`.
     /// `fresh` holds each `const` local that an array or object literal
     /// initializes: a value that no other binding can reach yet.
+    /// `positions` maps each module-level `const`, `let`, and `function` to
+    /// the index of its top-level statement. `ordinal` is the statement of
+    /// the initializer under the walk, and `reached_atom` names the later
+    /// declaration that the walk found.
     const InitWalk = struct {
         bodies: std.AutoHashMapUnmanaged(u32, NodeIndex) = .empty,
         states: std.AutoHashMapUnmanaged(u32, BodyState) = .empty,
         fresh: std.AutoHashMapUnmanaged(u32, void) = .empty,
+        positions: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+        ordinal: u32 = 0,
+        reached_atom: u16 = 0,
         cycle_hits: u32 = 0,
     };
 
@@ -490,11 +500,15 @@ pub const StrictChecker = struct {
         defer walk.bodies.deinit(self.allocator);
         defer walk.states.deinit(self.allocator);
         defer walk.fresh.deinit(self.allocator);
+        defer walk.positions.deinit(self.allocator);
         try self.collectFreshLocals(root, &walk);
         for (0..block.stmts_count) |i| {
             const stmt = self.topLevelDeclaration(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
-            if (self.ir_view.getTag(stmt) != .function_decl) continue;
+            const tag = self.ir_view.getTag(stmt) orelse continue;
+            if (tag != .function_decl and tag != .var_decl) continue;
             const decl = self.ir_view.getVarDecl(stmt) orelse continue;
+            try walk.positions.put(self.allocator, bindingKey(decl.binding), @intCast(i));
+            if (tag != .function_decl) continue;
             const func = self.ir_view.getFunction(decl.init) orelse continue;
             try walk.bodies.put(self.allocator, bindingKey(decl.binding), func.body);
         }
@@ -502,7 +516,29 @@ pub const StrictChecker = struct {
             const stmt = self.topLevelDeclaration(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
             if (self.ir_view.getTag(stmt) != .var_decl) continue;
             const decl = self.ir_view.getVarDecl(stmt) orelse continue;
+            // A body's answer depends on the statement that reaches it, so no answer outlives its initializer.
+            walk.states.clearRetainingCapacity();
+            walk.ordinal = @intCast(i);
             const finding = try self.initEffect(decl.init, &walk) orelse continue;
+            const reached_name = if (finding.effect == .later_declaration) self.resolveAtomName(walk.reached_atom) else null;
+            if (reached_name) |name| {
+                const message = self.allocator.print(
+                    "a top-level initializer must not reach '{s}', which the module declares at or after it",
+                    .{name},
+                ) catch {
+                    self.markAllocationFailure();
+                    continue;
+                };
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .effectful_module_initializer,
+                    .node = finding.node,
+                    .message = message,
+                    .help = "Declare the name above this initializer, or compute the value inside a function, such as the handler.",
+                    .message_owned = true,
+                });
+                continue;
+            }
             self.addDiagnostic(.{
                 .severity = .err,
                 .kind = .effectful_module_initializer,
@@ -545,6 +581,7 @@ pub const StrictChecker = struct {
                 if (self.assignmentEffect(assign.target, walk)) |effect| return .{ .node = node, .effect = effect };
             },
             .call => if (try self.initCallEffect(node, walk)) |effect| return .{ .node = node, .effect = effect },
+            .identifier => if (self.laterDeclaration(node, walk)) return .{ .node = node, .effect = .later_declaration },
             // Holding a function value runs nothing.
             .arrow_function, .function_expr => return null,
             // exhaustive: every other tag has no effect of its own, and the walk below visits its children.
@@ -555,6 +592,19 @@ pub const StrictChecker = struct {
             if (try self.initEffect(child, walk)) |finding| return finding;
         }
         return null;
+    }
+
+    /// True, and `walk.reached_atom` names it, when `node` reads a module
+    /// declaration at or after the initializer under the walk. Module
+    /// initialization runs the statements in order, so such a name holds no
+    /// value yet.
+    fn laterDeclaration(self: *const StrictChecker, node: NodeIndex, walk: *InitWalk) bool {
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        if (binding.kind != .global) return false;
+        const position = walk.positions.get(bindingKey(binding)) orelse return false;
+        if (position < walk.ordinal) return false;
+        walk.reached_atom = binding.name_atom;
+        return true;
     }
 
     /// A rebinding of a local or a parameter changes no shared value. A write

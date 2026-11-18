@@ -1277,6 +1277,14 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("function double(n: number): number {\n  return n * 2;\n}\nconst d: number = double(2);\nconst xs: number[] = [1, 2].map((x: number): number => x * 2);")),
     },
     .{
+        .key = "A top-level initializer that reaches a module declaration at or after it, such as `const a: number = b;` and `const n: number = f();` for a function that reads a name that the module declares later",
+        .refused = &.{
+            r("const a: number = b;", top("const a: number = b;\nconst b: number = 1;")),
+            r("const n: number = f();", top("function f(): number {\n  return later;\n}\nconst n: number = f();\nconst later: number = 5;")),
+        },
+        .clean = c(top("function isEven(n: number): boolean {\n  if (n === 0) {\n    return true;\n  }\n  return isOdd(n - 1);\n}\nfunction isOdd(n: number): boolean {\n  if (n === 0) {\n    return false;\n  }\n  return isEven(n - 1);\n}\nfunction read(): number {\n  return later;\n}\nconst later: number = 5;\nconst even: boolean = isEven(4);")),
+    },
+    .{
         .key = "`import type X from \"./x.ts\";`",
         .refused = &.{r("import type X from \"./x.ts\";", top("import type X from \"./x.ts\";"))},
         .clean = c(top("import type { X } from \"./x.ts\";")),
