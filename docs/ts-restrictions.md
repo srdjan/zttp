@@ -59,6 +59,7 @@ type error hides a `ZTS624` strict error in the same function.
 | A top-level initializer that reaches a module declaration at or after it, such as `const a: number = b;` and `const n: number = f();` for a function that reads a name that the module declares later | ZTS630 | Declare the name above the initializer, or compute the value inside a function, such as the handler |
 | `import type X from "./x.ts";` | ZTS002 | `import type { X } from "./x.ts";` |
 | A module specifier that is not a string literal, such as `import { ok } from m;` and `import type { T } from m;` | ZTS003 | A string literal, such as `"./lib.ts"` |
+| `import { ... } from "zttp:types"` | ZTS053 | Write `Proof<T, P>` or `Effects<T, R>` directly. Both are ambient |
 
 A module specifier must be a string literal. Relative modules and registered
 `zttp:*` or `zttp-ext:*` modules are permitted. Module initialization must be
@@ -167,6 +168,9 @@ and local function declaration. A block is only the body of a function, `if`,
 | `for...of` over a value that is not an array, a tuple, or range(n), such as a record, a number, a string, or a Dict | ZTS218 | `Object.keys(r)` for a record, `dictEntries(d)` for a `Dict`, `s.split("")` for a string, and `range(n)` for a count |
 | `range(n).map(f)` and other array members on `range(n)` | ZTS201 | `for (const i of range(n))` |
 | Destructuring in a `for...of` head | ZTS001 | Bind the element to one name, then read each member in the body |
+| C-style `for (;;)` | ZTS001 | `for (const i of range(n))` |
+| Labeled `break` and `continue` | ZTS001 | Write a conditional |
+| `break` or `continue` outside a loop | ZTS022, ZTS023 | Move the statement into a `for...of` body. `break` reports ZTS022 and `continue` reports ZTS023 |
 
 `for...of` evaluates its iterable once and iterates a snapshot. The admitted
 iterables are arrays, tuples, and `range(n)`. A record, a number, a string, and
@@ -197,6 +201,7 @@ a `Dict` are refused with ZTS218. There is no user-defined iterator protocol.
 | A non-boolean condition in `if`, `assert`, or `?:` | ZTS100 | A boolean expression, such as `x !== undefined` or `n > 0` |
 | A non-boolean operand of `&&`, `\|\|`, or `!` | ZTS101, ZTS102 | A boolean expression |
 | `\|>` | ZTS001 | A direct call `f(a)`. Run guards by early return |
+| `pipe()` and `guard()` | ZTS001 | A direct call `f(a)`. Run guards by early return |
 | Optional call `f?.()` | ZTS001 | Check for `undefined`, then call `f()` |
 | Optional computed access `xs?.[i]` | ZTS001 | Check for `undefined`, then read `xs[i]` |
 | An effectful arm in `a ? b : c` | ZTS612 | Bind the call to a `const` first, or use `match` over the condition |
@@ -415,11 +420,6 @@ against the compiler.
 
 | Form | Observed result | Required |
 |---|---|---|
-| `import { ... } from "zttp:types"` | Refused with ZTS206 for a value import, and with ZTS053 for `import type` | ZTS053 for both. Write `Proof<T, P>` or `Effects<T, R>` directly. Both are ambient |
-| C-style `for (;;)` | Refused with ZTS001 and ZTS002 | ZTS001 only. Write `for (const i of range(n))` |
-| Labeled `break` and `continue` | Refused with ZTS001 and ZTS047 | ZTS001 only. Write a conditional |
-| `break` or `continue` outside a loop | Refused with ZTS002. The probes do not report ZTS022 or ZTS023 | ZTS022 for `break`, ZTS023 for `continue`. Move the statement into a `for...of` body |
-| `pipe()` and `guard()` | Refused with ZTS600 and ZTS629 | ZTS001. Write a direct call `f(a)`. Run guards by early return |
 | A write to a `readonly` field | Refused with ZTS200 | ZTS215. Write a new record |
 | A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |

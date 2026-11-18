@@ -745,6 +745,10 @@ pub const writeJsonString = json_utils.writeJsonString;
 /// explicitly registered extensions. Iterate it to register the module set.
 pub const builtinModules = builtin_modules.all;
 
+/// The specifier of the retired types module. A value import of it is refused
+/// with ZTS053, as is its `import type` form.
+pub const retired_types_module = base.module_specifier.retired_types_module;
+
 /// The type text of the `error` field that the runtime stores when the export
 /// `name` of `module` returns a Result: `string` or `unknown`. The checker reads
 /// the same row, so an emitted `.d.ts` and the checker agree.

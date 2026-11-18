@@ -110,17 +110,30 @@ pub fn virtualImportJsonDiagnostic(
     diagnostic: VirtualImportDiagnostic,
     file: []const u8,
 ) !json_diag.JsonDiagnostic {
+    // The retired types module is refused with the code and text of its
+    // `import type` form, so that both spellings report ZTS053.
+    const retired = diagnostic.kind == .unknown_module and
+        std.mem.eql(u8, diagnostic.module, zts.retired_types_module);
     const message = switch (diagnostic.kind) {
-        .unknown_module => try allocator.print("unknown virtual module '{s}'", .{diagnostic.module}),
+        .unknown_module => if (retired)
+            try allocator.dupe(u8, zts.StripDiagnosticKind.retired_types_import.message())
+        else
+            try allocator.print("unknown virtual module '{s}'", .{diagnostic.module}),
         .missing_export => try allocator.print("module '{s}' does not export '{s}'", .{ diagnostic.module, diagnostic.missing_export.? }),
     };
     errdefer allocator.free(message);
     const suggestion = switch (diagnostic.kind) {
-        .unknown_module => "Use a specifier published by meta.module_catalog.",
+        .unknown_module => if (retired)
+            "Remove the import and write Proof<T, P> or Effects<T, R> directly."
+        else
+            "Use a specifier published by meta.module_catalog.",
         .missing_export => "Use an export published for this module by meta.module_catalog.",
     };
     return .{
-        .code = diagnostic_catalog.virtualImportCode(diagnostic.kind),
+        .code = if (retired)
+            diagnostic_catalog.stripCode(.retired_types_import)
+        else
+            diagnostic_catalog.virtualImportCode(diagnostic.kind),
         .severity = "error",
         .message = message,
         .file = file,

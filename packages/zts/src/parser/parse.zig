@@ -299,6 +299,14 @@ pub const Parser = struct {
     brace_depth: u32 = 0,
     primed: bool = false,
 
+    /// The first reference to `pipe` and the first to `guard` that resolved to
+    /// no declaration. `refuseRemovedPipeGlobals` refuses each one that is still
+    /// undeclared once the whole module is read, because a later module
+    /// function may bind the name. A module declaration rebinds every reference
+    /// to its name, so the first one stands for all of them.
+    undeclared_pipe: ?NodeIndex = null,
+    undeclared_guard: ?NodeIndex = null,
+
     /// Maximum recursive-descent nesting. Far above any hand-written handler
     /// (real code rarely nests past ~30) yet well under the worker-thread stack
     /// budget. Roughly V8's parser nesting tolerance.
@@ -823,6 +831,7 @@ pub const Parser = struct {
         }
 
         self.bindLaterModuleDeclarations();
+        try self.refuseRemovedPipeGlobals();
 
         // Create program node
         const stmts_count = try self.checkedU16Count(.{ .line = 1, .column = 1, .offset = 0 }, stmts.slice().len, "too many top-level statements; limit is 65535");
@@ -854,6 +863,25 @@ pub const Parser = struct {
                 .parameter, .catch_param, .import => {},
             }
         }
+    }
+
+    /// `pipe()` and `guard()` are not part of the profile. A reference that
+    /// still names an undeclared global after `bindLaterModuleDeclarations`
+    /// names no function of the module, so the parser refuses it with the
+    /// code of the `|>` operator. The strict stage would otherwise report
+    /// ZTS600 and ZTS629 for the same form.
+    fn refuseRemovedPipeGlobals(self: *Parser) !void {
+        const pipe = self.stillUndeclared(self.undeclared_pipe);
+        const guard = self.stillUndeclared(self.undeclared_guard);
+        if (pipe) |node| self.errors.addError(.unsupported_feature, self.nodes.getLoc(node), "'pipe()' is not supported; write the call directly, as `f(a)`");
+        if (guard) |node| self.errors.addError(.unsupported_feature, self.nodes.getLoc(node), "'guard()' is not supported; run guards by explicit early return");
+        if (pipe != null or guard != null) return error.ParseError;
+    }
+
+    fn stillUndeclared(self: *const Parser, recorded: ?NodeIndex) ?NodeIndex {
+        const node = recorded orelse return null;
+        if (self.nodes.getBinding(node).kind != .undeclared_global) return null;
+        return node;
     }
 
     fn admissionSelected(self: *const Parser) bool {
@@ -2067,6 +2095,14 @@ pub const Parser = struct {
                     const name = self.current.text(self.source);
                     if (std.mem.eql(u8, name, "namespace") or std.mem.eql(u8, name, "module")) {
                         self.errors.addErrorAt(.unsupported_feature, self.current, "'namespace' is not supported; use ES6 modules instead");
+                        self.advance();
+                        return error.ParseError;
+                    }
+                    // A label starts no expression statement. Consuming it lets
+                    // the loop that it names parse as its own statement.
+                    if (self.peekIsColon()) {
+                        self.errors.addErrorAt(.unsupported_feature, self.current, "labeled statements are not supported; remove the label and use a conditional instead of a labeled jump");
+                        self.advance();
                         self.advance();
                         return error.ParseError;
                     }
@@ -3796,7 +3832,25 @@ pub const Parser = struct {
         // C-style for loops are not supported - only for-of
         self.scopes.popScope();
         self.errors.addErrorAt(.unsupported_feature, self.previous, "C-style 'for' loops are not supported; use 'for (let x of array)' or 'for (let i of range(n))' instead");
+        self.skipCStyleForRemainder();
         return error.ParseError;
+    }
+
+    /// After the refusal of a C-style `for`, skip the rest of its head and its
+    /// block body. Recovery would otherwise parse the head's `;` and `)` as
+    /// statements and report a second error for one refused form.
+    fn skipCStyleForRemainder(self: *Parser) void {
+        var parens: u32 = 1;
+        while (!self.check(.eof)) {
+            if (self.check(.lparen)) parens += 1;
+            if (self.check(.rparen)) parens -= 1;
+            self.advance();
+            if (parens == 0) break;
+        }
+        if (!self.check(.lbrace)) return;
+        const body_depth = self.brace_depth;
+        self.advance();
+        while (!self.check(.eof) and self.brace_depth > body_depth) self.advance();
     }
 
     fn parseReturnStatement(self: *Parser) anyerror!NodeIndex {
@@ -3827,7 +3881,7 @@ pub const Parser = struct {
         self.advance(); // consume 'break'
 
         if (!self.in_loop) {
-            self.errorAt(loc, "'break' outside of loop");
+            self.errors.addError(.invalid_break, loc, "'break' outside of loop");
         }
 
         // Labeled break is not supported
@@ -3846,7 +3900,7 @@ pub const Parser = struct {
         self.advance(); // consume 'continue'
 
         if (!self.in_loop) {
-            self.errorAt(loc, "'continue' outside of loop");
+            self.errors.addError(.invalid_continue, loc, "'continue' outside of loop");
         }
 
         // Labeled continue is not supported
@@ -5486,7 +5540,12 @@ pub const Parser = struct {
         }
 
         self.advance();
-        return try self.nodes.addIdentifier(loc, binding);
+        const node = try self.nodes.addIdentifier(loc, binding);
+        if (binding.kind == .undeclared_global) {
+            if (self.undeclared_pipe == null and std.mem.eql(u8, name, "pipe")) self.undeclared_pipe = node;
+            if (self.undeclared_guard == null and std.mem.eql(u8, name, "guard")) self.undeclared_guard = node;
+        }
+        return node;
     }
 
     fn parseUnaryOp(self: *Parser, op: UnaryOp) anyerror!NodeIndex {
@@ -6252,6 +6311,13 @@ pub const Parser = struct {
         const tok = self.tokenizer.next();
         self.tokenizer.restoreState(state);
         return tok.type == .identifier or self.isKeyword(tok.type);
+    }
+
+    fn peekIsColon(self: *Parser) bool {
+        const state = self.tokenizer.saveState();
+        const tok = self.tokenizer.next();
+        self.tokenizer.restoreState(state);
+        return tok.type == .colon;
     }
 
     fn peekIsPropertyName(self: *Parser) bool {
@@ -11980,4 +12046,23 @@ test "a parse refusal carries a fixed help string" {
         try std.testing.expect(errors.len >= 1);
         try std.testing.expectEqualStrings(case.help, errors[0].suggestion orelse "(null)");
     }
+}
+
+test "an undeclared pipe is refused when the module declares guard further down" {
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator,
+        \\function handler(req: Request): Response {
+        \\  const a: number = pipe(1);
+        \\  const b: number = guard(2);
+        \\  return Response.text(String(a + b));
+        \\}
+        \\function guard(n: number): number {
+        \\  return n;
+        \\}
+    , .compile);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
+    try std.testing.expectEqualStrings("'pipe()' is not supported; write the call directly, as `f(a)`", errors[0].message);
 }

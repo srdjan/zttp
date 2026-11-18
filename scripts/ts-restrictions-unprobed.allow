@@ -32,6 +32,4 @@ ZTS027 no emit site: the kind is declared in packages/zts/src/parser/error.zig a
 ZTS037 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `import { x } from ;` reports ZTS003
 ZTS038 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `export { x };` of an undeclared name reports ZTS002
 ZTS039 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `export const a = 1;` twice reports no error
-ZTS022 no code path emits it: a break outside a loop reports ZTS002, as the gap table says
-ZTS023 no code path emits it: a continue outside a loop reports ZTS002, as the gap table says
 ZTS044 nesting limit of the parser: docs/ts-restrictions.md names it only in prose under Limits, with no row

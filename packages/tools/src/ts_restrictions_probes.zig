@@ -746,6 +746,14 @@ const refusal_rows_a = [_]RefusalRow{
         .clean = c(body("  const a = String(1);")),
     },
     .{
+        .key = "`pipe()` and `guard()`",
+        .refused = &.{
+            r("pipe()", body("  const a = pipe(1, String);")),
+            r("guard()", body("  const a = guard(1);")),
+        },
+        .clean = c(body("  const a = String(1);")),
+    },
+    .{
         .key = "Optional call `f?.()`",
         .refused = &.{r("f?.()", top("function g(f: (() => number) | undefined): number {\n  return f?.();\n}"))},
         .clean = c(top("function g(f: () => number): number {\n  return f();\n}")),
@@ -1295,6 +1303,14 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("function isEven(n: number): boolean {\n  if (n === 0) {\n    return true;\n  }\n  return isOdd(n - 1);\n}\nfunction isOdd(n: number): boolean {\n  if (n === 0) {\n    return false;\n  }\n  return isEven(n - 1);\n}\nfunction read(): number {\n  return later;\n}\nconst later: number = 5;\nconst even: boolean = isEven(4);")),
     },
     .{
+        .key = "`import { ... } from \"zttp:types\"`",
+        .refused = &.{
+            r("import { ... } from \"zttp:types\"", top("import { Proof } from \"zttp:types\";")),
+            r("import { ... } from \"zttp:types\"", top("import type { Proof } from \"zttp:types\";")),
+        },
+        .clean = c(top("function g(): Proof<number, \"deterministic\"> {\n  return 1;\n}")),
+    },
+    .{
         .key = "`import type X from \"./x.ts\";`",
         .refused = &.{r("import type X from \"./x.ts\";", top("import type X from \"./x.ts\";"))},
         .clean = c(top("import type { X } from \"./x.ts\";")),
@@ -1528,6 +1544,28 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("import { dictEntries } from \"zttp:collections\";\nfunction g(xs: number[], t: [number, string], d: Dict<string, number>, s: string): number {\n  for (const a of xs) {\n    const y = a;\n  }\n  for (const b of t) {\n    const y = b;\n  }\n  for (const i of range(3)) {\n    const y = i;\n  }\n  for (const e of dictEntries(d)) {\n    const y = e;\n  }\n  for (const ch of s.split(\"\")) {\n    const y = ch;\n  }\n  return 1;\n}")),
     },
     .{
+        .key = "C-style `for (;;)`",
+        .refused = &.{r("for (;;)", body("  for (;;) {\n  }"))},
+        .clean = c(body("  for (const i of range(3)) {\n    const y = i;\n  }")),
+    },
+    .{
+        .key = "Labeled `break` and `continue`",
+        .refused = &.{
+            r("break", body("  outer: for (const i of range(3)) {\n    break outer;\n  }")),
+            r("continue", body("  outer: for (const i of range(3)) {\n    continue outer;\n  }")),
+        },
+        .clean = c(body("  for (const i of range(3)) {\n    if (i === 1) {\n      break;\n    }\n  }")),
+    },
+    .{
+        .key = "`break` or `continue` outside a loop",
+        .refused = &.{
+            r("break", body("  break;")),
+            r("break", body("  if (true) {\n    break;\n  }")),
+            r("continue", body("  continue;")),
+        },
+        .clean = c(body("  for (const i of range(3)) {\n    if (i === 1) {\n      continue;\n    }\n  }")),
+    },
+    .{
         .key = "Destructuring in a `for...of` head",
         .refused = &.{
             r("for...of", top("function g(xs: number[][]): number {\n  for (const [a, b] of xs) {\n  }\n  return 1;\n}")),
@@ -1582,41 +1620,6 @@ pub const refusal_rows = refusal_rows_a ++ refusal_rows_b;
 // ---------------------------------------------------------------------------
 
 pub const gap_rows = [_]GapRow{
-    .{
-        .key = "`import { ... } from \"zttp:types\"`",
-        .sources = &.{
-            c(top("import { Proof } from \"zttp:types\";")),
-            c(top("import type { Proof } from \"zttp:types\";")),
-        },
-    },
-    .{
-        .key = "C-style `for (;;)`",
-        .sources = &.{
-            c(body("  for (;;) {\n  }")),
-        },
-    },
-    .{
-        .key = "Labeled `break` and `continue`",
-        .sources = &.{
-            c(body("  outer: for (const i of range(3)) {\n    break outer;\n  }")),
-            c(body("  outer: for (const i of range(3)) {\n    continue outer;\n  }")),
-        },
-    },
-    .{
-        .key = "`break` or `continue` outside a loop",
-        .sources = &.{
-            c(body("  break;")),
-            c(body("  continue;")),
-            c(body("  if (true) {\n    break;\n  }")),
-        },
-    },
-    .{
-        .key = "`pipe()` and `guard()`",
-        .sources = &.{
-            c(body("  const a = pipe(1, String);")),
-            c(body("  const a = guard(1);")),
-        },
-    },
     .{
         .key = "A write to a `readonly` field",
         .sources = &.{c(top("structural R = { readonly a: number };\nfunction g(r: R): number {\n  r.a = 2;\n  return r.a;\n}"))},

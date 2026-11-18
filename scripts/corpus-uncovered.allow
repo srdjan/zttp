@@ -64,8 +64,8 @@ ZTS015 no producer for expected_property_name; `{ : 1 }` is reported as ZTS002 a
 ZTS017 no producer for invalid_destructuring; `const { a } = req;` is reported as ZTS001 (declaration destructuring is unsupported)
 ZTS020 no producer for undeclared_variable; a read of an undeclared name is reported as ZTS629 (unpublished ambient global)
 ZTS021 no producer for const_without_initializer; `const a: number;` is reported as ZTS002
-ZTS022 no producer for invalid_break; `break;` outside a loop is reported as ZTS002
-ZTS023 no producer for invalid_continue; `continue;` outside a loop is reported as ZTS002
+ZTS022 the default check reports `break;` outside a loop as ZTS022; no recorded handler holds a `break` outside a loop
+ZTS023 the default check reports `continue;` outside a loop as ZTS023; no recorded handler holds a `continue` outside a loop
 ZTS024 no producer for invalid_return; a top-level `return 1;` is reported as ZTS002
 ZTS025 no producer for invalid_yield; `yield 1` is reported as ZTS001 (unsupported feature)
 ZTS027 no producer for invalid_super; `super.x` is reported as ZTS001 (unsupported feature)
