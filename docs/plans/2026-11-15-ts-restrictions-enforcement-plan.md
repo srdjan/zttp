@@ -389,6 +389,26 @@ with no type, and the `number` annotation accepts a value with no type.
 - (b) U4d-5 refuses only `Number(x)` with a known argument that is not a
   `string`, and the general hole stays an open item.
 
+### Decision 27: `DictKey`
+
+The gap row "`DictKey` with no import" in docs/ts-restrictions.md says the
+check admits `DictKey` and the `meta` ambient names do not list it. Spec
+6.2 writes every `Dict` signature with `K extends DictKey`. The owner chose
+option (a) on 2026-11-18: U4i publishes `DictKey` as an ambient type name
+in `meta` and in the docs, which changes no source that compiles today.
+The rejected option was (b): refuse `DictKey` and require
+`string | number`.
+
+### Decision 28: `FetchOptions`
+
+The gap row "`FetchOptions` with no import" says the check admits it and
+`zttp:fetch` exports no type. Spec 6 says the module registry expresses
+`structural FetchOptions`, and a module type is named through
+`import type`. The owner chose option (a) on 2026-11-18: `zttp:fetch`
+exports a `FetchOptions` type, and an unimported `FetchOptions` gets
+ZTS065. The rejected option was (b): publish `FetchOptions` as an ambient
+type.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -540,6 +560,8 @@ dispatches. Bulk rewrite scripts are not allowed.
 | U4d | G6 with X21, X22, Decision 5, N3, N5, N15 |
 | U5 | G4 |
 | U4g | Decision 24 (a) |
+| U4h | The eight gap rows whose code differs, in two parts |
+| U4i | The three admitted gap rows, Decisions 27 (a) and 28 (a) |
 | U6 | The spec text for Decisions 3, 4, 6, 7, and 25, and for N1 to N16 |
 
 U4a runs as five commits, one for each rule. U4a-1 refuses the array members
@@ -789,6 +811,29 @@ the refusal lands.
   name or a member path" becomes unreachable and is deleted. Each source
   in the second group binds the scrutinee to a `const` first. The gap row
   moves to the Match refusal table.
+
+### U4h and U4i: the rows that no unit owned (Sonnet)
+
+After U4e-2, the section "Spec Rules That `zts check` Does Not Enforce" of
+docs/ts-restrictions.md still held 11 rows, and no unit owned them. U6
+deletes that table, so the owner approved two units before U6 on
+2026-11-18.
+
+- U4h-1. Five forms that the compiler refuses with a different code or a
+  cascade: a `zttp:types` value import (ZTS206, required ZTS053), a
+  C-style `for` (ZTS001 and ZTS002, required ZTS001), a labeled `break`
+  or `continue` (ZTS001 and ZTS047, required ZTS001), a `break` or
+  `continue` outside a loop (ZTS002, required ZTS022 or ZTS023), and
+  `pipe()` and `guard()` (ZTS600 and ZTS629, required ZTS001).
+- U4h-2. A write to a `readonly` field (ZTS200, required ZTS215), and a
+  `match` that does not cover every case, which gets ZTS603 in a
+  statement or a `const` and ZTS204 with a ZTS205 warning as a return
+  value. The required refusal is ZTS603 in every position, and a path
+  that does not run the strict check must not lose its refusal.
+- U4i-1. A generic alias argument that breaks the constraint of its
+  parameter, such as `Box<number>` for
+  `structural Box<T extends string> = { value: T };`, gets ZTS209.
+- U4i-2. Decisions 27 (a) and 28 (a).
 
 ### U6: close-out (Opus)
 
@@ -1601,3 +1646,20 @@ later.
   - A loop over a value whose type is only `undefined` or `null` gets
     ZTS218.
   - The CHANGELOG has no [Unreleased] entry for U4d. U6 writes it.
+- U4e and U4g landed on 2026-11-18: 2285aab5 (U4e-1), 43095442 (U4g),
+  and 1a3817d3 (U4e-2). Each commit gate in an empty cache gave 218/221
+  steps with the codegen replay as the only failed test. These findings
+  stay open or correct this plan:
+  - The U4g section above names a later `const` only. A probe under
+    `zttp serve` showed that an initializer that calls a later function
+    fails at startup with `PrewarmFailed`, because module initialization
+    does not hoist a function declaration. ZTS630 therefore refuses an
+    initializer that reaches a later `const`, `let`, or `function`.
+  - The parser drops parentheses, so `match ((x))` is admitted as `x`.
+  - The ternary repair is exact only for a `const` initializer or a
+    `return` operand. In any other position the normalizer leaves the
+    ternary and the finding stays.
+  - The repair validator splits the binding statement at the first `;`
+    followed by a space or a newline. A condition with such a `;` inside a
+    string is refused, never accepted. How often this occurs is not
+    measured.
