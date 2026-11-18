@@ -50,7 +50,6 @@ pub fn analyzeAot(
 
     var analyzer = zts.HandlerAnalyzer.init(allocator, ir_view, atoms);
     defer analyzer.deinit();
-    analyzer.enableJsonBodyParsePatterns();
 
     var dispatch = try analyzer.analyze(handler_fn);
     const default_response = try analyzer.analyzeDirectReturn(handler_fn);

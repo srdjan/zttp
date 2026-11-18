@@ -493,19 +493,12 @@ pub const PatternType = enum(u2) {
     dynamic, // Dynamic routing (not optimizable)
 };
 
-/// Source of response body material for fast path patterns.
-pub const ResponseBodySource = enum(u2) {
-    static, // body is pre-serialized at compile time
-    request_json_parse, // body is built from JSON.parse(request.body)
-};
-
 /// Pre-analyzed URL pattern with static response
 pub const HandlerPattern = struct {
     pattern_type: PatternType,
     url_atom: object.Atom, // For exact match
     url_bytes: []const u8, // URL string bytes for comparison
     static_body: []const u8, // Pre-serialized JSON body
-    body_source: ResponseBodySource = .static,
     status: u16,
     content_type_idx: u8, // 0=json, 1=text, 2=html
     /// Pre-built complete HTTP response (status line + headers + body)
@@ -528,7 +521,6 @@ pub const HandlerPattern = struct {
     /// Should be called after pattern analysis to enable zero-copy fast path.
     pub fn buildPrebuiltResponse(self: *HandlerPattern, allocator: std.mem.Allocator) !void {
         if (self.pattern_type != .exact) return; // Only for exact matches
-        if (self.body_source != .static) return; // Dynamic body patterns cannot be prebuilt
 
         const content_type = switch (self.content_type_idx) {
             0 => "application/json",

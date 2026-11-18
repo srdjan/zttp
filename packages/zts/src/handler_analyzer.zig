@@ -18,7 +18,6 @@ const context = @import("context.zig");
 const HandlerPattern = bytecode.HandlerPattern;
 const PatternDispatchTable = bytecode.PatternDispatchTable;
 const PatternType = bytecode.PatternType;
-const ResponseBodySource = bytecode.ResponseBodySource;
 const HandlerFlags = bytecode.HandlerFlags;
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -37,8 +36,6 @@ pub const HandlerAnalyzer = struct {
     route_binding_slot: ?u16, // Local slot of `url` or `path` variable
     route_atom: object.Atom, // Which request field is bound (`url` or `path`)
     request_binding_slot: ?u16, // Local slot of request parameter
-    body_binding_slot: ?u16, // Local slot of `body` variable bound to request.body
-    enable_json_body_parse: bool,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -53,15 +50,7 @@ pub const HandlerAnalyzer = struct {
             .route_binding_slot = null,
             .route_atom = .url,
             .request_binding_slot = null,
-            .body_binding_slot = null,
-            .enable_json_body_parse = false,
         };
-    }
-
-    /// Enable detection for `Response.json(JSON.parse(request.body))` patterns.
-    /// Route analysis during precompile turns this on.
-    pub fn enableJsonBodyParsePatterns(self: *HandlerAnalyzer) void {
-        self.enable_json_body_parse = true;
     }
 
     pub fn deinit(self: *HandlerAnalyzer) void {
@@ -81,10 +70,8 @@ pub const HandlerAnalyzer = struct {
         self.route_binding_slot = null;
         self.route_atom = .url;
         self.request_binding_slot = null;
-        self.body_binding_slot = null;
 
         self.findRequestBinding(func);
-        self.findBodyBinding(func.body);
 
         // Find route binding in function body:
         //   const url = request.url
@@ -130,32 +117,6 @@ pub const HandlerAnalyzer = struct {
         const elem = self.ir.getPatternElem(req_param) orelse return;
         if (bindingSlotIfBindable(elem.binding)) |slot| {
             self.request_binding_slot = slot;
-        }
-    }
-
-    /// Find `const body = request.body` binding for JSON.parse detection.
-    fn findBodyBinding(self: *HandlerAnalyzer, body_node: NodeIndex) void {
-        const tag = self.ir.getTag(body_node) orelse return;
-
-        if (tag == .block or tag == .program) {
-            const block = self.ir.getBlock(body_node) orelse return;
-            var i: u16 = 0;
-            while (i < block.stmts_count) : (i += 1) {
-                const stmt_idx = self.ir.getListIndex(block.stmts_start, i);
-                const stmt_tag = self.ir.getTag(stmt_idx) orelse continue;
-                if (stmt_tag != .var_decl) continue;
-
-                const decl = self.ir.getVarDecl(stmt_idx) orelse continue;
-                if (decl.init == null_node) continue;
-                const member = self.getMemberAccess(decl.init) orelse continue;
-                if (member.property != @backingInt(object.Atom.body)) continue;
-
-                // Body binding must come from request.body.
-                if (!self.matchesOptionalSlot(member.object, self.request_binding_slot)) continue;
-
-                self.body_binding_slot = bindingSlotIfBindable(decl.binding) orelse continue;
-                return;
-            }
         }
     }
 
@@ -247,7 +208,6 @@ pub const HandlerAnalyzer = struct {
             .static_body = response.body,
             .status = response.status,
             .content_type_idx = response.content_type_idx,
-            .body_source = response.body_source,
         });
     }
 
@@ -289,7 +249,6 @@ pub const HandlerAnalyzer = struct {
                     .static_body = response.body,
                     .status = response.status,
                     .content_type_idx = response.content_type_idx,
-                    .body_source = response.body_source,
                 });
             }
         }
@@ -339,7 +298,6 @@ pub const HandlerAnalyzer = struct {
             .static_body = response.body,
             .status = response.status,
             .content_type_idx = response.content_type_idx,
-            .body_source = response.body_source,
         });
     }
 
@@ -495,7 +453,6 @@ pub const HandlerAnalyzer = struct {
         body: []const u8,
         status: u16,
         content_type_idx: u8,
-        body_source: ResponseBodySource = .static,
     };
 
     const ResponseKind = enum {
@@ -533,9 +490,7 @@ pub const HandlerAnalyzer = struct {
     pub fn analyzeDirectReturn(self: *HandlerAnalyzer, func_node: NodeIndex) !?StaticResponseInfo {
         const func = self.ir.getFunction(func_node) orelse return null;
         self.request_binding_slot = null;
-        self.body_binding_slot = null;
         self.findRequestBinding(func);
-        self.findBodyBinding(func.body);
         return try self.analyzeStaticReturn(func.body);
     }
 
@@ -595,17 +550,6 @@ pub const HandlerAnalyzer = struct {
                         .body = body.?,
                         .status = status,
                         .content_type_idx = content_type_idx,
-                        .body_source = .static,
-                    };
-                }
-
-                // Dynamic pattern: Response.json(JSON.parse(request.body)), recognised only when enableJsonBodyParsePatterns ran
-                if (self.enable_json_body_parse and self.isJsonParseOfRequestBody(arg_idx)) {
-                    return .{
-                        .body = "",
-                        .status = status,
-                        .content_type_idx = content_type_idx,
-                        .body_source = .request_json_parse,
                     };
                 }
 
@@ -630,41 +574,12 @@ pub const HandlerAnalyzer = struct {
                     .body = body,
                     .status = status,
                     .content_type_idx = content_type_idx,
-                    .body_source = .static,
                 };
             },
         }
 
         // Unreachable with current response_kind variants
         return null;
-    }
-
-    fn isJsonParseOfRequestBody(self: *HandlerAnalyzer, node: NodeIndex) bool {
-        const tag = self.ir.getTag(node) orelse return false;
-        if (tag != .call) return false;
-
-        const call = self.ir.getCall(node) orelse return false;
-        if (call.args_count != 1) return false;
-
-        const member = self.getMemberAccess(call.callee) orelse return false;
-        if (member.property != @backingInt(object.Atom.parse)) return false;
-
-        // Must be JSON.parse(...)
-        if (!self.isGlobalIdentifier(member.object, object.Atom.JSON)) return false;
-
-        // Argument must be request.body or a local bound from request.body
-        const arg_idx = self.ir.getListIndex(call.args_start, 0);
-        return self.isRequestBodySource(arg_idx);
-    }
-
-    fn isRequestBodySource(self: *HandlerAnalyzer, node: NodeIndex) bool {
-        if (self.body_binding_slot) |slot| {
-            if (self.matchesSlot(node, slot)) return true;
-        }
-
-        const member = self.getMemberAccess(node) orelse return false;
-        if (member.property != @backingInt(object.Atom.body)) return false;
-        return self.matchesOptionalSlot(member.object, self.request_binding_slot);
     }
 
     /// Extract status from options object: {status: 404}
@@ -983,51 +898,4 @@ test "HandlerAnalyzer does not fast-path match-object arms that constrain method
             try std.testing.expect(!std.mem.eql(u8, p.url_bytes, "/echo"));
         }
     }
-}
-
-test "HandlerAnalyzer detects Response.json(JSON.parse(request.body))" {
-    const allocator = std.testing.allocator;
-
-    var atoms = context.AtomTable.init(allocator);
-    defer atoms.deinit();
-
-    const source =
-        \\function handler(request) {
-        \\  const url = request.url;
-        \\  const body = request.body;
-        \\  if (url === '/api/echo') {
-        \\    return Response.json(JSON.parse(body), { status: 201 });
-        \\  }
-        \\}
-    ;
-
-    var js_parser = try @import("parser/parse.zig").Parser.initAdmission(allocator, allocator, source, .compile);
-    defer js_parser.deinit();
-    js_parser.setAtomTable(&atoms);
-
-    const root = try js_parser.parse();
-    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const handler_fn = findHandlerFunctionForTest(ir_view, root) orelse return error.InvalidRequest;
-
-    var analyzer = HandlerAnalyzer.init(allocator, ir_view, &atoms);
-    defer analyzer.deinit();
-    analyzer.enableJsonBodyParsePatterns();
-
-    const dispatch_opt = try analyzer.analyze(handler_fn);
-    try std.testing.expect(dispatch_opt != null);
-
-    const dispatch = dispatch_opt.?;
-    defer {
-        dispatch.deinit();
-        allocator.destroy(dispatch);
-    }
-
-    try std.testing.expectEqual(@as(usize, 1), dispatch.patterns.len);
-    const p = dispatch.patterns[0];
-    try std.testing.expectEqual(PatternType.exact, p.pattern_type);
-    try std.testing.expectEqualStrings("/api/echo", p.url_bytes);
-    try std.testing.expectEqual(ResponseBodySource.request_json_parse, p.body_source);
-    try std.testing.expectEqual(@as(u16, 201), p.status);
-    try std.testing.expectEqual(@as(u8, 0), p.content_type_idx);
-    try std.testing.expectEqual(@as(usize, 0), p.static_body.len);
 }
