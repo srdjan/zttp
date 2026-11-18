@@ -363,14 +363,13 @@ iterator, and ends the loop for every other value. `s.split("")` splits by
 code point: for `"aé€"` it gave 3 parts, and `s.length` gave 6. The U4d-1
 measurement refused a string loop and broke no test, fixture, or example.
 
-- (a) Recommended. U4d-1 refuses a string iterable with the same code as a
+- (a) U4d-1 refuses a string iterable with the same code as a
   record or a number, and spec 5.5 names arrays, tuples, and `range(n)`
   only. The replacement is `s.split("")`. `Dict` entries means the array
-  that `dictEntries(d)` returns.
+  that `dictEntries(d)` returns. The owner chose this option on
+  2026-11-18.
 - (b) The runtime iterates a string by code point, as `split("")` does.
   This adds an opcode path and a second spelling of one loop.
-
-The owner has not answered.
 
 ### Decision 26: a builtin argument that breaks its row parameter
 
@@ -381,15 +380,14 @@ check, and `n` holds `undefined` at run time. A row of
 checker does not compare the argument with it. A mismatch leaves the call
 with no type, and the `number` annotation accepts a value with no type.
 
-- (a) Recommended. U4d-5 reports ZTS203 when an argument of a builtin row
+- (a) U4d-5 reports ZTS203 when an argument of a builtin row
   call has a known type that its row parameter does not admit. The
   `Number` row takes a `string` parameter, so this rule also refuses
   `Number(x)` with a known argument that is not a `string` (N3). A fallout
-  measurement comes first.
+  measurement comes first. The owner chose this option on
+  2026-11-18.
 - (b) U4d-5 refuses only `Number(x)` with a known argument that is not a
   `string`, and the general hole stays an open item.
-
-The owner has not answered.
 
 ## Units
 
@@ -542,7 +540,7 @@ dispatches. Bulk rewrite scripts are not allowed.
 | U4d | G6 with X21, X22, Decision 5, N3, N5, N15 |
 | U5 | G4 |
 | U4g | Decision 24 (a) |
-| U6 | The spec text for Decisions 3, 4, 6, and 7, and for N1 to N16 |
+| U6 | The spec text for Decisions 3, 4, 6, 7, and 25, and for N1 to N16 |
 
 U4a runs as five commits, one for each rule. U4a-1 refuses the array members
 `forEach`, `pop`, `shift`, `unshift`, `splice`, `toReversed`, and `concat`,
@@ -704,7 +702,7 @@ implementer gets the list and 120 calls.
   `diagnostic_projection.zig` (64 to 65); the pipeline test "for...of over
   a union with a member that is not an array or tuple leaves the variable
   untyped"; A3 case `r08_for_of`, which the union skip fixes; and the
-  corpus ratchet, which needs a bad case for ZTS218. Waits for Decision 25.
+  corpus ratchet, which needs a bad case for ZTS218.
 - U4d-2 (X22). The `stringifyJson` binding in
   `packages/zts/src/modules/data/json_mod.zig` sets
   `json_encodable_args = &.{0}`, so `reportIfUnencodable` gives ZTS213, as
