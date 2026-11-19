@@ -11,8 +11,8 @@
 //!     probe. A refused probe reports an error (or a warning that the row marks
 //!     `(warning)`), every error code is in the row, and the probes together
 //!     report every code of the row. A clean probe reports no error.
-//!   * A gap row (`| Form | Observed result |`) names the codes that the
-//!     compiler gives today, or says "Accepted". Its probes must match.
+//!   * A table headed `| Form | Observed result | Required |` is the retired
+//!     gap table. The parser refuses it in any section.
 //!   * Censuses: every row has a probe and every probe has a row; every source
 //!     refusing diagnostic kind is observed or has a row in
 //!     `scripts/ts-restrictions-unprobed.allow`; every array and string member
@@ -44,15 +44,6 @@ pub const RefusalDoc = struct {
     codes: []const Code,
 };
 
-pub const GapDoc = struct {
-    key: []const u8,
-    /// Empty when the observation names no code ("Accepted ...").
-    codes: []const []const u8,
-    /// The code and the form that the compiler must give. The gate checks only
-    /// that the cell is not empty: a fix moves the row to a refusal table.
-    required: []const u8,
-};
-
 pub const AdmittedLine = struct {
     scope: []const u8,
     members: []const []const u8,
@@ -62,15 +53,12 @@ pub const LimitDoc = struct { label: []const u8, value: u64 };
 
 pub const Doc = struct {
     refusals: []const RefusalDoc,
-    gaps: []const GapDoc,
     admitted: []const AdmittedLine,
     ambient: []const []const u8,
     ambient_types: []const []const u8,
     limits: []const LimitDoc,
-    /// The backticked spans of every refusal and gap form cell.
+    /// The backticked spans of every refusal form cell.
     form_spans: []const []const u8,
-    /// The backticked spans of every gap form cell.
-    gap_spans: []const []const u8,
 };
 
 const refusal_header = [_][]const u8{ "Refused form", "Code", "Write instead" };
@@ -180,29 +168,6 @@ fn severityName(severity: Severity) []const u8 {
     };
 }
 
-/// The codes of an "Observed result" cell: every code in its first sentence.
-fn parseObservedCodes(a: std.mem.Allocator, cell: []const u8) ![]const []const u8 {
-    var end = cell.len;
-    var k: usize = 0;
-    while (k < cell.len) : (k += 1) {
-        if (cell[k] == '.' and (k + 1 == cell.len or cell[k + 1] == ' ')) {
-            end = k;
-            break;
-        }
-    }
-    var codes: std.ArrayList([]const u8) = .empty;
-    errdefer codes.deinit(a);
-    var i: usize = 0;
-    const sentence = cell[0..end];
-    while (i + 6 <= sentence.len) : (i += 1) {
-        if (!isCode(sentence[i .. i + 6])) continue;
-        if (i + 6 < sentence.len and sentence[i + 6] >= '0' and sentence[i + 6] <= '9') continue;
-        try codes.append(a, sentence[i .. i + 6]);
-        i += 5;
-    }
-    return codes.toOwnedSlice(a);
-}
-
 fn headerIs(cells: []const []const u8, expected: []const []const u8) bool {
     if (cells.len != expected.len) return false;
     for (cells, expected) |cell, want| {
@@ -221,11 +186,9 @@ fn leadingInteger(text: []const u8) !u64 {
 /// Read `text`. Slices point into `a`.
 pub fn parseDoc(a: std.mem.Allocator, text: []const u8) !Doc {
     var refusals: std.ArrayList(RefusalDoc) = .empty;
-    var gaps: std.ArrayList(GapDoc) = .empty;
     var admitted: std.ArrayList(AdmittedLine) = .empty;
     var limits: std.ArrayList(LimitDoc) = .empty;
     var form_spans: std.ArrayList([]const u8) = .empty;
-    var gap_spans: std.ArrayList([]const u8) = .empty;
     var ambient: []const []const u8 = &.{};
     var ambient_types: []const []const u8 = &.{};
 
@@ -284,15 +247,8 @@ pub fn parseDoc(a: std.mem.Allocator, text: []const u8) !Doc {
                 try form_spans.appendSlice(a, spans);
                 try refusals.append(a, .{ .key = cells[0], .spans = spans, .codes = try parseCodeCell(a, cells[1]) });
             }
-        } else if (headerIs(header, &gap_header) and std.mem.startsWith(u8, section, "Spec Rules That")) {
-            for (rows) |row_line| {
-                const cells = try splitCells(a, row_line);
-                if (cells.len != 3) return error.BadGapRow;
-                const spans = try codeSpans(a, cells[0]);
-                try form_spans.appendSlice(a, spans);
-                try gap_spans.appendSlice(a, spans);
-                try gaps.append(a, .{ .key = cells[0], .codes = try parseObservedCodes(a, cells[1]), .required = cells[2] });
-            }
+        } else if (headerIs(header, &gap_header)) {
+            return error.RetiredGapTable;
         } else if (headerIs(header, &limit_header) and std.mem.eql(u8, section, "Limits")) {
             for (rows) |row_line| {
                 const cells = try splitCells(a, row_line);
@@ -303,13 +259,11 @@ pub fn parseDoc(a: std.mem.Allocator, text: []const u8) !Doc {
     }
     return .{
         .refusals = try refusals.toOwnedSlice(a),
-        .gaps = try gaps.toOwnedSlice(a),
         .admitted = try admitted.toOwnedSlice(a),
         .ambient = ambient,
         .ambient_types = ambient_types,
         .limits = try limits.toOwnedSlice(a),
         .form_spans = try form_spans.toOwnedSlice(a),
-        .gap_spans = try gap_spans.toOwnedSlice(a),
     };
 }
 
@@ -471,20 +425,12 @@ pub const Inputs = struct {
     doc: []const u8,
     allow: []const u8,
     refusal_probes: []const probes.RefusalRow,
-    gap_probes: []const probes.GapRow,
     check: CheckFn,
     registry: Registry,
     list: bool = false,
 };
 
 fn findRefusalProbe(rows: []const probes.RefusalRow, key: []const u8) ?probes.RefusalRow {
-    for (rows) |row| {
-        if (std.mem.eql(u8, row.key, key)) return row;
-    }
-    return null;
-}
-
-fn findGapProbe(rows: []const probes.GapRow, key: []const u8) ?probes.GapRow {
     for (rows) |row| {
         if (std.mem.eql(u8, row.key, key)) return row;
     }
@@ -499,12 +445,17 @@ pub fn runGate(gpa: std.mem.Allocator, inputs: Inputs) !Report {
     var report = Report.init(gpa);
     errdefer report.deinit();
     const a = report.arena.allocator();
-    const doc = try parseDoc(a, inputs.doc);
+    const doc = parseDoc(a, inputs.doc) catch |err| switch (err) {
+        error.RetiredGapTable => {
+            try report.fail("the document has a table headed Form, Observed result, Required: the gap table is retired, and a form that the compiler admits is fixed in the compiler", .{});
+            return report;
+        },
+        else => return err,
+    };
 
     var observed: std.ArrayList([]const u8) = .empty;
 
     try checkRefusalRows(&report, doc, inputs, &observed);
-    try checkGapRows(&report, doc, inputs, &observed);
     try checkKinds(&report, inputs, observed.items);
     try checkAdmitted(&report, doc, inputs.registry.members);
     try checkMemberReads(&report, doc, inputs);
@@ -619,55 +570,6 @@ fn checkSpanTags(report: *Report, row: RefusalDoc, probe_row: probes.RefusalRow)
     }
 }
 
-fn checkGapRows(report: *Report, doc: Doc, inputs: Inputs, observed: *std.ArrayList([]const u8)) !void {
-    const a = report.arena.allocator();
-    for (doc.gaps, 0..) |row, index| {
-        report.rows_checked += 1;
-        for (doc.gaps[0..index]) |earlier| {
-            if (std.mem.eql(u8, earlier.key, row.key)) try report.fail("gap row \"{s}\": the document has this form cell twice", .{row.key});
-        }
-        const probe_row = findGapProbe(inputs.gap_probes, row.key) orelse {
-            try report.fail("gap row \"{s}\": no probe row", .{row.key});
-            continue;
-        };
-        if (probe_row.sources.len == 0) try report.fail("gap row \"{s}\": no probe", .{row.key});
-        if (row.required.len == 0) try report.fail("gap row \"{s}\": the Required cell is empty", .{row.key});
-        const expected = try joinCodes(a, row.codes);
-        var seen: std.ArrayList([]const u8) = .empty;
-        for (probe_row.sources) |source| {
-            const run = try runProbe(report, inputs.check, source);
-            if (inputs.list) try report.note("gap      {s}: errors={s} warnings={s}", .{ row.key, try joinCodes(a, run.errors), try joinCodes(a, run.warnings) });
-            if (run.crashed) |err| {
-                try report.fail("gap row \"{s}\": the check failed with {s}", .{ row.key, @errorName(err) });
-                continue;
-            }
-            for (run.all) |code| try appendUnique(a, observed, code);
-            if (row.codes.len == 0) {
-                if (run.errors.len != 0) try report.fail("gap row \"{s}\": the document says the form is accepted, and the probe reports {s}", .{ row.key, try joinCodes(a, run.errors) });
-                continue;
-            }
-            for (run.errors) |code| {
-                try appendUnique(a, &seen, code);
-                if (!contains(row.codes, code)) try report.fail("gap row \"{s}\": the probe reports error {s}, and the document says {s}", .{ row.key, code, expected });
-            }
-            if (run.errors.len == 0) try report.fail("gap row \"{s}\": the document says {s}, and the probe reports no error", .{ row.key, expected });
-        }
-        for (row.codes) |code| {
-            if (!contains(seen.items, code)) try report.fail("gap row \"{s}\": no probe reports {s}", .{ row.key, code });
-        }
-    }
-    for (inputs.gap_probes, 0..) |probe_row, index| {
-        for (inputs.gap_probes[0..index]) |earlier| {
-            if (std.mem.eql(u8, earlier.key, probe_row.key)) try report.fail("gap probe key \"{s}\": two probe rows have this key", .{probe_row.key});
-        }
-        var matched = false;
-        for (doc.gaps) |row| {
-            if (std.mem.eql(u8, row.key, probe_row.key)) matched = true;
-        }
-        if (!matched) try report.fail("gap probe key \"{s}\": no gap row has this form", .{probe_row.key});
-    }
-}
-
 /// A row of the allowlist: a code and the reason that no probe reaches it.
 const AllowRow = struct { code: []const u8, reason: []const u8 };
 
@@ -728,12 +630,11 @@ fn isAdmitted(doc: Doc, member: Member) bool {
 }
 
 /// Read each runtime member through the real check. An admitted member must be
-/// accepted. Any other member must be refused, unless a gap row names it.
+/// accepted. Any other member must be refused, .
 fn checkMemberReads(report: *Report, doc: Doc, inputs: Inputs) !void {
     const a = report.arena.allocator();
     for (inputs.registry.members) |m| {
         const admitted = isAdmitted(doc, m);
-        if (!admitted and contains(doc.gap_spans, m.name)) continue;
         const run = try runProbe(report, inputs.check, .{ .text = try memberRead(a, m) });
         if (run.crashed) |err| {
             try report.fail("member {s}.{s}: the check of a read failed with {s}", .{ m.scope, m.name, @errorName(err) });
@@ -763,7 +664,7 @@ fn checkAdmitted(report: *Report, doc: Doc, members: []const Member) !void {
         for (doc.admitted) |line| {
             if (std.mem.eql(u8, line.scope, m.scope) and contains(line.members, m.name)) covered = true;
         }
-        if (!covered) try report.fail("member {s}.{s}: not in Admitted Members, and no refusal or gap row names it", .{ m.scope, m.name });
+        if (!covered) try report.fail("member {s}.{s}: not in Admitted Members, and no refusal row names it", .{ m.scope, m.name });
     }
 }
 
@@ -963,7 +864,6 @@ fn runGateMain(init: std.process.Init) !void {
         .doc = doc_options.contents,
         .allow = allow_options.contents,
         .refusal_probes = &probes.refusal_rows,
-        .gap_probes = &probes.gap_rows,
         .check = realCheck,
         .registry = registry,
         .list = list,
@@ -1006,13 +906,6 @@ const test_doc =
     \\|---|---|
     \\| Source file size | 10 bytes |
     \\
-    \\## Spec Rules That `zts check` Does Not Enforce
-    \\
-    \\| Form | Observed result | Required |
-    \\|---|---|---|
-    \\| Gap one | Accepted, exit 0 | ZTS001 |
-    \\| Gap two | Refused with ZTS003, "x". The registry names ZTS042 | ZTS042 |
-    \\
 ;
 
 /// A fake check: the source text names the diagnostics, as `code:severity ...`.
@@ -1044,11 +937,6 @@ const good_refusals = [_]probes.RefusalRow{
     },
 };
 
-const good_gaps = [_]probes.GapRow{
-    .{ .key = "Gap one", .sources = &.{.{ .text = "clean" }} },
-    .{ .key = "Gap two", .sources = &.{.{ .text = "ZTS003:error" }} },
-};
-
 const test_registry: Registry = .{
     .kind_codes = &.{ "ZTS001", "ZTS002" },
     .members = &.{
@@ -1060,12 +948,11 @@ const test_registry: Registry = .{
     .limits = &.{.{ .label = "Source file size", .value = 10 }},
 };
 
-fn testInputs(doc: []const u8, refusals: []const probes.RefusalRow, gaps: []const probes.GapRow, registry: Registry) Inputs {
+fn testInputs(doc: []const u8, refusals: []const probes.RefusalRow, registry: Registry) Inputs {
     return .{
         .doc = doc,
         .allow = "",
         .refusal_probes = refusals,
-        .gap_probes = gaps,
         .check = fakeCheck,
         .registry = registry,
     };
@@ -1081,16 +968,16 @@ fn expectFailure(report: *const Report, fragment: []const u8) !void {
 }
 
 test "a document and probes that agree pass" {
-    var report = try runGate(testing.allocator, testInputs(test_doc, &good_refusals, &good_gaps, test_registry));
+    var report = try runGate(testing.allocator, testInputs(test_doc, &good_refusals, test_registry));
     defer report.deinit();
     try testing.expectEqual(@as(usize, 0), report.failures.items.len);
-    try testing.expectEqual(@as(usize, 4), report.rows_checked);
+    try testing.expectEqual(@as(usize, 2), report.rows_checked);
 }
 
 test "a changed code in the document names the row" {
     const doc = try std.mem.replaceOwned(u8, testing.allocator, test_doc, "| A plain form | ZTS002 |", "| A plain form | ZTS003 |");
     defer testing.allocator.free(doc);
-    var report = try runGate(testing.allocator, testInputs(doc, &good_refusals, &good_gaps, test_registry));
+    var report = try runGate(testing.allocator, testInputs(doc, &good_refusals, test_registry));
     defer report.deinit();
     try expectFailure(&report, "refusal row \"A plain form\" []: the probe reports error ZTS002, which is not in the row (ZTS003)");
 }
@@ -1101,7 +988,7 @@ test "a deleted probe names the row and the span" {
         .refused = &.{.{ .span = "var", .source = .{ .text = "ZTS001:error" } }},
         .clean = .{ .text = "clean" },
     }};
-    var report = try runGate(testing.allocator, testInputs(test_doc, &fewer, &good_gaps, test_registry));
+    var report = try runGate(testing.allocator, testInputs(test_doc, &fewer, test_registry));
     defer report.deinit();
     try expectFailure(&report, "refusal row \"A plain form\": no probe row");
     try expectFailure(&report, "no refused probe for the span `let | x`");
@@ -1119,7 +1006,7 @@ test "a warning code that no probe reports at warning severity fails" {
         },
         good_refusals[1],
     };
-    var report = try runGate(testing.allocator, testInputs(test_doc, &wrong, &good_gaps, test_registry));
+    var report = try runGate(testing.allocator, testInputs(test_doc, &wrong, test_registry));
     defer report.deinit();
     try expectFailure(&report, "no probe reports ZTS216 at warning severity");
 }
@@ -1133,19 +1020,9 @@ test "a clean probe that reports an error fails" {
             .clean = .{ .text = "ZTS100:error" },
         },
     };
-    var report = try runGate(testing.allocator, testInputs(test_doc, &dirty, &good_gaps, test_registry));
+    var report = try runGate(testing.allocator, testInputs(test_doc, &dirty, test_registry));
     defer report.deinit();
     try expectFailure(&report, "refusal row \"A plain form\": the clean probe of the \"Write instead\" form reports ZTS100");
-}
-
-test "a gap that the compiler now refuses fails" {
-    const refused = [_]probes.GapRow{
-        .{ .key = "Gap one", .sources = &.{.{ .text = "ZTS001:error" }} },
-        good_gaps[1],
-    };
-    var report = try runGate(testing.allocator, testInputs(test_doc, &good_refusals, &refused, test_registry));
-    defer report.deinit();
-    try expectFailure(&report, "gap row \"Gap one\": the document says the form is accepted, and the probe reports ZTS001");
 }
 
 test "a member missing from Admitted Members and an extra ambient name fail" {
@@ -1160,7 +1037,7 @@ test "a member missing from Admitted Members and an extra ambient name fail" {
         .ambient_types = &.{ "Bytes", "Widget" },
         .limits = &.{.{ .label = "Source file size", .value = 11 }},
     };
-    var report = try runGate(testing.allocator, testInputs(test_doc, &good_refusals, &good_gaps, registry));
+    var report = try runGate(testing.allocator, testInputs(test_doc, &good_refusals, registry));
     defer report.deinit();
     try expectFailure(&report, "member Array.prototype.join: not in Admitted Members");
     try expectFailure(&report, "member Array.prototype.join: a read is accepted, and the document does not admit it");
@@ -1178,11 +1055,11 @@ test "a kind that no probe observes needs an allowlist row, and a stale row fail
         .ambient_types = test_registry.ambient_types,
         .limits = test_registry.limits,
     };
-    var report = try runGate(testing.allocator, testInputs(test_doc, &good_refusals, &good_gaps, registry));
+    var report = try runGate(testing.allocator, testInputs(test_doc, &good_refusals, registry));
     defer report.deinit();
     try expectFailure(&report, "diagnostic kind ZTS004: no refused probe observes it");
 
-    var stale_inputs = testInputs(test_doc, &good_refusals, &good_gaps, registry);
+    var stale_inputs = testInputs(test_doc, &good_refusals, registry);
     stale_inputs.allow = "# header\nZTS004 syntax error, no row\nZTS001 observed already\n";
     var stale = try runGate(testing.allocator, stale_inputs);
     defer stale.deinit();
@@ -1197,9 +1074,6 @@ test "parseDoc reads cells with an escaped pipe and spans with a backtick" {
     try testing.expectEqualStrings("`var` and `let | x`", doc.refusals[0].key);
     try testing.expectEqualStrings("let | x", doc.refusals[0].spans[1]);
     try testing.expectEqual(Severity.warning, doc.refusals[0].codes[1].severity);
-    try testing.expectEqualStrings("ZTS042", doc.gaps[1].required);
-    try testing.expectEqual(@as(usize, 1), doc.gaps[1].codes.len);
-    try testing.expectEqualStrings("ZTS003", doc.gaps[1].codes[0]);
     const spans = try codeSpans(arena.allocator(), "Template `` `n=${n}` `` end");
     try testing.expectEqualStrings("`n=${n}`", spans[0]);
 }
@@ -1213,7 +1087,7 @@ fn refuseSliceRead(a: std.mem.Allocator, source: Source) anyerror![]const Diag {
 }
 
 test "an admitted member whose read is refused fails" {
-    var inputs = testInputs(test_doc, &good_refusals, &good_gaps, test_registry);
+    var inputs = testInputs(test_doc, &good_refusals, test_registry);
     inputs.check = refuseSliceRead;
     var report = try runGate(testing.allocator, inputs);
     defer report.deinit();
@@ -1229,7 +1103,7 @@ test "an advisory code passes only at advisory severity" {
         .refused = &.{.{ .source = .{ .text = "ZTS625:advisory" } }},
         .clean = .{ .text = "clean" },
     } };
-    var inputs = testInputs(doc, &advisory, &good_gaps, test_registry);
+    var inputs = testInputs(doc, &advisory, test_registry);
     inputs.allow = "ZTS002 no row names it in this test\n";
     var pass = try runGate(testing.allocator, inputs);
     defer pass.deinit();
@@ -1247,11 +1121,11 @@ test "an advisory code passes only at advisory severity" {
     try expectFailure(&fail, "no probe reports ZTS625 at advisory severity");
 }
 
-test "a gap row with an empty Required cell fails" {
-    const doc = try std.mem.replaceOwned(u8, testing.allocator, test_doc, "| Gap one | Accepted, exit 0 | ZTS001 |", "| Gap one | Accepted, exit 0 | |");
+test "a table headed with the gap columns is refused in any section" {
+    const doc = try std.mem.replaceOwned(u8, testing.allocator, test_doc, "## Limits\n", "## Notes\n\n| Form | Observed result | Required |\n|---|---|---|\n| A form | Accepted, exit 0 | ZTS001 |\n\n## Limits\n");
     defer testing.allocator.free(doc);
-    var report = try runGate(testing.allocator, testInputs(doc, &good_refusals, &good_gaps, test_registry));
+    var report = try runGate(testing.allocator, testInputs(doc, &good_refusals, test_registry));
     defer report.deinit();
     try testing.expectEqual(@as(usize, 1), report.failures.items.len);
-    try expectFailure(&report, "gap row \"Gap one\": the Required cell is empty");
+    try expectFailure(&report, "the gap table is retired, and a form that the compiler admits is fixed in the compiler");
 }

@@ -10,10 +10,8 @@ section 5. [Restrictions to Proofs](restrictions-to-proofs.md) gives the
 reason for each restriction and the proof that it unlocks. This file adds the
 diagnostic code and the replacement form for each restriction.
 
-The codes in this file come from `zts check` on the build of commit
-`a1db8b0b`, run on 2026-11-15. The section
-[Spec rules that `zts check` does not enforce](#spec-rules-that-zts-check-does-not-enforce)
-lists the gaps that those runs found.
+The compiler refuses each listed form with its listed code. The gate
+`zig build test-ts-restrictions` checks this against the compiler.
 
 ## How To Query The Live Rules
 
@@ -349,7 +347,7 @@ types, `keyof`, indexed-access types, index signatures, mapped types,
 conditional types, `infer`, type-position `typeof`, and any other text that
 follows a type. The Declarations And Bindings table gives the refusals of
 overloads and of `declare`. `zts check` gives the other features no targeted
-diagnostic. The gap section below gives the observed behavior.
+diagnostic.
 
 ## Admitted Members
 
@@ -431,18 +429,3 @@ The `meta` operation publishes these limits:
 A generic declaration with eight type parameters passes `zts check`. The
 parser refuses a ninth type parameter with ZTS028. Nesting deeper than the
 parser limit reports ZTS044.
-
-## Spec Rules That `zts check` Does Not Enforce
-
-Each row is a probe that ran on 2026-11-15. Each probe was one small handler
-file. The specification excludes each form, but `zts check` did not refuse it
-with a targeted diagnostic.
-
-The table also lists each form for which an earlier version of this file gave a
-code that the compiler does not report. The Required column gives the code and
-the form that the compiler must give. When a fix lands, the row moves to a
-refusal table. The gate `zig build test-ts-restrictions` checks each row
-against the compiler.
-
-| Form | Observed result | Required |
-|---|---|---|

@@ -3,7 +3,7 @@
 # The gate runs the probes of the rows of docs/ts-restrictions.md. It lists the
 # kinds of the parser, the type stripper, the type checker, and the strict
 # checker from the diagnostic catalog, and it requires each code to be observed
-# in a probe of a refusal row or of a gap row, or to have a row here that says
+# in a probe of a refusal row, or to have a row here that says
 # why it is not.
 #
 # One row per code: the code, then the reason. The gate enforces both

@@ -8,8 +8,7 @@
 //! A refusal row needs one `Refusal` for each backticked span of its form cell
 //! (a row with no span needs one with an empty span) and one clean source for
 //! its "Write instead" form. A span can have more than one probe, so that the
-//! probes together reach each code of the row. A gap row needs at least one
-//! source.
+//! probes together reach each code of the row.
 
 pub const File = struct { name: []const u8, text: []const u8 };
 
@@ -31,11 +30,6 @@ pub const RefusalRow = struct {
     key: []const u8,
     refused: []const Refusal,
     clean: Source,
-};
-
-pub const GapRow = struct {
-    key: []const u8,
-    sources: []const Source,
 };
 
 // ---------------------------------------------------------------------------
@@ -1733,11 +1727,3 @@ const refusal_rows_b = [_]RefusalRow{
 };
 
 pub const refusal_rows = refusal_rows_a ++ refusal_rows_b;
-
-// ---------------------------------------------------------------------------
-// Gap rows
-// ---------------------------------------------------------------------------
-
-pub const gap_rows = [_]GapRow{
-    // ----- U1b rows, in the order of the row assignment of the plan -----
-};
