@@ -11,7 +11,7 @@ execution: code
 
 Refreshed against `8b154522` (`v0.27.1`) on 2026-11-19.
 Decision 1 retains option A, which the owner accepted on 2026-11-15.
-This request refreshes the plan only. The paused LFG run does not resume through this document edit.
+The owner accepted Decision 2, option A, on 2026-11-19 and authorized implementation of this plan.
 
 ## Goal Capsule
 
@@ -19,7 +19,7 @@ Authors can write the four accepted constructs with TypeScript grammar and recei
 The means are the helper interface in KTD1 (preserve option A).
 This file remains the plan authority for the syntax migration.
 
-Implementation requires Decision 2 (authorize the profile changes and a new recording window).
+Decision 2 authorizes the profile changes and a new recording window.
 The completed restrictions plan supplies the baseline, not migration authority.
 Work remains on local `main`, with one local commit per isolated unit and no push or deployment.
 The implementing agent owns compiler work; the owner runs the authorized model recording; the implementing agent publishes evidence afterward.
@@ -192,10 +192,10 @@ A `.d.ts` body cannot substitute for either owner.
 
 ### Decision 2: implementation authorization
 
-Decision 2 is open and blocks implementation, not this plan refresh.
-Option A, recommended: authorize this plan's narrow source-profile changes and one new batched recording window under D-012.
+Decision 2 is session-settled: user-approved on 2026-11-19.
+Option A, accepted: authorize this plan's narrow source-profile changes and one new batched recording window under D-012.
 D-012 means model-visible changes wait for an authorized re-record window.
-Option B: retain the refreshed plan and defer source changes.
+Option B, not selected: retain the refreshed plan and defer source changes.
 
 Option A authorizes revising `docs/ts-restrictions.md` and `docs/spec/zts-model-1.md` for the accepted surface.
 It also authorizes the bounded transition and owner recording described in U8 (close evidence for the migrated profile).
