@@ -432,6 +432,18 @@ declaration whose name is an ambient type name or a name that an
 `import type` binds gets ZTS019. The rejected option was (b): record it
 as an open item.
 
+### Decision 31: how source names the `Result` type
+
+The spec edit of U6 found that no source can name `Result`: it is not
+ambient, and `import type { Result } from "zttp:result"` got ZTS207,
+because the module exported no type. Spec examples 16.1 and 16.4 wrote
+`Result<...>` and failed `zts check` with ZTS065, and 16.4 also imported
+`FetchError` from `zttp:fetch`, which got ZTS207. The owner chose option
+(a) on 2026-11-19: `zttp:result` exports `Result` and `zttp:fetch`
+exports `FetchError` through `type_exports`, as `FetchOptions` is
+exported (Decision 28), and the spec examples import them. The rejected
+option was (b): make `Result` an ambient type.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -1699,14 +1711,15 @@ later.
     writes passed (e8796729); a missing builtin argument and a non-string
     `Response` body passed (4ccb9dfd); `for...of` over a value with no type,
     over a `null` member, and over a bad `range` call passed (cb6f4b8e).
-  - Confirmed, with a fix unit: a callback in a top-level initializer
-    reads `undefined` at run time (U6-R6, Decision 29 a), and a
-    declaration could redefine an ambient type name (U6-R7, Decision 30 a).
+  - Confirmed and fixed by a later unit: a callback in a top-level
+    initializer reads `undefined` at run time (1386e2bc, Decision 29 a),
+    and a declaration could redefine an ambient type name (0d37e2e9,
+    Decision 30 a).
   - Corrected documents: docs/ts-restrictions.md, docs/cli.md, AGENTS.md,
     and two allowlist reasons (f0d2ab31).
   - These findings stay open:
     - The run-time defect behind the initializer callback is not
-      diagnosed; U6-R6 refuses the form.
+      diagnosed; 1386e2bc refuses the form.
     - `range(1.5)` and `range(-1)` pass: their type is `number`.
     - A write through a record alias that drops `readonly` passes.
     - A refusal in a graph file module prints its message without the
@@ -1725,3 +1738,52 @@ later.
     - `function f<T extends string>(b: Box<T>): T { return b.value; }`
       gets ZTS204.
     - A method call on a union receiver gets no ZTS203 check.
+- U6 closed on 2026-11-19. Beyond the review fixes above, it landed U6-R6
+  (1386e2bc), U6-R7 (0d37e2e9), the retired gap table (ba49def0), the
+  spec and user docs (fd858a9d), the registry census (2b682d88), the
+  CHANGELOG entry (51c383c9), the `dictEmpty` type arguments that spec
+  example 16.2 needs (a67786e0), the grammar and idiom registries
+  (0ffa94b7), and the `Result` and `FetchError` type exports of Decision
+  31 (cd320a43). Two claims of mine in U6 briefs were wrong: the type
+  environment did not register `Result` before U6-R9, and
+  `dictEmpty<string, number>()` was typed `Dict<never, never>` before
+  a67786e0. The website commit b890cef in ../ZTTP-WEBSITE names the
+  change as on main; it is not pushed.
+  - Mutants: each fix unit moved its row and ran `zig build
+    test-ts-restrictions` against the compiler as it was before the fix,
+    and the gate failed on that row. Those runs are the named mutants of
+    the U1 gate; each commit message quotes its failing line.
+  - Timing: `hyperfine -N --warmup 5 --runs 40` of `zts check` with the
+    ReleaseFast binaries of 14de3b7b and 2b682d88, at a load average near
+    3. `handler.ts` 2.2 ms both (+0.9%), `json-and-dict.ts` 2.5 ms both
+    (-1.2%), `modules_all.ts` 2.4 ms and 2.3 ms (-2.1%, refused by both).
+    Each change is within one standard deviation.
+  - The registry census measured 59 rows, not the 57 that an earlier
+    count of this plan gave; one row (`restriction.ambient-async`) gained
+    ZTS001.
+  - These findings stay open, beyond the list of the U6 review entry:
+    - `dictEmpty` with a type argument count other than two is typed
+      `Dict<never, never>` and gets no diagnostic.
+    - A type parameter named like an ambient type, such as
+      `structural Box<Request>`, is not refused.
+    - `restriction.ambient-async` does not list ZTS026, which
+      docs/ts-restrictions.md gives a separate row.
+    - Spec example 16.4 fails with ZTS204 at `return fetch(url, {})`: the
+      checker types `fetch` as the response-shaped record, not as
+      `Result<Response, FetchError>`, the limit that `net/fetch.zig` names.
+    - The verify check reports ZTS303 on `return ok(1)` in a file that
+      holds a handler; this predates U6.
+    - `FetchError` is `{ error: string; details: string }`, read from the
+      runtime's `createFetchErrorResponse`; spec 7.2 names it and does
+      not define it.
+    - The test "late export capture failure releases a transferred rate
+      limit namespace" runs a warm-up extraction before its counting run.
+      The probable cause of the off-by-one count is the shared atom table
+      that the new types use; an allocation trace can confirm it.
+- U7 is the owner's. The codegen replay has been red since U3 by plan.
+  The re-record follows docs/internals/cassette-recording.md and the
+  memory of the recorder: one case first, which the recorder quarantines
+  by design, then the whole corpus, then three commits in order: the
+  corpus with its pins, then `scripts/update-convergence.sh`, then
+  `scripts/update-coverage.sh`. The verdict comes from an unfiltered
+  `zig build test-expert-app`, and then `bash scripts/verify.sh`.
