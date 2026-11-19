@@ -1,5 +1,5 @@
 {
-  "runId": "af63cc56eb45-1794593836024-27181",
+  "runId": "5b7cb98c4089-1795119480224-84106",
   "complete": true,
   "publishable": true,
   "publicationMode": true,
@@ -22,29 +22,30 @@
   "corpusVersion": "91c9e8aaf5e4fed0b828dc417f5eb4931a99cf56499abab1e6d16c9a90874d89",
   "headlineInputHash": "91c9e8aaf5e4fed0b828dc417f5eb4931a99cf56499abab1e6d16c9a90874d89",
   "intentSuiteHash": "b89e34e79f1b928bc67ace815add4a8ae19d84c800c8b39e7e5b8bbbbd27a552",
-  "securityProbeHash": "90d069bf5a0b79c142966f9e51a28e9d01226589fa34125239d7f63c2605e16a",
-  "thresholdHash": "f1d1da842b7f79fe04c62efa2088fd009be35c1431bafa42e431faf21206bc52",
-  "manifestHash": "ba50f851d9760a39fb3287b57bec7f190c89cd932d14685baf65b246f292cff5",
-  "resultRunHash": "45d300ca700efffd356a9d5ffda94e13e835f89daf23a93ce0001cffdb86ca7a",
+  "securityProbeHash": "647b5301e890233a52d636e6a98d96685854abb4b523d9c3bbb6cab8b1f91e92",
+  "thresholdHash": "bce3b8d3ea0f11ad1fe549689ac449be0b687262c8bd8a85f6b34c7c9c89098c",
+  "manifestHash": "abbe8e270fe3740af4934c6729fc2cf24f316e221dcb2862a6a3640efa85a42a",
+  "resultRunHash": "27d67a305dfcd95bba57f7b7017d032ecf20c617dc0701c5f562a8f287b5f121",
   "promptPersonaHash": "c14dd7a39fc83fcefac89b4110fa712bd0123333ab9b475b8fd2515c4438ac88",
   "providerNeutralCatalogHash": "f8d1aeb614463641a8c9d36f5b90d723046513506a99215dc2ea142074125ced",
   "providerSerializedCatalogHash": "bbfcefa889f76ce0abccd1e813916181286e88a8eb84a3edf089bf7abc6460b6",
   "schemaHash": "c88e438ea0a1798a6824afa97e1d49c87db89377aa133636893a0cf9693f05d2",
-  "metaHash": "a3fc0714fbddf9c01ea1846733beb47be12f50db940ba6b3396aaaf4b8ef5eb2",
-  "grammarHash": "8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be",
+  "metaHash": "ee060cea0ca60b74d56f6c39ec21404ae0c3e87037263acdb7fc334968bcd515",
+  "grammarHash": "eac3f20605ed8c5fbb5bfccd144c1d22a98ed7b0d9ca5e96b7a3897f5e70d856",
   "semanticsHash": "6f6f17bc48a511f2ca4376829f4b2b2c11560b63d75299d00e7811e31d2a09f6",
-  "diagnosticHash": "252fd9dcea57261f680dbac67271bbbd630de1194f1381d307aa1e1156bc1976",
-  "policyHash": "f223964a5d87bc96bf4f09f72b3f4c6eb7c1b1726fcfba4d2d332a409738ac1e",
-  "sourceCommit": "af63cc56eb45cd66e8069092f2d90694af69de03",
+  "diagnosticHash": "7881c38c380d22e75081b7a1c3ca6451c3d22c08431c4c366c4821060c0f9841",
+  "policyHash": "0b2f75d485181e426902f197f86297a2005a1f21b14e3ebec3a04908223abfbb",
+  "sourceCommit": "5b7cb98c408945b53dd607563cd0235a448576ba",
   "sourceDirty": false,
-  "rulesTotal": 59,
+  "rulesTotal": 58,
   "rulesTripped": 2,
   "tripped": [
-    "ZTS303",
-    "ZTS400"
+    "ZTS400",
+    "ZTS502"
   ],
   "untripped": [
     "ZTS302",
+    "ZTS303",
     "ZTS304",
     "ZTS305",
     "ZTS306",
@@ -53,7 +54,6 @@
     "ZTS310",
     "ZTS500",
     "ZTS501",
-    "ZTS502",
     "ZTS600",
     "ZTS629",
     "ZTS601",
@@ -62,8 +62,6 @@
     "ZTS603",
     "ZTS604",
     "ZTS605",
-    "ZTS608",
-    "ZTS609",
     "ZTS610",
     "ZTS623",
     "ZTS611",
@@ -74,6 +72,7 @@
     "ZTS616",
     "ZTS620",
     "ZTS622",
+    "ZTS630",
     "ZTS625",
     "ZTS626",
     "ZTS627",
@@ -107,14 +106,13 @@
     "ZTS002",
     "ZTS026",
     "ZTS056",
-    "ZTS200",
-    "ZTS203",
-    "ZTS204"
+    "ZTS202",
+    "ZTS203"
   ],
-  "recorded": "2026-11-13",
+  "recorded": "2026-11-19",
   "seedSuite": {
-    "seedsTotal": 61,
-    "verifiedRules": 58,
+    "seedsTotal": 62,
+    "verifiedRules": 57,
     "verified": [
       "POL001",
       "POL003",
@@ -156,8 +154,6 @@
       "ZTS605",
       "ZTS606",
       "ZTS607",
-      "ZTS608",
-      "ZTS609",
       "ZTS610",
       "ZTS611",
       "ZTS612",
@@ -173,7 +169,8 @@
       "ZTS626",
       "ZTS627",
       "ZTS628",
-      "ZTS629"
+      "ZTS629",
+      "ZTS630"
     ],
     "unseeded": [
       {
@@ -184,15 +181,16 @@
   },
   "corpusUnion": {
     "corpusVersion": "91c9e8aaf5e4fed0b828dc417f5eb4931a99cf56499abab1e6d16c9a90874d89",
-    "sourceTreeHash": "d381045ea05b62415842c523f05360977e9f9126",
-    "observations": 3,
-    "distinctSets": 2,
+    "sourceTreeHash": "9fbd5d7986ed5634d37c528f6a20b5deb2c5307f",
+    "observations": 4,
+    "distinctSets": 3,
     "smallestSet": 1,
     "largestSet": 2,
-    "unionCount": 2,
+    "unionCount": 3,
     "union": [
       "ZTS303",
-      "ZTS400"
+      "ZTS400",
+      "ZTS502"
     ]
   }
 }
