@@ -9,29 +9,30 @@ Use `zttp modules --json` for the live export list from the built binary.
 ## Module Catalog
 
 <!-- BEGIN GENERATED: module catalog. Edit the Zig bindings, then run `zttp module-spec-render`. -->
-| Module | Exports | Capabilities |
-|---|---|---|
-| `zttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | `crypto`, `clock` |
-| `zttp:bytes` | `bytesFromOctets`, `bytesLength`, `byteAt`, `sliceBytes`, `concatBytes`, `encodeUtf8`, `decodeUtf8`, `decodeBase64`, `encodeBase64` | none |
-| `zttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | `clock`, `policy_check` |
-| `zttp:collections` | `dictEmpty`, `dictFromEntries`, `dictGet`, `dictSet`, `dictRemove`, `dictHas`, `dictEntries`, `dictMapValues`, `dictFilter`, `dictFold` | none |
-| `zttp:crypto` | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | `crypto` |
-| `zttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` | none |
-| `zttp:env` | `env` | `env`, `policy_check` |
-| `zttp:fetch` | `fetch`, `fetchWithRetry` | `network`, `runtime_callback` |
-| `zttp:http` | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` | none |
-| `zttp:id` | `uuid`, `ulid`, `nanoid` | `clock`, `random` |
-| `zttp:json` | `parseJson`, `parseJsonBytes`, `stringifyJson` | none |
-| `zttp:log` | `logDebug`, `logInfo`, `logWarn`, `logError` | `clock`, `stderr` |
-| `zttp:ratelimit` | `rateCheck`, `rateReset` | `clock` |
-| `zttp:result` | `ok`, `err`, `mapResult`, `mapError`, `andThen`, `orElse`, `unwrapOr`, `collectAll` | none |
-| `zttp:router` | `routerMatch` | none |
-| `zttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | `sqlite`, `policy_check` |
-| `zttp:sse` | `sseEvents` | none |
-| `zttp:text` | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` | none |
-| `zttp:time` | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | none |
-| `zttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | none |
-| `zttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | none |
+| Module | Types | Intrinsics | Functions | Capabilities |
+|---|---|---|---|---|
+| `zttp:auth` | none | none | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | `crypto`, `clock` |
+| `zttp:bytes` | none | none | `bytesFromOctets`, `bytesLength`, `byteAt`, `sliceBytes`, `concatBytes`, `encodeUtf8`, `decodeUtf8`, `decodeBase64`, `encodeBase64` | none |
+| `zttp:cache` | none | none | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | `clock`, `policy_check` |
+| `zttp:collections` | none | none | `dictEmpty`, `dictFromEntries`, `dictGet`, `dictSet`, `dictRemove`, `dictHas`, `dictEntries`, `dictMapValues`, `dictFilter`, `dictFold` | none |
+| `zttp:core` | `Nominal` | `nominal`, `match`, `assert`, `P` | none | none |
+| `zttp:crypto` | none | none | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | `crypto` |
+| `zttp:decode` | none | none | `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` | none |
+| `zttp:env` | none | none | `env` | `env`, `policy_check` |
+| `zttp:fetch` | `FetchOptions`, `FetchError` | none | `fetch`, `fetchWithRetry` | `network`, `runtime_callback` |
+| `zttp:http` | none | none | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` | none |
+| `zttp:id` | none | none | `uuid`, `ulid`, `nanoid` | `clock`, `random` |
+| `zttp:json` | none | none | `parseJson`, `parseJsonBytes`, `stringifyJson` | none |
+| `zttp:log` | none | none | `logDebug`, `logInfo`, `logWarn`, `logError` | `clock`, `stderr` |
+| `zttp:ratelimit` | none | none | `rateCheck`, `rateReset` | `clock` |
+| `zttp:result` | `Result` | none | `ok`, `err`, `mapResult`, `mapError`, `andThen`, `orElse`, `unwrapOr`, `collectAll` | none |
+| `zttp:router` | none | none | `routerMatch` | none |
+| `zttp:sql` | none | none | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | `sqlite`, `policy_check` |
+| `zttp:sse` | none | none | `sseEvents` | none |
+| `zttp:text` | none | none | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` | none |
+| `zttp:time` | none | none | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | none |
+| `zttp:url` | none | none | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | none |
+| `zttp:validate` | none | none | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | none |
 <!-- END GENERATED: module catalog -->
 
 ## Common Usage

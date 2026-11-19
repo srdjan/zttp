@@ -824,6 +824,57 @@ test "check envelope writer failure propagates" {
     try std.testing.expectError(error.WriteFailed, writeCheckEnvelope(&failing, true, null, &.{}, null));
 }
 
+test "module writers classify core authoring exports without runtime functions" {
+    const TypeExport = struct { name: []const u8, typescript: ?[]const u8 = null };
+    const Intrinsic = struct { name: []const u8, kind: []const u8 };
+    const Module = struct {
+        specifier: []const u8,
+        exports: []const []const u8,
+        type_exports: []const TypeExport,
+        intrinsic_exports: []const Intrinsic,
+    };
+    const a = std.testing.allocator;
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(a);
+    var json_writer: std.Io.Writer.Allocating = .fromArrayList(a, &json_buf);
+    try json_diag.writeModulesJson(&json_writer.writer);
+    json_buf = json_writer.toArrayList();
+    const parsed = try std.json.parseFromSlice([]const Module, a, json_buf.items, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 22), parsed.value.len);
+    var saw_core = false;
+    var runtime_modules: usize = 0;
+    for (parsed.value) |module| {
+        if (module.exports.len > 0) runtime_modules += 1;
+        if (!std.mem.eql(u8, module.specifier, "zttp:core")) continue;
+        saw_core = true;
+        try std.testing.expectEqual(@as(usize, 0), module.exports.len);
+        try std.testing.expectEqual(@as(usize, 1), module.type_exports.len);
+        try std.testing.expectEqualStrings("Nominal", module.type_exports[0].name);
+        const type_text = module.type_exports[0].typescript orelse return error.TestExpectedEqual;
+        try std.testing.expect(std.mem.indexOf(u8, type_text, "type Nominal") != null);
+        const intrinsics = module.intrinsic_exports;
+        try std.testing.expectEqual(@as(usize, 4), intrinsics.len);
+        try std.testing.expectEqualStrings("nominal", intrinsics[0].name);
+        try std.testing.expectEqualStrings("nominal", intrinsics[0].kind);
+        try std.testing.expectEqualStrings("match", intrinsics[1].name);
+        try std.testing.expectEqualStrings("match", intrinsics[1].kind);
+        try std.testing.expectEqualStrings("assert", intrinsics[2].name);
+        try std.testing.expectEqualStrings("assert", intrinsics[2].kind);
+        try std.testing.expectEqualStrings("P", intrinsics[3].name);
+        try std.testing.expectEqualStrings("pattern_namespace", intrinsics[3].kind);
+    }
+    try std.testing.expect(saw_core);
+    try std.testing.expectEqual(@as(usize, 21), runtime_modules);
+    var text_buf: std.ArrayList(u8) = .empty;
+    defer text_buf.deinit(a);
+    var text_writer: std.Io.Writer.Allocating = .fromArrayList(a, &text_buf);
+    try json_diag.writeModulesText(&text_writer.writer);
+    text_buf = text_writer.toArrayList();
+    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "zttp:core\n  type Nominal\n  intrinsic nominal (nominal)\n  intrinsic match (match)\n  intrinsic assert (assert)\n  intrinsic P (pattern_namespace)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "zttp:env\n  env\n") != null);
+}
+
 test "writeAllFd fails on a closed descriptor and writes a full buffer" {
     try std.testing.expectError(error.WriteFailed, writeAllFd(-1, "x"));
     try writeAllFd(std.c.STDERR_FILENO, "");

@@ -171,6 +171,42 @@ fn writeModuleSummary(json: *std.json.Stringify, binding: anytype) !void {
     try json.write(binding.summary);
 }
 
+fn writeTypeExports(json: *std.json.Stringify, binding: anytype) !void {
+    try json.objectField("type_exports");
+    try json.beginArray();
+    for (binding.type_exports) |name| {
+        try json.beginObject();
+        try json.objectField("name");
+        try json.write(name);
+        for (binding.type_declarations) |declaration| {
+            if (!std.mem.eql(u8, declaration.name, name)) continue;
+            try json.objectField("typescript");
+            try json.write(declaration.typescript);
+            break;
+        }
+        try json.endObject();
+    }
+    try json.endArray();
+}
+
+fn writeIntrinsicExports(json: *std.json.Stringify, binding: anytype) !void {
+    try json.objectField("intrinsic_exports");
+    try json.beginArray();
+    for (binding.intrinsic_exports) |intrinsic| {
+        try json.beginObject();
+        try json.objectField("name");
+        try json.write(intrinsic.name);
+        try json.objectField("kind");
+        try json.write(@tagName(intrinsic.kind));
+        if (intrinsic.typescript.len > 0) {
+            try json.objectField("typescript");
+            try json.write(intrinsic.typescript);
+        }
+        try json.endObject();
+    }
+    try json.endArray();
+}
+
 /// Emit an export's parameter names, in call order.
 ///
 /// This is the field the model needs and did not have. Discovery published
@@ -294,6 +330,8 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
         try json.objectField("name");
         try json.write(binding.name);
         try writeModuleSummary(json, binding);
+        try writeTypeExports(json, binding);
+        try writeIntrinsicExports(json, binding);
         try json.objectField("required_capabilities");
         try json.beginArray();
         for (binding.required_capabilities) |cap| try json.write(@tagName(cap));
@@ -731,6 +769,8 @@ pub fn writeModulesPayload(
         try json.objectField("name");
         try json.write(binding.name);
         try writeModuleSummary(json, binding);
+        try writeTypeExports(json, binding);
+        try writeIntrinsicExports(json, binding);
         // Whether the entry file imports this module. A reader never has to
         // infer that from a missing key, and never mistakes an unimported
         // entry for a module that declares no capabilities.
@@ -1855,21 +1895,58 @@ test "meta limits are the constants the code enforces" {
 }
 
 test "meta publishes the built-in module catalog from the bindings" {
+    const TypeExport = struct { name: []const u8, typescript: ?[]const u8 = null };
+    const Intrinsic = struct { name: []const u8, kind: []const u8, typescript: ?[]const u8 = null };
+    const Module = struct {
+        specifier: []const u8,
+        exports: []const std.json.Value,
+        type_exports: []const TypeExport,
+        intrinsic_exports: []const Intrinsic,
+        required_capabilities: []const []const u8,
+    };
+    const Reply = struct { payload: struct { module_catalog: []const Module } };
     const a = testing.allocator;
     var raw: []u8 = undefined;
-    var parsed = try metaPayload(a, &raw);
+    var document = try metaPayload(a, &raw);
     defer a.free(raw);
+    document.deinit();
+    const parsed = try std.json.parseFromSlice(Reply, a, raw, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
 
-    const catalog = parsed.value.object.get("payload").?.object.get("module_catalog").?.array;
-    try testing.expectEqual(zts.builtinModules.len, catalog.items.len);
-    for (catalog.items, zts.builtinModules) |item, binding| {
-        const module = item.object;
-        try testing.expect(std.mem.startsWith(u8, module.get("specifier").?.string, "zttp:"));
-        try testing.expect(module.get("exports").?.array.items.len >= 1);
-        try testing.expectEqual(binding.exports.len, module.get("exports").?.array.items.len);
-        try testing.expect(module.get("required_capabilities").? == .array);
+    const catalog = parsed.value.payload.module_catalog;
+    try testing.expectEqual(@as(usize, 22), catalog.len);
+    try testing.expectEqual(zts.builtinModules.len, catalog.len);
+    var runtime_modules: usize = 0;
+    var saw_core = false;
+    for (catalog, zts.builtinModules) |module, binding| {
+        try testing.expectEqualStrings(binding.specifier, module.specifier);
+        try testing.expectEqual(binding.exports.len, module.exports.len);
+        try testing.expectEqual(binding.type_exports.len, module.type_exports.len);
+        try testing.expectEqual(binding.intrinsic_exports.len, module.intrinsic_exports.len);
+        try testing.expectEqual(binding.required_capabilities.len, module.required_capabilities.len);
+        if (binding.exports.len > 0) runtime_modules += 1;
+        if (!std.mem.eql(u8, binding.specifier, "zttp:core")) continue;
+        saw_core = true;
+        try testing.expectEqual(@as(usize, 0), module.exports.len);
+        try testing.expectEqual(@as(usize, 1), module.type_exports.len);
+        try testing.expectEqualStrings("Nominal", module.type_exports[0].name);
+        const type_text = module.type_exports[0].typescript orelse return error.TestExpectedEqual;
+        try testing.expect(std.mem.indexOf(u8, type_text, "type Nominal") != null);
+        const intrinsics = module.intrinsic_exports;
+        try testing.expectEqual(@as(usize, 4), intrinsics.len);
+        try testing.expectEqualStrings("nominal", intrinsics[0].name);
+        try testing.expectEqualStrings("nominal", intrinsics[0].kind);
+        try testing.expectEqualStrings("match", intrinsics[1].name);
+        try testing.expectEqualStrings("match", intrinsics[1].kind);
+        try testing.expectEqualStrings("assert", intrinsics[2].name);
+        try testing.expectEqualStrings("assert", intrinsics[2].kind);
+        try testing.expectEqualStrings("P", intrinsics[3].name);
+        try testing.expectEqualStrings("pattern_namespace", intrinsics[3].kind);
+        const pattern_text = intrinsics[3].typescript orelse return error.TestExpectedEqual;
+        try testing.expect(std.mem.indexOf(u8, pattern_text, "const P") != null);
     }
+    try testing.expect(saw_core);
+    try testing.expectEqual(@as(usize, 21), runtime_modules);
 }
 
 test "meta publishes every decision kind a refusal can carry, with its next action" {

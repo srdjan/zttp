@@ -73,6 +73,11 @@ The extension SDK and runtime bridge are revision-locked. Native extensions must
 | `zttp:ratelimit` | `clock` | Fixed-window expiry. |
 | `zttp:sql` | `sqlite`, `policy_check` | SQLite connection plus query-name allowlist check. |
 
+### Compiler-owned declarations
+
+`zttp:core` declares compiler intrinsics and type metadata.
+It has no runtime exports and requires no capabilities.
+
 ### Modules that declare no capabilities
 
 These modules are pure compute - string manipulation, parsing, URL encoding, structural routing, type-directed decoding, keyed-collection transformation, octet manipulation - and run without a wrapper. They appear in `modules/` with a `ModuleBinding` whose `required_capabilities = &.{}` or that omits the field.

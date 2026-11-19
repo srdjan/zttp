@@ -15,6 +15,7 @@ const contract_types = @import("zts-contracts").contract_types;
 const module_authorization = @import("zts-base").module_authorization;
 const std = @import("std");
 const modules = @import("zttp-modules");
+const core_intrinsics = @import("core_intrinsics.zig");
 
 // Namespaced to avoid shadowing the `<name>_binding` locals used in the
 // governance-assertion tests at the bottom of this file.
@@ -71,9 +72,10 @@ pub const builtins = [_]ModuleBinding{
     ported.ratelimit,
     fetch_mod.binding,
     ported.sse,
+    core_intrinsics.binding,
 };
 
-/// The registry: the core built-ins.
+/// The registry: runtime modules and compiler-owned intrinsic modules.
 pub const all = builtins;
 
 /// Semantic metadata projected in registration order from the runtime declarations.
@@ -108,6 +110,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zttp:ratelimit", .module_path = "packages/modules/src/data/ratelimit.zig", .spec_path = "packages/modules/module-specs/data/ratelimit.json" },
     .{ .specifier = "zttp:fetch", .module_path = "packages/modules/src/net/fetch.zig", .spec_path = "packages/modules/module-specs/net/fetch.json" },
     .{ .specifier = "zttp:sse", .module_path = "packages/modules/src/net/sse.zig", .spec_path = "packages/modules/module-specs/net/sse.json" },
+    .{ .specifier = "zttp:core", .module_path = "packages/zts/src/core_intrinsics.zig", .spec_path = "packages/modules/module-specs/core.json" },
 };
 
 comptime {
@@ -184,6 +187,14 @@ pub fn findDescriptor(specifier: []const u8, export_name: []const u8) ?descripto
     return null;
 }
 
+pub fn findIntrinsic(specifier: []const u8, export_name: []const u8) ?*const mb.IntrinsicDeclaration {
+    const binding = fromSpecifier(specifier) orelse return null;
+    for (binding.intrinsic_exports) |*intrinsic| {
+        if (std.mem.eql(u8, intrinsic.name, export_name)) return intrinsic;
+    }
+    return null;
+}
+
 /// Get the binding for a specific export from a specific module.
 pub fn findExport(
     specifier: []const u8,
@@ -212,8 +223,36 @@ test "fromSpecifier finds known modules" {
     try std.testing.expect(fromSpecifier("zttp:url") != null);
     try std.testing.expect(fromSpecifier("zttp:id") != null);
     try std.testing.expect(fromSpecifier("zttp:sse") != null);
+    try std.testing.expect(fromSpecifier("zttp:core") != null);
     try std.testing.expect(fromSpecifier("zttp-ext:math") == null);
     try std.testing.expect(fromSpecifier("zttp:unknown") == null);
+}
+
+test "core exports are classified without runtime functions" {
+    const core = fromSpecifier("zttp:core") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), core.exports.len);
+    try std.testing.expectEqual(@as(usize, 1), core.type_exports.len);
+    try std.testing.expectEqualStrings("Nominal", core.type_exports[0]);
+    try std.testing.expectEqual(@as(usize, 1), core.type_declarations.len);
+    try std.testing.expectEqualStrings("Nominal", core.type_declarations[0].name);
+    try std.testing.expectEqual(@as(usize, 4), core.intrinsic_exports.len);
+    const nominal = findIntrinsic("zttp:core", "nominal") orelse return error.TestExpectedEqual;
+    const match = findIntrinsic("zttp:core", "match") orelse return error.TestExpectedEqual;
+    const assertion = findIntrinsic("zttp:core", "assert") orelse return error.TestExpectedEqual;
+    const patterns = findIntrinsic("zttp:core", "P") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(mb.IntrinsicKind.nominal, nominal.kind);
+    try std.testing.expectEqual(mb.IntrinsicKind.match, match.kind);
+    try std.testing.expectEqual(mb.IntrinsicKind.assert, assertion.kind);
+    try std.testing.expectEqual(mb.IntrinsicKind.pattern_namespace, patterns.kind);
+    try std.testing.expect(findExport("zttp:core", "match") == null);
+
+    for (std.enums.values(mb.IntrinsicKind)) |kind| {
+        var count: usize = 0;
+        for (core.intrinsic_exports) |intrinsic| {
+            if (intrinsic.kind == kind) count += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), count);
+    }
 }
 
 test "findExport finds known module export" {
@@ -329,7 +368,8 @@ test "governance entries stay aligned with public built-ins" {
     try std.testing.expectEqualStrings("zttp:env", entries[0].specifier);
     try std.testing.expectEqualStrings("packages/modules/src/platform/env.zig", entries[0].module_path);
     try std.testing.expectEqualStrings("packages/modules/module-specs/platform/env.json", entries[0].spec_path);
-    try std.testing.expectEqualStrings("zttp:sse", entries[entries.len - 1].specifier);
+    try std.testing.expectEqualStrings("zttp:sse", entries[entries.len - 2].specifier);
+    try std.testing.expectEqualStrings("zttp:core", entries[entries.len - 1].specifier);
 }
 
 /// Union `required_capabilities` across every module resolved from
@@ -417,7 +457,7 @@ test "the builder's copy of the zttp:validate keyword list matches the module's"
 }
 
 test "semantic descriptors preserve every builtin payload and registration order" {
-    try std.testing.expectEqual(@as(usize, 21), metadata.len);
+    try std.testing.expectEqual(@as(usize, 22), metadata.len);
     try std.testing.expectEqual(all.len, metadata.len);
     for (all, metadata) |binding, descriptor| {
         inline for (@typeInfo(descriptors.ModuleDescriptor).@"struct".field_names) |field| {
@@ -425,7 +465,11 @@ test "semantic descriptors preserve every builtin payload and registration order
                 try std.testing.expectEqualDeep(@field(binding, field), @field(descriptor, field));
             }
         }
-        try std.testing.expect(binding.exports.len > 0);
+        if (binding.intrinsic_exports.len == 0) {
+            try std.testing.expect(binding.exports.len > 0);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), binding.exports.len);
+        }
         try std.testing.expectEqual(binding.exports.len, descriptor.exports.len);
         for (binding.exports, descriptor.exports) |function, semantic| {
             inline for (@typeInfo(descriptors.FunctionDescriptor).@"struct".field_names) |field| {

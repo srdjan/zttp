@@ -28,6 +28,9 @@ pub const ContractFlags = descriptors.ContractFlags;
 pub const LawKind = descriptors.LawKind;
 pub const AbsorbingPattern = descriptors.AbsorbingPattern;
 pub const Law = descriptors.Law;
+pub const IntrinsicKind = descriptors.IntrinsicKind;
+pub const TypeDeclaration = descriptors.TypeDeclaration;
+pub const IntrinsicDeclaration = descriptors.IntrinsicDeclaration;
 
 pub const FunctionBinding = struct {
     name: []const u8,
@@ -152,6 +155,9 @@ pub const ModuleBinding = struct {
     /// Type names that `import type { ... } from "<specifier>"` declares. A type
     /// name is not a value export: `import { Name }` of one is still refused.
     type_exports: []const []const u8 = &.{},
+    type_declarations: []const TypeDeclaration = &.{},
+    intrinsic_exports: []const IntrinsicDeclaration = &.{},
+    typescript_helpers: []const u8 = "",
     required_capabilities: []const ModuleCapability = &.{},
     stateful: bool = false,
     state_init: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!void = null,
@@ -186,6 +192,15 @@ pub fn validateBindingMetadata(comptime bindings: anytype) void {
             @compileError("module specifier must start with 'zttp:' or 'zttp-ext:': " ++ binding.specifier);
         }
 
+        if (binding.intrinsic_exports.len != 0) {
+            if (!std.mem.eql(u8, binding.specifier, "zttp:core")) {
+                @compileError("compile-time intrinsics belong to zttp:core: " ++ binding.specifier);
+            }
+            if (binding.exports.len != 0) {
+                @compileError("compile-time intrinsics cannot share runtime exports: " ++ binding.specifier);
+            }
+        }
+
         if (binding.state_init != null and binding.state_deinit == null) {
             @compileError("module has state_init but missing state_deinit: " ++ binding.specifier);
         }
@@ -201,6 +216,39 @@ pub fn validateBindingMetadata(comptime bindings: anytype) void {
             for (binding.exports) |f| {
                 if (std.mem.eql(u8, type_name, f.name)) {
                     @compileError("type export '" ++ type_name ++ "' repeats a function export of " ++ binding.specifier);
+                }
+            }
+            var declared = false;
+            for (binding.type_declarations) |type_decl| {
+                if (std.mem.eql(u8, type_name, type_decl.name)) declared = true;
+            }
+            if (!declared and binding.type_declarations.len != 0) {
+                @compileError("type export '" ++ type_name ++ "' has no TypeScript declaration in " ++ binding.specifier);
+            }
+            for (binding.intrinsic_exports) |intrinsic| {
+                if (std.mem.eql(u8, type_name, intrinsic.name)) {
+                    @compileError("type export '" ++ type_name ++ "' repeats an intrinsic export of " ++ binding.specifier);
+                }
+            }
+        }
+        for (binding.type_declarations) |type_decl| {
+            if (type_decl.typescript.len == 0) @compileError("empty TypeScript type declaration in " ++ binding.specifier);
+            var published = false;
+            for (binding.type_exports) |type_name| {
+                if (std.mem.eql(u8, type_name, type_decl.name)) published = true;
+            }
+            if (!published) @compileError("TypeScript declaration names an unregistered type export in " ++ binding.specifier ++ ": " ++ type_decl.name);
+        }
+        for (binding.intrinsic_exports, 0..) |intrinsic, index| {
+            if (intrinsic.typescript.len == 0) @compileError("empty TypeScript intrinsic declaration in " ++ binding.specifier);
+            for (binding.exports) |runtime_export| {
+                if (std.mem.eql(u8, intrinsic.name, runtime_export.name)) {
+                    @compileError("intrinsic export '" ++ intrinsic.name ++ "' repeats a runtime export of " ++ binding.specifier);
+                }
+            }
+            for (binding.intrinsic_exports[index + 1 ..]) |other| {
+                if (std.mem.eql(u8, intrinsic.name, other.name)) {
+                    @compileError("duplicate intrinsic export in " ++ binding.specifier ++ ": " ++ intrinsic.name);
                 }
             }
         }

@@ -838,6 +838,9 @@ pub fn generateTypeDefs(writer: anytype) void {
     const modules = @import("zts").builtin_modules;
     for (modules.all) |binding| {
         writer.print("declare module \"{s}\" {{\n", .{binding.specifier}) catch return;
+        for (binding.type_declarations) |type_decl| writer.writeAll(type_decl.typescript) catch return;
+        writer.writeAll(binding.typescript_helpers) catch return;
+        for (binding.intrinsic_exports) |intrinsic| writer.writeAll(intrinsic.typescript) catch return;
         for (binding.exports) |func| {
             writer.print("  export function {s}(", .{func.name}) catch return;
             const required_arg_count = func.required_arg_count orelse @as(u8, @intCast(@min(func.param_types.len, 255)));
@@ -847,6 +850,21 @@ pub fn generateTypeDefs(writer: anytype) void {
                 writer.print("arg{d}{s}: {s}", .{ i, optional_marker, paramTypeText(func, i, pt) }) catch return;
             }
             writer.print("): {s};\n", .{returnTypeText(binding.specifier, func)}) catch return;
+        }
+        if (binding.intrinsic_exports.len != 0) {
+            writer.writeAll("  export { ") catch return;
+            var separator = false;
+            for (binding.type_exports) |name| {
+                if (separator) writer.writeAll(", ") catch return;
+                writer.writeAll(name) catch return;
+                separator = true;
+            }
+            for (binding.intrinsic_exports) |intrinsic| {
+                if (separator) writer.writeAll(", ") catch return;
+                writer.writeAll(intrinsic.name) catch return;
+                separator = true;
+            }
+            writer.writeAll(" };\n") catch return;
         }
         writer.print("}}\n\n", .{}) catch return;
     }
@@ -1074,6 +1092,32 @@ test "frozen signature corpus: the gate has an input before it has a verdict" {
     for (zts.builtinModules) |binding| {
         try std.testing.expect(std.mem.indexOf(u8, emitted, binding.specifier) != null);
     }
+}
+
+test "type defs project the classified zttp core surface" {
+    const allocator = std.testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    generateTypeDefs(&aw.writer);
+    const emitted = aw.written();
+
+    try std.testing.expect(std.mem.indexOf(u8, emitted,
+        \\declare module "zttp:core" {
+        \\  type Nominal<Base extends Scalar, Identity extends symbol> =
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "  function nominal<T extends Nominal<Scalar, symbol>>(base: BaseOf<T>): T;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "  function match<Value>(subject: Value): Matcher<Value, never>;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "  function assert(condition: boolean): asserts condition;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "  const P: {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "  export { Nominal, nominal, match, assert, P };") != null);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "export type Matcher") == null);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "export type Dict") == null);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "export type Bytes") == null);
+
+    const core = zts.builtin_modules.fromSpecifier("zttp:core") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), core.type_exports.len);
+    try std.testing.expectEqualStrings("Nominal", core.type_exports[0]);
+    try std.testing.expectEqual(@as(usize, 4), core.intrinsic_exports.len);
 }
 
 test "binding signature parser rejects trailing type text" {

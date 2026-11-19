@@ -35,6 +35,7 @@ zts arena.zig
 zts engine_root.zig
 zts atom_table.zig
 zts builtin_modules.zig
+zts core_intrinsics.zig
 zts builtins/array.zig
 zts builtins/console.zig
 zts builtins/date.zig

@@ -79,6 +79,61 @@ fn stringArray(buf: *Buf, a: std.mem.Allocator, spaces: usize, items: []const []
     try buf.append(a, ']');
 }
 
+fn renderTypeDeclarations(
+    buf: *Buf,
+    a: std.mem.Allocator,
+    spaces: usize,
+    declarations: []const module_binding.TypeDeclaration,
+) !void {
+    try buf.appendSlice(a, "[\n");
+    for (declarations, 0..) |declaration, i| {
+        try indent(buf, a, spaces + 2);
+        try buf.appendSlice(a, "{\n");
+        try key(buf, a, spaces + 4, "name");
+        try appendJsonString(buf, a, declaration.name);
+        try buf.appendSlice(a, ",\n");
+        try key(buf, a, spaces + 4, "typescript");
+        try appendJsonString(buf, a, declaration.typescript);
+        try buf.append(a, '\n');
+        try indent(buf, a, spaces + 2);
+        try buf.append(a, '}');
+        if (i + 1 < declarations.len) try buf.append(a, ',');
+        try buf.append(a, '\n');
+    }
+    try indent(buf, a, spaces);
+    try buf.append(a, ']');
+}
+
+fn renderIntrinsicExports(
+    buf: *Buf,
+    a: std.mem.Allocator,
+    spaces: usize,
+    intrinsics: []const module_binding.IntrinsicDeclaration,
+) !void {
+    try buf.appendSlice(a, "[\n");
+    for (intrinsics, 0..) |intrinsic, i| {
+        try indent(buf, a, spaces + 2);
+        try buf.appendSlice(a, "{\n");
+        try key(buf, a, spaces + 4, "name");
+        try appendJsonString(buf, a, intrinsic.name);
+        try buf.appendSlice(a, ",\n");
+        try key(buf, a, spaces + 4, "kind");
+        try appendJsonString(buf, a, @tagName(intrinsic.kind));
+        if (intrinsic.typescript.len > 0) {
+            try buf.appendSlice(a, ",\n");
+            try key(buf, a, spaces + 4, "typescript");
+            try appendJsonString(buf, a, intrinsic.typescript);
+        }
+        try buf.append(a, '\n');
+        try indent(buf, a, spaces + 2);
+        try buf.append(a, '}');
+        if (i + 1 < intrinsics.len) try buf.append(a, ',');
+        try buf.append(a, '\n');
+    }
+    try indent(buf, a, spaces);
+    try buf.append(a, ']');
+}
+
 fn renderExtractions(
     buf: *Buf,
     a: std.mem.Allocator,
@@ -298,6 +353,18 @@ pub fn renderModuleSpec(
         try buf.appendSlice(allocator, ",\n");
     }
 
+    if (binding.type_declarations.len > 0) {
+        try key(&buf, allocator, 2, "typeDeclarations");
+        try renderTypeDeclarations(&buf, allocator, 2, binding.type_declarations);
+        try buf.appendSlice(allocator, ",\n");
+    }
+
+    if (binding.intrinsic_exports.len > 0) {
+        try key(&buf, allocator, 2, "intrinsicExports");
+        try renderIntrinsicExports(&buf, allocator, 2, binding.intrinsic_exports);
+        try buf.appendSlice(allocator, ",\n");
+    }
+
     try key(&buf, allocator, 2, "exports");
     try buf.appendSlice(allocator, "[\n");
     for (binding.exports, 0..) |exp, i| {
@@ -344,14 +411,39 @@ pub fn renderModuleCatalogTable(
     var buf: Buf = .empty;
     errdefer buf.deinit(allocator);
 
-    try buf.appendSlice(allocator, "| Module | Exports | Capabilities |\n");
-    try buf.appendSlice(allocator, "|---|---|---|\n");
+    try buf.appendSlice(allocator, "| Module | Types | Intrinsics | Functions | Capabilities |\n");
+    try buf.appendSlice(allocator, "|---|---|---|---|---|\n");
 
     for (order) |idx| {
         const binding = bindings[idx];
         try buf.appendSlice(allocator, "| `");
         try buf.appendSlice(allocator, binding.specifier);
         try buf.appendSlice(allocator, "` | ");
+        if (binding.type_exports.len == 0) {
+            try buf.appendSlice(allocator, "none");
+        } else {
+            for (binding.type_exports, 0..) |name, i| {
+                if (i > 0) try buf.appendSlice(allocator, ", ");
+                try buf.append(allocator, '`');
+                try buf.appendSlice(allocator, name);
+                try buf.append(allocator, '`');
+            }
+        }
+        try buf.appendSlice(allocator, " | ");
+        if (binding.intrinsic_exports.len == 0) {
+            try buf.appendSlice(allocator, "none");
+        } else {
+            for (binding.intrinsic_exports, 0..) |intrinsic, i| {
+                if (i > 0) try buf.appendSlice(allocator, ", ");
+                try buf.append(allocator, '`');
+                try buf.appendSlice(allocator, intrinsic.name);
+                try buf.append(allocator, '`');
+            }
+        }
+        try buf.appendSlice(allocator, " | ");
+        if (binding.exports.len == 0) {
+            try buf.appendSlice(allocator, "none");
+        }
         for (binding.exports, 0..) |exp, i| {
             if (i > 0) try buf.appendSlice(allocator, ", ");
             try buf.append(allocator, '`');
@@ -488,4 +580,38 @@ test "empty required capabilities render inline" {
     const validate = try renderBySpecifier(a, "zttp:validate");
     defer a.free(validate);
     try testing.expect(std.mem.indexOf(u8, validate, "\"requiredCapabilities\": [],") != null);
+}
+
+test "core spec and catalog classify authoring exports without runtime functions" {
+    const Declaration = struct { name: []const u8, typescript: []const u8 };
+    const Intrinsic = struct { name: []const u8, kind: []const u8 };
+    const Spec = struct {
+        typeDeclarations: []const Declaration,
+        intrinsicExports: []const Intrinsic,
+        exports: []const std.json.Value,
+    };
+    const a = testing.allocator;
+    const core = try renderBySpecifier(a, "zttp:core");
+    defer a.free(core);
+    const parsed = try std.json.parseFromSlice(Spec, a, core, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const spec = parsed.value;
+    try testing.expectEqual(@as(usize, 1), spec.typeDeclarations.len);
+    try testing.expectEqualStrings("Nominal", spec.typeDeclarations[0].name);
+    try testing.expect(std.mem.indexOf(u8, spec.typeDeclarations[0].typescript, "type Nominal") != null);
+    const intrinsics = spec.intrinsicExports;
+    try testing.expectEqual(@as(usize, 4), intrinsics.len);
+    try testing.expectEqualStrings("nominal", intrinsics[0].name);
+    try testing.expectEqualStrings("nominal", intrinsics[0].kind);
+    try testing.expectEqualStrings("match", intrinsics[1].name);
+    try testing.expectEqualStrings("match", intrinsics[1].kind);
+    try testing.expectEqualStrings("assert", intrinsics[2].name);
+    try testing.expectEqualStrings("assert", intrinsics[2].kind);
+    try testing.expectEqualStrings("P", intrinsics[3].name);
+    try testing.expectEqualStrings("pattern_namespace", intrinsics[3].kind);
+    try testing.expectEqual(@as(usize, 0), spec.exports.len);
+    const catalog = try renderModuleCatalogTable(a, &builtin_modules.builtins);
+    defer a.free(catalog);
+    try testing.expect(std.mem.indexOf(u8, catalog, "| `zttp:core` | `Nominal` | `nominal`, `match`, `assert`, `P` | none | none |\n") != null);
+    try testing.expect(std.mem.indexOf(u8, catalog, "| `zttp:env` | none | none | `env` | `env`, `policy_check` |\n") != null);
 }

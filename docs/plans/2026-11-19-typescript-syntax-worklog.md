@@ -22,11 +22,71 @@ Native execution uses Sol workers at high effort. No external implementation eng
 ## Current work
 
 The declaration study uses ignored files under `demos/typescript-syntax-study/`.
-The baseline inventory is complete. Its source census includes packages, examples, corpus files, shell fixtures, documentation, and embedded skills.
-Neither responsibility changes compiler behavior. The main agent owns verification, this log, and local commits.
+The baseline inventory is complete. Its census includes packages, examples, corpus files, shell fixtures, documentation, and embedded skills.
+The main agent owns verification, this log, and local commits.
 The workers used twelve-turn budgets. The declaration worker received bounded extensions of twelve, eight, and eight turns for reproduced omissions.
 The independent review is complete. The main agent reproduced its recursive-union failure and checked the correction.
-Baseline capture and the declaration feasibility gate are complete. Intrinsic metadata and external declarations can start next.
+Baseline capture and the declaration feasibility gate are complete. Intrinsic metadata and external declarations are ready for a local commit.
+
+## Intrinsic metadata work
+
+The worker reached its eighteen-turn budget after SDK tests passed. The main agent took repair and verification ownership.
+The attempted red command used runtime filter arguments and produced no assertion verdict before it stopped.
+The documented build option reproduced the public generator failure. That filtered run is development evidence only.
+
+The main agent corrected the single registry, governance row, tier manifest, and generated core module artifact.
+The main agent also reproduced an ambient TypeScript privacy failure before fixing it with an explicit export list.
+The generated declarations now keep helper types private and reuse the existing opaque `Bytes` and `Dict` identities.
+Four positive files and seventeen negative files pass against actual generated declarations with `--lib es2022`.
+A public integration case passes values from bytes and collections functions through the pattern descriptors.
+The generated checks live under `/tmp/zttp-syntax-u2-generated/`.
+
+The catalog, metadata, module specification, and generated table now distinguish types, intrinsics, and runtime functions.
+The original twenty-one runtime entries retain identical specifiers, exports, and signatures.
+The reviewed public goldens and registry pin reflect this deliberate contract change. No empirical recording or cassette pin changed.
+
+The main agent reproduced missing intrinsic fields in registry and artifact identities before correcting the hash inputs.
+An independent review found that type-only exports and helper-only declarations also escaped the hash guards.
+Exact literal hash regressions reproduce both omissions and pass after the repairs. Independent reference preimages supplied the expected hashes.
+The review found no other confirmed defect. The main agent reviewed every changed source line.
+
+The unfiltered owning run passed 7524 tests, skipped two, and failed only the stale empirical replay.
+The subsequent aggregate passed 9783 tests, skipped six, and failed one test: the same stale replay.
+Two shell failures also reported the missing capability inventory entry for `zttp:core`.
+The main agent added that entry. Unfiltered documentation, capability, rejection-probe, and spine checks pass after the correction.
+The final unfiltered aggregate rerun exits one, with only the stale empirical replay failed.
+It reports 218 of 221 steps succeeded, 1186 tests passed, one skipped, and one failed; successful earlier results are cached.
+These results do not establish a passing aggregate gate.
+Empirical replay remains held for the approved owner recording after the final syntax and authoring updates.
+
+Three SDK compilation probes accept core-only metadata and reject foreign or mixed runtime/intrinsic declarations.
+Removing each guard from a copied SDK makes its corresponding negative probe compile. The production SDK remains unchanged by those mutations.
+The exact outcomes are recorded under `/tmp/zttp-syntax-u2-sdk-results.json` and `/tmp/zttp-syntax-u2-sdk-mutants/`.
+
+The type-path trace found that type-only file imports are erased before module-graph discovery.
+The next type unit must extend the existing graph with checking edges, without running those modules or their runtime imports.
+It must retain normal admission, cycle refusal, and graph identity for those dependencies.
+The source trace is `/tmp/zttp-syntax-u3-type-paths.md`.
+
+## Type unit integration
+
+The type worker owns parser syntax, nominal representation, type checking, signature transport, and the shared lowering boundary.
+Its implementation budget is twenty-four turns after the read-only integration phase.
+The graph worker owns dependency discovery, analysis order, runtime order, compile mappings, and source hashes.
+Its implementation budget is twenty turns after the read-only integration phase.
+The main agent owns runtime and remaining caller integration, review, unfiltered checks, and local commits.
+
+`DirectSyntaxInput.module_path` will require the normalized source path without a default.
+`ModuleSourceTypeInput.direct` will carry that path into declaration population.
+Nominal origins will contain the module path and declaration offset. Each destination pool will own its copied origin.
+The graph will retain runtime edges and add type-only edges. Analysis order will cover both; execution order will cover runtime reachability.
+`CompileResult.positionOfModule` will map a graph index to its compiled position.
+The parser will retain accepted type-only specifiers and named bindings, with one shared decoding path.
+These changes extend existing checking paths. They do not add a second module graph or execution path.
+Both workers remain read-only until the metadata unit is committed.
+An independent consumer worker will handle the internal transparent unary operation, within a twelve-turn implementation budget.
+The operation will retain the original argument as its child. It adds no bytecode operation or runtime function.
+This preserves nested call type arguments and avoids cloning typed owners.
 
 ## Baseline evidence
 
@@ -79,4 +139,4 @@ Owner recording remains an external prerequisite. The migration cannot finish wi
 
 ## Next action
 
-The main agent will delegate intrinsic metadata and external declarations, then review the diff and run its owning gates.
+The main agent will commit the metadata unit, then start type aliases, nominal construction, and graph integration.

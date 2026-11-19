@@ -567,7 +567,33 @@ pub fn writeModulesJson(writer: anytype) !void {
         if (i > 0) try writer.writeByte(',');
         try writer.writeAll("{\"specifier\":");
         try writeJsonString(writer, binding.specifier);
-        try writer.writeAll(",\"exports\":[");
+        try writer.writeAll(",\"type_exports\":[");
+        for (binding.type_exports, 0..) |name, j| {
+            if (j > 0) try writer.writeByte(',');
+            try writer.writeAll("{\"name\":");
+            try writeJsonString(writer, name);
+            for (binding.type_declarations) |declaration| {
+                if (!std.mem.eql(u8, declaration.name, name)) continue;
+                try writer.writeAll(",\"typescript\":");
+                try writeJsonString(writer, declaration.typescript);
+                break;
+            }
+            try writer.writeByte('}');
+        }
+        try writer.writeAll("],\"intrinsic_exports\":[");
+        for (binding.intrinsic_exports, 0..) |intrinsic, j| {
+            if (j > 0) try writer.writeByte(',');
+            try writer.writeAll("{\"name\":");
+            try writeJsonString(writer, intrinsic.name);
+            try writer.writeAll(",\"kind\":");
+            try writeJsonString(writer, @tagName(intrinsic.kind));
+            if (intrinsic.typescript.len > 0) {
+                try writer.writeAll(",\"typescript\":");
+                try writeJsonString(writer, intrinsic.typescript);
+            }
+            try writer.writeByte('}');
+        }
+        try writer.writeAll("],\"exports\":[");
         for (binding.exports, 0..) |func, j| {
             if (j > 0) try writer.writeByte(',');
             try writeJsonString(writer, func.name);
@@ -597,6 +623,12 @@ pub fn writeModulesJson(writer: anytype) !void {
 pub fn writeModulesText(writer: anytype) !void {
     for (zts.builtinModules) |binding| {
         try writer.print("{s}\n", .{binding.specifier});
+        for (binding.type_exports) |name| {
+            try writer.print("  type {s}\n", .{name});
+        }
+        for (binding.intrinsic_exports) |intrinsic| {
+            try writer.print("  intrinsic {s} ({s})\n", .{ intrinsic.name, @tagName(intrinsic.kind) });
+        }
         for (binding.exports) |func| {
             try writer.print("  {s}\n", .{func.name});
         }

@@ -249,12 +249,33 @@ pub const FunctionDescriptor = struct {
     laws: []const Law = &.{},
 };
 
+pub const IntrinsicKind = enum {
+    nominal,
+    match,
+    assert,
+    pattern_namespace,
+};
+
+pub const TypeDeclaration = struct {
+    name: []const u8,
+    typescript: []const u8,
+};
+
+pub const IntrinsicDeclaration = struct {
+    name: []const u8,
+    kind: IntrinsicKind,
+    typescript: []const u8,
+};
+
 pub const ModuleDescriptor = struct {
     specifier: []const u8,
     name: []const u8,
     exports: []const FunctionDescriptor,
     summary: []const u8 = "",
     type_exports: []const []const u8 = &.{},
+    type_declarations: []const TypeDeclaration = &.{},
+    intrinsic_exports: []const IntrinsicDeclaration = &.{},
+    typescript_helpers: []const u8 = "",
     required_capabilities: []const ModuleCapability = &.{},
     stateful: bool = false,
     contract_section: ?[]const u8 = null,

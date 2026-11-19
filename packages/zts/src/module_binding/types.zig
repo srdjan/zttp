@@ -214,6 +214,9 @@ pub const Law = sdk.Law;
 /// produces when that shape appears. Used for dead-branch pruning during
 /// path canonicalization (e.g. `jwtVerify("")` is always `.err`).
 pub const AbsorbingPattern = sdk.AbsorbingPattern;
+pub const IntrinsicKind = sdk.IntrinsicKind;
+pub const TypeDeclaration = sdk.TypeDeclaration;
+pub const IntrinsicDeclaration = sdk.IntrinsicDeclaration;
 
 // -------------------------------------------------------------------------
 // Function binding
@@ -385,6 +388,9 @@ pub const ModuleBinding = struct {
     /// Type names that `import type { ... } from "<specifier>"` declares. A type
     /// name is not a value export, so `import { Name }` of one stays refused.
     type_exports: []const []const u8 = &.{},
+    type_declarations: []const TypeDeclaration = &.{},
+    intrinsic_exports: []const IntrinsicDeclaration = &.{},
+    typescript_helpers: []const u8 = "",
 
     /// Runtime capabilities consumed by the module's Zig implementation.
     required_capabilities: []const ModuleCapability = &.{},

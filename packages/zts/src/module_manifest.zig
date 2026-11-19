@@ -345,8 +345,34 @@ const BindingHasher = struct {
         self.boolean(binding.state_deinit != null);
         self.optionalBytes(binding.contract_section);
         self.boolean(binding.sandboxable);
+        if (hasCompileTimeSurface(binding)) {
+            self.hasher.update(&compileTimeDigest(binding));
+        }
     }
 };
+
+fn hasCompileTimeSurface(binding: mb.ModuleBinding) bool {
+    return binding.type_exports.len != 0 or binding.type_declarations.len != 0 or
+        binding.intrinsic_exports.len != 0 or binding.typescript_helpers.len != 0;
+}
+
+fn compileTimeDigest(binding: mb.ModuleBinding) [32]u8 {
+    var hasher = BindingHasher.init("zttp-compile-time-surface-v1");
+    hasher.stringList(binding.type_exports);
+    hasher.count(binding.type_declarations.len);
+    for (binding.type_declarations) |declaration| {
+        hasher.bytes(declaration.name);
+        hasher.bytes(declaration.typescript);
+    }
+    hasher.bytes(binding.typescript_helpers);
+    hasher.count(binding.intrinsic_exports.len);
+    for (binding.intrinsic_exports) |intrinsic| {
+        hasher.bytes(intrinsic.name);
+        hasher.tag(intrinsic.kind);
+        hasher.bytes(intrinsic.typescript);
+    }
+    return hasher.hasher.finalResult();
+}
 
 /// Canonical identity of every declared, authority-bearing native module field.
 /// Function addresses are intentionally excluded because they are build-layout
@@ -399,11 +425,52 @@ pub fn registryHashFromBindings(comptime bindings: []const mb.ModuleBinding) [64
             }
             hasher.update("\x00");
         }
+        if (hasCompileTimeSurface(binding)) {
+            hasher.update(&compileTimeDigest(binding));
+        }
         hasher.update("\n");
     }
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return std.fmt.bytesToHex(digest, .lower);
+}
+
+test "intrinsic metadata has an exact registry and artifact identity" {
+    const cases = .{
+        .{ mb.IntrinsicKind.nominal, "02d8165f34f07d864abb3370926e546278bdc39db28fb435c90dc63261af19a8", "bdfd5a8ae49b0046c6d49a5343e732f2e9dd4862b8fe56263cf25d81f6d5c9e7" },
+        .{ mb.IntrinsicKind.assert, "903f58ac1e5189a172fa842258ecc2ce8dc7015e73c1f786207692e00fcecbe9", "f30bdfd39dc10a909474584406bd25960a3a3d0ae8b78a942926086632ae7e65" },
+    };
+    inline for (cases) |case| {
+        const binding = mb.ModuleBinding{
+            .specifier = "zttp:core",
+            .name = "core",
+            .exports = &.{},
+            .type_exports = &.{"Id"},
+            .type_declarations = &.{.{ .name = "Id", .typescript = "type Id = string;" }},
+            .typescript_helpers = "type Scalar = string;",
+            .intrinsic_exports = &.{.{ .name = "make", .kind = case[0], .typescript = "function make(value: string): Id;" }},
+        };
+        try std.testing.expectEqualStrings(case[1], &registryHashFromBindings(&.{binding}));
+        try std.testing.expectEqualStrings(case[2], &std.fmt.bytesToHex(bindingDigest(binding), .lower));
+    }
+}
+
+test "erased type metadata has an exact registry and artifact identity" {
+    const cases = .{
+        .{ &[_][]const u8{"Id"}, "", "f666dfa792891b269f3e90b777345497ca6c17c1cc1b3c5cd1c79fb87c888fdb", "965a7f2292a3c0c835e51858f96096ae879352f2102ea2d2fdde4e9bff4faeea" },
+        .{ &[_][]const u8{}, "type Scalar = string;", "d8355ba8103a33e32ff912a42569ad67d6dbc0b3ec655f24f481b04648d1a54b", "01d9a9615f095f7b8755a4893c868b1f0e6dd7ce4a0ed480055c872bf88eba70" },
+    };
+    inline for (cases) |case| {
+        const binding = mb.ModuleBinding{
+            .specifier = "zttp:core",
+            .name = "core",
+            .exports = &.{},
+            .type_exports = case[0],
+            .typescript_helpers = case[1],
+        };
+        try std.testing.expectEqualStrings(case[2], &registryHashFromBindings(&.{binding}));
+        try std.testing.expectEqualStrings(case[3], &std.fmt.bytesToHex(bindingDigest(binding), .lower));
+    }
 }
 
 test "binding digest covers the complete authority surface" {

@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zttp:core",
+  "source": "packages/zts/src/core_intrinsics.zig",
+  "requiredCapabilities": [],
+  "typeExports": [
+    "Nominal"
+  ],
+  "typeDeclarations": [
+    {
+      "name": "Nominal",
+      "typescript": "  type Nominal<Base extends Scalar, Identity extends symbol> = Base & {\n      readonly [nominalKey]: {\n          readonly base: Base;\n          readonly identity: Identity;\n      };\n  };\n"
+    }
+  ],
+  "intrinsicExports": [
+    {
+      "name": "nominal",
+      "kind": "nominal",
+      "typescript": "  function nominal<T extends Nominal<Scalar, symbol>>(base: BaseOf<T>): T;\n"
+    },
+    {
+      "name": "match",
+      "kind": "match",
+      "typescript": "  function match<Value>(subject: Value): Matcher<Value, never>;\n"
+    },
+    {
+      "name": "assert",
+      "kind": "assert",
+      "typescript": "  function assert(condition: boolean): asserts condition;\n"
+    },
+    {
+      "name": "P",
+      "kind": "pattern_namespace",
+      "typescript": "  const P: {\n      readonly any: AnyPattern;\n      readonly present: PresentPattern;\n      readonly boolean: Descriptor<\"boolean\">;\n      readonly number: Descriptor<\"number\">;\n      readonly string: Descriptor<\"string\">;\n      readonly array: Descriptor<\"array\">;\n      readonly Dict: Descriptor<\"Dict\">;\n      readonly Bytes: Descriptor<\"Bytes\">;\n  };\n"
+    }
+  ],
+  "exports": [
+  ]
+}

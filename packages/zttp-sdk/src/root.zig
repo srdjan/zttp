@@ -40,6 +40,9 @@ pub const AbsorbingPattern = binding.AbsorbingPattern;
 pub const Law = binding.Law;
 pub const FunctionBinding = binding.FunctionBinding;
 pub const ModuleBinding = binding.ModuleBinding;
+pub const IntrinsicKind = binding.IntrinsicKind;
+pub const TypeDeclaration = binding.TypeDeclaration;
+pub const IntrinsicDeclaration = binding.IntrinsicDeclaration;
 pub const validateBindings = binding.validateBindings;
 
 pub const DecodedArgs = args.DecodedArgs;
