@@ -226,6 +226,9 @@ pub const TypeChecker = struct {
     /// like `binding_types`.
     /// A write into such a binding widens the literal types of the slot.
     unannotated_decls: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    /// The `const` bindings whose initializer is a builtin `range(...)` call.
+    /// The call has no type, so a `for...of` over such a name reads this set.
+    range_bindings: std.AutoHashMapUnmanaged(u64, void) = .empty,
     /// Callable metadata for declarations keyed by packed(scope_id, slot).
     /// An explicit `unavailable` entry is significant: it prevents a local
     /// binding from inheriting an unrelated module signature by bare name.
@@ -352,6 +355,7 @@ pub const TypeChecker = struct {
         self.compiled_schemas.deinit(self.allocator);
         self.binding_types.deinit(self.allocator);
         self.unannotated_decls.deinit(self.allocator);
+        self.range_bindings.deinit(self.allocator);
         self.binding_callables.deinit(self.allocator);
         self.file_import_callables.deinit(self.allocator);
         self.file_import_untyped.deinit(self.allocator);
@@ -1379,9 +1383,10 @@ pub const TypeChecker = struct {
     /// element type. A tuple binds the union of its widened element types, so
     /// `[1, 2, 3]` binds `number`. A union whose members are all arrays or
     /// tuples binds the union of each member's element type. A value that is
-    /// not an array, a tuple, or `range(n)` is refused with ZTS218. A
-    /// nullable iterable, an empty tuple, and an element with no type leave
-    /// the variable untyped.
+    /// not an array, a tuple, or `range(n)` is refused with ZTS218, and so is a
+    /// value with no type, or one with a `null` member. An `undefined` member
+    /// keeps ZTS309. An empty tuple and an element with no type leave the
+    /// variable untyped.
     fn bindForOfElement(self: *TypeChecker, fi: Node.ForIterStmt) void {
         // A loop variable is never a declared function. Without this entry, a
         // call of a loop variable named like a builtin, such as `isDict`,
@@ -1389,13 +1394,12 @@ pub const TypeChecker = struct {
         self.bindCallableMetadata(fi.binding, .unavailable);
         // `range(...)` returns a lazy iterator of integers (`globalRange`).
         // Only the builtin counts: a parameter named `range` is another binding.
-        if (self.isBuiltinRangeCall(fi.iterable)) {
+        if (self.isBuiltinRangeCall(fi.iterable) or self.namesRangeBinding(fi.iterable)) {
             self.binding_types.put(self.allocator, bindingKey(fi.binding), self.env.pool.idx_number) catch self.markAllocationFailure();
             return;
         }
         const iterable = self.env.resolveRef(self.inferType(fi.iterable));
-        if (iterable == null_type_idx) return;
-        if (!self.isIterableShape(iterable)) {
+        if (iterable == null_type_idx or !self.isIterableShape(iterable)) {
             self.addDiagnostic(.{
                 .severity = .err,
                 .kind = .non_iterable_loop,
@@ -1411,8 +1415,9 @@ pub const TypeChecker = struct {
     }
 
     /// Whether a `for...of` may iterate a value of type `iterable`: an array,
-    /// a tuple, or a union of those. A `null` or `undefined` member does not
-    /// count against the type, because ZTS309 reports the read of it. A type
+    /// a tuple, or a union of those. An `undefined` member does not count
+    /// against the type, because ZTS309 reports the read of it. A `null`
+    /// member does count: ZTS309 does not cover `null`. A type
     /// that is already refused (`t_error`) passes, so one fault gives one
     /// diagnostic.
     fn isIterableShape(self: *TypeChecker, iterable: TypeIndex) bool {
@@ -1426,7 +1431,7 @@ pub const TypeChecker = struct {
                 var seen_sequence = false;
                 for (pool.getUnionMembers(shape)) |member| {
                     const member_tag = pool.getTag(pool.unwrapNominal(self.env.resolveRef(member))) orelse return false;
-                    if (member_tag == .t_null or member_tag == .t_undefined) continue;
+                    if (member_tag == .t_undefined) continue;
                     if (!self.isIterableShape(member)) return false;
                     seen_sequence = true;
                 }
@@ -1477,6 +1482,13 @@ pub const TypeChecker = struct {
     fn joinElementTypes(self: *const TypeChecker, joined: TypeIndex, next: TypeIndex) TypeIndex {
         if (joined == null_type_idx) return next;
         return self.env.pool.addUnion(self.allocator, &.{ joined, next });
+    }
+
+    /// Whether `node` is a name bound by `const r = range(n)`.
+    fn namesRangeBinding(self: *const TypeChecker, node: NodeIndex) bool {
+        if (self.ir_view.getTag(node) != .identifier) return false;
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        return self.range_bindings.contains(bindingKey(binding));
     }
 
     fn isBuiltinRangeCall(self: *const TypeChecker, node: NodeIndex) bool {
@@ -1543,6 +1555,9 @@ pub const TypeChecker = struct {
                 const declared = self.bindVarDeclaration(node, vd.binding);
                 if (declared == null_type_idx and self.initializerHoldsLiteralTypes(vd.init)) {
                     self.unannotated_decls.put(self.allocator, bindingKey(vd.binding), {}) catch self.markAllocationFailure();
+                }
+                if (vd.kind == .@"const" and vd.init != null_node and self.isBuiltinRangeCall(vd.init)) {
+                    self.range_bindings.put(self.allocator, bindingKey(vd.binding), {}) catch self.markAllocationFailure();
                 }
                 self.reportIfNonContractive(declared, node);
                 self.reportTypeBreach(declared, node, &.{});
@@ -8285,6 +8300,38 @@ pub const TypeChecker = struct {
         } else |_| self.markAllocationFailure();
     }
 
+    /// Report ZTS202 for a `range` call with an argument count other than 1,
+    /// and ZTS203 for an argument whose known type is not `number` (spec 5.5).
+    /// The runtime runs `range("3")` zero times and `range(1, 2)` once. The
+    /// type `number` does not tell a finite non-negative integer from another
+    /// number, so `range(1.5)` stays admitted.
+    fn checkRangeArgs(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
+        const name = self.builtinGlobalName(call.callee) orelse return;
+        if (!std.mem.eql(u8, name, "range")) return;
+        if (call.args_count != 1) {
+            self.addArgCountMismatch(node, 1, call.args_count);
+            return;
+        }
+        const arg = self.ir_view.getListIndex(call.args_start, 0);
+        if (self.ir_view.getTag(arg) == .spread) return;
+        const arg_type = self.inferType(arg);
+        const pool = self.env.pool;
+        if (arg_type == null_type_idx or pool.mentionsError(arg_type)) return;
+        if (self.env.isAssignableTo(arg_type, pool.idx_number)) return;
+        var buf: [1024]u8 = undefined;
+        const got = pool.formatType(pool.widenLiteral(arg_type), &buf);
+        if (self.allocator.print("range argument 1 must be a number, got '{s}'", .{got})) |msg| {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .arg_type_mismatch,
+                .node = arg,
+                .message = msg,
+                .help = "pass a finite non-negative integer: range(3)",
+                .allocated = true,
+            });
+        } else |_| self.markAllocationFailure();
+    }
+
     fn checkCallArgs(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
         // Before the branches on the callee tag: `responseConstructorName`
@@ -8293,6 +8340,7 @@ pub const TypeChecker = struct {
         self.checkResponseInit(call);
         self.checkResponseStringArg(call);
         self.checkBuiltinRowArgs(node, call);
+        self.checkRangeArgs(node, call);
         if (callee_tag == .identifier) {
             self.checkModuleEncodableArgs(call);
             self.checkModuleBooleanPredicate(call);
@@ -10824,6 +10872,70 @@ test "TypeChecker: a for...of over an array that may be undefined gets no ZTS218
     , 0, 0);
 }
 
+test "TypeChecker: a for...of over a value with no type is refused with ZTS218" {
+    const help = "Iterate Object.keys(r) for a record, dictEntries(d) for a Dict, s.split(\"\") for a string, or range(n) for a count.";
+    const message = "for...of iterates only an array, a tuple, or range(n)";
+    try checkTypedSourceHelping(
+        \\function f(): number {
+        \\  for (const k of Math) { const y = k; }
+        \\  return 1;
+        \\}
+    , 1, message, help);
+    try checkTypedSourceHelping(
+        \\function f(): number {
+        \\  for (const k of Object.keys) { const y = k; }
+        \\  return 1;
+        \\}
+    , 1, message, help);
+}
+
+test "TypeChecker: a for...of over an array that may be null is refused with ZTS218" {
+    const help = "Iterate Object.keys(r) for a record, dictEntries(d) for a Dict, s.split(\"\") for a string, or range(n) for a count.";
+    const message = "for...of iterates only an array, a tuple, or range(n)";
+    try checkTypedSourceHelping(
+        \\function f(s: string[] | null): number {
+        \\  for (const k of s) { const y = k; }
+        \\  return 1;
+        \\}
+    , 1, message, help);
+    try checkTypedSourceHelping(
+        \\function f(s: string[] | null | undefined): number {
+        \\  for (const k of s) { const y = k; }
+        \\  return 1;
+        \\}
+    , 1, message, help);
+}
+
+test "TypeChecker: a range call whose argument count is not 1 is refused with ZTS202" {
+    const expected = "wrong number of arguments: expected 1, got 2";
+    try checkTypedSourceSaying(
+        \\function f(): number {
+        \\  for (const i of range(1, 2)) { const y = i; }
+        \\  return 1;
+        \\}
+    , 1, expected);
+    try checkTypedSourceSaying(
+        \\function f(): number {
+        \\  for (const i of range()) { const y = i; }
+        \\  return 1;
+        \\}
+    , 1, "wrong number of arguments: expected 1, got 0");
+}
+
+test "TypeChecker: a range call whose argument is not a number is refused with ZTS203" {
+    try checkTypedSourceSaying(
+        \\function f(): number {
+        \\  for (const i of range("3")) { const y = i; }
+        \\  return 1;
+        \\}
+    , 1, "range argument 1 must be a number, got 'string'");
+    try checkTypedSourceSaying(
+        \\function f(): number {
+        \\  const r = range(true);
+        \\  return 1;
+        \\}
+    , 1, "range argument 1 must be a number, got 'boolean'");
+}
 test "TypeChecker: a function and an arrow on one line keep separate signatures" {
     // Annotations were filed under the line they sit on, so the arrow's
     // parameter merged into `bump`'s signature and `bump([1, 2])` was refused
@@ -14317,4 +14429,17 @@ test "a readonly tuple is not assignable to a mutable tuple" {
         \\  return m[0];
         \\}
     , 1, 0);
+}
+
+test "a for...of over a const that holds range(n) is admitted" {
+    try checkTypedSource(
+        \\function f(): number {
+        \\  const r = range(3);
+        \\  let n: number = 0;
+        \\  for (const i of r) {
+        \\    n = n + i;
+        \\  }
+        \\  return n;
+        \\}
+    , 0, 0);
 }

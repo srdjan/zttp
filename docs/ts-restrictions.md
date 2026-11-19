@@ -169,7 +169,8 @@ statement, `if`/`else`, `for...of`, `assert`, `return`, `break`, and
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | ZTS070 | Write the body as a block, such as `if (c) { g(); }`. `else if` stays |
 | A fallback `assert` form | ZTS002 | `if (!predicate) { return fallback; }` |
 | A `for...of` body that mutates the collection that it iterates | ZTS622 | Read one collection and build the changed one separately |
-| `for...of` over a value that is not an array, a tuple, or range(n), such as a record, a number, a string, or a Dict | ZTS218 | `Object.keys(r)` for a record, `dictEntries(d)` for a `Dict`, `s.split("")` for a string, and `range(n)` for a count |
+| `for...of` over a value that is not an array, a tuple, or range(n), such as a record, a number, a string, a Dict, a namespace, a function, or an array that may be null | ZTS218 | `Object.keys(r)` for a record, `dictEntries(d)` for a `Dict`, `s.split("")` for a string, `range(n)` for a count, and a check that the array is not `null` first |
+| A `range` call with an argument count other than 1, or with an argument that is not a number | ZTS202, ZTS203 | `range(n)` with one number |
 | `range(n).map(f)` and other array members on `range(n)` | ZTS201 | `for (const i of range(n))` |
 | Destructuring in a `for...of` head | ZTS001 | Bind the element to one name, then read each member in the body |
 | C-style `for (;;)` | ZTS001 | `for (const i of range(n))` |
@@ -178,7 +179,9 @@ statement, `if`/`else`, `for...of`, `assert`, `return`, `break`, and
 
 `for...of` evaluates its iterable once and iterates a snapshot. The admitted
 iterables are arrays, tuples, and `range(n)`. A record, a number, a string, and
-a `Dict` are refused with ZTS218. There is no user-defined iterator protocol.
+a `Dict` are refused with ZTS218, and so is a value with no type, such as `Math`, and an
+array that may be `null`. `range` takes one `number`. The check cannot tell a finite non-negative
+integer from another number, so `range(1.5)` stays admitted. There is no user-defined iterator protocol.
 
 ## Operators And Expressions
 
