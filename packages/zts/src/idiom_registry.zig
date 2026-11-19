@@ -7,7 +7,7 @@
 //! `advisory` severity, rewritten where the rewrite is provable, and otherwise
 //! left alone.
 //!
-//! The table is complete against spec 4.2.1: 18 rows, in the document's own
+//! The table is complete against spec 4.2.1: 17 rows, in the document's own
 //! order, held there by `scripts/check-idiom-table.sh`. Phase 0 seeded the rows
 //! that needed no language the engine lacked; the Dict rows arrived with
 //! `Dict`; the `Result`, selection, record-update, fold, and search-loop rows
@@ -77,14 +77,6 @@ pub const entries = [_]IdiomEntry{
         .idiomatic = "an explicit literal",
         .superseded = "a leading spread that overrides every field",
         .precondition = "the spread operand is pure",
-        .rewrite_rule = null,
-    },
-    .{
-        .id = "idiom.array-concatenation",
-        .operation = "array concatenation",
-        .idiomatic = "[...a, ...b]",
-        .superseded = "a.concat(b)",
-        .precondition = "none",
         .rewrite_rule = null,
     },
     .{
@@ -270,7 +262,7 @@ test "idiom registry has unique stable ids" {
     // here fails `scripts/check-idiom-table.sh`; a row added here and not there
     // fails it too. This asserts the number itself so a same-size swap of one
     // row for another still has to face the text comparison.
-    try std.testing.expectEqual(@as(usize, 18), entries.len);
+    try std.testing.expectEqual(@as(usize, 17), entries.len);
 }
 
 test "idiom registry rows are fully populated" {

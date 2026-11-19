@@ -75,7 +75,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "TopDecl",
-        .rhs = "[\"export\"] StructuralDecl | [\"export\"] NominalDecl | [\"export\"] FunctionDecl | [\"export\"] TopBindingDecl",
+        .rhs = "[\"export\"] StructuralDecl | [\"export\"] NominalDecl | [\"export\"] FunctionDecl | [\"export\"] TopBindingDecl | RegistrationCall",
     },
     .{
         .name = "StructuralDecl",
@@ -128,6 +128,16 @@ pub const productions = [_]Production{
         .rhs = "\"const\" Bind [\":\" Type] \"=\" Expr \";\"",
     },
     .{
+        .name = "RegistrationCall",
+        .rhs = "Ident \"(\" RegistrationArg (\",\" RegistrationArg)* [\",\"] \")\" \";\"",
+        .enforcement = .check_time,
+        .note = "ZTS074, the parser band, which is outside the policy-hashed registry: the callee must be an import of `sql` from zttp:sql or of `schemaCompile` from zttp:validate, and the grammar admits any identifier",
+    },
+    .{
+        .name = "RegistrationArg",
+        .rhs = "String | Number | \"true\" | \"false\" | \"null\"",
+    },
+    .{
         .name = "BindingDecl",
         .rhs = "(\"const\" | \"let\") Bind [\":\" Type] \"=\" Expr \";\"",
         .enforcement = .check_time,
@@ -143,7 +153,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "Stmt",
-        .rhs = "BindingDecl | FunctionDecl | LValue \"=\" Expr \";\" | Expr \";\" | IfStmt | \"for\" \"(\" (\"const\" | \"let\") Bind \"of\" Expr \")\" Block | \"assert\" Expr \";\" | \"return\" [Expr] \";\" | \"break\" \";\" | \"continue\" \";\" | Block",
+        .rhs = "BindingDecl | LValue \"=\" Expr \";\" | Expr \";\" | IfStmt | \"for\" \"(\" (\"const\" | \"let\") Bind \"of\" Expr \")\" Block | \"assert\" Expr \";\" | \"return\" [Expr] \";\" | \"break\" \";\" | \"continue\" \";\"",
         .enforcement = .check_time,
         .rule_code = "ZTS613",
     },
@@ -161,7 +171,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "Expr",
-        .rhs = "ArrowExpr | ConditionalExpr",
+        .rhs = "ConditionalExpr",
     },
     .{
         .name = "ConditionalExpr",
@@ -193,11 +203,11 @@ pub const productions = [_]Production{
     },
     .{
         .name = "UnaryOp",
-        .rhs = "\"!\" | \"-\" | \"~\" | \"typeof\"",
+        .rhs = "\"!\" | \"-\" | \"typeof\"",
     },
     .{
         .name = "BinaryOp",
-        .rhs = "\"**\" | \"*\" | \"/\" | \"%\" | \"+\" | \"-\" | \"<<\" | \">>\" | \">>>\" | \"<\" | \"<=\" | \">\" | \">=\" | \"===\" | \"!==\" | \"&\" | \"^\" | \"|\" | \"&&\" | \"||\" | \"??\"",
+        .rhs = "\"*\" | \"/\" | \"%\" | \"+\" | \"-\" | \"<\" | \"<=\" | \">\" | \">=\" | \"===\" | \"!==\" | \"&&\" | \"||\" | \"??\"",
         .enforcement = .check_time,
         .rule_code = "ZTS624",
     },
@@ -225,7 +235,11 @@ pub const productions = [_]Production{
     },
     .{
         .name = "Args",
-        .rhs = "Expr (\",\" Expr)* [\",\"]",
+        .rhs = "Arg (\",\" Arg)* [\",\"]",
+    },
+    .{
+        .name = "Arg",
+        .rhs = "Expr | ArrowExpr",
     },
     .{
         .name = "TypeArgs",
@@ -234,8 +248,6 @@ pub const productions = [_]Production{
     .{
         .name = "ArrowExpr",
         .rhs = "\"(\" [ArrowParams] \")\" \"=>\" (Expr | Block)",
-        .enforcement = .check_time,
-        .note = "ZTS072, the parser band, which is outside the policy-hashed registry: an arrow is admitted only as a direct call argument, and the grammar admits one in any expression position",
     },
     .{
         .name = "ArrowParams",
@@ -333,7 +345,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "ScalarType",
-        .rhs = "\"number\" | \"string\"",
+        .rhs = "\"boolean\" | \"number\" | \"string\"",
     },
 };
 
@@ -449,9 +461,9 @@ test "every check_time row names either a registry rule or the band that answers
 test "every noted row names a code the projection really emits" {
     // The note is prose, and prose is where a claim rots. `StructuralDecl`
     // admits a recursive alias no data constructor guards, and the refusal is
-    // ZTS212 from the type-checker band. `ArrowExpr` admits an arrow in any
-    // expression position, and the refusal is ZTS072 from the parser band.
-    // Neither band is covered by the policy-hashed registry, which is why
+    // ZTS212 from the type-checker band. `RegistrationCall` admits any identifier as
+    // a callee, and the refusal is ZTS074 from the parser band. Neither band is
+    // covered by the policy-hashed registry, which is why
     // these rows carry a note instead of a `rule_code`. Each note is bound to
     // the projection here so a renamed code fails the build rather than
     // leaving a client chasing a code nothing emits.
@@ -461,8 +473,8 @@ test "every noted row names a code the projection really emits" {
     // failure rather than an unchecked sentence.
     const type_code = diagnostic_projection.code(.type, .non_contractive_alias);
     try testing.expectEqualStrings("ZTS212", type_code);
-    const parser_code = diagnostic_catalog.parserCode(.arrow_outside_call_argument);
-    try testing.expectEqualStrings("ZTS072", parser_code);
+    const parser_code = diagnostic_catalog.parserCode(.top_level_statement);
+    try testing.expectEqualStrings("ZTS074", parser_code);
 
     var noted: usize = 0;
     for (&productions) |p| {
@@ -470,7 +482,7 @@ test "every noted row names a code the projection really emits" {
     }
     try testing.expectEqual(@as(usize, 2), noted);
     try testing.expect(std.mem.indexOf(u8, findByName("StructuralDecl").?.note.?, type_code) != null);
-    try testing.expect(std.mem.indexOf(u8, findByName("ArrowExpr").?.note.?, parser_code) != null);
+    try testing.expect(std.mem.indexOf(u8, findByName("RegistrationCall").?.note.?, parser_code) != null);
 }
 
 test "the production names are unique, so a client can key on them" {
@@ -499,4 +511,33 @@ test "every right-hand side is normalized the way the drift gate normalizes the 
         try testing.expect(std.mem.indexOfScalar(u8, p.rhs, '\t') == null);
         try testing.expect(std.mem.indexOfScalar(u8, p.rhs, '\n') == null);
     }
+}
+
+test "the grammar derives no form that the compiler refuses" {
+    const has = struct {
+        fn in(name: []const u8, needle: []const u8) bool {
+            const p = findByName(name) orelse return false;
+            return std.mem.indexOf(u8, p.rhs, needle) != null;
+        }
+    }.in;
+    // A function declaration is module level only (ZTS071).
+    try testing.expect(!has("Stmt", "FunctionDecl"));
+    // A bare block is not a statement (ZTS001).
+    try testing.expect(!has("Stmt", "| Block"));
+    // An arrow is a direct call argument only (ZTS072).
+    try testing.expect(!has("Expr", "ArrowExpr"));
+    try testing.expect(has("Arg", "ArrowExpr"));
+    // Exponentiation, bitwise, and shift operators are refused (ZTS001).
+    try testing.expect(has("UnaryOp", "\"typeof\""));
+    try testing.expect(!has("UnaryOp", "\"~\""));
+    try testing.expect(has("BinaryOp", "\"&&\""));
+    try testing.expect(!has("BinaryOp", "\"**\""));
+    try testing.expect(!has("BinaryOp", "\"<<\""));
+    try testing.expect(!has("BinaryOp", "\"&\""));
+    try testing.expect(!has("BinaryOp", "\"^\""));
+    try testing.expect(!has("BinaryOp", "\"|\""));
+    // The registration call is the one top-level statement (ZTS074), and
+    // `nominal` admits `boolean` (Decision 6).
+    try testing.expect(has("TopDecl", "RegistrationCall"));
+    try testing.expect(has("ScalarType", "\"boolean\""));
 }

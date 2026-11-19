@@ -36,9 +36,9 @@ cd "$(dirname "$0")/.."
 spec_doc="docs/spec/zts-model-1.md"
 registry_file="packages/zts/src/idiom_registry.zig"
 
-# The row count measured on 2026-08-16. Removed forms are restrictions, not
-# non-idiomatic alternatives.
-MIN_ROWS=18
+# The row count measured on 2026-11-19, after the array concatenation row left
+# the table. Removed forms are restrictions, not non-idiomatic alternatives.
+MIN_ROWS=17
 
 fail() {
   printf 'idiom table drift: %s\n' "$1" >&2

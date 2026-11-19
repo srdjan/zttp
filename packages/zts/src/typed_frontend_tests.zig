@@ -10413,9 +10413,9 @@ fn expectDirectSingleModuleContract(
 
 test "direct single-module full and sound extraction preserve contract bytes" {
     const fixtures = [_]struct { kind: ContractConsumerCase, source: []const u8, json_hash: u64 }{
-        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0xc9e623d5f505ea5a },
-        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0x75672ecfe64b248e },
-        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0x292324209f3eaedf },
+        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0xaa07bcb58e80a22 },
+        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0xbcc927433cf181e6 },
+        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0x415ebff34d5ae728 },
     };
     const fields = @typeInfo(ContractConsumerCase).@"enum".field_names;
     try std.testing.expectEqual(@as(usize, 3), fixtures.len);

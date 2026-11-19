@@ -315,7 +315,6 @@ registry-generated and drift-gated; this document is its readable view.
 | absent member read | `x?.f` | `x === undefined ? undefined : x.f` | same as above |
 | two-way pure selection | `c ? a : b` | a two-arm `match` over a `boolean` scrutinee whose arms are both pure | none |
 | record update | an explicit literal | a leading spread that overrides every field | the spread operand is pure |
-| array concatenation | `[...a, ...b]` | `a.concat(b)` | none |
 | membership test | `items.includes(v)` | `items.indexOf(v) !== -1`, `items.indexOf(v) >= 0` | element type excludes `number` (`NaN` distinguishes the two equalities) |
 | existence test | `items.some(p)` | `items.find(p) !== undefined` | element type excludes `undefined` |
 | dictionary membership test | `dictHas(d, k)` | `dictGet(d, k) !== undefined` | `V` excludes `undefined` |
@@ -336,7 +335,7 @@ template interpolation, and string addition. Those forms are errors in
 leave in source. Their restriction rows name explicit member reads,
 `String(value)`, and string-array `join` as the replacements.
 
-Three entries are declared preferences rather than derivations, recorded here
+Two entries are declared preferences rather than derivations, recorded here
 so no reader has to infer them:
 
 - `??` and `?.` are idiomatic for `undefined`-absence. The explicit
@@ -345,11 +344,6 @@ so no reader has to infer them:
   `unknown` and a later instantiation could admit `null`, and in
   `if`-position guards, where the comparison is a narrowing test rather than
   a value selection.
-- Array spread is the one spelling of concatenation. The `concat` member is
-  refused (ZTS201): spread is the familiar TypeScript form under law 4.1 and
-  generalizes to element-and-array mixtures a two-argument helper cannot
-  express. The `a.concat(b)` entry of the array concatenation row therefore
-  names a spelling that the compiler refuses, and no rewrite reaches it.
 - A record spread is idiomatic whenever at least one field is inherited
   unchanged, including when the result type widens the base's type with new
   fields. A spread that overrides every field inherits nothing and is
@@ -1816,16 +1810,15 @@ typed-error contracts.
 
 This grammar describes admitted structure as a structural over-approximation:
 several productions admit forms the normative prose of Section 5 excludes
-(for example arrow expressions outside callback argument positions, which
-ZTS072 refuses). The same holds for the `FunctionDecl` and `Block` alternatives
-of `Stmt` (ZTS071 and ZTS001), and for the operators `**`, `~`, `<<`, `>>`,
-`>>>`, `&`, `^`, and `|`, which the parser reads and refuses with ZTS001. In
-the other direction, the grammar omits the bare registration call that Section
-5.1 admits as the one top-level statement, and its `ScalarType` omits
-`boolean`, which Section 5.7 admits as the base of a `nominal` declaration.
-Legality is defined by the prose rules and
-the machine-readable registry together; the registry records, per rule,
-whether enforcement happens at parse time or at check time. Unexpanded
+(for example a recursive alias that is not contractive, which ZTS212 refuses).
+The statement, block, arrow, and operator productions match the parser. A
+function declaration is module-level only, a block is only the body of a
+function, an `if`, an `else`, or a `for...of`, and an arrow is a direct call
+argument only. The only top-level statement is the registration call of Section
+5.1, and its callee is an import of `sql` or `schemaCompile`.
+Legality is defined by the prose rules and the machine-readable registry
+together; the registry records, per rule, whether enforcement happens at parse
+time or at check time. Unexpanded
 leaves such as `Ident`, `String`, `Number`, `Literal`, and
 `TemplateLiteralType` are lexical or separately specified syntactic classes.
 An `Ident` that names a value is not a reserved word of Section 5.2.
@@ -1841,6 +1834,7 @@ TopDecl      ::= ["export"] StructuralDecl
                | ["export"] NominalDecl
                | ["export"] FunctionDecl
                | ["export"] TopBindingDecl
+               | RegistrationCall
 
 StructuralDecl ::= "structural" Ident TypeParams? "=" Type ";"
 NominalDecl  ::= "nominal" Ident "=" ScalarType ";"
@@ -1857,12 +1851,13 @@ ReturnType   ::= Type | TypePredicate
 TypePredicate ::= Ident "is" Type
 
 TopBindingDecl ::= "const" Bind [":" Type] "=" Expr ";"
+RegistrationCall ::= Ident "(" RegistrationArg ("," RegistrationArg)* [","] ")" ";"
+RegistrationArg ::= String | Number | "true" | "false" | "null"
 BindingDecl  ::= ("const" | "let") Bind [":" Type] "=" Expr ";"
 Bind         ::= Ident
 
 Block        ::= "{" Stmt* "}"
 Stmt         ::= BindingDecl
-               | FunctionDecl
                | LValue "=" Expr ";"
                | Expr ";"
                | IfStmt
@@ -1871,13 +1866,12 @@ Stmt         ::= BindingDecl
                | "return" [Expr] ";"
                | "break" ";"
                | "continue" ";"
-               | Block
 IfStmt       ::= "if" "(" Expr ")" Block ["else" (Block | IfStmt)]
 LValue       ::= Ident AssignableSuffix*
 AssignableSuffix ::= "." Ident
                    | "[" Expr "]"
 
-Expr         ::= ArrowExpr | ConditionalExpr
+Expr         ::= ConditionalExpr
 ConditionalExpr ::= BinaryExpr ["?" BinaryExpr ":" BinaryExpr]
 BinaryExpr   ::= UnaryExpr (BinaryOp UnaryExpr)*
 UnaryExpr    ::= UnaryOp UnaryExpr | PostfixExpr
@@ -1892,13 +1886,11 @@ PrimaryExpr  ::= Literal
                | RecordExpr
                | MatchExpr
                | "(" Expr ")"
-UnaryOp      ::= "!" | "-" | "~" | "typeof"
-BinaryOp     ::= "**" | "*" | "/" | "%"
+UnaryOp      ::= "!" | "-" | "typeof"
+BinaryOp     ::= "*" | "/" | "%"
                | "+" | "-"
-               | "<<" | ">>" | ">>>"
                | "<" | "<=" | ">" | ">="
                | "===" | "!=="
-               | "&" | "^" | "|"
                | "&&" | "||" | "??"
 
 ArrayExpr    ::= "[" [ArrayItem ("," ArrayItem)* [","]] "]"
@@ -1909,7 +1901,8 @@ RecordExpr   ::= "{" "}"
                   ("," RecordField)* [","] "}"
 RecordField  ::= Ident ":" Expr | String ":" Expr
 PropertyName ::= Ident | String
-Args         ::= Expr ("," Expr)* [","]
+Args         ::= Arg ("," Arg)* [","]
+Arg          ::= Expr | ArrowExpr
 TypeArgs     ::= "<" Type ("," Type)* ">"
 ArrowExpr    ::= "(" [ArrowParams] ")" "=>" (Expr | Block)
 ArrowParams  ::= ArrowParam ("," ArrowParam)* [","]
@@ -1949,18 +1942,15 @@ TupleType    ::= ["readonly"] "[" [Type ("," Type)* [","]] "]"
 RecordType   ::= "{" [RecordTypeField (";" RecordTypeField)* [";"]] "}"
 RecordTypeField ::= ["readonly"] PropertyName ["?"] ":" Type
 FunctionType ::= "(" [ValueParams] ")" "=>" ReturnType
-ScalarType   ::= "number" | "string"
+ScalarType   ::= "boolean" | "number" | "string"
 ```
 
 Postfix operations bind most tightly. Binary precedence, from tightest to
 loosest, is multiplication; addition; comparisons; strict equality; boolean
-AND and OR; nullish coalescing; then the conditional expression. The refused
-operators of the grammar keep their familiar positions, so the parser can
-report them: exponentiation (right-associative) above multiplication, shifts
-below addition, and bitwise AND, XOR, and OR below strict equality. Every
-admitted binary operator is left-associative. The
-conditional expression does not nest: neither arm may be a conditional
-expression, parenthesized or not, so no associativity question arises.
+AND and OR; nullish coalescing; then the conditional expression. Every
+binary operator is left-associative. The conditional expression does not nest:
+neither arm may be a conditional expression, parenthesized or not, so no
+associativity question arises.
 Parentheses override precedence. An `LValue` cannot contain an
 optional-chain suffix.
 
