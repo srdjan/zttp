@@ -4914,7 +4914,7 @@ pub const TypeChecker = struct {
             };
         }
         if (self.resultExportCallType(binding, call)) |typed| return typed;
-        if (self.collectionsExportCallType(binding, call)) |typed| return typed;
+        if (self.collectionsExportCallType(binding, node, call)) |typed| return typed;
         const name = self.resolveAtomName(binding.name_atom) orelse return null_type_idx;
         // `hole()` types as `never`, the bottom type, so it is assignable to
         // whatever the surrounding context expects and the rest of the program
@@ -7374,12 +7374,17 @@ pub const TypeChecker = struct {
     /// name keeps its own type. The first argument is read as one `Dict<K, V>`;
     /// when it is a union, `unknown`, or has no type, the declared return type
     /// of the binding stays. No rule refuses an argument.
-    fn collectionsExportCallType(self: *const TypeChecker, binding: ir.BindingRef, call: Node.CallExpr) ?TypeIndex {
+    fn collectionsExportCallType(self: *const TypeChecker, binding: ir.BindingRef, node: NodeIndex, call: Node.CallExpr) ?TypeIndex {
         const entry = self.resolveImportedExport(binding) orelse return null;
         if (!std.mem.eql(u8, entry.module.specifier, "zttp:collections")) return null;
         const pool = self.env.pool;
         const name = entry.function.name;
         if (std.mem.eql(u8, name, "dictEmpty") and call.args_count == 0) {
+            // Written type arguments name the key and the value type: the
+            // Dict holds no entry yet, and these are the types it will hold.
+            if (self.explicitTypeArgs(node)) |explicit| {
+                if (explicit.count == 2) return pool.addDict(self.allocator, explicit.args[0], explicit.args[1]);
+            }
             return pool.addDict(self.allocator, pool.idx_never, pool.idx_never);
         }
         const arity = collectionsDictArity(name) orelse return null;

@@ -2065,6 +2065,44 @@ test "a refused operand is unknown to the strict checker, not a type it can reas
     }.run);
 }
 
+fn expectCleanReduce(source: []const u8) !void {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 0), session.resolved.typeDiagnostics().len);
+            try testing.expectEqual(
+                @as(usize, 0),
+                countKind(session.resolved.boolDiagnostics(), bool_checker_mod.DiagnosticKind.add_on_non_addable),
+            );
+            try testing.expectEqual(
+                @as(usize, 0),
+                countKind(session.resolved.strictDiagnostics(), strict_checker_mod.DiagnosticKind.nullish_operator_on_null),
+            );
+        }
+    };
+    try withSession(testing.allocator, source, Probe.run);
+}
+
+test "a reduce seed written as dictEmpty with type arguments types the accumulator (spec 16.2)" {
+    try expectCleanReduce(
+        \\import { dictEmpty, dictGet, dictSet } from "zttp:collections";
+        \\function frequencies(words: readonly string[]): Dict<string, number> {
+        \\  return words.reduce(
+        \\    (counts, word) => dictSet(counts, word, (dictGet(counts, word) ?? 0) + 1),
+        \\    dictEmpty<string, number>(),
+        \\  );
+        \\}
+    );
+}
+
+test "a reduce seed written as a generic call with a string type argument types the accumulator" {
+    try expectCleanReduce(
+        \\function empty<T>(): T[] { return []; }
+        \\function collect(words: readonly string[]): string[] {
+        \\  return words.reduce((acc, word) => [...acc, word], empty<string>());
+        \\}
+    );
+}
+
 const refused_flow_source =
     \\import { env } from "zttp:env";
     \\function handler(req: Request): Response {
