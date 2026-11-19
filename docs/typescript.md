@@ -42,7 +42,7 @@ the original source.
 **Basic generics** (recorded for analysis, absent at runtime):
 - Generic params on an alias: `structural Box<T> = ...`
 - Generic params on functions: `function id<T>(x: T): T { ... }`
-- Generic arrow functions in .ts files: `const id = <T>(x: T): T => x;`
+- A generic arrow is refused (ZTS001), and so is a bound arrow (ZTS072). Write `function id<T>(x: T): T { ... }` at module level.
 
 **Generic type aliases** (recorded and type-checked):
 
@@ -91,7 +91,7 @@ carrying `P` as a proof obligation discharged against the helper's own body:
 
 ```typescript
 function fullName(u: User): Proof<string, "pure" | "total"> {
-    return `${u.first} ${u.last}`;
+    return [u.first, " ", u.last].join("");
 }
 ```
 
@@ -349,6 +349,21 @@ structural Summary = { id: number; name: string };
 structural UserPatch = { id?: number; name?: string; email?: string };
 ```
 
+### Ambient Type Names
+
+The ambient type names are `boolean`, `Bytes`, `never`, `null`, `number`,
+`string`, `undefined`, `unknown`, `Dict`, `DictKey`, `Effects`, `Proof`,
+`Request`, and `Response`. The `meta` operation of `zttp agent --stdin-json`
+publishes the list as `payload.ambient_names.types`. `DictKey` is the bound of
+every `Dict` key: `string`, `number`, or a `nominal` type over one of them.
+
+`Result`, `JsonValue`, and `HtmlNode` are not ambient. A handler that names
+`Result` or `JsonValue` declares it with `structural`. A module type, such as
+`FetchOptions`, is imported with `import type { FetchOptions } from
+"zttp:fetch";`, and an unimported `FetchOptions` gets ZTS065. A `structural` or
+`nominal` declaration cannot redefine an ambient type name or a name that an
+`import type` binds: `structural Request = number;` gets ZTS019.
+
 ### Template Literal Types
 
 Template literal types validate string patterns at build time:
@@ -388,7 +403,7 @@ A result has a type only when each argument has the type that the runtime reads.
 |---|---|
 | `xs.length`, `s.length`, `u.length` with `u: string \| string[]`, `Math.PI`, the 8 `Number` constants | `number` |
 | `Math.floor(n)` and the other `Math` methods, with number arguments | `number` |
-| `parseInt(s, 10)`, `Number(x)`, `Date.now()` | `number` |
+| `parseInt(s, 10)`, `Number(s)` with `s: string`, `Date.now()` | `number` |
 | `String(x)`, `s.toUpperCase()`, `s.slice(1)`, `xs.join(",")` | `string` |
 | `s.split(",")` with a string separator | `string[]` |
 | `s.repeat(n)`, `req.headers.get("x")` | `string \| undefined` |
@@ -661,7 +676,7 @@ predicate callbacks face the same rule at runtime.
 | `"hello"`, `` `template` `` | string |
 | `undefined` | undefined |
 | `{}`, `[]` | object |
-| `() => ...`, `function() {}` | function |
+| `() => ...` as a direct call argument | function |
 | `===`, `!==`, `<`, `>`, `<=`, `>=` | boolean |
 | `A && B`, `A \|\| B` | boolean |
 | non-nullable `A ?? B` | `A` |
@@ -676,7 +691,7 @@ predicate callbacks face the same rule at runtime.
 | reassigned `let x = expr; ... x` | same as expr until reassignment invalidates it |
 | `cond ? a : b` | unified type of a and b |
 | `match (...) { ... }` | unified arm type (if compatible) |
-| `const f = (x) => x > 0; f(1)` | return type of f (boolean) |
+| `function f(x: number): boolean { return x > 0; } f(1)` | return type of f (boolean) |
 | imported virtual-module call | known return type when modeled |
 | optional virtual-module return | optional string/object |
 | Result property access (`result.ok`) | known property type when modeled |
@@ -840,7 +855,7 @@ proof it buys, see [Restrictions to Proofs](restrictions-to-proofs.md).
 | 3 | Prefer `satisfies` over `as` | Adapted | both rejected; annotate the declaration -> [annotate-not-assert.ts](../examples/patterns/annotate-not-assert.ts) |
 | 4 | Derive types from values | Partial | `typeof`-extraction absent by design; declare the alias, `const` keeps literals -> [annotate-not-assert.ts](../examples/patterns/annotate-not-assert.ts) |
 | 5 | Discriminated unions for impossible states | Direct fit (core) | tagged unions plus `match` narrowing; `undefined`-only sentinel -> [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts) |
-| 6 | Exhaustive checks with `never` | Adapted (native) | `match` exhaustiveness is native with a required `default` arm; the `never`-helper is unneeded -> [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts) |
+| 6 | Exhaustive checks with `never` | Adapted (native) | `match` exhaustiveness is native; a closed union is covered member by member with no `default` (ZTS216), and an open type needs one; the `never`-helper is unneeded -> [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts) |
 | 7 | `as const` for config and constants | Adapted | `const` bindings preserve literals automatically; no `as const` -> [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts) |
 | 8 | Type predicates for reusable narrowing | Direct fit | `x is T` guards; pairs with `assert` -> [unknown-and-guards.ts](../examples/patterns/unknown-and-guards.ts) |
 | 9 | Build new types from existing (`Pick`/`Omit`/`Partial`) | Adapted | the profile has no utility types (ZTS065); declare each shape with `structural` -> [derive-types.ts](../examples/patterns/derive-types.ts) |

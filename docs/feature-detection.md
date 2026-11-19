@@ -68,6 +68,35 @@ declaration augmentation were never supported and are not repaired into an
 alias. The heuristic that made an all-function interface nominal went with the
 form - nominal identity now comes only from a `nominal` declaration.
 
+## Top-Level And Binding Rules
+
+| Form | Code | What it does instead |
+|---|---|---|
+| A top-level statement other than a bare registration call with literal arguments, such as `f();` and `if (c) { f(); }` | ZTS074 | Move the statement into a function. A bare `schemaCompile(...)` or `sql(...)` call with literal arguments stays |
+| A top-level initializer with an effect: a clock, random, or `env` read, a call of an import that declares an effect, a write to module state, or a call of a function whose body the module cannot read | ZTS630 | Compute the value inside a function. Write a registration as a bare statement, not bound to a `const` |
+| A top-level initializer that reaches a module declaration at or after it | ZTS630 | Declare the name above the initializer. A function body may name a later declaration, so mutual recursion stays |
+| A top-level initializer that passes a function to a call, such as `xs.map((x: number): number => x * 2)` | ZTS630 | Compute the value inside a function. Module initialization does not run a callback |
+| An arrow outside a direct call argument: bound, exported, returned, in a record field, immediately called, or a `?:` arm | ZTS072 | A module-level `function`. Pass an arrow only as a direct call argument |
+| A function declaration inside a function body or a block | ZTS071 | A module-level function |
+| An assignment to a parameter, such as `a = a + 1` | ZTS068 | Bind the new value to a new `const` |
+| A declaration of a name that an enclosing or a nested scope, or the module scope, already declares | ZTS069 | A different name. Two sibling blocks may declare one name |
+| A `structural` or `nominal` declaration of an ambient type name, or of a name that an `import type` binds, such as `structural Request = number;` | ZTS019 | A different name |
+
+## Operator And Builtin Rules
+
+| Form | Code | What it does instead |
+|---|---|---|
+| Bitwise operators `&`, `\|`, `^`, `~`, `<<`, `>>`, `>>>` | ZTS001 | The profile has no bit operations. Use arithmetic or a comparison |
+| The `**` operator | ZTS001 | `Math.pow(a, b)` |
+| `Boolean(x)` | ZTS600, ZTS629 | A comparison, such as `x !== ""` or `n > 0` |
+| `Number(x)` with an argument that is not a `string`, and any builtin argument whose type the builtin parameter does not admit, such as `Math.pow(true, 2)` | ZTS203 | Pass the parameter type. `Number(text)` stays the one strict text-to-number parse |
+| `Headers` | ZTS629 | Read request headers through `req.headers` |
+| `substring`, array `concat`, and `Number.parseInt` or `Number.parseFloat` | ZTS201 | `slice`, spread `[...a, ...b]`, and the globals `parseInt` and `parseFloat` |
+| An `Object` member other than `keys`, `values`, and `entries`, such as `Object.fromEntries` | ZTS201 | `Object.keys`, `Object.values`, `Object.entries`, or object spread |
+| `Partial<T>`, `Required<T>`, `Pick<T, K>`, `Omit<T, K>`, and `Readonly<T>` | ZTS065 | An explicit `structural` declaration and the `readonly` modifier |
+| `for...of` over a record, a number, a string, or a `Dict` | ZTS218 | `Object.keys(r)`, `range(n)`, `s.split("")`, or `dictEntries(d)` |
+| `FetchOptions` with no import | ZTS065 | `import type { FetchOptions } from "zttp:fetch";` |
+
 ## Match Rules
 
 Spec 5.5 gives `match` the grammar `MatchArm+ [DefaultArm]`. The parser enforces
@@ -80,6 +109,7 @@ before and then answered by the `default` arm.
 | A `default` arm followed by a `when` arm | ZTS062 | Move `default` after the `when` arms. The diagnostic points at the misplaced `default` |
 | A second `default` arm | ZTS062 | A match has at most one `default`. The diagnostic points at the second one |
 | `when { v: string }` or `when [string]` - a type-test name below the top level of a pattern | ZTS001 | Nested type tests are not supported. Bind the field and match it in a nested `match`, or use a top-level type test (`when string:`) |
+| A `default` arm after full coverage of a closed union, or a duplicate `when` arm | ZTS216 | An error. Remove the `default` arm or the duplicate arm |
 
 A renamed binding (`value: v`) declares a variable, so `{ v: string }` bound a
 variable called `string` and matched every value. That spelling and the
@@ -243,7 +273,7 @@ Logical compound assignments require short-circuit semantics and are not support
 | Feature | Suggested Alternative |
 |---------|----------------------|
 | Regular expressions `/.../ ` | Use string methods |
-| Function expressions (named & anonymous) | Use arrow functions `(x) => x * 2` or function declarations |
+| Function expressions (named & anonymous) | Use a module-level function declaration, or an arrow as a direct call argument such as `xs.map((x: number): number => x * 2)` |
 | `yield` expressions | Generators are not available |
 | `delete` operator | Use object spread to omit properties |
 | Template interpolation `` `n=${n}` `` | Build a string array with explicit `String(...)` conversions and call `.join("")`. A backtick literal with no interpolation is fine |
@@ -255,6 +285,9 @@ Logical compound assignments require short-circuit semantics and are not support
 |---------|----------------------|
 | `debugger;` | Remove the statement |
 | Empty statement `;` | Remove the standalone semicolon |
+| Bare block statement `{ ... }` | Put its statements in the enclosing block |
+| Empty body of `if`, `else`, or `for...of`, such as `if (c) {}` | Remove the statement, or invert the condition and drop the empty branch |
+| A body that is not a block, such as `if (c) g();` (ZTS070) | Write the body as a block: `if (c) { g(); }` |
 | `when _:` catch-all | Write `default:` |
 
 ### Global Identifiers
@@ -272,7 +305,7 @@ Logical compound assignments require short-circuit semantics and are not support
 | Feature | Suggested Alternative |
 |---------|----------------------|
 | Shorthand `{ value }` | Name both key and value: `{ value: value }` |
-| Object method `{ go() { ... } }` | Hold an arrow function in the property: `{ go: () => ... }` |
+| Object method `{ go() { ... } }` | Write a module-level function |
 | Getter `{ get x() { ... } }` | Call an explicit function |
 | Setter `{ set x(v) { ... } }` | Call an explicit function |
 | Numeric key `{ 1: "a" }` | Use a string key, or an array when the keys are dense indices |

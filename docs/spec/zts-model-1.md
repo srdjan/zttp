@@ -20,7 +20,11 @@ model-minimal core grammar, complete
 reachable-node and opcode classification, and artifact-bound source-profile
 identity. Revision 6 records the shipped artifact certificate and independent
 consumer, including the current `trusted` weakest edge and the properties
-disclosed at `tested`.
+disclosed at `tested`. After revision 6, sections 5 to 7 and 15 were brought
+in line with the restrictions that `docs/ts-restrictions.md` lists and the
+compiler enforces: the owner decisions of the restriction-enforcement plan
+(top-level statements, arrows as call arguments only, bitwise and `**`
+operators, utility types, local functions, shadowing, and others).
 
 **Relationship to the earlier document:** this document replaces its design
 claims, not its historical record. The earlier artifact remains useful context,
@@ -87,7 +91,7 @@ This profile therefore makes five decisions:
 | Added pattern syntax | Binding fields and type-test patterns in `match` |
 | Added type syntax | Bounded generic parameters with `extends` |
 | Added type capability | Sound function generics and contractive recursive aliases |
-| Added pure abstractions | `Result<T, E>`, `Dict<K, V>`, immutable `Bytes`, `HtmlNode` |
+| Added pure abstractions | `Result<T, E>`, `Dict<K, V>`, immutable `Bytes` |
 | Added concurrency model | None |
 | Added error channel | None; errors remain ordinary tagged values. `Result` combinators are effect-row polymorphic, not a new channel |
 | Agent-only source notation | None; machine metadata remains separate JSON |
@@ -341,11 +345,11 @@ so no reader has to infer them:
   `unknown` and a later instantiation could admit `null`, and in
   `if`-position guards, where the comparison is a narrowing test rather than
   a value selection.
-- Array spread is idiomatic for concatenation. `concat` stays in the
-  operation set because the live runtime ships it and removing it would
-  narrow the baseline, but spread is the familiar TypeScript form under law
-  4.1 and generalizes to element-and-array mixtures a two-argument helper
-  cannot express, so every `concat` call normalizes to a spread.
+- Array spread is the one spelling of concatenation. The `concat` member is
+  refused (ZTS201): spread is the familiar TypeScript form under law 4.1 and
+  generalizes to element-and-array mixtures a two-argument helper cannot
+  express. The `a.concat(b)` entry of the array concatenation row therefore
+  names a spelling that the compiler refuses, and no rewrite reaches it.
 - A record spread is idiomatic whenever at least one field is inherited
   unchanged, including when the result type widens the base's type with new
   fields. A spread that overrides every field inherits nothing and is
@@ -724,8 +728,24 @@ Rules:
   is also excluded. Consumers import the original declaration, or the module
   author declares an explicit named wrapper with its own type and effect
   contract.
-- Module initialization MUST be pure. Handler-reachable mutable module state
-  is excluded from the certified profile.
+- Module initialization MUST be pure, with no exemption. A top-level `const`
+  initializer MUST NOT read the clock, read random, or read `env`; call an
+  import that declares an effect or a capability; write module state; call a
+  module function whose body does one of these; or call a function whose body
+  the module cannot read, such as an import from another application module
+  (ZTS630). Handler-reachable mutable module state is excluded from the
+  certified profile.
+- A top-level initializer MUST NOT pass a function value as a call argument,
+  directly or through a called module function, such as `xs.map(f)` with an
+  arrow or a named callback (ZTS630). Module initialization does not run a
+  callback, so the value would be `undefined`.
+- A top-level initializer MUST NOT reach a module declaration at or after it
+  (ZTS630). A function body MAY name a module `function`, `const`, or `let`
+  declared further down, so mutual recursion is admitted.
+- The only top-level statement is a bare registration call, such as
+  `schemaCompile(...)` or `sql(...)`, whose arguments are literals. Every
+  other top-level statement is refused (ZTS074). A registration bound to a
+  `const` is an effect (ZTS630).
 - A top-level value binding MUST use `const`. Reassignment is local to a
   function activation.
 
@@ -735,7 +755,8 @@ The profile permits:
 
 - `const` for every binding that is assigned once
 - `let` only when the binding is reassigned
-- named function declarations for reusable behavior
+- module-level named function declarations for reusable behavior; a
+  module-level `function` is the one form of a named function
 - parameters written as `name: Type`, with absence named as `T | undefined`
 - direct arrow expressions only as arguments to typed, finite callback APIs
 - named bindings followed by explicit member or fixed-tuple index reads
@@ -748,7 +769,13 @@ It excludes:
 - declaration destructuring and destructuring renames
 - rest parameters, default parameters, and optional-parameter shorthand
 - function expressions
-- reusable or exported arrow helpers
+- reusable or exported arrow helpers; an arrow is a direct call argument and
+  nothing else, so a bound, exported, returned, record-field, immediately
+  called, or `?:`-arm arrow is refused (ZTS072)
+- a function declaration inside a function body or a block (ZTS071)
+- an assignment to a parameter (ZTS068); bind the new value to a new `const`
+- a declaration of a name that an enclosing or a nested scope, or the module
+  scope, already declares (ZTS069); two sibling blocks MAY declare one name
 - object methods, getters, and setters
 - object literal shorthand and computed record keys
 - the `in` operator and unary `+`
@@ -815,6 +842,10 @@ Rules:
 - `number` has exact IEEE 754 binary64 semantics, including `NaN`, infinities,
   and negative zero. JSON and capability boundaries MUST reject non-finite
   values when their wire format cannot represent them.
+- A number literal is decimal or `0x` hexadecimal, with a digit before the
+  point. A binary literal such as `0b101`, an octal literal such as `0o17` or
+  `0755`, a number with no digit before the point such as `.5`, a bigint
+  literal, and a numeric separator are excluded (ZTS012). Write `0.5`.
 - `string` contains valid Unicode and rejects invalid UTF-8 at ingress. The
   observable `length`, `charAt`, and slicing contract retains ZTS's current
   UTF-16 code-unit model. The formal string library MUST specify the behavior
@@ -864,7 +895,7 @@ value selection.
 
 The profile permits:
 
-- arithmetic, comparison, bitwise, and boolean operators
+- arithmetic, comparison, and boolean operators
 - `+` over two `number` operands, yielding `number`
 - strict equality `===` and `!==`
 - `typeof` in value position
@@ -889,6 +920,9 @@ The profile excludes:
 - the `in` operator; use the value kind's explicit membership predicate
 - assignment in expression position
 - compound and logical assignment
+- bitwise operators `&`, `|`, `^`, `~`, `<<`, `>>`, and `>>>`; the profile has
+  no bit operations (ZTS001)
+- the `**` operator; write `Math.pow(a, b)` (ZTS001)
 - increment and decrement
 - comma and sequence expressions
 - call spread
@@ -993,12 +1027,26 @@ that is not already `string` MUST be converted explicitly with `String(...)`.
 Template interpolation and string-valued `+` are excluded, so source order,
 conversion, and the numeric meaning of `+` are visible in the program.
 
+`Number(text)` is the one strict text-to-number parse, and its argument MUST
+be a `string` (ZTS203). `Boolean(x)` is not admitted (ZTS629); write a
+comparison such as `x !== ""` or `n > 0`.
+
+An argument of a builtin MUST have the type of the builtin's parameter
+(ZTS203), and a builtin call MUST supply every parameter and no more (ZTS202).
+So `Math.pow(true, 2)`, `Number(true)`, and `Math.floor()` are refused. A
+narrowing test removes `undefined` from an argument first. The `Object`
+namespace admits only `keys`, `values`, and `entries`. Every other member,
+such as `Object.fromEntries`, is refused (ZTS201), and `Object.assign`,
+`Object.freeze`, and `Object.isFrozen` are refused with ZTS001. The
+`string` member `substring` and the `Number` members `parseInt` and
+`parseFloat` are refused (ZTS201); write `slice`, and the globals `parseInt`
+and `parseFloat`.
+
 ### 5.5 Control flow
 
 The statement set is:
 
 ```text
-block
 const declaration
 necessary let declaration
 plain assignment statement
@@ -1009,8 +1057,13 @@ assert
 return
 break
 continue
-local function declaration
 ```
+
+A block is only the body of a function, an `if`, an `else`, or a `for...of`,
+and the body of an `if`, `else`, or `for...of` MUST be a block (ZTS070). A
+bare block statement and an empty `if`, `else`, or `for...of` body are
+excluded (ZTS001). A function declaration is a module-level
+declaration and is excluded inside a block (ZTS071).
 
 There is no `switch`, `while`, `do...while`, C-style `for`, `for...in`,
 `throw`, `try`, `catch`, or `finally`.
@@ -1024,7 +1077,8 @@ never costs a human or agent a hand edit.
 
 An assignment statement evaluates its target subexpressions left to right and
 then the right-hand side. The root of an assignment target is a name, and its
-receiver chain contains no call. Subexpressions of an assignment target MUST be
+receiver chain contains no call; a target such as `[1, 2][0] = 5` or
+`mk().n = 2` is refused (ZTS016). Subexpressions of an assignment target MUST be
 pure; an effectful receiver or index is evaluated into a named `const` before
 the assignment so evaluation order remains explicit.
 
@@ -1074,10 +1128,13 @@ Rules:
   rewritten to a binding, and a rename whose new name equals the field name
   is rewritten to the shorthand (Section 4.2.1).
 - A closed literal or discriminated union MUST be covered exactly and MUST NOT
-  include `default`.
+  include `default` (ZTS216).
 - An open domain such as `string`, `number`, or `unknown` MUST include
   `default`.
-- Duplicate, unreachable, and non-exhaustive arms are errors.
+- Duplicate, unreachable, and non-exhaustive arms are errors. A `default` arm
+  after full coverage of a closed union and a duplicate `when` arm are errors
+  (ZTS216, an error and not an advisory); a `match` that does not cover every
+  case is ZTS603.
 - Each arm narrows the scrutinee binding for its expression.
 
 #### `assert`
@@ -1125,10 +1182,13 @@ Its semantics are snapshot-finite:
 4. Later mutation of the original collection cannot add iterations or change
    a value that the loop will observe.
 
-Admitted iterables are arrays, tuples, strings, `range(n)`, `Dict` entries,
-and other standard-library values whose contract supplies a finite snapshot.
-`range` is an ambient pure intrinsic (Section 6). There is no user-defined
-iterator protocol.
+Admitted iterables are arrays, tuples, and `range(n)` only. A record, a
+number, a string, a `Dict`, a namespace, a function, a value with no type, and
+an array that may be `null` are refused (ZTS218). The replacements are
+`Object.keys(r)` for a record, `s.split("")` for a string, `range(n)` for a
+count, and `dictEntries(d)` for a `Dict`; `Dict` entries means the array that
+`dictEntries` returns. `range` is an ambient pure intrinsic (Section 6). There
+is no user-defined iterator protocol.
 
 `range(n)` requires a finite non-negative integer. A certified cost claim also
 requires a proven upper bound for `n`.
@@ -1181,6 +1241,10 @@ termination:
 - if no termination argument is found, the program may remain accepted but
   the corresponding proof property is unavailable.
 
+A function body MAY call a module function declared later in the file, so
+mutual recursion is admitted. Only a top-level initializer MUST NOT reach a
+declaration at or after it (Section 5.1).
+
 No runtime stack cap may be presented as a termination proof.
 
 ### 5.7 Types
@@ -1197,6 +1261,12 @@ transparent alias declaration; `nominal` is the one scalar identity
 declaration. Open interfaces, declaration merging, inheritance, and
 `implements` remain excluded.
 
+A `nominal` declaration is over `string`, `number`, or `boolean`. A `nominal`
+declaration over a record, tuple, union, or function type is refused (ZTS048).
+A `structural` or `nominal` declaration MUST NOT redefine an ambient type name
+or a name that an `import type` binds (ZTS019), such as `structural Request =
+number;` and `structural string = number;`.
+
 `nominal UserId = string;` introduces:
 
 ```ts
@@ -1212,8 +1282,7 @@ it.
 Admitted types are:
 
 - `unknown`, `never`, `undefined`, `null`, `boolean`, `number`, `string`,
-  `Bytes`, `HtmlNode`, `Request`, `Response`, and capability-specific opaque
-  types
+  `Bytes`, `Request`, `Response`, and capability-specific opaque types
 - boolean, number, and string literals
 - arrays, readonly arrays, and fixed tuples
 - fixed records with readonly and optional fields
@@ -1222,7 +1291,6 @@ Admitted types are:
 - named `structural` aliases and scalar `nominal` identities
 - generic applications and constrained generic parameters
 - template literal types
-- `Readonly`, `Pick`, `Omit`, `Partial`, and `Required`
 - `Proof` and `Effects` capsules
 - contractive recursive aliases
 
@@ -1277,6 +1345,9 @@ Excluded type features are:
 - `any`
 - `as`, angle-bracket assertions, and `satisfies`
 - generic parameters on function types (higher-rank polymorphism)
+- the utility types `Partial`, `Required`, `Pick`, `Omit`, and `Readonly<T>`;
+  write an explicit `structural` declaration and the `readonly` modifier
+  (ZTS065)
 - `keyof`, indexed-access types, and index signatures
 - type-position `typeof`
 - conditional, distributive, mapped, and inferred types
@@ -1302,16 +1373,24 @@ effect row carries them (Section 6.1).
 One rule separates ambient names from imports, so the split is derivable, not
 memorized:
 
-- Ambient type names: the closed profile-level type names, including the primitives,
-  `Result`, `Dict`, `Bytes`, `HtmlNode`, `Request`, `Response`, `Proof`, and
-  `Effects`. These are never imported. A module-defined type (for example
-  `FetchError` from `zttp:fetch`) is named through an ordinary `import type`
-  from its module.
-- Ambient value names: the members of the familiar TypeScript sequence types
-  (array and string methods), plus the closed intrinsic set `String`,
-  `range`, `Array.isArray`, `isDict`, and `isBytes`. These keep their
-  familiar TS spellings under law 4.1; dispatch is static, never prototype
-  lookup.
+- Ambient type names: the closed profile-level type names `boolean`, `Bytes`,
+  `never`, `null`, `number`, `string`, `undefined`, `unknown`, `Dict`,
+  `DictKey`, `Effects`, `Proof`, `Request`, and `Response`. These are never
+  imported, and a declaration MUST NOT redefine one (ZTS019). `Result` and
+  `JsonValue` are not ambient: a handler that names either declares it with
+  `structural`, and `zttp:result` and `zttp:json` export no type. `HtmlNode`
+  is not a type of the profile. A module-defined type is named through an
+  ordinary `import type` from its module: `FetchOptions` comes from
+  `zttp:fetch`, and an unimported `FetchOptions` is refused (ZTS065).
+- Ambient value names: the closed set `Array`, `Date`, `Math`, `Number`,
+  `Object`, `Request`, `Response`, `String`, `assert`, `h`, `hole`, `isBytes`,
+  `isDict`, `parseFloat`, `parseInt`, `range`, `renderToString`,
+  `requestBody`, `requestJson`, and `requestText`. A value name outside the
+  set, such as `console`, `process`, `Headers`, `Boolean`, or `performance`,
+  is refused (ZTS629). The members of the familiar TypeScript sequence types
+  (array and string methods) and of the ambient namespaces keep their
+  familiar TS spellings under law 4.1, and a member outside the admitted set
+  is refused (ZTS201); dispatch is static, never prototype lookup.
 - Everything else is a statically named import. New abstractions with no
   TypeScript-familiar member form (`Result`, `Dict`, `Bytes`, JSON)
   export free functions from their zero-capability modules, and
@@ -1352,8 +1431,10 @@ collectAll<T, E>(
 ): Result<readonly T[], E>
 ```
 
-The type is predeclared. Constructors and combinators are statically named
-imports from the zero-capability `zttp:result` module. `collectAll` is
+The type is not ambient, and `zttp:result` exports no type: a handler that
+names `Result<T, E>` declares the alias above with `structural` (`Result<...>`
+with no declaration is refused with ZTS065). Constructors and combinators are
+statically named imports from the zero-capability `zttp:result` module. `collectAll` is
 first-error: it returns the first `err` in order, matching `andThen`
 short-circuit semantics.
 
@@ -1462,8 +1543,10 @@ data, not a spelling choice.
 A static table uses `dictFromEntries([...])` over a literal entry list. The
 caller handles a duplicate-key error explicitly.
 
-`DictKey` is a checker-recognized generic bound, not a source alias. It accepts
-`string`, `number`, or a `nominal` type over one of those bases. Nominal keys
+`DictKey` is an ambient type name, published in `meta`, and the generic bound
+of every `Dict` signature. It accepts `string`, `number`, or a `nominal` type
+over one of those bases. A `Dict` key type outside that set, such as
+`Dict<boolean, string>`, is refused (ZTS209). Nominal keys
 compare only within the same `K` instantiation, using the wrapped base value.
 
 `dictSet` and `dictRemove` return new dictionaries. Iteration order is the
@@ -1575,10 +1658,8 @@ find<T>(items: readonly T[], f: (value: T, index: number) => boolean): T | undef
 findIndex<T>(items: readonly T[], f: (value: T, index: number) => boolean): number
 some<T>(items: readonly T[], f: (value: T, index: number) => boolean): boolean
 every<T>(items: readonly T[], f: (value: T, index: number) => boolean): boolean
-flatMap<T, U>(items: readonly T[], f: (value: T, index: number) => readonly U[]): U[]
 toSorted<T>(items: readonly T[], compare: (a: T, b: T) => number): T[]
 slice<T>(items: readonly T[], start: number, end: number): T[]
-concat<T>(items: readonly T[], other: readonly T[]): T[]
 indexOf<T>(items: readonly T[], value: T): number
 includes<T>(items: readonly T[], value: T): boolean
 join(items: readonly string[], separator: string): string
@@ -1590,10 +1671,14 @@ element type, and the sort is stable. `indexOf` uses strict equality and
 key rule of Section 6.2, so they disagree on `NaN` and the rewrite between
 them is conditioned accordingly. `includes` is idiomatic for the boolean
 question and `indexOf` for the position, so neither is written through the
-other (Section 4.2.1). `concat` is admitted but non-idiomatic: array spread
-spells the same operation and generalizes further. This closed set is a
-superset of the array members the live runtime already ships, so completing
-their types (Section 3, gap 6) does not narrow the baseline.
+other (Section 4.2.1). `concat` is not admitted (ZTS201): array spread
+`[...a, ...b]` spells the same operation and generalizes further. `flatMap`
+is not admitted either (ZTS201). The array members that the compiler admits
+are the closed set `every`, `filter`, `find`, `findIndex`, `includes`,
+`indexOf`, `join`, `length`, `map`, `push`, `reduce`, `slice`, `some`, and
+`toSorted`. Every other array member, such as `forEach`, `pop`, `shift`,
+`unshift`, `splice`, and `toReversed`, is refused (ZTS201), and an argument
+list that differs from the signatures above is refused (ZTS202).
 
 Each operation uses snapshot-finite iteration. Its callback MUST be pure. The
 checker verifies the callback body and every reachable helper rather than
@@ -1641,10 +1726,11 @@ Application-facing capability names remain explicit, including environment,
 clock, random, crypto, logging, storage, filesystem, network, policy, and
 WebSocket effects.
 
-Ambient `Date.now`, `performance.now`, random-number generation, console
-output, filesystem access, and network access are excluded from the advanced
-canonical profile. Their named modules make authority and replay inputs
-visible.
+`Date.now()` and `Math.random()` are ambient and admitted. Each removes the
+`deterministic` property from the handler and is charged to it (Section 15).
+`performance.now`, console output, filesystem access, and network access are
+not ambient: a value name outside the ambient set is refused (ZTS629). Their
+named modules make authority and replay inputs visible.
 
 ### 7.1 Minimum application ABI
 
@@ -1682,6 +1768,10 @@ fetch(
   options: FetchOptions,
 ): Result<Response, FetchError>
 ```
+
+`FetchOptions` is a type that `zttp:fetch` exports. A handler names it with
+`import type { FetchOptions } from "zttp:fetch";`, and an unimported
+`FetchOptions` is refused (ZTS065).
 
 `responseText` is total: a handler always has an infallible constructor for
 the error arm of a fallible one. `responseJson<T>` uses the JSON-encodability
@@ -1726,7 +1816,14 @@ typed-error contracts.
 
 This grammar describes admitted structure as a structural over-approximation:
 several productions admit forms the normative prose of Section 5 excludes
-(for example arrow expressions outside callback argument positions). Legality is defined by the prose rules and
+(for example arrow expressions outside callback argument positions, which
+ZTS072 refuses). The same holds for the `FunctionDecl` and `Block` alternatives
+of `Stmt` (ZTS071 and ZTS001), and for the operators `**`, `~`, `<<`, `>>`,
+`>>>`, `&`, `^`, and `|`, which the parser reads and refuses with ZTS001. In
+the other direction, the grammar omits the bare registration call that Section
+5.1 admits as the one top-level statement, and its `ScalarType` omits
+`boolean`, which Section 5.7 admits as the base of a `nominal` declaration.
+Legality is defined by the prose rules and
 the machine-readable registry together; the registry records, per rule,
 whether enforcement happens at parse time or at check time. Unexpanded
 leaves such as `Ident`, `String`, `Number`, `Literal`, and
@@ -1856,10 +1953,12 @@ ScalarType   ::= "number" | "string"
 ```
 
 Postfix operations bind most tightly. Binary precedence, from tightest to
-loosest, is exponentiation; multiplication; addition; shifts; comparisons;
-strict equality; bitwise AND, XOR, and OR; boolean AND and OR; nullish
-coalescing; then the conditional expression. Exponentiation is
-right-associative. Every other binary operator is left-associative. The
+loosest, is multiplication; addition; comparisons; strict equality; boolean
+AND and OR; nullish coalescing; then the conditional expression. The refused
+operators of the grammar keep their familiar positions, so the parser can
+report them: exponentiation (right-associative) above multiplication, shifts
+below addition, and bitwise AND, XOR, and OR below strict equality. Every
+admitted binary operator is left-associative. The
 conditional expression does not nest: neither arm may be a conditional
 expression, parenthesized or not, so no associativity question arises.
 Parentheses override precedence. An `LValue` cannot contain an
@@ -2061,6 +2160,10 @@ keeps some cuts because one explicit form is easier to read and maintain.
 | optional call | explicit absence branch before invocation | check for `undefined`, then call directly |
 | optional computed access | explicit absence branch before dynamic indexed access | check for `undefined`, then use indexed access |
 | `.js`, `.jsx`, and `.tsx` source files | one typed core source form | language-simplicity choice; use `.ts` |
+| bitwise operators and `**` | one numeric meaning of each operator; no bit operations in the kernel | canonical simplicity; use `Math.pow(a, b)` for a power |
+| local function declaration, arrow outside a call argument, bare block | one named-function form and one block form | canonical simplicity; use a module-level function |
+| parameter reassignment and shadowing | each name denotes one binding in its scope | canonical simplicity; bind a new name |
+| top-level statement or effectful initializer | pure module initialization | essential to isolation and replay; move the work into a function |
 
 Non-idiomatic spellings are absent from this matrix by design. They are not
 restrictions and eliminate no failure class: Section 4.2.1 supersedes them
@@ -2395,7 +2498,7 @@ status and priorities.
   forms as ZTS621 carrying implemented `replace_chained_ternary_with_match`
 - static named modules
 - structural aliases, unions, intersections, literals, readonly, optionals, nominal
-  types, guards, utility types, and proof/effect capsules
+  types, guards, and proof/effect capsules
 - explicit capability modules
 - familiar TypeScript lexical conventions and human-readable block structure
 - a machine-readable idiom registry, published with a table hash and reachable
@@ -2437,10 +2540,12 @@ shape rather than a second delivery backlog.
 - the profile registry and source-profile hashes are the identity authority;
 - ZTS is identified as a constrained language, not TypeScript compatibility;
 - the removed producer-only signed receipt remains historical;
-- ambient clock, random, logging, and I/O capabilities are admitted and charged
-  to their proof properties rather than rejected. The centralized varying-read
-  registry includes `Date.now`, `Math.random`, and `performance.now`, so this
-  policy has no uncharged clock exception.
+- the ambient clock and random reads `Date.now` and `Math.random` are admitted
+  and charged to their proof properties rather than rejected. Logging and I/O
+  enter only through capability modules, and `performance.now` is not an
+  ambient name (ZTS629). The centralized varying-read registry includes
+  `Date.now`, `Math.random`, and `performance.now`, so this policy has no
+  uncharged clock exception.
 
 ### Keep excluded
 
@@ -2457,6 +2562,12 @@ shape rather than a second delivery backlog.
 - `any`, type assertions, `satisfies`, and TypeScript type metaprogramming
 - enums, namespaces, decorators, interfaces, and overload sets
 - mutable module-global application state
+- bitwise operators, `**`, and the utility types `Partial`, `Required`, `Pick`,
+  `Omit`, and `Readonly<T>`
+- local function declarations, arrows outside a direct call argument, and bare
+  blocks
+- top-level statements other than a bare registration call, and top-level
+  initializers with an effect
 
 ## 16. Worked examples
 

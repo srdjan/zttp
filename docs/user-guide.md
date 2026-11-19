@@ -82,9 +82,9 @@ Request fields used by examples:
 Response helpers:
 
 ```ts
-Response.text("ok")
-Response.json({ ok: true }, { status: 201 })
-Response.html("<h1>Hello</h1>")
+Response.text("ok");
+Response.json({ ok: true }, { status: 201 });
+Response.html("<h1>Hello</h1>");
 ```
 
 `Response.text`, `Response.json`, `Response.html`, and `Response.rawJson` take an optional init record as the second argument.
@@ -177,12 +177,16 @@ ZTS309.
 Read a request body with a schema. `decodeJson` takes a schema name and the text:
 
 ```ts
-const parsed = decodeJson("todo", req.body ?? "");
-if (!parsed.ok) {
-    return Response.json({ error: "invalid body" }, { status: 400 });
+import { decodeJson } from "zttp:decode";
+
+function handler(req: Request): Response {
+    const parsed = decodeJson("todo", req.body ?? "");
+    if (!parsed.ok) {
+        return Response.json({ error: "invalid body" }, { status: 400 });
+    }
+    const todo = parsed.value;
+    return Response.json({ title: todo.title });
 }
-const todo = parsed.value;
-return Response.json({ title: todo.title });
 ```
 
 The `.value` of `requestJson`, `parseJson`, and `parseJsonBytes` is a JSON value.
@@ -220,6 +224,18 @@ Use:
 - `if`/`else` and `match` for branching.
 - Explicit Result and optional checks.
 - Ambient `Proof<T, P>` and `Effects<T, R>` annotations with no import.
+- A module-level `function` for each named function. Write an arrow only as a
+  direct call argument, such as `xs.map((x: number): number => x + 1)`, and
+  keep each function declaration at module level (ZTS071, ZTS072).
+- Top-level declarations only. The one top-level statement is a bare
+  registration call such as `schemaCompile(...)` with literal arguments. A
+  top-level initializer must be pure: it cannot read the clock, random, or
+  `env`, and it cannot pass a callback (ZTS074, ZTS630).
+- A new name for each binding: a parameter is never reassigned, and a local
+  name never reuses the name of an enclosing scope or an import (ZTS068,
+  ZTS069).
+- `Math.pow(a, b)` and arithmetic, not `**` or bitwise operators, and an
+  explicit `structural` declaration, not `Partial`, `Pick`, or `Omit`.
 
 ### Match Patterns
 
@@ -772,8 +788,15 @@ Set the required variable, remove the literal `env("NAME")` use, or pass
 Check `.ok` before `.value`, or narrow the optional before use:
 
 ```ts
-const token = parseBearer(req.headers.authorization ?? "");
-if (token === undefined) return Response.text("Unauthorized", { status: 401 });
+import { parseBearer } from "zttp:auth";
+
+function handler(req: Request): Response {
+    const token = parseBearer(req.headers.authorization ?? "");
+    if (token === undefined) {
+        return Response.text("Unauthorized", { status: 401 });
+    }
+    return Response.text("ok");
+}
 ```
 
 **A language feature is rejected.**
