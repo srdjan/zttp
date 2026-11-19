@@ -1731,9 +1731,6 @@ later.
     - `match (Math)` with only a `default` arm passes.
     - The C-style `for` diagnostic names `for (let x of array)`, which
       ZTS604 refuses.
-    - docs/user-guide.md shows `if (token === undefined) return ...;`,
-      which ZTS070 refuses. Spec 6 lists `Result` and `HtmlNode` as
-      ambient types, and the compiler refuses `Result<...>` with ZTS065.
     - `import type { FetchOptions as FO }` makes `FO` an opaque type.
     - `function f<T extends string>(b: Box<T>): T { return b.value; }`
       gets ZTS204.
@@ -1787,3 +1784,12 @@ later.
   corpus with its pins, then `scripts/update-convergence.sh`, then
   `scripts/update-coverage.sh`. The verdict comes from an unfiltered
   `zig build test-expert-app`, and then `bash scripts/verify.sh`.
+- U7 closed on 2026-11-19. The owner re-recorded the 13-case DeepSeek
+  corpus (af0f4c4f, with the pins set from the recording log), and the
+  publishes followed in order: convergence 5b7cb98c (first-attempt green
+  61%, 8/13; reached green 76%, 10/13) and coverage 3712da9b (2 of 58
+  rules tripped; 57 of 58 named with the defect seeds). `bash
+  scripts/verify.sh` passed in an empty cache. Two items of the U6 review
+  list are closed: fd858a9d fixed the user-guide ZTS070 example, and
+  fd858a9d with cd320a43 made the spec's ambient types and `Result` agree
+  with the compiler.
