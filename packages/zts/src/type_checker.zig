@@ -268,6 +268,11 @@ pub const TypeChecker = struct {
     /// admits undefined at the walk point. Keyed by the read node. The
     /// verifier turns each entry into one ZTS309.
     absent_receivers: std.AutoHashMapUnmanaged(NodeIndex, TypeIndex) = .empty,
+    /// Coverage of each `match` as measured by the walk, with the narrowing
+    /// of that point in scope, keyed by the `match` node. The witness is owned
+    /// by `self.allocator`. The strict checker reads it, so ZTS603 and ZTS216
+    /// answer for the same type.
+    match_coverage: std.AutoHashMapUnmanaged(NodeIndex, match_analysis_mod.Coverage) = .empty,
     /// Pattern bindings typed `unknown` because their arm has no record type.
     /// A read of one is still recorded: the fallback stays fail-closed.
     opaque_pattern_bindings: std.AutoHashMapUnmanaged(u64, void) = .empty,
@@ -351,6 +356,9 @@ pub const TypeChecker = struct {
         self.param_types.deinit(self.allocator);
         self.narrowed.deinit(self.allocator);
         self.context_types.deinit(self.allocator);
+        var recorded = self.match_coverage.valueIterator();
+        while (recorded.next()) |coverage| coverage.deinit(self.allocator);
+        self.match_coverage.deinit(self.allocator);
         self.absent_receivers.deinit(self.allocator);
         self.opaque_pattern_bindings.deinit(self.allocator);
         self.narrow_journal.deinit(self.allocator);
@@ -5858,6 +5866,52 @@ pub const TypeChecker = struct {
         };
     }
 
+    /// Keep a copy of the coverage the walk measured for `node`. When the walk
+    /// reaches the node again, a copy that is not exhaustive wins. A copy that
+    /// cannot be made marks the checker as failed and leaves the node
+    /// unrecorded.
+    fn recordMatchCoverage(self: *TypeChecker, node: NodeIndex, coverage: match_analysis_mod.Coverage) void {
+        var copy = coverage;
+        if (coverage.witness) |witness| {
+            copy.witness = self.allocator.dupe(u8, witness) catch {
+                self.markAllocationFailure();
+                return;
+            };
+        }
+        const slot = self.match_coverage.getOrPut(self.allocator, node) catch {
+            if (copy.witness) |witness| self.allocator.free(witness);
+            self.markAllocationFailure();
+            return;
+        };
+        if (slot.found_existing) {
+            // A match that the walk reaches twice, under two narrowings, keeps
+            // a verdict that is not exhaustive: the strict check reads one
+            // verdict for the node, and a later exhaustive walk must not hide
+            // an earlier walk that left a case uncovered.
+            if (!slot.value_ptr.exhaustive) {
+                if (copy.witness) |witness| self.allocator.free(witness);
+                return;
+            }
+            slot.value_ptr.deinit(self.allocator);
+        }
+        slot.value_ptr.* = copy;
+    }
+
+    /// The coverage the walk measured for the `match` at `node`, with the
+    /// narrowing of that point in scope, or null when the walk never reached
+    /// it. The witness is owned by the caller's `deinit`, with `self.allocator`.
+    pub fn recordedMatchCoverage(self: *const TypeChecker, node: NodeIndex) ?match_analysis_mod.Coverage {
+        const recorded = self.match_coverage.get(node) orelse return null;
+        var copy = recorded;
+        if (recorded.witness) |witness| {
+            copy.witness = self.allocator.dupe(u8, witness) catch {
+                @constCast(self).markAllocationFailure();
+                return .{ .incomplete = .budget };
+            };
+        }
+        return copy;
+    }
+
     /// Report a match that is not provably exhaustive (ZTS205) and the first
     /// arm that no value reaches (ZTS216). ZTS205 is a warning and ZTS216 is
     /// an error. `check` drops ZTS205 again when the strict checker follows
@@ -5865,6 +5919,7 @@ pub const TypeChecker = struct {
     fn reportMatchCoverage(self: *TypeChecker, node: NodeIndex, me: ir.Node.MatchExpr) void {
         var coverage = self.matchCoverage(me, true);
         defer coverage.deinit(self.allocator);
+        self.recordMatchCoverage(node, coverage);
 
         if (!coverage.exhaustive) {
             const help = match_analysis_mod.missingCaseHelp(self.allocator, coverage) catch {

@@ -506,3 +506,12 @@ packages/zts/src/type_checker.zig widenWriteSlot catch-block
 # type. TypeChecker.ensureHealthy reports OutOfMemory before a partial type can
 # support a verdict.
 packages/zts/src/type_checker.zig arrayLiteralBindingType catch-block
+
+# Recording a match's measured coverage copies its witness and stores it by node.
+# A failure sets allocation_failed, and TypeChecker.ensureHealthy reports
+# OutOfMemory before a missing record can support a verdict. Reading a record
+# that cannot copy its witness returns the incomplete budget verdict, which
+# the strict checker refuses as ZTS603.
+packages/zts/src/type_checker.zig recordMatchCoverage catch-block
+packages/zts/src/type_checker.zig recordMatchCoverage catch-block@2
+packages/zts/src/type_checker.zig recordedMatchCoverage catch-block

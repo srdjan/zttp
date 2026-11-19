@@ -1321,7 +1321,7 @@ pub const StrictChecker = struct {
                 const match = self.ir_view.getMatchExpr(node) orelse return;
                 self.walkExpr(match.discriminant);
                 self.checkMatchBindingIdioms(match);
-                var coverage = self.matchCoverage(match);
+                var coverage = self.matchCoverage(node, match);
                 defer coverage.deinit(self.allocator);
                 if (!coverage.exhaustive) {
                     if (match_analysis_mod.missingCaseHelp(self.allocator, coverage)) |help| {
@@ -2218,12 +2218,15 @@ pub const StrictChecker = struct {
     /// spelling the spec requires for a closed union - every member covered,
     /// no `default` - was the spelling it refused. Coverage is measured by the
     /// type checker's analysis (`match_analysis.zig`), and a `default` still
-    /// answers for a domain no analysis can enumerate.
-    fn matchCoverage(self: *const StrictChecker, match: ir.Node.MatchExpr) match_analysis_mod.Coverage {
+    /// answers for a domain no analysis can enumerate. The type checker
+    /// measured this `match` during its walk, with the narrowing of that point
+    /// in scope; reading that measure keeps ZTS603 and ZTS216 on one type. A
+    /// `match` the walk never reached is measured against its declared type.
+    fn matchCoverage(self: *const StrictChecker, node: NodeIndex, match: ir.Node.MatchExpr) match_analysis_mod.Coverage {
         if (self.matchHasDefault(match)) return .{ .exhaustive = true };
         // With no type checker there is no type to enumerate.
         const tc = self.type_checker orelse return .{ .incomplete = .untyped };
-        return tc.matchCoverage(match, false);
+        return tc.recordedMatchCoverage(node) orelse tc.matchCoverage(match, false);
     }
 
     fn isStaticComputedKey(self: *const StrictChecker, node: NodeIndex) bool {
@@ -3718,6 +3721,49 @@ test "the six arms cover it" {
     var h = try checkDirect("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n    when Dict: \"dict\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
+}
+
+const narrowed_match_head = "structural C = { kind: \"a\"; n: number } | { kind: \"b\" };\nfunction f(c: C): string {\n  if (c.kind === \"a\") {\n    return \"o\";\n  }\n  return match (c) {\n";
+
+const handler_tail = "function handler(req: Request): Response {\n  return Response.json({ k: f({ kind: \"b\" }) });\n}\n";
+
+fn expectNoMatchDiagnostic(h: *DirectHarness) !void {
+    try expectNoKind(&h.checker, .non_exhaustive_profile_match);
+    for (h.tc.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .redundant_match_arm);
+    }
+}
+
+test "a match that covers the type narrowed by an early return passes both checks" {
+    var h = try checkDirect(narrowed_match_head ++ "    when { kind: \"b\" }: \"b\"\n  };\n}\n" ++ handler_tail);
+    defer h.deinit();
+    try expectNoMatchDiagnostic(h);
+}
+
+test "an arm for the case an early return removed is unreachable and nothing else" {
+    var h = try checkDirect(narrowed_match_head ++ "    when { kind: \"a\" }: \"a\"\n    when { kind: \"b\" }: \"b\"\n  };\n}\n" ++ handler_tail);
+    defer h.deinit();
+    try expectNoKind(&h.checker, .non_exhaustive_profile_match);
+    var redundant: usize = 0;
+    for (h.tc.getDiagnostics()) |diag| {
+        if (diag.kind == .redundant_match_arm) redundant += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), redundant);
+}
+
+test "without the early return the strict match error names the case the arms omit" {
+    var h = try checkDirect("structural C = { kind: \"a\"; n: number } | { kind: \"b\" };\nfunction f(c: C): string {\n  return match (c) {\n    when { kind: \"b\" }: \"b\"\n  };\n}\n" ++ handler_tail);
+    defer h.deinit();
+    var found = false;
+    for (h.checker.getDiagnostics()) |diag| {
+        if (diag.kind != .non_exhaustive_profile_match) continue;
+        found = true;
+        try testing.expectEqualStrings(
+            "missing case: when { kind: \"a\" }. Add an arm for it, or add a 'default:' arm.",
+            diag.help.?,
+        );
+    }
+    try testing.expect(found);
 }
 
 // D12: spread operands, closures, and the default descent of the strict walks.
