@@ -52,6 +52,7 @@ const JSObject = object.JSObject;
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:result",
     .name = "result",
+    .type_exports = &.{"Result"},
     .required_capabilities = &.{},
     .exports = &.{
         .{ .name = "ok", .func = okNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.unknown}, .param_names = &.{"value"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },

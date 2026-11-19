@@ -768,6 +768,11 @@ test "late export capture failure releases a transferred rate limit namespace" {
         }
     };
 
+    // A run interns names into the shared atom table, and a later run finds
+    // them there. One warm-up run makes the counting run and the failing run
+    // allocate the same number of times.
+    try Run.extract(allocator, parsed);
+
     var counting = std.testing.FailingAllocator.init(allocator, .{
         .fail_index = std.math.maxInt(usize),
     });
@@ -7477,6 +7482,53 @@ test "array suffix after a generic application is an array of the application" {
     try expectNoTypeDiagnostic("function f(x: Dict<string, number>[]): number { return x.length; }");
     try expectNoTypeDiagnostic("structural Result<T, E> = { ok: T; error: E };\nfunction f(x: Result<number, string>[]): number { return x.length; }");
     try expectNoTypeDiagnostic("function f(x: Dict<string, number>[][]): number { return x[0].length; }");
+}
+
+test "an imported Result accepts ok and err and a returned Result of its own type" {
+    try expectNoTypeDiagnostic(
+        \\import { err, ok } from "zttp:result";
+        \\import type { Result } from "zttp:result";
+        \\structural DivideError = { kind: "division-by-zero" };
+        \\function divide(n: number, d: number): Result<number, DivideError> {
+        \\  if (d === 0) {
+        \\    return err({ kind: "division-by-zero" });
+        \\  }
+        \\  return ok(n / d);
+        \\}
+    );
+    try expectNoTypeDiagnostic(
+        \\import type { Result } from "zttp:result";
+        \\function pass(r: Result<number, string>): Result<number, string> {
+        \\  return r;
+        \\}
+    );
+}
+
+test "an imported Result refuses a value of the wrong value type" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.typeDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(type_checker_mod.DiagnosticKind.return_type_mismatch, diagnostics[0].kind);
+            try testing.expectEqualStrings("return type does not match declared return type", diagnostics[0].message);
+        }
+    };
+    try withSession(testing.allocator,
+        \\import { ok } from "zttp:result";
+        \\import type { Result } from "zttp:result";
+        \\function f(): Result<number, string> {
+        \\  return ok("text");
+        \\}
+    , Probe.run);
+}
+
+test "an imported FetchError is the error and details of a failed fetch" {
+    try expectNoTypeDiagnostic(
+        \\import type { FetchError } from "zttp:fetch";
+        \\function code(e: FetchError): string {
+        \\  return e.error;
+        \\}
+    );
 }
 
 test "array brackets with trivia between them are an array" {

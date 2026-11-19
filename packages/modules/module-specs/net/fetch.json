@@ -8,7 +8,8 @@
     "runtime_callback"
   ],
   "typeExports": [
-    "FetchOptions"
+    "FetchOptions",
+    "FetchError"
   ],
   "exports": [
     {

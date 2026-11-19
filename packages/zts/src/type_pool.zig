@@ -961,7 +961,11 @@ pub const TypePool = struct {
                 for (0..new_fields.len) |i| {
                     new_fields[i].type_idx = self.instantiate(allocator, new_fields[i].type_idx, param_names, param_types, depth + 1);
                 }
-                return self.addRecord(allocator, new_fields);
+                const instantiated = self.addRecord(allocator, new_fields);
+                // The instance of a marked Result record is a Result too: the
+                // mark is the identity that every Result consumer tests.
+                if (self.isResultRecord(idx)) return self.markResultRecord(allocator, instantiated);
+                return instantiated;
             },
             .t_array => {
                 const elem = self.getArrayElement(idx);

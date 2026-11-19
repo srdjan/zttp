@@ -109,6 +109,48 @@ fn registerFetchOptions(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Alloc
     env.putTypeAlias("FetchOptions", options);
 }
 
+/// `Result<T, E>` (spec 6.1), the type that `zttp:result` exports. Its body is
+/// the marked Result record that `ok`, `err`, and every `.result` export
+/// return, with `T` at `value` and `E` at `error`, so the value of a call of
+/// `ok` or `err` is assignable to a declared `Result<T, E>`. A `structural
+/// Result<...>` declaration in the source overwrites it.
+fn registerResult(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
+    if (env.generic_aliases.contains("Result")) return;
+
+    env.pushGenericScope();
+    const value_param = env.addGenericParam("T");
+    const error_param = env.addGenericParam("E");
+    const body = pool.addTypedResult(allocator, value_param, error_param, pool.idx_never);
+    env.popGenericScope();
+    if (body == null_type_idx) return;
+
+    var alias = type_env_mod.GenericAlias{};
+    alias.param_names[0] = env.internName("T");
+    alias.param_names[1] = env.internName("E");
+    alias.param_count = 2;
+    alias.body = body;
+    env.generic_aliases.put(allocator, env.internName("Result"), alias) catch env.markAllocationFailure();
+}
+
+/// `FetchError`, the type that `zttp:fetch` exports. Its shape is the failure
+/// half of what `fetch` returns: `createFetchErrorResponse` in
+/// `runtime_http.zig` sets a string `error` (the code, such as `InvalidUrl`
+/// or `HostNotAllowed`) and a string `details` on the response, and the
+/// `fetch` signature in `net/fetch.zig` declares both as optional strings. The
+/// code set is open (the outbound exchange adds its own), so `error` is a
+/// `string`, not a union of literals. Spec 7.2 names the type and does not
+/// define it.
+fn registerFetchError(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
+    if (env.getTypeAlias("FetchError") != null) return;
+
+    const failure = pool.addRecord(allocator, &.{
+        addField(pool, allocator, "error", pool.idx_string),
+        addField(pool, allocator, "details", pool.idx_string),
+    });
+    if (failure == null_type_idx) return;
+    env.putTypeAlias("FetchError", failure);
+}
+
 fn object_refFor(pool: *TypePool, allocator: std.mem.Allocator) TypeIndex {
     return pool.addRef(allocator, "object");
 }
@@ -184,6 +226,8 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
     const optional_object = pool.addNullable(allocator, object_ref);
 
     registerFetchOptions(env, pool, allocator);
+    registerFetchError(env, pool, allocator);
+    registerResult(env, pool, allocator);
 
     // Register all function signatures from the module registry
     for (builtin_modules.metadata) |binding| {

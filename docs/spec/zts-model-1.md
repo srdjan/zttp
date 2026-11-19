@@ -1371,11 +1371,13 @@ memorized:
   `never`, `null`, `number`, `string`, `undefined`, `unknown`, `Dict`,
   `DictKey`, `Effects`, `Proof`, `Request`, and `Response`. These are never
   imported, and a declaration MUST NOT redefine one (ZTS019). `Result` and
-  `JsonValue` are not ambient: a handler that names either declares it with
-  `structural`, and `zttp:result` and `zttp:json` export no type. `HtmlNode`
-  is not a type of the profile. A module-defined type is named through an
-  ordinary `import type` from its module: `FetchOptions` comes from
-  `zttp:fetch`, and an unimported `FetchOptions` is refused (ZTS065).
+  `JsonValue` are not ambient. `Result` comes from `zttp:result` through
+  `import type { Result } from "zttp:result";`, and a handler that names
+  `JsonValue` declares it with `structural`, because `zttp:json` exports no
+  type. `HtmlNode` is not a type of the profile. A module-defined type is
+  named through an ordinary `import type` from its module: `FetchOptions` and
+  `FetchError` come from `zttp:fetch`, and an unimported one is refused
+  (ZTS065).
 - Ambient value names: the closed set `Array`, `Date`, `Math`, `Number`,
   `Object`, `Request`, `Response`, `String`, `assert`, `h`, `hole`, `isBytes`,
   `isDict`, `parseFloat`, `parseInt`, `range`, `renderToString`,
@@ -1425,9 +1427,10 @@ collectAll<T, E>(
 ): Result<readonly T[], E>
 ```
 
-The type is not ambient, and `zttp:result` exports no type: a handler that
-names `Result<T, E>` declares the alias above with `structural` (`Result<...>`
-with no declaration is refused with ZTS065). Constructors and combinators are
+The type is not ambient, and `zttp:result` exports it: a handler names
+`Result<T, E>` with `import type { Result } from "zttp:result";` (`Result<...>`
+with no import is refused with ZTS065, and a `structural` declaration of the
+imported name is refused with ZTS019). Constructors and combinators are
 statically named imports from the zero-capability `zttp:result` module. `collectAll` is
 first-error: it returns the first `err` in order, matching `andThen`
 short-circuit semantics.
@@ -2565,6 +2568,7 @@ shape rather than a second delivery backlog.
 
 ```ts
 import { err, ok } from "zttp:result";
+import type { Result } from "zttp:result";
 
 structural DivideError = { kind: "division-by-zero" };
 
@@ -2672,6 +2676,7 @@ import { env } from "zttp:env";
 import { fetch } from "zttp:fetch";
 import { err } from "zttp:result";
 import type { FetchError } from "zttp:fetch";
+import type { Result } from "zttp:result";
 
 structural LoadError =
   | FetchError

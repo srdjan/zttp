@@ -181,8 +181,10 @@ const refusal_rows_a = [_]RefusalRow{
             r("import type", top("import type { Nope } from \"zttp:fetch\";")),
             r("import type", top("import type { FetchOptions, Nope } from \"zttp:fetch\";")),
             r("import type", top("import type { Nope } from \"zttp:collections\";")),
+            r("import type", top("import type { Nope } from \"zttp:result\";")),
+            r("import type", top("import type { FetchError, Nope } from \"zttp:fetch\";")),
         },
-        .clean = c(top("import type { FetchOptions } from \"zttp:fetch\";\nfunction g(o: FetchOptions): number {\n  return 1;\n}")),
+        .clean = c(top("import type { Result } from \"zttp:result\";\nimport type { FetchError, FetchOptions } from \"zttp:fetch\";\nfunction g(o: FetchOptions, e: FetchError, r: Result<number, FetchError>): Result<number, FetchError> {\n  return r;\n}")),
     },
     .{
         .key = "`namespace` and `module` declarations",
@@ -1443,6 +1445,23 @@ const refusal_rows_b = [_]RefusalRow{
         .key = "`FetchOptions` with no import",
         .refused = &.{r("FetchOptions", paramText("FetchOptions"))},
         .clean = c(top("import type { FetchOptions } from \"zttp:fetch\";\nfunction g(o: FetchOptions): number {\n  return 1;\n}")),
+    },
+    .{
+        .key = "`FetchError` and `Result` with no import",
+        .refused = &.{
+            r("FetchError", paramText("FetchError")),
+            r("Result", paramText("Result<number, string>")),
+        },
+        .clean = c(top("import type { FetchError } from \"zttp:fetch\";\nimport type { Result } from \"zttp:result\";\nfunction g(e: FetchError, r: Result<number, string>): number {\n  return 1;\n}")),
+    },
+    .{
+        .key = "A `structural` declaration of `Result` beside an `import type` of it",
+        .refused = &.{
+            r("structural", top("import type { Result } from \"zttp:result\";\nstructural Result<T, E> = { value: T };")),
+            r("Result", top("import type { Result } from \"zttp:result\";\nstructural Result<T, E> = { value: T };")),
+            r("import type", top("import type { Result } from \"zttp:result\";\nstructural Result<T, E> = { value: T };")),
+        },
+        .clean = c(top("import type { Result } from \"zttp:result\";\nstructural Outcome<T, E> = { value: T };\nfunction g(r: Result<number, string>): number {\n  return 1;\n}")),
     },
     .{
         .key = "A `structural` or `nominal` declaration of an ambient type name or of a name that an `import type` binds, such as `structural Request = number;`, `structural string = number;`, `nominal Proof<T, P> = string;`, and `structural FetchOptions = number;` beside an import of it",

@@ -3,6 +3,9 @@
   "specifier": "zttp:result",
   "source": "packages/zts/src/modules/data/result_mod.zig",
   "requiredCapabilities": [],
+  "typeExports": [
+    "Result"
+  ],
   "exports": [
     {
       "name": "ok",

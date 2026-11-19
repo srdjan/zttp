@@ -358,9 +358,10 @@ publishes the list as `payload.ambient_names.types`. `DictKey` is the bound of
 every `Dict` key: `string`, `number`, or a `nominal` type over one of them.
 
 `Result`, `JsonValue`, and `HtmlNode` are not ambient. A handler that names
-`Result` or `JsonValue` declares it with `structural`. A module type, such as
-`FetchOptions`, is imported with `import type { FetchOptions } from
-"zttp:fetch";`, and an unimported `FetchOptions` gets ZTS065. A `structural` or
+`JsonValue` declares it with `structural`. A module type, such as
+`FetchOptions`, `FetchError`, or `Result`, is imported with `import type {
+FetchOptions } from "zttp:fetch";` or `import type { Result } from
+"zttp:result";`, and an unimported one gets ZTS065. A `structural` or
 `nominal` declaration cannot redefine an ambient type name or a name that an
 `import type` binds: `structural Request = number;` gets ZTS019.
 
