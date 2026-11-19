@@ -991,7 +991,10 @@ const refusal_rows_b = [_]RefusalRow{
     },
     .{
         .key = "A write to a `readonly` field",
-        .refused = &.{r("readonly", top("structural R = { readonly a: number };\nfunction g(r: R): number {\n  r.a = 2;\n  return r.a;\n}"))},
+        .refused = &.{
+            r("readonly", top("structural R = { readonly a: number };\nfunction g(r: R): number {\n  r.a = 2;\n  return r.a;\n}")),
+            r("readonly", top("structural In = { readonly a: number };\nstructural Out = { inner: In };\nfunction g(o: Out): number {\n  o.inner.a = 2;\n  return o.inner.a;\n}")),
+        },
         .clean = c(top("structural R = { readonly a: number };\nfunction g(r: R): R {\n  return { a: 2 };\n}")),
     },
     .{

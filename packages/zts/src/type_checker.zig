@@ -1952,26 +1952,31 @@ pub const TypeChecker = struct {
                     const member = self.ir_view.getMember(asgn.target) orelse return;
                     self.recordAbsentReceiver(asgn.target, member.object);
                     const obj_tag = self.ir_view.getTag(member.object) orelse return;
-                    if (obj_tag == .identifier) {
+                    // A name reads its type through the narrowing overlay, not
+                    // `binding_types`: the readonly record is usually reached
+                    // by a guard (`if (v !== undefined) { v.id = "x"; }`), and
+                    // reading the declaration finds the nullable node instead.
+                    // Any other receiver, such as `o.inner` in `o.inner.a = 2`,
+                    // reads its inferred type; checking only a name let a write
+                    // through a nested receiver pass in silence.
+                    const receiver_type: ?TypeIndex = if (obj_tag == .identifier) blk: {
                         const binding = self.ir_view.getBinding(member.object) orelse return;
-                        // Through the narrowing overlay, not `binding_types`:
-                        // the readonly record is usually reached by a guard
-                        // (`if (v !== undefined) { v.id = "x"; }`), and reading
-                        // the declaration finds the nullable node instead. A
-                        // non-record tag yields no fields, so the write to a
-                        // readonly field passed in silence.
-                        if (self.currentBindingType(binding)) |obj_type| {
-                            const prop_name = self.resolveAtomName(member.property) orelse return;
-                            if (self.env.pool.lookupRecordField(obj_type, prop_name)) |field| {
-                                if (field.readonly) {
-                                    self.addDiagnostic(.{
-                                        .severity = .err,
-                                        .kind = .readonly_mutation,
-                                        .node = node,
-                                        .message = "cannot assign to readonly property",
-                                        .help = "build a new record with the changed field, or remove the readonly modifier",
-                                    });
-                                }
+                        break :blk self.currentBindingType(binding);
+                    } else blk: {
+                        const inferred = self.env.resolveRef(self.inferType(member.object));
+                        break :blk if (inferred == null_type_idx) null else inferred;
+                    };
+                    if (receiver_type) |obj_type| {
+                        const prop_name = self.resolveAtomName(member.property) orelse return;
+                        if (self.env.pool.lookupRecordField(obj_type, prop_name)) |field| {
+                            if (field.readonly) {
+                                self.addDiagnostic(.{
+                                    .severity = .err,
+                                    .kind = .readonly_mutation,
+                                    .node = node,
+                                    .message = "cannot assign to readonly property",
+                                    .help = "build a new record with the changed field, or remove the readonly modifier",
+                                });
                             }
                         }
                     }
@@ -14110,4 +14115,20 @@ test "builtin argument: an argument with no type is admitted" {
     try expectNoDiagnostics(
         \\function f(): number { const n: number = Math.abs(nothing()); return n; }
     );
+}
+
+test "a write to a readonly field is caught through a nested receiver" {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator,
+        \\structural In = { readonly a: number };
+        \\structural Out = { inner: In };
+        \\function g(o: Out): number {
+        \\  o.inner.a = 2;
+        \\  return o.inner.a;
+        \\}
+    , false);
+    defer freeSeenDiagnostics(allocator, seen);
+    try std.testing.expectEqual(@as(usize, 1), seen.len);
+    try std.testing.expectEqual(DiagnosticKind.readonly_mutation, seen[0].kind);
+    try std.testing.expectEqualStrings("cannot assign to readonly property", seen[0].message);
 }
