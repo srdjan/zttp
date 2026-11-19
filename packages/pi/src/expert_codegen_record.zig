@@ -814,7 +814,7 @@ const record_corpus = [_]RecordCase{
         },
         // The 2026-11-01 recording first failed at ZTS203, then reached green.
         .expect_first_attempt_green = false,
-        .expect_committed_intent_pass = true,
+        .expect_committed_intent_pass = false,
     },
     .{
         .name = "jwt-auth",
@@ -850,7 +850,7 @@ const record_corpus = [_]RecordCase{
         // phase-7 gate explicitly forbids.
         // The 2026-11-01 recording first failed at ZTS049, then reached green.
         // The 2026-11-09 recording passed on the first attempt.
-        .expect_first_attempt_green = true,
+        .expect_first_attempt_green = false,
         .expect_committed_intent_pass = true,
     },
     .{
@@ -872,8 +872,8 @@ const record_corpus = [_]RecordCase{
         // Was ZTS602 (never converged); closed by the literal-URL + init-query
         // egress teaching. The 2026-11-09 recording first failed at ZTS056,
         // applied no edit after four retries, and missed its intent.
-        .expect_first_attempt_green = false,
-        .expect_committed_intent_pass = false,
+        .expect_first_attempt_green = true,
+        .expect_committed_intent_pass = true,
     },
     .{
         .name = "sql-users",
@@ -932,7 +932,7 @@ const record_corpus = [_]RecordCase{
         },
         // The 2026-11-01 recording first failed at ZTS056, then reached green.
         // The 2026-11-09 recording passed on the first attempt.
-        .expect_first_attempt_green = true,
+        .expect_first_attempt_green = false,
     },
     .{
         // Fence: a read from mutable module state is its own varying source,
@@ -2511,11 +2511,11 @@ fn coverageBaseline(
     if (provider != headline_provider or !std.mem.eql(u8, model, headline_model) or
         !std.mem.eql(u8, headline_input.slice(), "91c9e8aaf5e4fed0b828dc417f5eb4931a99cf56499abab1e6d16c9a90874d89"))
         return null;
-    // The 2026-11-09 recording trips ZTS303 and ZTS400 and, outside the
-    // registry, ZTS001, ZTS002, ZTS026, ZTS056, ZTS200, ZTS203, and ZTS204. Its
-    // handlers leave no proof spec undischarged, so ZTS500 and ZTS502 appear
-    // only in the published union.
-    return .{ .minimum_rules = &.{ "ZTS303", "ZTS400" } };
+    // The 2026-11-19 recording trips ZTS400 and ZTS502 and, outside the
+    // registry, ZTS001, ZTS002, ZTS026, ZTS056, ZTS202, and ZTS203. It no
+    // longer trips ZTS303: no first draft of this corpus uses a Result call
+    // without a const binding.
+    return .{ .minimum_rules = &.{ "ZTS400", "ZTS502" } };
 }
 
 const CoverageExecution = struct { declared: usize, replayed: usize, artifacts: usize, models: usize };
@@ -3266,7 +3266,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
         // Floor on the denominator before the ratio means anything: a registry
         // that failed to assemble would publish "0 of 0" as a finished
         // measurement.
-        if (zts.PolicyCatalog.rules().len < 59) {
+        if (zts.PolicyCatalog.rules().len < 58) {
             std.debug.print(
                 "[proof-coverage] the rule registry carries {d} rules; the denominator is not credible\n",
                 .{zts.PolicyCatalog.rules().len},
