@@ -241,6 +241,7 @@ boolean to text.
 | An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, or `xs.indexOf(v, i)`, and a callback with a third parameter, such as `xs.map((x, i, all) => x)` | ZTS202 | The arguments of spec 6.5: `xs.slice(start, end)`, `xs.reduce(f, init)`, and a callback `(value, index)` or `(acc, value, index)` |
 | `join` on an array of non-strings, such as `[1, 2].join("")` | ZTS203 | Convert each element with `String` first |
 | A builtin argument of a type that the builtin does not take, such as `Math.pow(true, 2)` or `Number(true)` | ZTS203 | Pass the parameter type. Narrow a value that may be `undefined` first |
+| A builtin call with fewer arguments than the builtin requires or more than it accepts, such as `Math.floor()`, `Math.pow(2)`, `Object.keys()`, or `Math.floor(1, 2)` | ZTS202 | Pass the arguments that the builtin takes |
 | A numeric index read on a string, such as `s[0]` | ZTS201 | `s.charAt(i)` or `s.slice(i, i + 1)` |
 | An index read or a `length` read on `Bytes`, such as `b[0]` and `b.length` | ZTS201 | `byteAt(b, i)` or `bytesLength(b)` from `zttp:bytes` |
 | A member call on `unknown` or on a value with no known type | ZTS201 | Narrow with `typeof` or `isDict` first |
@@ -400,6 +401,7 @@ capsule, the default proof profile then reports ZTS500.
 | A Response init member other than `status`, such as `headers` | ZTS203 | `{ status: 201 }`. Response headers are not supported |
 | A Response init that is not a record, or a `status` that is not a number | ZTS203 | `Response.text("x", { status: 404 })` |
 | `Response.redirect(url, { status: 301 })` | ZTS203 | `Response.redirect(url, 301)` |
+| A `Response.text` or `Response.html` body, or a `Response.redirect` URL, that is not a string, such as `Response.text(1)` | ZTS203 | `Response.text(String(n))`. Narrow a value that may be `undefined` first |
 | A `Response.json` payload that JSON cannot carry, such as `Dict<number, string>` | ZTS213 | A string-keyed payload |
 | `stringifyJson` of a value that JSON cannot carry, such as a function or a `Dict<number, string>` | ZTS213 | A string-keyed payload. Call a function rather than encoding it |
 | A member or index read on the `.value` of `requestJson(req)` | ZTS201 | `decodeJson` with a schema, or `isDict(v)` and `dictGet(v, key)` |

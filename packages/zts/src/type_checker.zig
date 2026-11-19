@@ -36,6 +36,8 @@ const response_init_record_help_text = "Pass the status in an init record, for e
 const response_init_status_help_text = "Write the status as a number, for example `{ status: 201 }`, or remove this member.";
 /// Help for a ZTS203 on a `Response.redirect` status that is not a number.
 const response_redirect_status_help_text = "Pass the status as a number, for example `Response.redirect(url, 301)`. Response.redirect takes no init record.";
+/// Help for a ZTS203 on the first argument of `Response.text`, `Response.html`, and `Response.redirect`.
+const response_string_help_text = "Pass a string, for example `Response.text(String(n))`. The runtime sends an empty body, or an empty `Location`, for any other value.";
 /// The one member that a `Response` helper reads from its init.
 const response_init_status = "status";
 /// What the type of a `Response` helper init holds that the runtime does not read.
@@ -6741,6 +6743,50 @@ pub const TypeChecker = struct {
         self.reportIfUnencodable(arg_idx, "Response.json");
     }
 
+    /// `Response.text(body)`, `Response.html(body)`, and `Response.redirect(url)`:
+    /// refuse a first argument whose type is known and is not a string.
+    ///
+    /// The runtime reads a string and sends an empty body, or an empty
+    /// `Location`, for any other value (`http.zig` `getStringArgWithCtx`), with
+    /// status 200 or the redirect status. An argument with no type is admitted,
+    /// as for every builtin row.
+    fn checkResponseStringArg(self: *TypeChecker, call: Node.CallExpr) void {
+        const method = self.responseConstructorName(call) orelse return;
+        const requirement: []const u8 = if (std.mem.eql(u8, method, "redirect"))
+            "url must be a string"
+        else if (std.mem.eql(u8, method, "text") or std.mem.eql(u8, method, "html") or std.mem.eql(u8, method, "rawJson"))
+            "body must be a string"
+        else
+            return;
+        // With no argument the runtime sends an empty body or an empty
+        // `Location`, so the first argument is required.
+        if (call.args_count == 0) {
+            const message: []const u8 = if (std.mem.eql(u8, method, "redirect"))
+                "Response.redirect takes a url argument"
+            else if (std.mem.eql(u8, method, "text"))
+                "Response.text takes a body argument"
+            else if (std.mem.eql(u8, method, "html"))
+                "Response.html takes a body argument"
+            else
+                "Response.rawJson takes a body argument";
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .arg_count_mismatch,
+                .node = call.callee,
+                .message = message,
+                .help = response_string_help_text,
+            });
+            return;
+        }
+
+        const first = self.ir_view.getListIndex(call.args_start, 0);
+        if (self.ir_view.getTag(first) == .spread) return;
+        const arg_type = self.inferType(first);
+        if (arg_type == null_type_idx or self.env.pool.mentionsError(arg_type)) return;
+        if (self.rowParamAdmits(.string, arg_type)) return;
+        self.reportResponseArgType(first, method, requirement, arg_type, response_string_help_text);
+    }
+
     /// `Response.json(body, init)`: refuse a second argument that the runtime
     /// does not read.
     ///
@@ -8159,15 +8205,22 @@ pub const TypeChecker = struct {
         };
     }
 
-    /// Report ZTS203 for each argument of a builtin row call whose type is
-    /// known and is not what its row parameter admits. The runtime returns
-    /// `undefined` for such an argument, so the call has no result type.
-    fn checkBuiltinRowArgs(self: *TypeChecker, call: Node.CallExpr) void {
+    /// Report ZTS202 for a builtin row call with fewer arguments than the row
+    /// requires or more than it accepts, and ZTS203 for each argument whose
+    /// type is known and is not what its row parameter admits. The runtime
+    /// returns `undefined` for such a call, so the call has no result type.
+    ///
+    /// A call with a spread argument has no known count, and an `Array.prototype`
+    /// call has its argument list checked by `reportArrayCallShape` (spec 6.5).
+    fn checkBuiltinRowArgs(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
         const target = self.builtinCallee(call) orelse return;
         const row = target.row;
         const pool = self.env.pool;
         const scope: []const u8 = if (std.mem.eql(u8, row.scope, "global")) "" else row.scope;
         const dot: []const u8 = if (scope.len == 0) "" else ".";
+        if (!row.acceptsCount(call.args_count) and !self.hasSpreadArg(call) and !std.mem.eql(u8, row.scope, "Array.prototype")) {
+            return self.reportBuiltinRowCount(node, row, scope, dot, call.args_count);
+        }
         for (0..call.args_count) |position| {
             const arg = self.ir_view.getListIndex(call.args_start, @intCast(position));
             if (self.ir_view.getTag(arg) == .spread) continue;
@@ -8198,13 +8251,48 @@ pub const TypeChecker = struct {
         }
     }
 
+    fn hasSpreadArg(self: *const TypeChecker, call: Node.CallExpr) bool {
+        for (0..call.args_count) |position| {
+            if (self.ir_view.getTag(self.ir_view.getListIndex(call.args_start, @intCast(position))) == .spread) return true;
+        }
+        return false;
+    }
+
+    fn reportBuiltinRowCount(
+        self: *TypeChecker,
+        node: NodeIndex,
+        row: builtin_results.Row,
+        scope: []const u8,
+        dot: []const u8,
+        count: usize,
+    ) void {
+        const max = row.params.len;
+        const printed = if (row.rest != null)
+            self.allocator.print("{s}{s}{s} takes at least {d} argument(s), got {d}", .{ scope, dot, row.name, row.min_args, count })
+        else if (row.min_args == max)
+            self.allocator.print("{s}{s}{s} takes {d} argument(s), got {d}", .{ scope, dot, row.name, max, count })
+        else
+            self.allocator.print("{s}{s}{s} takes {d} to {d} argument(s), got {d}", .{ scope, dot, row.name, row.min_args, max, count });
+        if (printed) |msg| {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .arg_count_mismatch,
+                .node = node,
+                .message = msg,
+                .help = "pass the arguments that the builtin takes; the runtime returns undefined for any other count",
+                .allocated = true,
+            });
+        } else |_| self.markAllocationFailure();
+    }
+
     fn checkCallArgs(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
         // Before the branches on the callee tag: `responseConstructorName`
         // reads every spelling of the callee.
         self.checkResponseJsonPayload(call);
         self.checkResponseInit(call);
-        self.checkBuiltinRowArgs(call);
+        self.checkResponseStringArg(call);
+        self.checkBuiltinRowArgs(node, call);
         if (callee_tag == .identifier) {
             self.checkModuleEncodableArgs(call);
             self.checkModuleBooleanPredicate(call);

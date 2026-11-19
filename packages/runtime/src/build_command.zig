@@ -3410,7 +3410,7 @@ const refused_by_production_source =
     \\import { env } from "zttp:env";
     \\function handler(req: Request): Response {
     \\  const v = env("SECRET_KEY");
-    \\  return Response.text(v === undefined ? "none" : v);
+    \\  return Response.text(v ?? "none");
     \\}
 ;
 

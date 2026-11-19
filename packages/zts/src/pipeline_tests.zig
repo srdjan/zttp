@@ -4088,11 +4088,11 @@ test "builtin result: an argument that may be undefined is ZTS203 and adds no re
     , "Math.floor argument 1 must be a number, got 'number | undefined'");
 }
 
-test "builtin result: a missing argument leaves the result untyped" {
-    try expectNoTypeDiagnostic(
+test "builtin result: a missing argument is ZTS202 and adds no result type" {
+    try expectOneCountMismatch(
         \\structural Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = Math.floor(); return 0; }
-    );
+    , "Math.floor takes 1 argument(s), got 0");
 }
 
 test "builtin result: split with a separator that is not a string is ZTS203 and adds no result type" {
@@ -7369,4 +7369,94 @@ test "a top-level initializer with a builtin call that takes a non-function argu
         \\  return Response.text([a, String(n)].join(""));
         \\}
     , Probe.run);
+}
+
+fn expectOneCountMismatch(source: []const u8, comptime message: []const u8) !void {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.typeDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(type_checker_mod.DiagnosticKind.arg_count_mismatch, diagnostics[0].kind);
+            try testing.expectEqualStrings(message, diagnostics[0].message);
+        }
+    };
+    try withSession(testing.allocator, source, Probe.run);
+}
+
+test "builtin row call: Math.floor with no argument is ZTS202" {
+    try expectOneCountMismatch(
+        \\function f(): number { const r: number = Math.floor(); return r; }
+    , "Math.floor takes 1 argument(s), got 0");
+}
+
+test "builtin row call: Math.pow with one argument is ZTS202" {
+    try expectOneCountMismatch(
+        \\function f(): number { const r: number = Math.pow(2); return r; }
+    , "Math.pow takes 2 argument(s), got 1");
+}
+
+test "builtin row call: Object.keys with no argument is ZTS202" {
+    try expectOneCountMismatch(
+        \\function f(): string[] { const k: string[] = Object.keys(); return k; }
+    , "Object.keys takes 1 argument(s), got 0");
+}
+
+test "builtin row call: Math.floor with two arguments is ZTS202" {
+    try expectOneCountMismatch(
+        \\function f(): number { const r: number = Math.floor(1.5, 2); return r; }
+    , "Math.floor takes 1 argument(s), got 2");
+}
+
+test "builtin row call: String.prototype.split with three arguments is ZTS202" {
+    try expectOneCountMismatch(
+        \\function f(s: string): string[] { const p: string[] = s.split(",", 2, 3); return p; }
+    , "String.prototype.split takes 0 to 2 argument(s), got 3");
+}
+
+test "builtin row call: an argument count in range is admitted" {
+    try expectNoTypeDiagnostic(
+        \\function f(s: string): number { const a: number = Math.floor(1.5); const b: number = Math.pow(2, 3); const c: string[] = s.split(","); const d: number = Math.max(); const e: string[] = Object.keys({ a: 1 }); return a + b + c.length + d + e.length; }
+    );
+}
+
+test "Response.text with a number body is ZTS203" {
+    try expectOneArgMismatch(
+        \\function f(): Response { return Response.text(1); }
+    , "Response.text body must be a string, got 'number'");
+}
+
+test "Response.text with a body that may be undefined is ZTS203" {
+    try expectOneArgMismatch(
+        \\function f(u: string | undefined): Response { return Response.text(u); }
+    , "Response.text body must be a string, got 'string | undefined'");
+}
+
+test "Response.html with an array body is ZTS203" {
+    try expectOneArgMismatch(
+        \\function f(): Response { return Response.html([1, 2]); }
+    , "Response.html body must be a string, got '[1, 2]'");
+}
+
+test "Response.redirect with a number url is ZTS203" {
+    try expectOneArgMismatch(
+        \\function f(): Response { return Response.redirect(1, 301); }
+    , "Response.redirect url must be a string, got 'number'");
+}
+
+test "Response helpers with a string first argument are admitted" {
+    try expectNoTypeDiagnostic(
+        \\function f(n: number): Response { const a = Response.text("x"); const b = Response.text(String(n)); const c = Response.html("<p>x</p>"); const d = Response.redirect("/a", 301); return d; }
+    );
+}
+
+test "Response.rawJson with a number body is ZTS203" {
+    try expectOneArgMismatch(
+        \\function f(): Response { return Response.rawJson(1); }
+    , "Response.rawJson body must be a string, got 'number'");
+}
+
+test "Response.text with no body is ZTS202" {
+    try expectOneCountMismatch(
+        \\function f(): Response { return Response.text(); }
+    , "Response.text takes a body argument");
 }

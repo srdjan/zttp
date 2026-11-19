@@ -936,6 +936,16 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("function g(): number {\n  return Math.pow(2, 3) + Number(\"12\");\n}")),
     },
     .{
+        .key = "A builtin call with fewer arguments than the builtin requires or more than it accepts, such as `Math.floor()`, `Math.pow(2)`, `Object.keys()`, or `Math.floor(1, 2)`",
+        .refused = &.{
+            r("Math.floor()", top("function g(): number {\n  return Math.floor();\n}")),
+            r("Math.pow(2)", top("function g(): number {\n  return Math.pow(2);\n}")),
+            r("Object.keys()", top("function g(): string[] {\n  return Object.keys();\n}")),
+            r("Math.floor(1, 2)", top("function g(): number {\n  return Math.floor(1, 2);\n}")),
+        },
+        .clean = c(top("function g(): number {\n  return Math.floor(1.5) + Math.pow(2, 3) + Object.keys({ a: 1 }).length;\n}")),
+    },
+    .{
         .key = "A numeric index read on a string, such as `s[0]`",
         .refused = &.{r("s[0]", body("  const s = \"abc\";\n  const c = s[0];"))},
         .clean = c(body("  const s = \"abc\";\n  const c = s.charAt(0);")),
@@ -1269,6 +1279,16 @@ const refusal_rows_b = [_]RefusalRow{
         .key = "`Response.redirect(url, { status: 301 })`",
         .refused = &.{r("Response.redirect(url, { status: 301 })", body("  const a = Response.redirect(\"/x\", { status: 301 });"))},
         .clean = c(body("  const a = Response.redirect(\"/x\", 301);")),
+    },
+    .{
+        .key = "A `Response.text` or `Response.html` body, or a `Response.redirect` URL, that is not a string, such as `Response.text(1)`",
+        .refused = &.{
+            r("Response.text(1)", body("  const a = Response.text(1);")),
+            r("Response.text", body("  const a = Response.text(1);")),
+            r("Response.html", top("function g(u: string | undefined): Response {\n  return Response.html(u);\n}")),
+            r("Response.redirect", body("  const a = Response.redirect(1, 301);")),
+        },
+        .clean = c(body("  const a = Response.text(String(1));\n  const b = Response.redirect(\"/a\", 301);")),
     },
     .{
         .key = "A `Response.json` payload that JSON cannot carry, such as `Dict<number, string>`",
