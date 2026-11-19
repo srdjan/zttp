@@ -1451,6 +1451,19 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("import type { FetchOptions } from \"zttp:fetch\";\nfunction g(o: FetchOptions): number {\n  return 1;\n}")),
     },
     .{
+        .key = "A `structural` or `nominal` declaration of an ambient type name or of a name that an `import type` binds, such as `structural Request = number;`, `structural string = number;`, `nominal Proof<T, P> = string;`, and `structural FetchOptions = number;` beside an import of it",
+        .refused = &.{
+            r("structural", top("structural Request = number;")),
+            r("nominal", top("nominal Request = number;")),
+            r("import type", top("import type { FetchOptions } from \"zttp:fetch\";\nnominal FetchOptions = number;")),
+            r("structural Request = number;", top("structural Request = number;")),
+            r("structural string = number;", top("structural string = number;")),
+            r("nominal Proof<T, P> = string;", top("nominal Proof<T, P> = string;")),
+            r("structural FetchOptions = number;", top("import type { FetchOptions } from \"zttp:fetch\";\nstructural FetchOptions = number;")),
+        },
+        .clean = c(top("structural MyRequest = { id: string };\nfunction g(r: MyRequest): number {\n  return 1;\n}")),
+    },
+    .{
         .key = "A generic default, such as `function f<T = string>(a: T): T`",
         .refused = &.{
             r("function f<T = string>(a: T): T", top("function f<T = string>(a: T): T {\n  return a;\n}")),

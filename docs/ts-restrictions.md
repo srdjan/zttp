@@ -332,6 +332,7 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | `readonly` on a record type, such as `readonly { a: number }` | ZTS001 | The record type |
 | A type name that is not declared, imported, or ambient, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error`, `object`, and the utility types `Partial<T>`, `Required<T>`, `Pick<T, K>`, `Omit<T, K>`, and `Readonly<T>` | ZTS065 | A declared or imported type, or an ambient type from `meta` |
 | `FetchOptions` with no import | ZTS065 | Write `import type { FetchOptions } from "zttp:fetch";` |
+| A `structural` or `nominal` declaration of an ambient type name or of a name that an `import type` binds, such as `structural Request = number;`, `structural string = number;`, `nominal Proof<T, P> = string;`, and `structural FetchOptions = number;` beside an import of it | ZTS019 | A different name, such as `structural MyRequest = { id: string };` |
 
 The ZTS065 check counts a function type parameter as declared in the whole
 file, so a stray `T` outside its function passes it. The type checker then

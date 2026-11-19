@@ -182,6 +182,20 @@ pub fn refuseUndeclaredTypes(
                 .{ refusal.module, refusal.name },
                 "import a type that the module exports",
             ),
+            .ambient_redeclared => p.errors.addErrorFmt(
+                .duplicate_binding,
+                token.location(),
+                "type name `{s}` is ambient and cannot be declared again",
+                .{refusal.name},
+                "write a different name",
+            ),
+            .imported_redeclared => p.errors.addErrorFmt(
+                .duplicate_binding,
+                token.location(),
+                "type name `{s}` is imported and cannot be declared again",
+                .{refusal.name},
+                "write a different name",
+            ),
         }
     }
     if (p.errors.outOfMemory()) return error.OutOfMemory;

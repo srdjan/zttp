@@ -12,6 +12,11 @@
 //! builtin alias that `module_types.populateModuleTypes` registers for the
 //! `fetch` signature (spec section 7.1).
 //!
+//! A `structural` or `nominal` declaration may not take an ambient type name
+//! or a name that an `import type` binds: the declaration would shadow a type
+//! that the runtime or the module owns, and the handler would pass the check
+//! and fail at the first request (ZTS019, at the declared name).
+//!
 //! A type parameter of a function is in scope for the whole file in this pass,
 //! because the store does not record where a function body ends. A type
 //! parameter of a `structural` or `nominal` declaration is in scope inside that
@@ -61,6 +66,10 @@ pub const RefusalKind = enum {
     undeclared_name,
     /// A name in an `import type` that the module does not export (ZTS207).
     unexported_type,
+    /// A declaration named like an ambient type (ZTS019).
+    ambient_redeclared,
+    /// A declaration named like an `import type` binding (ZTS019).
+    imported_redeclared,
 };
 
 pub const Refusal = struct {
@@ -177,12 +186,15 @@ pub fn undeclared(
         try appendTypeImports(allocator, module.raw_span.text(store.source), module.raw_span.start, &type_imports);
     }
 
+    var type_bound: std.ArrayList([]const u8) = .empty;
+    defer type_bound.deinit(allocator);
     var refusals: std.ArrayList(Refusal) = .empty;
     errdefer refusals.deinit(allocator);
     for (type_imports.items) |type_import| {
         const binding = builtin_modules.fromSpecifier(type_import.module) orelse continue;
         if (containsName(binding.type_exports, type_import.imported)) {
             try imported.append(allocator, type_import.local);
+            try type_bound.append(allocator, type_import.local);
         } else {
             try refusals.append(allocator, .{
                 .name = type_import.imported,
@@ -191,6 +203,16 @@ pub fn undeclared(
                 .module = type_import.module,
             });
         }
+    }
+    for (store.declarations.items) |declaration| {
+        const name = declaration.name_span.text(store.source);
+        const kind: RefusalKind = if (containsName(&known_types.ambient, name))
+            .ambient_redeclared
+        else if (containsName(type_bound.items, name))
+            .imported_redeclared
+        else
+            continue;
+        try refusals.append(allocator, .{ .name = name, .offset = declaration.name_span.start, .kind = kind });
     }
     for (store.nodes.items) |node| {
         const span = switch (node.data) {

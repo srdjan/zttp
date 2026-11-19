@@ -3416,6 +3416,14 @@ const parity_refused_rows = [_]ParityRow{
         .file = "entry.ts",
     },
     .{
+        .label = "entry declares a type with an ambient type name",
+        .entry = "structural Request = number;\n" ++
+            "export function handler(req: Request): Response {\n  return Response.text(\"x\");\n}\n",
+        .files = &.{},
+        .code = "ZTS019",
+        .file = "entry.ts",
+    },
+    .{
         .label = "dependency names a type that nothing declares",
         .entry = parityEntry("result_safe"),
         .files = &.{.{ .name = "lib.ts", .source = "function g(o: Nope): number {\n  return 1;\n}\nexport function f(): string {\n  return \"x\";\n}\n" }},
