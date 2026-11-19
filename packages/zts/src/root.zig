@@ -989,7 +989,7 @@ test "stable RepairPolicy exposes validator catalog and discharge" {
 
 /// Version information
 pub const version = struct {
-    pub const string = "0.27.0";
+    pub const string = "0.27.1";
 };
 
 /// Create a new standalone context (not pooled)

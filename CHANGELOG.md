@@ -1,137 +1,446 @@
 # Changelog
 
-Changes to zttp. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). SemVer kicks in at 1.0; until then, minor bumps may include breaking changes (called out in the release notes).
+Changes to zttp. Format:
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). SemVer kicks in at
+1.0; until then, minor bumps may include breaking changes (called out in the
+release notes).
 
 Entries for released versions keep the identifiers that version shipped. A
 release record describes what it shipped, not the repository's current
 vocabulary, so the pre-rename names below stay as written.
 
-For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+For releases prior to v0.16 see git tags and
+[RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
 
 ## [Unreleased]
 
 ### Added
 
-- `zttp.json` now accepts `"requiredProperties": ["cost_bounded", ...]`. `zttp expert` applies no change set whose candidate fails to prove every listed property, in every approval mode including `--yes`. The rejection code is `required_property_lost`. The rule is absolute: when the workspace already lacks a required property, every change set is rejected until a candidate proves it or the name leaves the list. An unknown name rejects every change set and the message suggests the nearest valid name. Only `zttp expert` reads the key. An older zttp ignores it. The REPL command `/contract` prints a card of the entry, routes, proven and required properties, env reads, and egress hosts. It asks `Require the proven properties? [y/N]`, and `y` adds the proven names to `requiredProperties`. `/contract drop <name>` removes one name.
+- `zttp.json` now accepts `"requiredProperties": ["cost_bounded", ...]`.
+  `zttp expert` applies no change set whose candidate fails to prove every
+  listed property, in every approval mode including `--yes`. The rejection code
+  is `required_property_lost`. The rule is absolute: when the workspace already
+  lacks a required property, every change set is rejected until a candidate
+  proves it or the name leaves the list. An unknown name rejects every change
+  set and the message suggests the nearest valid name. Only `zttp expert` reads
+  the key. An older zttp ignores it. The REPL command `/contract` prints a card
+  of the entry, routes, proven and required properties, env reads, and egress
+  hosts. It asks `Require the proven properties? [y/N]`, and `y` adds the proven
+  names to `requiredProperties`. `/contract drop <name>` removes one name.
 
 ### Changed
 
-- The compiler now refuses each form that `docs/ts-restrictions.md` lists, with the listed code, in `zts check` and in every build path. A source that passed before can now be refused. The file has no gap table, and `zig build test-ts-restrictions` fails when the file and the compiler disagree.
-- New refusals in statements and declarations: a body that is not a block (ZTS070), a function declaration that is not at module level (ZTS071), an arrow that is not a direct call argument (ZTS072), a callback that writes a binding of an enclosing function (ZTS073), and a top-level statement other than a registration call (ZTS074).
-- New refusals of names: a second declaration of a name in one scope and a type declaration that redefines an ambient or imported type name (ZTS019), an assignment to a `const` (ZTS066), a reserved word as a value name (ZTS067), an assignment to a parameter (ZTS068), and a name that an enclosing or nested scope declares (ZTS069).
-- New refusals in syntax: bitwise operators, `**`, `0b`, `0o`, a number that starts with a dot, `declare`, `abstract`, `x!`, `<T>x`, overloads, tagged templates, comma expressions, generic defaults, labeled jumps, a C-style `for`, and a `match` scrutinee that is not a name or a member path.
-- New refusals in types: a type name that is not declared, imported, or ambient, which includes the utility types (ZTS065), a generic alias argument that breaks its parameter's bound (ZTS209), a readonly field, element, or tuple write (ZTS215), a declaration that holds a function value (ZTS217), and a `for...of` over a value that is not an array, a tuple, or `range(n)` (ZTS218).
-- Builtin calls: an argument whose known type the builtin does not take gets ZTS203, and an argument count that the builtin does not take gets ZTS202. `Response.text`, `Response.html`, `Response.rawJson`, and `Response.redirect` need a string first argument. `stringifyJson` refuses a payload that JSON cannot carry (ZTS213).
-- Removed ambient names and members: `JSON` (use `zttp:json` or `zttp:decode`), `Boolean`, `Headers`, `Number.parseInt`, `Number.parseFloat`, `Array.from`, `Array.of`, `Object.hasOwn`, and the array and string members `forEach`, `pop`, `shift`, `unshift`, `splice`, `toReversed`, `concat`, and `substring`.
-- `DictKey` is now an ambient type name. `FetchOptions` is no longer ambient: write `import type { FetchOptions } from "zttp:fetch";`. An `import type` of a name that a built-in module does not export gets ZTS207.
-- A `match` arm that no value reaches is now an error (ZTS216), and a `match` that does not cover its type gets ZTS603 in every position.
-- Module initialization: ZTS630 refuses a top-level initializer that has an effect, passes a callback, or reaches a module declaration at or after it. A function body may now call a function or read a `const` that the module declares further down, so mutual recursion passes.
-- The exact repair of ZTS612 and ZTS621 now binds the condition, `const cond = !!(c);`, before the statement and writes `match (cond)`.
-- `zttp expert` now shows a result card before the question "Apply this change set? [y/N, d=show files]". The card reports the verdict, failing tests, lost and gained proof properties, and contract changes in env variables, egress hosts, routes, and capabilities. It shows only in an interactive session with the asking policy.
-- `zttp expert` now runs `zttp test` on `tests/handler.test.jsonl` against the candidate before the approval question. A failing or unrunnable suite never refuses the change set. The host stops a run after 30 seconds. `--yes`, `--no-edit`, `--print`, and `--goal` run no tests.
-- A model turn that ends without a verified change set now prints the line `No change to approve.`
+- The compiler now refuses each form that `docs/ts-restrictions.md` lists, with
+  the listed code, in `zts check` and in every build path. A source that passed
+  before can now be refused. The file has no gap table, and
+  `zig build test-ts-restrictions` fails when the file and the compiler
+  disagree.
+- New refusals in statements and declarations: a body that is not a block
+  (ZTS070), a function declaration that is not at module level (ZTS071), an
+  arrow that is not a direct call argument (ZTS072), a callback that writes a
+  binding of an enclosing function (ZTS073), and a top-level statement other
+  than a registration call (ZTS074).
+- New refusals of names: a second declaration of a name in one scope and a type
+  declaration that redefines an ambient or imported type name (ZTS019), an
+  assignment to a `const` (ZTS066), a reserved word as a value name (ZTS067), an
+  assignment to a parameter (ZTS068), and a name that an enclosing or nested
+  scope declares (ZTS069).
+- New refusals in syntax: bitwise operators, `**`, `0b`, `0o`, a number that
+  starts with a dot, `declare`, `abstract`, `x!`, `<T>x`, overloads, tagged
+  templates, comma expressions, generic defaults, labeled jumps, a C-style
+  `for`, and a `match` scrutinee that is not a name or a member path.
+- New refusals in types: a type name that is not declared, imported, or ambient,
+  which includes the utility types (ZTS065), a generic alias argument that
+  breaks its parameter's bound (ZTS209), a readonly field, element, or tuple
+  write (ZTS215), a declaration that holds a function value (ZTS217), and a
+  `for...of` over a value that is not an array, a tuple, or `range(n)` (ZTS218).
+- Builtin calls: an argument whose known type the builtin does not take gets
+  ZTS203, and an argument count that the builtin does not take gets ZTS202.
+  `Response.text`, `Response.html`, `Response.rawJson`, and `Response.redirect`
+  need a string first argument. `stringifyJson` refuses a payload that JSON
+  cannot carry (ZTS213).
+- Removed ambient names and members: `JSON` (use `zttp:json` or `zttp:decode`),
+  `Boolean`, `Headers`, `Number.parseInt`, `Number.parseFloat`, `Array.from`,
+  `Array.of`, `Object.hasOwn`, and the array and string members `forEach`,
+  `pop`, `shift`, `unshift`, `splice`, `toReversed`, `concat`, and `substring`.
+- `DictKey` is now an ambient type name. `FetchOptions` is no longer ambient:
+  write `import type { FetchOptions } from "zttp:fetch";`. An `import type` of a
+  name that a built-in module does not export gets ZTS207.
+- A `match` arm that no value reaches is now an error (ZTS216), and a `match`
+  that does not cover its type gets ZTS603 in every position.
+- Module initialization: ZTS630 refuses a top-level initializer that has an
+  effect, passes a callback, or reaches a module declaration at or after it. A
+  function body may now call a function or read a `const` that the module
+  declares further down, so mutual recursion passes.
+- The exact repair of ZTS612 and ZTS621 now binds the condition,
+  `const cond = !!(c);`, before the statement and writes `match (cond)`.
+- `zttp expert` now shows a result card before the question "Apply this change
+  set? [y/N, d=show files]". The card reports the verdict, failing tests, lost
+  and gained proof properties, and contract changes in env variables, egress
+  hosts, routes, and capabilities. It shows only in an interactive session with
+  the asking policy.
+- `zttp expert` now runs `zttp test` on `tests/handler.test.jsonl` against the
+  candidate before the approval question. A failing or unrunnable suite never
+  refuses the change set. The host stops a run after 30 seconds. `--yes`,
+  `--no-edit`, `--print`, and `--goal` run no tests.
+- A model turn that ends without a verified change set now prints the line
+  `No change to approve.`
 
 ### Fixed
 
-- `zttp expert` now rejects every change set with `policy_context_failed` when the capability policy file that `zttp.json` names does not parse. The message is `capability policy <file> does not parse: <error>`. Before, the expert accepted change sets with every allow list (env, egress, cache, and SQL) switched off, and printed nothing.
-- Deep or unbounded script recursion now fails the request with `CallStackOverflow` in a Debug build. Before, the native stack ran out near depth 190. `zttp test` ended on a signal, and `zttp serve` stopped. The interpreter now refuses a script call when less than 2 MiB of the thread stack remains. macOS release archives already stopped at 1024 frames and answered status 500. The default proof profile refuses recursion (ZTS500), so only a handler with a narrow `Proof` capsule could reach this.
+- `zttp expert` now rejects every change set with `policy_context_failed` when
+  the capability policy file that `zttp.json` names does not parse. The message
+  is `capability policy <file> does not parse: <error>`. Before, the expert
+  accepted change sets with every allow list (env, egress, cache, and SQL)
+  switched off, and printed nothing.
+- Deep or unbounded script recursion now fails the request with
+  `CallStackOverflow` in a Debug build. Before, the native stack ran out near
+  depth 190. `zttp test` ended on a signal, and `zttp serve` stopped. The
+  interpreter now refuses a script call when less than 2 MiB of the thread stack
+  remains. macOS release archives already stopped at 1024 frames and answered
+  status 500. The default proof profile refuses recursion (ZTS500), so only a
+  handler with a narrow `Proof` capsule could reach this.
 
-## [0.27.0] - 2026-11-13
+## [0.27.1] - 2026-11-13
 
 ### Highlights
 
 `zttp build`, `zttp compile`, and `zttp deploy` now build a handler with file
-imports into one binary with one certificate. The type checker closes many
-false proofs. A handler that passed `zttp check` and then faulted at runtime
-now gets a diagnostic code and a fix. The `Zttp-Proofs` header grades each
-property by the proof-checker verdict, and a deployed binary records a
-soundness incident when a claimed-safe path faults.
+imports into one binary with one certificate. The type checker closes many false
+proofs. A handler that passed `zttp check` and then faulted at runtime now gets
+a diagnostic code and a fix. The `Zttp-Proofs` header grades each property by
+the proof-checker verdict, and a deployed binary records a soundness incident
+when a claimed-safe path faults.
 
 ### Breaking changes
 
-- Rebuild and redeploy earlier artifacts. `semanticsHash` moved, so the new runtime refuses an artifact from an earlier binary with `SemanticsHashMismatch`. A self-extracting binary keeps running.
-- The runtime now refuses a contract with no capability matrix or no policy hash. A contract with no route arrays no longer gets them from the scalar route keys. Rebuild such an artifact with the current `zttp`.
-- Handlers that 0.26.0 accepted can now fail `zttp check`. Each entry under Fixed names the diagnostic code and the change to make. A handler can also lose `deterministic` or a property of the read-only family; see Changed.
-- The `Zttp-Proofs` response header and the startup log now grade each property by the proof-checker verdict, in the groups `checked=`, `accepted=`, and `claimed=`. Before, both listed the compiler's claims as proven. The startup line `Proven:` is replaced by `Checked:`, `Accepted:`, and `Claimed:`. The signed `property_summary` does not change.
-- The `Zttp-Attest` response header now holds `sha256=<hex>`, the SHA-256 of the signed attestation, not the attestation itself. The attestation stays in `/.well-known/zttp-attest`, which a cache must now revalidate (`Cache-Control: no-cache`). The attestation version is `zttp-attest-v5`. `zttp verify` refuses an artifact with the old header and asks for a rebuild.
-- The 500 body, the `SOUNDNESS INCIDENT` log line, and the incident-log JSON now say "claimed" instead of "proven". The JSON key `proven` is now `claimed`. The runtime judges a fault against the compiler's claims, which the `Zttp-Proofs` header grades as `claimed=`.
+- Rebuild and redeploy earlier artifacts. `semanticsHash` moved, so the new
+  runtime refuses an artifact from an earlier binary with
+  `SemanticsHashMismatch`. A self-extracting binary keeps running.
+- The runtime now refuses a contract with no capability matrix or no policy
+  hash. A contract with no route arrays no longer gets them from the scalar
+  route keys. Rebuild such an artifact with the current `zttp`.
+- Handlers that 0.26.0 accepted can now fail `zttp check`. Each entry under
+  Fixed names the diagnostic code and the change to make. A handler can also
+  lose `deterministic` or a property of the read-only family; see Changed.
+- The `Zttp-Proofs` response header and the startup log now grade each property
+  by the proof-checker verdict, in the groups `checked=`, `accepted=`, and
+  `claimed=`. Before, both listed the compiler's claims as proven. The startup
+  line `Proven:` is replaced by `Checked:`, `Accepted:`, and `Claimed:`. The
+  signed `property_summary` does not change.
+- The `Zttp-Attest` response header now holds `sha256=<hex>`, the SHA-256 of the
+  signed attestation, not the attestation itself. The attestation stays in
+  `/.well-known/zttp-attest`, which a cache must now revalidate
+  (`Cache-Control: no-cache`). The attestation version is `zttp-attest-v5`.
+  `zttp verify` refuses an artifact with the old header and asks for a rebuild.
+- The 500 body, the `SOUNDNESS INCIDENT` log line, and the incident-log JSON now
+  say "claimed" instead of "proven". The JSON key `proven` is now `claimed`. The
+  runtime judges a fault against the compiler's claims, which the `Zttp-Proofs`
+  header grades as `claimed=`.
 - Source builds and release verification now require Zig 0.17.1 exactly.
-- A `.ts` import or an `-e` source that admission refuses now fails at start with the admission message. Some forms used to run, or to report a second and less exact message.
-- `HandlerSource.inline_code` now passes admission, so inline source that admission refuses fails at load. Type annotations in inline source load unchecked. Use a `.ts` file for the type check.
-- A handler with a second parameter now reads `undefined` there, not an empty object. Remove the parameter.
-- The Zig API no longer has `zts.Parser.init`, `Parser.parse`, `Parser.parseWithCodegenAllocator`, `parser.parse`, `ParseResult`, `ParseOptions`, `zts.pathsMatch`, or `HandlerInstance.loadHandler`, and `Runtime.destroy` takes no allocator. Use `JsParser.initAdmission`, `routePatternsMatch`, and `loadCode`.
-- `zts canonicalize --json` now prints the repair intent names. Update a check that matches an old name: `canonicalize_arrow_helper` is `replace_arrow_with_function`, `canonicalize_export_function` is `replace_export_arrow_with_function`, `canonicalize_let_const` is `replace_let_with_const`, `canonicalize_compound_assign` is `replace_compound_assign_with_explicit`, and `canonicalize_redundant_bool_compare` is `drop_redundant_bool_compare`.
-- Contract JSON no longer holds the route keys `responseStatus`, `responseContentType`, `responseSchemaRef`, `responseSchema`, and `responseSchemaDynamic`, or their version 2 forms. Read `responses`. A contract that holds these keys still parses.
-- A static route with two or more responses now compares each response. A changed status, content type, or response count reports `breaking`, where it used to report `unchanged`, so a `dev --prove` hot-swap can stop for that route. Review the reported change.
-- A session journal no longer stores `body` in a tool result. Read `llm_text`. An older journal still loads.
-- The expert journal reader refuses a record that predates `llm_text`: a `part_index` record, a `body`-only record, or a string display record. Each reports `CorruptEventsLog`. Start a new session.
-- `zttp proofs gate` no longer accepts `--no-sign`. Remove the flag from scripts. Old `kind=perf` and `kind=equivalence` ledger rows still load, and the reader does not read their payloads.
-- `zttp auth claude` and `zttp auth openai` now report an unknown subcommand. `zttp auth revoke claude` and `zttp auth revoke openai` still delete a stored key.
-- `install.sh` no longer installs releases with `zigttp-*` assets, so `ZTTP_VERSION=v0.18.0` or older stops installing. Select `v0.19.0` or later.
-- In `zttp`, a flag token in a value position no longer sets that flag. `zttp serve handler.ts --sqlite --watch` reads `--watch` as the value of `--sqlite` and does not start watch mode. Give `--sqlite` its path, as in `--sqlite app.db --watch`.
-- The debug environment variables `ZTS_PIC_DISABLE_RECOVERY` and `ZTS_TRACE_FUN_DECL` are removed and have no effect. Remove them from scripts.
+- A `.ts` import or an `-e` source that admission refuses now fails at start
+  with the admission message. Some forms used to run, or to report a second and
+  less exact message.
+- `HandlerSource.inline_code` now passes admission, so inline source that
+  admission refuses fails at load. Type annotations in inline source load
+  unchecked. Use a `.ts` file for the type check.
+- A handler with a second parameter now reads `undefined` there, not an empty
+  object. Remove the parameter.
+- The Zig API no longer has `zts.Parser.init`, `Parser.parse`,
+  `Parser.parseWithCodegenAllocator`, `parser.parse`, `ParseResult`,
+  `ParseOptions`, `zts.pathsMatch`, or `HandlerInstance.loadHandler`, and
+  `Runtime.destroy` takes no allocator. Use `JsParser.initAdmission`,
+  `routePatternsMatch`, and `loadCode`.
+- `zts canonicalize --json` now prints the repair intent names. Update a check
+  that matches an old name: `canonicalize_arrow_helper` is
+  `replace_arrow_with_function`, `canonicalize_export_function` is
+  `replace_export_arrow_with_function`, `canonicalize_let_const` is
+  `replace_let_with_const`, `canonicalize_compound_assign` is
+  `replace_compound_assign_with_explicit`, and
+  `canonicalize_redundant_bool_compare` is `drop_redundant_bool_compare`.
+- Contract JSON no longer holds the route keys `responseStatus`,
+  `responseContentType`, `responseSchemaRef`, `responseSchema`, and
+  `responseSchemaDynamic`, or their version 2 forms. Read `responses`. A
+  contract that holds these keys still parses.
+- A static route with two or more responses now compares each response. A
+  changed status, content type, or response count reports `breaking`, where it
+  used to report `unchanged`, so a `dev --prove` hot-swap can stop for that
+  route. Review the reported change.
+- A session journal no longer stores `body` in a tool result. Read `llm_text`.
+  An older journal still loads.
+- The expert journal reader refuses a record that predates `llm_text`: a
+  `part_index` record, a `body`-only record, or a string display record. Each
+  reports `CorruptEventsLog`. Start a new session.
+- `zttp proofs gate` no longer accepts `--no-sign`. Remove the flag from
+  scripts. Old `kind=perf` and `kind=equivalence` ledger rows still load, and
+  the reader does not read their payloads.
+- `zttp auth claude` and `zttp auth openai` now report an unknown subcommand.
+  `zttp auth revoke claude` and `zttp auth revoke openai` still delete a stored
+  key.
+- `install.sh` no longer installs releases with `zigttp-*` assets, so
+  `ZTTP_VERSION=v0.18.0` or older stops installing. Select `v0.19.0` or later.
+- In `zttp`, a flag token in a value position no longer sets that flag.
+  `zttp serve handler.ts --sqlite --watch` reads `--watch` as the value of
+  `--sqlite` and does not start watch mode. Give `--sqlite` its path, as in
+  `--sqlite app.db --watch`.
+- The debug environment variables `ZTS_PIC_DISABLE_RECOVERY` and
+  `ZTS_TRACE_FUN_DECL` are removed and have no effect. Remove them from scripts.
 
 ### Added
 
-- `zttp compile`, `zttp build`, and `zttp deploy` now build a handler with file imports into one binary with one certificate. Before, these commands refused such a handler. A build exits 1 and writes no binary when a module binds an ambiguous top-level name, when a check fails in any module, or when a dependency breaks a capsule property. `zttp serve` also refuses an ambiguous top-level binding. See [Verification](docs/verification.md#handlers-with-file-imports).
-- `zttp check` and `zts check` now run the checks of the build on every module of a handler with file imports. A refusal carries a code and the file at fault. ZTS063 reports a missing, unparsable, or cyclic dependency. ZTS064 reports a file import that has no type that can cross modules. Before, such a handler could pass `check` and fail in `build`. `GraphResultsNotProved` stays a build-only refusal.
-- The producer states that the proof covers every file of the graph. The independent checker binds the dependency bytes through digests, but it does not confirm that coverage. A dependency edit makes the built binary refuse to start.
-- A self-contained binary accepts `--incident-log <FILE>`. A type fault on a path that the compiler claims `optional_safe` and `result_safe` now records a soundness incident in a deployed binary and in `zttp dev`. Before, the 500 body reported a possible incident, and nothing was recorded.
+- `zttp compile`, `zttp build`, and `zttp deploy` now build a handler with file
+  imports into one binary with one certificate. Before, these commands refused
+  such a handler. A build exits 1 and writes no binary when a module binds an
+  ambiguous top-level name, when a check fails in any module, or when a
+  dependency breaks a capsule property. `zttp serve` also refuses an ambiguous
+  top-level binding. See
+  [Verification](docs/verification.md#handlers-with-file-imports).
+- `zttp check` and `zts check` now run the checks of the build on every module
+  of a handler with file imports. A refusal carries a code and the file at
+  fault. ZTS063 reports a missing, unparsable, or cyclic dependency. ZTS064
+  reports a file import that has no type that can cross modules. Before, such a
+  handler could pass `check` and fail in `build`. `GraphResultsNotProved` stays
+  a build-only refusal.
+- The producer states that the proof covers every file of the graph. The
+  independent checker binds the dependency bytes through digests, but it does
+  not confirm that coverage. A dependency edit makes the built binary refuse to
+  start.
+- A self-contained binary accepts `--incident-log <FILE>`. A type fault on a
+  path that the compiler claims `optional_safe` and `result_safe` now records a
+  soundness incident in a deployed binary and in `zttp dev`. Before, the 500
+  body reported a possible incident, and nothing was recorded.
 
 ### Changed
 
-- When the verifier finds a write to module state, `pure`, `stateless`, `read_only`, `retry_safe`, `deterministic`, and `idempotent` are no longer proven, in addition to `state_isolated`. Before, a handler that wrote module state kept the other six, and the ZTS500 help suggested a capsule that claimed them.
-- The flow evaluator now follows each request through the handler, its helpers, and the imported modules, and it records each write to module state. A write that the verifier did not name is a ZTS310 warning at the write, in the file that holds it. The ZTS500 and ZTS606 hints name the line of the write and the remedy: copy the value into a local, or move the state to `zttp:cache`.
-- A control decision on a value that can differ between runs now removes `deterministic` when the response follows it. This covers `if`, a ternary, a `match` arm, `assert`, `&&`, `||`, `??`, an optional chain, a loop count, a selected call target, and a route choice. Before, `if (Date.now() % 2 === 0) { return Response.text("even"); }` kept `deterministic`. The ZTS500 hint names the branch.
-- A helper written as an arrow function, such as `const stamp = (): Proof<number, "pure"> => Date.now()`, is now held to its declared capsule. A `Proof<...>` or `Effects<...>` on a helper in an imported module is now discharged too. Before, both passed `zts check` and `zttp build` with no diagnostic.
-- Under the default profile, a helper with no capsule that breaks `pure`, `read_only`, or `deterministic` now gets a ZTS606 row marked as caused by the default profile, with a remedy. The suggested capsule of the ZTS500 row leaves out a property that a helper breaks.
-- The expert approval prompt now approves a change set only on the whole answer `y` or `yes`, in any letter case. Before, any answer that began with `y` approved, so typed-ahead text could write the change set before the user saw the diff.
-- An unannotated array literal binding now widens its elements. `const ys = [4, 5]` is `number[]`, `const t = ["a", 1]` is `[string, number]`, and `const out = []` is `unknown[]`. The loop variable of `for...of` over a tuple is the union of the widened element types. Before, the variable had no type, and `s.toUpperCase()` in `for (const s of [1, 2])` passed CHECK and answered 500.
-- `Object.values(o)` is now `unknown[]`, `Object.entries(o)` is `[string, unknown][]`, and `u.length` with `u: string | string[]` is a `number`.
-- The `zttp:collections` exports now accept a typed Dict and give typed results. `const d: Dict<string, number> = dictSet(dictEmpty(), "a", 1);` got ZTS200, and `dictFold(d, f, 0)` with that `d` got ZTS203. Both are now accepted. `dictGet` is `V | undefined`, so a read on its result needs a check for `undefined`. An unannotated `let d = dictEmpty();` is `Dict<unknown, unknown>`; annotate it.
-- An unannotated callback of `dictFold`, `dictMapValues`, or `dictFilter` over a typed Dict takes the key and value types, so `dictFold(d, (acc, value, key) => acc + value, 0)` is a `number`. An annotated or named callback that refuses those types gets ZTS203. Over a `Dict<unknown, unknown>`, a callback annotated `(acc: number, v: number, k: string)` also gets ZTS203; annotate the Dict. A named `dictFilter` predicate such as `function big(v: number, k: string): boolean` is now accepted.
-- The `error` of a Result from a virtual module now has the type that the runtime stores. Only `jwtVerify` and the `zttp:validate` and `zttp:decode` exports store a string message; every other export has an `unknown` error. A validate or decode schema failure fills `errors` and leaves `error` absent, so their `error` is `string | undefined`. Before, every Result declared `error?: string`, so `shout(r.error)` with `shout(s: string)` passed and could fault. Check for `undefined`, or use `r.error ?? "fallback"`. `zts check --types` prints the same error types.
-- The `zttp:result` exports now have value and error types: `ok(21)` has a `number` value, `err("x")` a `string` error, and `unwrapOr`, `mapResult`, `mapError`, `andThen`, `orElse`, and `collectAll` derive theirs. An unannotated combinator callback takes the value or error type, and an annotated one must accept it (ZTS203).
-- A builtin call now has the type of the value that the runtime returns, when its arguments have the types that the runtime reads. This covers `.length`, the `Math`, `Number`, `Date`, `String`, `JSON`, `Object`, and `Array` builtins, the string and array methods, and `req.headers.get`. Before, such a value had no type and passed at every typed position, so `const token: string = req.headers.get("x");` passed and the handler could fault at runtime. These forms are now refused, because the value can be `undefined`: `s.split(",")[0]`, `xs.pop()`, `req.headers.get("x")`, and `s.repeat(n)` where a `string` or `number` is required, and `xs.map(f)[0]` returned from a `number` function. Add `?? fallback`, or check for `undefined` in an `if`. `String(a) + String(b)` now gets ZTS105; write `[String(a), String(b)].join("")`.
-- An unannotated parameter of an inline array callback now has the type of the value in its position: the element, the index (`number`), and the array. A `reduce` callback whose return type differs from its seed type now gets ZTS200, such as `xs.reduce((acc, v) => String(v), 0)`. Annotate the accumulator with a type that holds both.
-- A discriminant test such as `v.kind === "a"` now keeps every union member that can hold `"a"`, and it narrows a union of `structural` records. Before, it took the first member that matched, and a union of named records did not narrow.
-- An erased type prefix now reports ZTS002, such as `const x = <T>(1);` and `const x = <T> { id: 1 };`. Remove the prefix.
-- A generic arrow after `return` or after a line comment now reads like the same arrow in an assignment. `return <T>(value: T): T => value;` is accepted. Update a check that expects ZTS002 there.
-- An empty type predicate now reports ZTS003 at the first token after `is`. Write the narrowed type after `is`.
-- A call on a value with no callable payload now stops with `NotCallable`. No tracked program reaches this call. Report a program that stops with this error.
+- When the verifier finds a write to module state, `pure`, `stateless`,
+  `read_only`, `retry_safe`, `deterministic`, and `idempotent` are no longer
+  proven, in addition to `state_isolated`. Before, a handler that wrote module
+  state kept the other six, and the ZTS500 help suggested a capsule that claimed
+  them.
+- The flow evaluator now follows each request through the handler, its helpers,
+  and the imported modules, and it records each write to module state. A write
+  that the verifier did not name is a ZTS310 warning at the write, in the file
+  that holds it. The ZTS500 and ZTS606 hints name the line of the write and the
+  remedy: copy the value into a local, or move the state to `zttp:cache`.
+- A control decision on a value that can differ between runs now removes
+  `deterministic` when the response follows it. This covers `if`, a ternary, a
+  `match` arm, `assert`, `&&`, `||`, `??`, an optional chain, a loop count, a
+  selected call target, and a route choice. Before,
+  `if (Date.now() % 2 === 0) { return Response.text("even"); }` kept
+  `deterministic`. The ZTS500 hint names the branch.
+- A helper written as an arrow function, such as
+  `const stamp = (): Proof<number, "pure"> => Date.now()`, is now held to its
+  declared capsule. A `Proof<...>` or `Effects<...>` on a helper in an imported
+  module is now discharged too. Before, both passed `zts check` and `zttp build`
+  with no diagnostic.
+- Under the default profile, a helper with no capsule that breaks `pure`,
+  `read_only`, or `deterministic` now gets a ZTS606 row marked as caused by the
+  default profile, with a remedy. The suggested capsule of the ZTS500 row leaves
+  out a property that a helper breaks.
+- The expert approval prompt now approves a change set only on the whole answer
+  `y` or `yes`, in any letter case. Before, any answer that began with `y`
+  approved, so typed-ahead text could write the change set before the user saw
+  the diff.
+- An unannotated array literal binding now widens its elements.
+  `const ys = [4, 5]` is `number[]`, `const t = ["a", 1]` is `[string, number]`,
+  and `const out = []` is `unknown[]`. The loop variable of `for...of` over a
+  tuple is the union of the widened element types. Before, the variable had no
+  type, and `s.toUpperCase()` in `for (const s of [1, 2])` passed CHECK and
+  answered 500.
+- `Object.values(o)` is now `unknown[]`, `Object.entries(o)` is
+  `[string, unknown][]`, and `u.length` with `u: string | string[]` is a
+  `number`.
+- The `zttp:collections` exports now accept a typed Dict and give typed results.
+  `const d: Dict<string, number> = dictSet(dictEmpty(), "a", 1);` got ZTS200,
+  and `dictFold(d, f, 0)` with that `d` got ZTS203. Both are now accepted.
+  `dictGet` is `V | undefined`, so a read on its result needs a check for
+  `undefined`. An unannotated `let d = dictEmpty();` is
+  `Dict<unknown, unknown>`; annotate it.
+- An unannotated callback of `dictFold`, `dictMapValues`, or `dictFilter` over a
+  typed Dict takes the key and value types, so
+  `dictFold(d, (acc, value, key) => acc + value, 0)` is a `number`. An annotated
+  or named callback that refuses those types gets ZTS203. Over a
+  `Dict<unknown, unknown>`, a callback annotated
+  `(acc: number, v: number, k: string)` also gets ZTS203; annotate the Dict. A
+  named `dictFilter` predicate such as
+  `function big(v: number, k: string): boolean` is now accepted.
+- The `error` of a Result from a virtual module now has the type that the
+  runtime stores. Only `jwtVerify` and the `zttp:validate` and `zttp:decode`
+  exports store a string message; every other export has an `unknown` error. A
+  validate or decode schema failure fills `errors` and leaves `error` absent, so
+  their `error` is `string | undefined`. Before, every Result declared
+  `error?: string`, so `shout(r.error)` with `shout(s: string)` passed and could
+  fault. Check for `undefined`, or use `r.error ?? "fallback"`.
+  `zts check --types` prints the same error types.
+- The `zttp:result` exports now have value and error types: `ok(21)` has a
+  `number` value, `err("x")` a `string` error, and `unwrapOr`, `mapResult`,
+  `mapError`, `andThen`, `orElse`, and `collectAll` derive theirs. An
+  unannotated combinator callback takes the value or error type, and an
+  annotated one must accept it (ZTS203).
+- A builtin call now has the type of the value that the runtime returns, when
+  its arguments have the types that the runtime reads. This covers `.length`,
+  the `Math`, `Number`, `Date`, `String`, `JSON`, `Object`, and `Array`
+  builtins, the string and array methods, and `req.headers.get`. Before, such a
+  value had no type and passed at every typed position, so
+  `const token: string = req.headers.get("x");` passed and the handler could
+  fault at runtime. These forms are now refused, because the value can be
+  `undefined`: `s.split(",")[0]`, `xs.pop()`, `req.headers.get("x")`, and
+  `s.repeat(n)` where a `string` or `number` is required, and `xs.map(f)[0]`
+  returned from a `number` function. Add `?? fallback`, or check for `undefined`
+  in an `if`. `String(a) + String(b)` now gets ZTS105; write
+  `[String(a), String(b)].join("")`.
+- An unannotated parameter of an inline array callback now has the type of the
+  value in its position: the element, the index (`number`), and the array. A
+  `reduce` callback whose return type differs from its seed type now gets
+  ZTS200, such as `xs.reduce((acc, v) => String(v), 0)`. Annotate the
+  accumulator with a type that holds both.
+- A discriminant test such as `v.kind === "a"` now keeps every union member that
+  can hold `"a"`, and it narrows a union of `structural` records. Before, it
+  took the first member that matched, and a union of named records did not
+  narrow.
+- An erased type prefix now reports ZTS002, such as `const x = <T>(1);` and
+  `const x = <T> { id: 1 };`. Remove the prefix.
+- A generic arrow after `return` or after a line comment now reads like the same
+  arrow in an assignment. `return <T>(value: T): T => value;` is accepted.
+  Update a check that expects ZTS002 there.
+- An empty type predicate now reports ZTS003 at the first token after `is`.
+  Write the narrowed type after `is`.
+- A call on a value with no callable payload now stops with `NotCallable`. No
+  tracked program reaches this call. Report a program that stops with this
+  error.
 
 ### Fixed
 
-- `zttp proofs verify` now checks semantics against the same binary that it hashed. Before, it hashed the file at `binary.path` of the manifest and then read a file named `binary`. A manifest that listed another file next to a valid `binary` printed `Integrity: verified`.
-- `zts check` now refuses a Response init that the runtime ignores (ZTS203). This covers an init member other than `status`, such as `headers`, an init that is not a record, a `status` that is not a number, and a record passed to `Response.redirect`. Before, these passed, and the runtime sent status 200 or 302 and no header. Write `{ status: 201 }`, or `Response.redirect(url, 301)`.
-- The checker now reads `Response?.json(...)` and `Response["json"](...)` as the constructor call, so the ZTS213 payload check and the return type check run for them. `zts check --types` now declares `Response.rawJson`, and `ResponseInit` declares `status` only.
-- A call to `push`, `pop`, `shift`, `unshift`, or `splice` on a module-scope array now raises ZTS310. Before, only an assignment raised ZTS310, so `seen.push(1)` kept `state_isolated` proven while the handler returned 2, 3, 4 for identical requests. Copy the array into a local, or move the state to `zttp:cache`.
-- A `push` of a request value onto a module array now fails the request with `ArenaObjectEscape`. Before, the module array kept a dangling pointer, and the next request read the wrong string.
-- `padStart` and `padEnd` now throw `RangeError: Invalid string length` for a target length above 1 MiB, before any allocation. Before, `"a".padStart(2000000000, "xy")` allocated about 2 GB per request, ignored `-m`, and panicked.
-- A pooled runtime now frees request overflow memory at each request reset. Before, that memory stayed until the runtime was recycled.
-- The server now sends the standard reason phrase for 34 more status codes. Before, a handler that returned 409 sent `HTTP/1.1 409 Unknown`.
-- The proof trace of `check --json` and the live-reload Counterexample and Why rows now name the dependency file of a branch cause, a guard, and a sink. Before, a line in an imported file printed as a line of the checked file.
-- `zts check --json` now writes the verifier's `unreachable_code` into the contract. Before, CHECK wrote `false`.
-- The expert proof read set now holds the schema of the SQLite database that `zttp.json` names, not its bytes, and it ignores a database that `zttp.json` does not name. Before, a row write during the approval wait failed the commit with `ProofReadSetChanged`, and a database above 32 MiB failed capture with `FileTooBig`.
-- The expert loop moves a change-set record to `.zttp/change-sets-archive/` when the user acknowledges its receipt, so the same change can commit again after a revert. Before, the repeat commit failed with `TransactionAlreadyExists`, and one damaged receipted record blocked every later acquire.
-- Expert change sets are safer. A target inside `.zttp` is refused. A target that the user edited between prepare and capture fails with `ProofReadSetChanged` instead of being overwritten. A `.DS_Store` file no longer blocks every acquire, and a leftover stage file no longer blocks the same change.
-- The expert providers now put a time bound on the TLS handshake, the request body write, and the response head read. Before, a peer that never answered could block a turn past its deadline. A response body shorter than its `Content-Length` is a transport failure (`BodyTruncated`). The local MLX client refuses an abnormal `finish_reason`, as the DeepSeek client already did.
-- The expert REPL refuses an over-long input line whole, and `quit`, `exit`, and `help` act only on the whole line. A failed `/resume`, `/new`, or `/fork` prints its error and keeps the current session.
-- `zttp ledger export` and crash recovery now keep `cost_bounded` and `post_only` of a verified change set. Before, both were written as `false`.
-- After `if (r.ok)`, a read on a Result `value` whose type admits `undefined`, such as `r.value.length` with `r = ok(req.headers.get("x"))`, now gets ZTS309. Check the value for `undefined` first.
-- An arithmetic operand with no type now gets ZTS104, or ZTS106 in `+`, and a member call on a value with no type gets ZTS201. Before, `[1, 2].reduce((acc, v) => acc.toFixed(2), "")` and `range(3).map(f)` passed CHECK and answered 500. Annotate the value or its source, or narrow it with `typeof` or `isDict`. Write `for (const i of range(n))` instead of `range(n).map(f)`.
-- `Response.json` now refuses a Dict whose key type admits a value that is not a string (ZTS213). `Response.json(dictSet(dictSet(dictEmpty(), 2, "x"), "k", 1))` passed CHECK and answered 500.
-- A write into a record field, an array element, or a tuple element must now fit the slot type (ZTS200), and each element that `push`, `unshift`, or `splice` adds must fit the element type (ZTS203). A tuple refuses `push`, `pop`, `shift`, `unshift`, `splice`, and a write to `length`. Before, `p.name = 5` with `p: { name: string }` passed CHECK, and `p.name.toUpperCase()` answered 500. An unannotated object or array literal binding widens its literal slots, so `const o = { n: 0 }; o.n = 1;` stays accepted.
-- A member read or call on a `number`, `boolean`, `string`, array, or tuple must name a member that the runtime holds. `n.toFixed(2)` and `n.toString()` now get ZTS201. Before, such a handler passed and faulted at runtime with `NotCallable`. Use `String(n)`. A call of a member on `unknown`, and a call through a member that one union member lacks, also get ZTS201. Narrow the value first.
-- An index read on a string now gets ZTS201, because the runtime gives `undefined`. Use `s.charAt(i)` or `s.slice(i, i + 1)`. In a union such as `string | string[]`, the string member adds `undefined` to an index read. A member that one union member lacks does the same, such as `x.age` with `x: P | string`. An unchecked read on such a value gets ZTS309.
-- After `if (!r.ok)`, a read on the `error` of a `zttp:validate` or `zttp:decode` Result, such as `r.error.length`, now gets ZTS309. A schema failure fills `errors` and leaves `error` absent. Check `r.error` for `undefined` first.
-- An annotated or named callback of an array method must accept the value that the method passes. `[1, 2].map((s: string) => s.toUpperCase())`, `[1, 2].map(sha256)`, and a `reduce` accumulator that refuses the seed or the callback result now get ZTS203. Before, such a handler passed and could fault at runtime with `NotCallable`. Correct the annotation, or remove it. A named predicate with parameters, such as `[1, 2].filter(isBig)`, is now accepted.
-- A Result argument must be a Result that `ok`, `err`, or a module export returns. `mapResult({ ok: true, value: 21 }, f)`, `collectAll([1, 2])`, and an `andThen` or `orElse` callback that does not return a Result now get ZTS203. Before, the runtime returned the value unchanged or `undefined`, and a handler could fault. Return `ok(...)` or `err(...)`.
-- An arithmetic operand must have a number type. `zts check` now refuses `x + 1` with `x: number | undefined` or `number | null`, `b.n - 1` with an optional field `n`, `xs[5] * 2`, `v * 2` with `v: unknown`, and `-x` or `-b` with `b: boolean` (ZTS104, ZTS106 for `+`). Before, such a handler passed, proved `optionals_safe`, and could fault at runtime. Compare with `undefined` or `null` in an `if` and compute inside the branch. For a value that may be `undefined` but not `null`, `(x ?? 0) + 1` also works. A ternary that selects a guarded value and a guarded value captured in a closure are also refused; write `x ?? 0` there.
-- A function value now has a function type. `zts check` refuses a function where the type admits no function: ZTS204 for a `return`, ZTS200 for an annotation, an assignment, a record field, or an array or tuple element, ZTS203 for an argument, and ZTS213 for a JSON payload. Before, such a handler passed and could fault at runtime. Call the function, or correct the type.
-- A function value is checked against a declared function type by its parameters. `(x: number, y: number) => number` and `(x: string) => number` are refused where `(x: number) => number` is declared (ZTS200).
-- A type guard narrows only when its test proves the type after `is`. `function isStr(x: unknown): x is string { return typeof x === "number"; }` now reports ZTS211, and so does `typeof x === "object"` for `x is object`. Change the test, or claim the type the test proves.
-- A type guard on an arrow function, on a function declared inside another function, or on a callback now reports ZTS211. So does a guard whose name before `is` is not an annotated parameter. Declare the guard as a function at module level.
+- `zttp proofs verify` now checks semantics against the same binary that it
+  hashed. Before, it hashed the file at `binary.path` of the manifest and then
+  read a file named `binary`. A manifest that listed another file next to a
+  valid `binary` printed `Integrity: verified`.
+- `zts check` now refuses a Response init that the runtime ignores (ZTS203).
+  This covers an init member other than `status`, such as `headers`, an init
+  that is not a record, a `status` that is not a number, and a record passed to
+  `Response.redirect`. Before, these passed, and the runtime sent status 200 or
+  302 and no header. Write `{ status: 201 }`, or `Response.redirect(url, 301)`.
+- The checker now reads `Response?.json(...)` and `Response["json"](...)` as the
+  constructor call, so the ZTS213 payload check and the return type check run
+  for them. `zts check --types` now declares `Response.rawJson`, and
+  `ResponseInit` declares `status` only.
+- A call to `push`, `pop`, `shift`, `unshift`, or `splice` on a module-scope
+  array now raises ZTS310. Before, only an assignment raised ZTS310, so
+  `seen.push(1)` kept `state_isolated` proven while the handler returned 2, 3, 4
+  for identical requests. Copy the array into a local, or move the state to
+  `zttp:cache`.
+- A `push` of a request value onto a module array now fails the request with
+  `ArenaObjectEscape`. Before, the module array kept a dangling pointer, and the
+  next request read the wrong string.
+- `padStart` and `padEnd` now throw `RangeError: Invalid string length` for a
+  target length above 1 MiB, before any allocation. Before,
+  `"a".padStart(2000000000, "xy")` allocated about 2 GB per request, ignored
+  `-m`, and panicked.
+- A pooled runtime now frees request overflow memory at each request reset.
+  Before, that memory stayed until the runtime was recycled.
+- The server now sends the standard reason phrase for 34 more status codes.
+  Before, a handler that returned 409 sent `HTTP/1.1 409 Unknown`.
+- The proof trace of `check --json` and the live-reload Counterexample and Why
+  rows now name the dependency file of a branch cause, a guard, and a sink.
+  Before, a line in an imported file printed as a line of the checked file.
+- `zts check --json` now writes the verifier's `unreachable_code` into the
+  contract. Before, CHECK wrote `false`.
+- The expert proof read set now holds the schema of the SQLite database that
+  `zttp.json` names, not its bytes, and it ignores a database that `zttp.json`
+  does not name. Before, a row write during the approval wait failed the commit
+  with `ProofReadSetChanged`, and a database above 32 MiB failed capture with
+  `FileTooBig`.
+- The expert loop moves a change-set record to `.zttp/change-sets-archive/` when
+  the user acknowledges its receipt, so the same change can commit again after a
+  revert. Before, the repeat commit failed with `TransactionAlreadyExists`, and
+  one damaged receipted record blocked every later acquire.
+- Expert change sets are safer. A target inside `.zttp` is refused. A target
+  that the user edited between prepare and capture fails with
+  `ProofReadSetChanged` instead of being overwritten. A `.DS_Store` file no
+  longer blocks every acquire, and a leftover stage file no longer blocks the
+  same change.
+- The expert providers now put a time bound on the TLS handshake, the request
+  body write, and the response head read. Before, a peer that never answered
+  could block a turn past its deadline. A response body shorter than its
+  `Content-Length` is a transport failure (`BodyTruncated`). The local MLX
+  client refuses an abnormal `finish_reason`, as the DeepSeek client already
+  did.
+- The expert REPL refuses an over-long input line whole, and `quit`, `exit`, and
+  `help` act only on the whole line. A failed `/resume`, `/new`, or `/fork`
+  prints its error and keeps the current session.
+- `zttp ledger export` and crash recovery now keep `cost_bounded` and
+  `post_only` of a verified change set. Before, both were written as `false`.
+- After `if (r.ok)`, a read on a Result `value` whose type admits `undefined`,
+  such as `r.value.length` with `r = ok(req.headers.get("x"))`, now gets ZTS309.
+  Check the value for `undefined` first.
+- An arithmetic operand with no type now gets ZTS104, or ZTS106 in `+`, and a
+  member call on a value with no type gets ZTS201. Before,
+  `[1, 2].reduce((acc, v) => acc.toFixed(2), "")` and `range(3).map(f)` passed
+  CHECK and answered 500. Annotate the value or its source, or narrow it with
+  `typeof` or `isDict`. Write `for (const i of range(n))` instead of
+  `range(n).map(f)`.
+- `Response.json` now refuses a Dict whose key type admits a value that is not a
+  string (ZTS213).
+  `Response.json(dictSet(dictSet(dictEmpty(), 2, "x"), "k", 1))` passed CHECK
+  and answered 500.
+- A write into a record field, an array element, or a tuple element must now fit
+  the slot type (ZTS200), and each element that `push`, `unshift`, or `splice`
+  adds must fit the element type (ZTS203). A tuple refuses `push`, `pop`,
+  `shift`, `unshift`, `splice`, and a write to `length`. Before, `p.name = 5`
+  with `p: { name: string }` passed CHECK, and `p.name.toUpperCase()`
+  answered 500. An unannotated object or array literal binding widens its
+  literal slots, so `const o = { n: 0 }; o.n = 1;` stays accepted.
+- A member read or call on a `number`, `boolean`, `string`, array, or tuple must
+  name a member that the runtime holds. `n.toFixed(2)` and `n.toString()` now
+  get ZTS201. Before, such a handler passed and faulted at runtime with
+  `NotCallable`. Use `String(n)`. A call of a member on `unknown`, and a call
+  through a member that one union member lacks, also get ZTS201. Narrow the
+  value first.
+- An index read on a string now gets ZTS201, because the runtime gives
+  `undefined`. Use `s.charAt(i)` or `s.slice(i, i + 1)`. In a union such as
+  `string | string[]`, the string member adds `undefined` to an index read. A
+  member that one union member lacks does the same, such as `x.age` with
+  `x: P | string`. An unchecked read on such a value gets ZTS309.
+- After `if (!r.ok)`, a read on the `error` of a `zttp:validate` or
+  `zttp:decode` Result, such as `r.error.length`, now gets ZTS309. A schema
+  failure fills `errors` and leaves `error` absent. Check `r.error` for
+  `undefined` first.
+- An annotated or named callback of an array method must accept the value that
+  the method passes. `[1, 2].map((s: string) => s.toUpperCase())`,
+  `[1, 2].map(sha256)`, and a `reduce` accumulator that refuses the seed or the
+  callback result now get ZTS203. Before, such a handler passed and could fault
+  at runtime with `NotCallable`. Correct the annotation, or remove it. A named
+  predicate with parameters, such as `[1, 2].filter(isBig)`, is now accepted.
+- A Result argument must be a Result that `ok`, `err`, or a module export
+  returns. `mapResult({ ok: true, value: 21 }, f)`, `collectAll([1, 2])`, and an
+  `andThen` or `orElse` callback that does not return a Result now get ZTS203.
+  Before, the runtime returned the value unchanged or `undefined`, and a handler
+  could fault. Return `ok(...)` or `err(...)`.
+- An arithmetic operand must have a number type. `zts check` now refuses `x + 1`
+  with `x: number | undefined` or `number | null`, `b.n - 1` with an optional
+  field `n`, `xs[5] * 2`, `v * 2` with `v: unknown`, and `-x` or `-b` with
+  `b: boolean` (ZTS104, ZTS106 for `+`). Before, such a handler passed, proved
+  `optionals_safe`, and could fault at runtime. Compare with `undefined` or
+  `null` in an `if` and compute inside the branch. For a value that may be
+  `undefined` but not `null`, `(x ?? 0) + 1` also works. A ternary that selects
+  a guarded value and a guarded value captured in a closure are also refused;
+  write `x ?? 0` there.
+- A function value now has a function type. `zts check` refuses a function where
+  the type admits no function: ZTS204 for a `return`, ZTS200 for an annotation,
+  an assignment, a record field, or an array or tuple element, ZTS203 for an
+  argument, and ZTS213 for a JSON payload. Before, such a handler passed and
+  could fault at runtime. Call the function, or correct the type.
+- A function value is checked against a declared function type by its
+  parameters. `(x: number, y: number) => number` and `(x: string) => number` are
+  refused where `(x: number) => number` is declared (ZTS200).
+- A type guard narrows only when its test proves the type after `is`.
+  `function isStr(x: unknown): x is string { return typeof x === "number"; }`
+  now reports ZTS211, and so does `typeof x === "object"` for `x is object`.
+  Change the test, or claim the type the test proves.
+- A type guard on an arrow function, on a function declared inside another
+  function, or on a callback now reports ZTS211. So does a guard whose name
+  before `is` is not an annotated parameter. Declare the guard as a function at
+  module level.
 
 ## [0.26.0] - 2026-10-29
 
@@ -149,25 +458,25 @@ pass proves it.
   `result_reads_guarded` checks that every read of a Result is guarded. The
   kernel runs this check for every `results_checked` claim that is not
   `not_established`, and refuses a mismatch, or a check that did not run, as
-  `fabricated_property`. `zttp proofs verify` names the properties the
-  kernel re-derived on a `Checked:` line, for example
-  `Checked:   response_total, results_checked`.
-  A results claim reads `trusted`, not `proved`, because the step from IR to
-  bytecode is trusted for every claim; a results claim without that opcode
-  edge is refused. Over the 93 tracked certificates, the kernel re-derives all
-  93 results claims with no difference from the producer.
+  `fabricated_property`. `zttp proofs verify` names the properties the kernel
+  re-derived on a `Checked:` line, for example
+  `Checked:   response_total, results_checked`. A results claim reads `trusted`,
+  not `proved`, because the step from IR to bytecode is trusted for every claim;
+  a results claim without that opcode edge is refused. Over the 93 tracked
+  certificates, the kernel re-derives all 93 results claims with no difference
+  from the producer.
 - **Every rejection that `pi_repair_plan` reports carries a repair plan.** A
-  Result mistake that the check stops early (`r.ok === true`, an unknown
-  member, `r.isOk()`, `return r`) gets the typed Result plan that names its
-  subject. A diagnostic whose repair intent `pi_apply_repair_plan` can run gets
-  a plan that names that intent. Every other error gets a help-text plan with
-  edit kind `manual_edit`, which no tool applies. The retry block lists these
-  as advice after the compiler-authored fixes.
+  Result mistake that the check stops early (`r.ok === true`, an unknown member,
+  `r.isOk()`, `return r`) gets the typed Result plan that names its subject. A
+  diagnostic whose repair intent `pi_apply_repair_plan` can run gets a plan that
+  names that intent. Every other error gets a help-text plan with edit kind
+  `manual_edit`, which no tool applies. The retry block lists these as advice
+  after the compiler-authored fixes.
 - **Every error code that the diagnostic corpus produces carries help text.**
-  Thirteen codes reported no `suggestion` in `zts check --json`: ZTS002,
-  ZTS012, ZTS013, ZTS026, ZTS045, ZTS047, ZTS200, ZTS201, ZTS202, ZTS203,
-  ZTS209, ZTS502, and ZTS504. Each now carries a fixed help string, and no help
-  string repeats source text.
+  Thirteen codes reported no `suggestion` in `zts check --json`: ZTS002, ZTS012,
+  ZTS013, ZTS026, ZTS045, ZTS047, ZTS200, ZTS201, ZTS202, ZTS203, ZTS209,
+  ZTS502, and ZTS504. Each now carries a fixed help string, and no help string
+  repeats source text.
 
 ### Changed
 
@@ -185,17 +494,17 @@ pass proves it.
   `no_secret_leakage`, `no_credential_leakage`, `input_validated`,
   `pii_contained`, `injection_safe`, and `state_isolated` are now `false`. A
   handler whose flow pass runs reads exactly as before; over the 263 tracked
-  `.ts` files only the `holes[].undischarged` lists of 5 codegen testdata
-  files move. A module with no handler now reads the six as unproven, so the
+  `.ts` files only the `holes[].undischarged` lists of 5 codegen testdata files
+  move. A module with no handler now reads the six as unproven, so the
   default-profile ZTS500 for it lists them.
 
 ### Fixed
 
-- **A precompiled contract discharges its specs against the final
-  properties.** `compileHandler` discharged the handler specs before the flow
-  pass and the verifier set their properties, so `contract.json` could omit a
-  ZTS500 for a declared `no_secret_leakage` over a leak, and could carry one for
-  a proved `result_safe`. It now discharges the specs again after both passes.
+- **A precompiled contract discharges its specs against the final properties.**
+  `compileHandler` discharged the handler specs before the flow pass and the
+  verifier set their properties, so `contract.json` could omit a ZTS500 for a
+  declared `no_secret_leakage` over a leak, and could carry one for a proved
+  `result_safe`. It now discharges the specs again after both passes.
 - **A colon with no type reports the missing type.** `const value: = 1;`
   reported "const declarations must have an initializer" and a second error,
   "statement is not terminated". It now reports one ZTS002, "expected a type
@@ -210,32 +519,31 @@ pass proves it.
   gate follows such an import, so a changed helper behind `./lib` now gives a
   breaking verdict (exit 1) in place of an unreadable import (exit 2). No
   tracked `.ts` file has an extensionless import, so no tracked verdict moves.
-- **A Result or optional reassigned in a `for...of` body is unchecked at the
-  top of the next iteration.** The verifier walked the loop body once, so a
-  body that read `.value` of a checked Result, or a member of a narrowed
-  optional, and then reassigned it proved `results_safe` or `optionals_safe`,
-  although the second iteration read an unchecked value. Now the verifier
-  clears the Result check, and the optional narrowing when the new value is an
-  optional-producing call, for every binding that the body assigns, before it
-  walks the body. This adds refusals only, and no tracked `.ts` verdict moves.
-- **`zttp proofs verify` requires the bundle's certificate and contract to
-  equal the copies inside the binary.** Acceptance read the certificate from
-  the binary, and the bundle files were only checked against the manifest
-  digest. A bundle whose `certificate` file held garbage, with the digest
-  rewritten to match, printed `policy_accepted` and exited 0. Now a difference,
-  or a bundled certificate that the binary lacks, exits 1 with a line that
-  names the component.
+- **A Result or optional reassigned in a `for...of` body is unchecked at the top
+  of the next iteration.** The verifier walked the loop body once, so a body
+  that read `.value` of a checked Result, or a member of a narrowed optional,
+  and then reassigned it proved `results_safe` or `optionals_safe`, although the
+  second iteration read an unchecked value. Now the verifier clears the Result
+  check, and the optional narrowing when the new value is an optional-producing
+  call, for every binding that the body assigns, before it walks the body. This
+  adds refusals only, and no tracked `.ts` verdict moves.
+- **`zttp proofs verify` requires the bundle's certificate and contract to equal
+  the copies inside the binary.** Acceptance read the certificate from the
+  binary, and the bundle files were only checked against the manifest digest. A
+  bundle whose `certificate` file held garbage, with the digest rewritten to
+  match, printed `policy_accepted` and exited 0. Now a difference, or a bundled
+  certificate that the binary lacks, exits 1 with a line that names the
+  component.
 - **A module export runs with only the capabilities it declares.** The runtime
   granted every export its module's whole capability set, while the analysis
   trusts each export's own `required_capabilities`. An export whose native code
-  read an undeclared capability could therefore break a proof without a
-  refusal. Embedders: an export that declares `required_capabilities` now gets
-  exactly that set; an export that declares none still gets the module set.
+  read an undeclared capability could therefore break a proof without a refusal.
+  Embedders: an export that declares `required_capabilities` now gets exactly
+  that set; an export that declares none still gets the module set.
 - **`jwtSign`, `jwtVerify`, and `verifyWebhookSignature` refuse an empty
-  secret.** An empty HMAC key signed and verified, so anyone could forge a
-  token or a webhook signature. `jwtSign` returns `undefined`, `jwtVerify`
-  returns an error Result (`empty secret`), and `verifyWebhookSignature`
-  returns `false`.
+  secret.** An empty HMAC key signed and verified, so anyone could forge a token
+  or a webhook signature. `jwtSign` returns `undefined`, `jwtVerify` returns an
+  error Result (`empty secret`), and `verifyWebhookSignature` returns `false`.
 - **`zttp proofs gate` gives a behavior verdict for a handler without a
   `Proof<...>` capsule.** Such a handler got ZTS500 on each side, and the gate
   stopped with exit 2. Now the gate compares it when its only errors are the
@@ -245,16 +553,16 @@ pass proves it.
   followed, for example behind a helper that fails its type check.
 - **`zttp proofs gate` compares the handlers that import a changed helper.** A
   pull request that changed only a helper skipped the helper as `no_contract`
-  and exited 0, or exited 2 when the helper failed its own analysis, for
-  example with ZTS061. Now the gate parses each tracked `.ts` file on both
-  sides, finds every handler that reaches a changed file through relative
-  imports, and compares it as if its own file changed. A helper is no longer
-  analyzed as a root, and a changed helper that no handler imports is skipped
-  as `unreferenced_helper`. The blindness of an edit inside a handler applies:
-  a helper that only changes a value it returns is `equivalent`, while a new
+  and exited 0, or exited 2 when the helper failed its own analysis, for example
+  with ZTS061. Now the gate parses each tracked `.ts` file on both sides, finds
+  every handler that reaches a changed file through relative imports, and
+  compares it as if its own file changed. A helper is no longer analyzed as a
+  root, and a changed helper that no handler imports is skipped as
+  `unreferenced_helper`. The blindness of an edit inside a handler applies: a
+  helper that only changes a value it returns is `equivalent`, while a new
   `fetch` or cache write loses `retry_safe`. A renamed or deleted helper that a
-  handler still imports, an extensionless import, and a chain deeper than
-  eight files give exit 2.
+  handler still imports, an extensionless import, and a chain deeper than eight
+  files give exit 2.
 - **A certificate no longer claims `capability_bounded` for a handler without
   `Effects<...>`.** The producer set the property for every handler, though the
   compiler checks a capability ceiling only when the return type declares
@@ -268,18 +576,18 @@ pass proves it.
 ### Breaking changes
 
 - **`fetchWithRetry` refuses a write that carries a credential header.** A
-  request with an `authorization`, `proxy-authorization`, or `cookie` header
-  and a method other than GET, HEAD, or OPTIONS gets `CredentialRefused` before
-  any request is sent. Before, such a request was resent up to `maxRetries`
-  times, so a write whose result was unknown could repeat with the user's
-  authority. A credentialed GET is still retried. Migration: send a
-  credentialed write with `fetch` and handle a failure in the handler.
+  request with an `authorization`, `proxy-authorization`, or `cookie` header and
+  a method other than GET, HEAD, or OPTIONS gets `CredentialRefused` before any
+  request is sent. Before, such a request was resent up to `maxRetries` times,
+  so a write whose result was unknown could repeat with the user's authority. A
+  credentialed GET is still retried. Migration: send a credentialed write with
+  `fetch` and handle a failure in the handler.
 
 ### Known limitations
 
 - **`no_secret_leakage` tracks explicit flow only.** A response chosen by a
-  comparison with a secret, such as `if (secret === guess)`, proves the
-  property and reveals the comparison result. See
+  comparison with a secret, such as `if (secret === guess)`, proves the property
+  and reveals the comparison result. See
   [Verification](docs/verification.md#what-is-not-checked-said-out-loud).
 
 ## [0.25.0] - 2026-10-27
@@ -295,47 +603,47 @@ each handler pool.
 ### Breaking changes
 
 - **`zttp deploy`, `zttp build`, and `zttp compile` refuse a handler that
-  `zttp check` refuses.** The build now runs the check analysis and stops on
-  any spec error, such as a declared capsule that the handler does not
-  discharge or a handler with no capsule that misses a default property. Before
-  this change, `zttp test` refused those handlers and the build shipped them.
-  A handler that calls a virtual module does not hold `pure`, so it needs a
-  capsule. Migration: run `zttp check` on each handler, then correct the code
-  or declare a narrow `Proof<T, P>` capsule with only the properties the
-  handler holds. Rebuild and redeploy earlier artifacts.
+  `zttp check` refuses.** The build now runs the check analysis and stops on any
+  spec error, such as a declared capsule that the handler does not discharge or
+  a handler with no capsule that misses a default property. Before this change,
+  `zttp test` refused those handlers and the build shipped them. A handler that
+  calls a virtual module does not hold `pure`, so it needs a capsule. Migration:
+  run `zttp check` on each handler, then correct the code or declare a narrow
+  `Proof<T, P>` capsule with only the properties the handler holds. Rebuild and
+  redeploy earlier artifacts.
 - **A handler with no failable I/O site now proves `fault_covered`.** The path
-  analysis version moves to 5 and changes the policy hash. Version 4 refused
-  the property for such a handler, so the first handler in the user guide
-  failed `zttp check`. Migration: rebuild handlers and regenerate contracts
-  before deployment. `zttp proofs gate` grades a lost `fault_covered` as
-  critical, so adding the first unchecked failable call to a handler with no
-  I/O now fails the gate.
+  analysis version moves to 5 and changes the policy hash. Version 4 refused the
+  property for such a handler, so the first handler in the user guide failed
+  `zttp check`. Migration: rebuild handlers and regenerate contracts before
+  deployment. `zttp proofs gate` grades a lost `fault_covered` as critical, so
+  adding the first unchecked failable call to a handler with no I/O now fails
+  the gate.
 - **`env()` values are secret unless the policy lists the name in
-  `env.public`.** The flow analysis used to label `env("NAME")` as
-  configuration when `NAME` held none of `SECRET`, `PASSWORD`, `PASSWD`, `KEY`,
-  `TOKEN`, `PRIVATE`, `CREDENTIAL`, and `AUTH`. A handler that returned
+  `env.public`.** The flow analysis used to label `env("NAME")` as configuration
+  when `NAME` held none of `SECRET`, `PASSWORD`, `PASSWD`, `KEY`, `TOKEN`,
+  `PRIVATE`, `CREDENTIAL`, and `AUTH`. A handler that returned
   `env("DATABASE_URL")` or `env("STRIPE_SK")` therefore proved
   `no_secret_leakage`. Now every literal name is secret, and the match for a
   public name is exact and case sensitive. A computed name stays secret.
   `env.public` needs `env.allow` in the same policy file, so listing a name
   there also turns on runtime allow-list enforcement. It is analysis only: the
-  runtime policy does not carry it, and a non-empty list appears in the
-  contract `env` object as `public`. The flow analyzer version moves to 8 and
-  changes the policy hash. Migration: add each env name that a handler returns
-  to `env.public`, or stop returning the value. Rebuild handlers and regenerate
+  runtime policy does not carry it, and a non-empty list appears in the contract
+  `env` object as `public`. The flow analyzer version moves to 8 and changes the
+  policy hash. Migration: add each env name that a handler returns to
+  `env.public`, or stop returning the value. Rebuild handlers and regenerate
   contracts before deployment. Commands that read no policy keep every name
   secret.
 - **`mask` declassifies only a literal bound of 4 or less on an unmodified
-  source value.** The flow analysis used to accept any numeric literal bound,
-  so `mask(secret, 39)` on a 40-byte secret proved `no_secret_leakage`, and
-  four bounded calls over slices of one secret revealed all of it. Now the
-  bound must be an integer literal from 0 to 4, an omitted bound is refused,
-  and the text must be an `env()` read, the `authorization` header, or a plain
-  copy of one. A slice, a concatenation, or any other transformation keeps the
-  secret label. The runtime default of 4 bytes does not change. Migration:
-  write `mask(value, 4)` on the value itself. This change shares the flow
-  analyzer version 8 with the `env.public` change. Rebuild handlers and
-  regenerate contracts before deployment.
+  source value.** The flow analysis used to accept any numeric literal bound, so
+  `mask(secret, 39)` on a 40-byte secret proved `no_secret_leakage`, and four
+  bounded calls over slices of one secret revealed all of it. Now the bound must
+  be an integer literal from 0 to 4, an omitted bound is refused, and the text
+  must be an `env()` read, the `authorization` header, or a plain copy of one. A
+  slice, a concatenation, or any other transformation keeps the secret label.
+  The runtime default of 4 bytes does not change. Migration: write
+  `mask(value, 4)` on the value itself. This change shares the flow analyzer
+  version 8 with the `env.public` change. Rebuild handlers and regenerate
+  contracts before deployment.
 - **A write through a shared object now breaks `state_isolated` (ZTS310).** The
   verifier used to check only a write to a bare identifier. A member or index
   write on a builtin, a module-scope binding, or a local that starts from one
@@ -353,8 +661,8 @@ each handler pool.
 
 ### Added
 
-- **`zttp verify` reports whether the signing key is pinned.** Human output
-  says "key not pinned" and names the `--trust-key` option. JSON output carries
+- **`zttp verify` reports whether the signing key is pinned.** Human output says
+  "key not pinned" and names the `--trust-key` option. JSON output carries
   `"keyPinned": false` or `true`. An unpinned result still exits 0, so a script
   that reads only the exit status must also read `keyPinned`.
 - **`zts compile --help` and `zttp proofs bundle --help` print usage and exit
@@ -370,9 +678,11 @@ each handler pool.
   path rules did not change: a path with `..`, or under `/etc/` or `/var/`, is
   refused. The command now prints the reason on stderr and exits 1. Before, it
   exited 1 with no output.
-- **A busy port refuses a second server.** `zttp serve` and `zttp dev` now
-  bind the public listener without `SO_REUSEPORT`. They print `Port N is
-  already in use. Pass a different port with -p <PORT>.` and exit 1.
+- **A busy port refuses a second server.** `zttp serve` and `zttp dev` now bind
+  the public listener without `SO_REUSEPORT`. They print
+  `Port N is
+  already in use. Pass a different port with -p <PORT>.` and
+  exit 1.
 - **The check report marks skipped stages.** When parsing fails, the proof card
   prints `SKIPPED (parse failed)` for Types, Sound mode, and Strict ZigTS.
 - **`zttp serve -e` prints parse diagnostics.** A parse error now shows the ZTS
@@ -381,13 +691,13 @@ each handler pool.
   Flow diagnostics and the failing sections now appear in `test` and `dev`
   output, so the printed errors match the counted errors.
 - **SQLite writes wait up to 5000 ms for a busy writer.** Concurrent writes
-  through `zttp:sql` used to fail with a 500 reply while another connection
-  held the write lock. They now wait and succeed. The runtime does not enable
-  WAL mode.
-- **One `zttp:ratelimit` store serves each handler pool.** Each runtime used
-  its own store, so a limit of 5 admitted about 20 requests in a test of 200.
-  The pool now shares one store of integer counters. It admits the stated
-  limit across all runtimes in the pool.
+  through `zttp:sql` used to fail with a 500 reply while another connection held
+  the write lock. They now wait and succeed. The runtime does not enable WAL
+  mode.
+- **One `zttp:ratelimit` store serves each handler pool.** Each runtime used its
+  own store, so a limit of 5 admitted about 20 requests in a test of 200. The
+  pool now shares one store of integer counters. It admits the stated limit
+  across all runtimes in the pool.
 - **A recycled runtime is rebuilt at release.** The next request no longer pays
   the rebuild. The release step now takes longer when a recycle happens. A
   failed rebuild logs a warning, and the next request rebuilds the runtime.
@@ -417,20 +727,19 @@ each handler pool.
   `reduce`, `sort`, `Array.from`, `Result.map`, or a dict helper used to become
   `undefined` or the input element. It now ends the request like any native
   error. Allocation failures in `concat` and default sort also propagate.
-- **HEAD replies carry no body.** Status and error replies, such as 404, 408, 413,
-  500, 501, and 503, now omit the body for a HEAD request.
+- **HEAD replies carry no body.** Status and error replies, such as 404, 408,
+  413, 500, 501, and 503, now omit the body for a HEAD request.
 - **Schema nesting is bounded at 512.** `schemaCompile` returns `InvalidSchema`
   for a schema nested deeper, which matches the JSON depth limit.
-- **`renderToString` refuses nesting deeper than 512.** A handler that nested
-  an array 200000 deep crashed the process. The request now fails with a 500
-  reply.
+- **`renderToString` refuses nesting deeper than 512.** A handler that nested an
+  array 200000 deep crashed the process. The request now fails with a 500 reply.
 - **Large radix literals keep their value.** A `0b` or `0o` literal above the
-  32-bit integer range used to read as 0. `{ get x: 1 }` and `{ set x: 1 }`
-  are now refused at parse time.
+  32-bit integer range used to read as 0. `{ get x: 1 }` and `{ set x: 1 }` are
+  now refused at parse time.
 - **A header read inside a spread operand reaches the route contract.** The
   header parameter was missing from the contract before.
-- **A static key declared inside a callback no longer reports ZTS605.** A dynamic
-  key stays refused.
+- **A static key declared inside a callback no longer reports ZTS605.** A
+  dynamic key stays refused.
 - **A nested function declaration no longer makes its handler `total`.** A
   helper that returns only when called does not return from the handler.
 - **`no_unreachable` and `state_isolated` are claimed only after the verifier
@@ -469,17 +778,17 @@ each handler pool.
 
 ### Highlights
 
-zttp 0.24.0 closes gaps in type checking and behavior path analysis.
-The analyzer checks more expression positions and records a path for each
-returned `match` arm. Source builds now require Zig 0.17.0.
+zttp 0.24.0 closes gaps in type checking and behavior path analysis. The
+analyzer checks more expression positions and records a path for each returned
+`match` arm. Source builds now require Zig 0.17.0.
 
 ### Breaking changes
 
 - **Source builds require Zig 0.17.0.** Migration: install Zig 0.17.0 and
   replace `-Doptimize=ReleaseFast` with `-Doptimize=fast` in build commands.
-- **Earlier contracts need a rebuild.** The path analysis version moves to 4
-  and changes the policy hash. Migration: rebuild handlers and regenerate
-  contracts before deployment.
+- **Earlier contracts need a rebuild.** The path analysis version moves to 4 and
+  changes the policy hash. Migration: rebuild handlers and regenerate contracts
+  before deployment.
 - **More programs fail type and proof checks.** The analyzer now reads calls,
   assignments, captures, and spread operands that earlier checks missed.
   Persistent reads and unresolved calls can now make a property unproven.
@@ -489,8 +798,8 @@ returned `match` arm. Source builds now require Zig 0.17.0.
   This applies to `sql(name, statement)` and `schemaCompile(name, schema)`.
   Migration: use a literal or static constant, or register at module scope.
 - **Nested functions cannot control an outer loop.** The parser now refuses
-  `break` and `continue` in these functions. Migration: move loop control to
-  the function that owns the loop.
+  `break` and `continue` in these functions. Migration: move loop control to the
+  function that owns the loop.
 - **Expert reads refuse git-ignored files.** Migration: move required source
   outside ignored paths, or change the ignore rule for that source.
 - **Aggregate tests refuse filters.** Migration: use a named suite, such as
@@ -502,36 +811,36 @@ returned `match` arm. Source builds now require Zig 0.17.0.
 ### Changed
 
 - **Building from source requires Zig 0.17.0.** The build uses tracked cache
-  outputs and configuration dependencies. Development tools and allocation
-  tests use `SafeAllocator`; release allocator selection stays the same.
+  outputs and configuration dependencies. Development tools and allocation tests
+  use `SafeAllocator`; release allocator selection stays the same.
 - **The proof gate workflow is an example.** It moved from
   `.github/workflows/proof-gate.yml` to `docs/examples/proof-gate.yml`, and the
   zttp repository no longer runs it. Copy it to `.github/workflows/` in your
   project, as before.
-- **The path analysis version is 4.** A returned `match` now gives one
-  behavior path for each arm, and an `assert` gives a failure path. Module
-  calls are recorded in every expression position. The policy hash moves, so a
-  contract that an older analysis stamped is rebuilt and not trusted.
+- **The path analysis version is 4.** A returned `match` now gives one behavior
+  path for each arm, and an `assert` gives a failure path. Module calls are
+  recorded in every expression position. The policy hash moves, so a contract
+  that an older analysis stamped is rebuilt and not trusted.
 
 ### Fixed
 
-- **The `stringOps` benchmark regains its throughput under Zig 0.17.**
-  `indexOf` reuses the existing first-byte search for two-to-four-byte needles.
-  The benchmark baseline and thresholds remain unchanged.
+- **The `stringOps` benchmark regains its throughput under Zig 0.17.** `indexOf`
+  reuses the existing first-byte search for two-to-four-byte needles. The
+  benchmark baseline and thresholds remain unchanged.
 - **Flow checks preserve uncertainty.** Persistent reads, unresolved calls,
   callbacks, recursion, and additional response and egress sinks no longer
-  preserve unsupported proof claims. `renderToString` no longer proves that
-  its result passed input validation.
-- **Missing proof properties remain unproven.** Deploy and review projections
-  no longer read an absent property as true.
+  preserve unsupported proof claims. `renderToString` no longer proves that its
+  result passed input validation.
+- **Missing proof properties remain unproven.** Deploy and review projections no
+  longer read an absent property as true.
 - **Production acceptance also applies during builds.** Artifact builds now
   refuse certificates that production startup refuses.
-- **The type checker reads more of the program.** It now checks calls in
-  member bases, computed keys, and spread operands. An assignment inside a
-  branch, a loop body, or a `match` arm now ends the narrowing after the join.
-  A captured binding has the type of its declaration, so an assignment through
-  a closure or to a parameter is checked. In a program where a closure writes
-  an outer binding, a call ends every narrowing.
+- **The type checker reads more of the program.** It now checks calls in member
+  bases, computed keys, and spread operands. An assignment inside a branch, a
+  loop body, or a `match` arm now ends the narrowing after the join. A captured
+  binding has the type of its declaration, so an assignment through a closure or
+  to a parameter is checked. In a program where a closure writes an outer
+  binding, a call ends every narrowing.
 
 ## [0.22.3] - 2026-10-18
 
@@ -556,36 +865,35 @@ The 0.22.2 and 0.22.0 entries in CHANGELOG.md list the breaking changes that a
   freed memory it had never written. On Linux x86_64 this crashed the process.
 - **`cli-abuse-check` runs from a relative cache path.** The check could not
   find the `zts` binary when the build cache path was relative, as it is in CI.
-- **The instruction counter falls back on a macOS virtual machine.** A macOS
-  VM reports zero retired instructions. The counter now uses CPU time there,
-  as it does on a Linux runner, and stays strict on a physical Mac.
+- **The instruction counter falls back on a macOS virtual machine.** A macOS VM
+  reports zero retired instructions. The counter now uses CPU time there, as it
+  does on a Linux runner, and stays strict on a physical Mac.
 
 ## [0.22.2] - 2026-10-17
 
 ### Highlights
 
 zttp 0.22.2 closes several cases in which the effect and termination analyses
-reported a property as proven when it was not. A function value that escapes
-the call graph, or a call into a module the analyzer cannot see, no longer
-proves `total`, `cost_bounded`, `read_only`, `pure`, or `deterministic`. The
-CLI also exits with a plain message on unreadable input. Version 0.22.1 was
-not published.
+reported a property as proven when it was not. A function value that escapes the
+call graph, or a call into a module the analyzer cannot see, no longer proves
+`total`, `cost_bounded`, `read_only`, `pure`, or `deterministic`. The CLI also
+exits with a plain message on unreadable input. Version 0.22.1 was not
+published.
 
 ### Breaking changes
 
 - **Proofs can get weaker with no source change.** A handler whose verdict
-  rested on one of the gaps under Security now reports the property as
-  unproven, and a declared `Proof<T, P>` that names it fails with ZTS500.
-  Migration: run `zttp check` on each handler and remove or satisfy the
-  property it names.
+  rested on one of the gaps under Security now reports the property as unproven,
+  and a declared `Proof<T, P>` that names it fails with ZTS500. Migration: run
+  `zttp check` on each handler and remove or satisfy the property it names.
 - **Rebuild artifacts built by 0.22.0.** The certificate schema (5), the
   self-extract payload format (7), and the policy hash did not change, so the
-  runtime still accepts an older artifact. An artifact built by 0.22.0 may
-  carry `total`, `cost_bounded`, `read_only`, `pure`, or `deterministic`
-  falsely. Migration: rebuild and redeploy every artifact.
+  runtime still accepts an older artifact. An artifact built by 0.22.0 may carry
+  `total`, `cost_bounded`, `read_only`, `pure`, or `deterministic` falsely.
+  Migration: rebuild and redeploy every artifact.
 - **`zttp help <unknown>` exits non-zero.** It printed the general help and
-  exited 0 before. Migration: a script that called it must use a known
-  command name.
+  exited 0 before. Migration: a script that called it must use a known command
+  name.
 
 ### Security
 
@@ -593,22 +901,21 @@ not published.
   recursed through a function value proved `total`, and a handler that reached
   it proved `cost_bounded`. The call graph has an edge only for a call by name,
   a function handed to a builtin, and a stable route dispatch. A function value
-  that leaves those positions now refuses termination for its owner. A
-  function value returned by an escaping sibling module refuses termination for
-  the whole importing module.
-- **A builtin callback slot closes only for a function with a call-graph
-  edge.** A function declared inside another function and handed to `map` or
-  `filter` recursed with no detected cycle, and proved `total` and
-  `cost_bounded`.
+  that leaves those positions now refuses termination for its owner. A function
+  value returned by an escaping sibling module refuses termination for the whole
+  importing module.
+- **A builtin callback slot closes only for a function with a call-graph edge.**
+  A function declared inside another function and handed to `map` or `filter`
+  recursed with no detected cycle, and proved `total` and `cost_bounded`.
 - **A function value is charged where it is referenced.** A reference to an
   import or a user function outside callee position now adds its effects to the
   owner. An export of a module the analyzer cannot see counts as a write and an
   egress, whether it is called directly, referenced as a value, or handed to a
   callback slot.
-- **`read_only` and `pure` refuse a lower-bound effect row.** When the
-  analyzer cannot see every effect, it no longer proves either property.
-- **Determinism follows what a callee reaches.** A discarded `logInfo` left
-  the clock in the effect row, so a later clock read added nothing new and the
+- **`read_only` and `pure` refuse a lower-bound effect row.** When the analyzer
+  cannot see every effect, it no longer proves either property.
+- **Determinism follows what a callee reaches.** A discarded `logInfo` left the
+  clock in the effect row, so a later clock read added nothing new and the
   handler stayed `deterministic`.
 - **Capsule properties report what holds.** `proofCapsules[].proven` and the
   ZTS611 repair read raw facts, so a recursive, escaping, or lower-bound helper
@@ -618,22 +925,23 @@ not published.
 ### Changed
 
 - **`zts --version` prints the release version.** It printed the analyzer
-  surface identity (0.19.0). The `zts meta` envelope still carries that
-  identity as `compiler_version`.
-- **Release version drift fails `zig build test`.** `VERSION` is the
-  authority, and the three `build.zig.zon` files, `version.string`, the
-  `README.md` heading, and the `install.sh` comment must equal it.
+  surface identity (0.19.0). The `zts meta` envelope still carries that identity
+  as `compiler_version`.
+- **Release version drift fails `zig build test`.** `VERSION` is the authority,
+  and the three `build.zig.zon` files, `version.string`, the `README.md`
+  heading, and the `install.sh` comment must equal it.
 
 ### Fixed
 
-- **Plain errors for unreadable or missing input.** `zttp check` names a
-  missing handler, a missing project, a wrong extension, and an unreadable
-  file. `zttp dev` and `zttp serve` check their flags before analysis and
-  explain a bad flag in plain words. `zttp gen-tests`, `zts compile`, `zttp
-  serve`, and `zttp deploy` exit with the read reason instead of a stack trace.
-- **Allocation failures.** Import scans, diagnostic copies, contract copies,
-  and module-audit messages free their memory when an allocation fails. A
-  second type environment initialization is refused.
+- **Plain errors for unreadable or missing input.** `zttp check` names a missing
+  handler, a missing project, a wrong extension, and an unreadable file.
+  `zttp dev` and `zttp serve` check their flags before analysis and explain a
+  bad flag in plain words. `zttp gen-tests`, `zts compile`, `zttp
+  serve`, and
+  `zttp deploy` exit with the read reason instead of a stack trace.
+- **Allocation failures.** Import scans, diagnostic copies, contract copies, and
+  module-audit messages free their memory when an allocation fails. A second
+  type environment initialization is refused.
 
 ## [0.22.0] - 2026-10-13
 
@@ -645,8 +953,7 @@ runtime serves only an artifact that the independent kernel accepts. This
 release removes orchestration, system linking, tool routes, application
 invariants, TSX, `comptime()`, Studio, the edge runtime, and many secondary
 commands. It also closes several cases in which the flow and fault-coverage
-analyses reported a property as proven when it was not. Rebuild every
-artifact.
+analyses reported a property as proven when it was not. Rebuild every artifact.
 
 ### Breaking changes
 
@@ -661,8 +968,8 @@ artifact.
   `zttp:tool`. The analyzer refuses an import of any of them with ZTS206, and
   `dev`, `serve`, replay, `--test`, `--watch`, `build`, `deploy`, precompile,
   proof bundles, and live reload all refuse source or contracts that use them.
-  Migration: move durable or multi-step work out of the handler, and call
-  other services with `zttp:fetch`.
+  Migration: move durable or multi-step work out of the handler, and call other
+  services with `zttp:fetch`.
 - **Retired project settings are refused.** `zttp.json` keys `invariants`,
   `declaration`, `ledger`, `auth`, `credentials`, `durableDir`, and `system`
   stop project discovery with an error, even when their value is `null`. A
@@ -673,8 +980,8 @@ artifact.
   `witnesses`, `ratchet`, `prove`, `proofs replay` with proof capsules, and
   `zts-training-export`. Migration: `zttp check` is the proof gate that
   `ratchet check` was, and `prove-behavior` and `edit-simulate` remain.
-- **Removed run and expert flags:** `--durable`, `--system`,
-  `--workflow-queue`, `--actor-queue`, `--mode rpc`, `--no-perf-receipt`, and
+- **Removed run and expert flags:** `--durable`, `--system`, `--workflow-queue`,
+  `--actor-queue`, `--mode rpc`, `--no-perf-receipt`, and
   `--no-equivalence-receipt`. Applied edits no longer sign `kind=perf` or
   `kind=equivalence` receipts.
 - **Removed providers:** `--provider claude` and `--provider openai`. The
@@ -685,27 +992,26 @@ artifact.
   `-Dreport`, `-Dsdk`, `-Dstudio`, `-Dsystem`, and `-Dtest-file`. OpenAPI and
   generated TypeScript client output go with them. The interpreter is now the
   only execution path.
-- **TSX, `comptime()`, and hypermedia are removed.** A `.tsx` source is
-  refused with ZTS052, like `.js` and `.jsx`. `comptime()` folding, the global
+- **TSX, `comptime()`, and hypermedia are removed.** A `.tsx` source is refused
+  with ZTS052, like `.js` and `.jsx`. `comptime()` folding, the global
   `resource()` affordances, and the HTMX `zttp init` template are gone.
-  Migration: build HTML with `h()` and `renderToString()`, and compute
-  constants in ordinary module-level code.
+  Migration: build HTML with `h()` and `renderToString()`, and compute constants
+  in ordinary module-level code.
 - **The analyzer refuses programs that it accepted before.** See Changed:
-  surplus call arguments (ZTS202), boolean checks inside function bodies
-  (ZTS100 to ZTS107), match arm placement (ZTS062), and deeper nesting limits
-  (ZTS044).
-- **Proofs can get weaker with no source change.** See Security. A handler
-  whose verdict rested on a closed analysis gap now reports the property as
-  unproven or refused.
+  surplus call arguments (ZTS202), boolean checks inside function bodies (ZTS100
+  to ZTS107), match arm placement (ZTS062), and deeper nesting limits (ZTS044).
+- **Proofs can get weaker with no source change.** See Security. A handler whose
+  verdict rested on a closed analysis gap now reports the property as unproven
+  or refused.
 
 ### Security
 
 - **Flow properties now cover route functions dispatched through
-  `routerMatch`.** The flow checker walked only the handler, so a route
-  function reached through `found.handler(req)` was never checked as a sink,
-  and its return value came back with no labels. A routed handler whose route
-  returned `env("SECRET_KEY")` was reported `no_secret_leakage` PROVEN. The same
-  gap covered `no_credential_leakage`, `input_validated`, `injection_safe`,
+  `routerMatch`.** The flow checker walked only the handler, so a route function
+  reached through `found.handler(req)` was never checked as a sink, and its
+  return value came back with no labels. A routed handler whose route returned
+  `env("SECRET_KEY")` was reported `no_secret_leakage` PROVEN. The same gap
+  covered `no_credential_leakage`, `input_validated`, `injection_safe`,
   `pii_contained`, and `deterministic`. Every resolvable route function is now a
   root of the flow walk, a dispatched call's value is the union of its routes'
   return labels, and a call to a function value the checker cannot resolve
@@ -720,45 +1026,45 @@ artifact.
   cannot resolve. **Artifacts built by 0.21.1 and earlier from a routed handler
   may carry any of these properties falsely as well.** A module-scope mutation
   now also fails a declared `state_isolated` capsule with ZTS500.
-- **The flow checker now reports sinks inside called functions.** A log,
-  egress, or response sink in a callee, in a closure passed to `map`,
-  `forEach`, or `filter`, on a return path, in a concise arrow body, or in a
-  nested expression was not reported. A handler that leaked through a helper
-  could prove `no_secret_leakage`, `no_credential_leakage`, `input_validated`,
+- **The flow checker now reports sinks inside called functions.** A log, egress,
+  or response sink in a callee, in a closure passed to `map`, `forEach`, or
+  `filter`, on a return path, in a concise arrow body, or in a nested expression
+  was not reported. A handler that leaked through a helper could prove
+  `no_secret_leakage`, `no_credential_leakage`, `input_validated`,
   `injection_safe`, `pii_contained`, and `deterministic`. A call that the
   checker cannot enter now clears those properties, even when the handler
   discards its result. Recursive summaries widen to a fixpoint. An unresolved
   method, a call through a function value, and a depth or allocation cap all
   fail closed.
-- **Imported helpers apply their sinks at each call site.** Only the labels
-  that an imported helper returned were kept, so a helper in another file that
-  logged or sent its argument proved clean.
+- **Imported helpers apply their sinks at each call site.** Only the labels that
+  an imported helper returned were kept, so a helper in another file that logged
+  or sent its argument proved clean.
 - **Captured values resolve lexically.** A closure that returned a captured
   secret proved `no_secret_leakage`, because captures were resolved by slot.
   Labels on module-level declarations and on re-declarations are also correct
   now.
-- **Credential reads are labelled on every request binding.** A request
-  passed to a helper or aliased (`const r = req`) read its `Authorization`
-  header without the credential label.
+- **Credential reads are labelled on every request binding.** A request passed
+  to a helper or aliased (`const r = req`) read its `Authorization` header
+  without the credential label.
 - **`mask()` declassifies only secret and credential.** It also dropped
   `user_input`, so `fetch(url, { body: mask(req.url, 4) })` proved
   `injection_safe`.
-- **Unvalidated HTML is tracked to the response.** `Response.html` of user
-  input now carries a fact that follows the value to the response sink.
+- **Unvalidated HTML is tracked to the response.** `Response.html` of user input
+  now carries a fact that follows the value to the response sink.
 - **Stored data has unknown provenance.** Values read from the cache or a SQL
   table carry `unknown`, because a separate write put them there.
 - **`fault_covered` was claimed falsely in five ways.** A failable call on no
   enumerated path did not block it, and neither did a walk that was not
   exhaustive. `fetch` and `fetchWithRetry` counted as zero failable sites. The
-  case "a true, b false" of `if (a && b)` never ran. Failable calls in
-  imported files were not scanned. A `res.status !== 200` test did not cover a
-  `fetch`. All five now fail closed.
+  case "a true, b false" of `if (a && b)` never ran. Failable calls in imported
+  files were not scanned. A `res.status !== 200` test did not cover a `fetch`.
+  All five now fail closed.
 - **Analyzer versions are part of the policy hash.** The flow analyzer is
   version 2 and the path analyzer version 3. A contract stamped by an older
   analyzer no longer matches the runtime policy; rebuild it.
 - **The proof kernel keeps runtime safety in release builds.** Its ReleaseSafe
-  pin had no effect under a ReleaseFast root. Safety is now set per function
-  and checked by a gate.
+  pin had no effect under a ReleaseFast root. Safety is now set per function and
+  checked by a gate.
 - **A certificate past the consumer limits is refused** with
   `CertificateExceedsConsumerLimits`. A proof above about 18,700 IR nodes
   reached undefined behavior in ReleaseFast.
@@ -782,11 +1088,11 @@ artifact.
   handler. **A pull request that passed the gate while losing one of the eight
   properties now fails it.**
 - **ZTS408 (warning) refuses a credential in an egress body,** including one
-  passed through an opaque `init` object. A value with unknown provenance in
-  an egress body also clears `no_credential_leakage`.
+  passed through an opaque `init` object. A value with unknown provenance in an
+  egress body also clears `no_credential_leakage`.
 - **ZTS202 refuses surplus arguments** to source functions and to `zttp:*`
-  exports. Signatures are keyed by source position, so two functions on one
-  line no longer merge.
+  exports. Signatures are keyed by source position, so two functions on one line
+  no longer merge.
 - **ZTS601 fires for an anonymous arrow that annotates only some of its
   parameters.**
 - **Boolean checks (ZTS100 to ZTS107) walk function bodies.** `if (5)` inside a
@@ -797,10 +1103,10 @@ artifact.
   name below the top level of a pattern reports ZTS001, and an unreachable arm
   reports ZTS216 (warning). The ZTS603 suggestion names the first missing case,
   and a match that is not exhaustive has type `T | undefined`.
-- **ZTS044 bounds left-deep operator and call chains** and type-syntax
-  nesting. **ZTS031** refuses a constant pool past 65,535 entries. **ZTS046**
-  names the character it refuses. One type mistake gives one message, and
-  parser recovery reports once per offset.
+- **ZTS044 bounds left-deep operator and call chains** and type-syntax nesting.
+  **ZTS031** refuses a constant pool past 65,535 entries. **ZTS046** names the
+  character it refuses. One type mistake gives one message, and parser recovery
+  reports once per offset.
 - **`zttp proofs gate` reports a signed receipt only when it wrote one,** and
   prints the reason to stderr when it did not.
 - **`rateCheck` returns an error `Result` for every failure,** tagged
@@ -820,8 +1126,8 @@ artifact.
 
 ### Added
 
-- **`zttp:sse` with `sseEvents`.** It splits a complete server-sent-events
-  body into events under the WHATWG rules. It refuses invalid UTF-8 and an
+- **`zttp:sse` with `sseEvents`.** It splits a complete server-sent-events body
+  into events under the WHATWG rules. It refuses invalid UTF-8 and an
   unterminated final block, and it ignores `retry`.
 - **Generated tests cover more handlers.** Fault-coverage tests now include
   `fetch` handlers and `req.method` and `req.url` guards, and they drop paths
@@ -832,12 +1138,12 @@ artifact.
 - **Crashes on hostile or very large input.** The analyzer no longer panics on
   256 nested template braces, on a schema literal with a duplicate key, on
   70,000 float constants, or on a left-deep chain of about 200,000 nodes. The
-  bytecode cache decoder no longer attempts a 50 GB allocation or overflows
-  its stack.
-- **Out-of-memory handling.** A parse fails on out-of-memory instead of
-  dropping the statement, a type check no longer loses a check on a transient
-  allocation failure, and about ten ownership paths free or keep their memory
-  correctly after an allocation failure.
+  bytecode cache decoder no longer attempts a 50 GB allocation or overflows its
+  stack.
+- **Out-of-memory handling.** A parse fails on out-of-memory instead of dropping
+  the statement, a type check no longer loses a check on a transient allocation
+  failure, and about ten ownership paths free or keep their memory correctly
+  after an allocation failure.
 
 ## [0.21.1] - 2026-09-26
 
@@ -846,10 +1152,10 @@ certificates, and bundles built by 0.21.0 remain valid.
 
 ### Changed
 
-- **The build graph is split across `build/*.zig`.** `build.zig` is now a
-  short orchestrator over thirteen files, one per area (package tests, proof
-  gates, host test roots, repository gates, tooling, the installed binaries,
-  wasm, goldens, runtime tests, bench, smoke, step coverage). Step names,
+- **The build graph is split across `build/*.zig`.** `build.zig` is now a short
+  orchestrator over thirteen files, one per area (package tests, proof gates,
+  host test roots, repository gates, tooling, the installed binaries, wasm,
+  goldens, runtime tests, bench, smoke, step coverage). Step names,
   descriptions, `-D` options, and the dependency graph are unchanged:
   `zig build -l` and `zig build -h` print the same output as 0.21.0.
   Contributors who format or grep the build must include `build/`;
@@ -858,19 +1164,18 @@ certificates, and bundles built by 0.21.0 remain valid.
 ### Fixed
 
 - **`release-check` reads every build file.** Its release-gate markers are
-  searched in `build.zig` and `build/*.zig` together, and its verifier
-  marker expects the `zig fmt` line that covers `build/`.
+  searched in `build.zig` and `build/*.zig` together, and its verifier marker
+  expects the `zig fmt` line that covers `build/`.
 
 ### Breaking changes
 
-- **Every artifact, certificate, and bundle built by 0.20.0 is refused;
-  rebuild and redeploy.** The strict artifact chain moved: certificate schema
-  `3` to `4`, proof system `zttp_pcc_v2` to `zttp_pcc_v3`, self-extract
-  format `3` to `6`, and the handler contract from version `18` to `22`. The
-  payload gained sections for the tool catalog and the declaration, and the
-  executable graph binds them as members 19 and 20. Older artifacts,
-  attestations, and bundles are not upgraded in place; their readers return
-  a rebuild-oriented error.
+- **Every artifact, certificate, and bundle built by 0.20.0 is refused; rebuild
+  and redeploy.** The strict artifact chain moved: certificate schema `3` to
+  `4`, proof system `zttp_pcc_v2` to `zttp_pcc_v3`, self-extract format `3` to
+  `6`, and the handler contract from version `18` to `22`. The payload gained
+  sections for the tool catalog and the declaration, and the executable graph
+  binds them as members 19 and 20. Older artifacts, attestations, and bundles
+  are not upgraded in place; their readers return a rebuild-oriented error.
 
 - **A zero outbound deadline is refused instead of meaning "no deadline".**
   `--outbound-timeout-ms 0` on `dev`, `serve`, and a deployed binary is an
@@ -880,90 +1185,88 @@ certificates, and bundles built by 0.21.0 remain valid.
   cannot be armed now fails the fetch with `DeadlineUnavailable` instead of
   letting the exchange run unbounded. The default stays `10000`.
 
-- **`--data-labels`, `-Ddata-labels`, and the `dataLabels` generator-pack
-  key are gone.** On 0.20.0 the flag reached a report boolean and enforced
-  nothing. The precompile parser now refuses any unknown flag instead of
-  taking it as a path, and a generator pack that carries `dataLabels` is
-  refused. The declaration file replaces them (see Added).
+- **`--data-labels`, `-Ddata-labels`, and the `dataLabels` generator-pack key
+  are gone.** On 0.20.0 the flag reached a report boolean and enforced nothing.
+  The precompile parser now refuses any unknown flag instead of taking it as a
+  path, and a generator pack that carries `dataLabels` is refused. The
+  declaration file replaces them (see Added).
 
-- **A validation call over a schema `zttp:validate` cannot compile fails
-  the build with ZTS514.** `schemaCompile` returns false at runtime for a
-  schema with a keyword outside the supported list, and every later
-  `validateJson`, `validateObject`, `coerceJson`, or `decodeJson` on it
-  refused every input. A handler that built on 0.20.0 with such a schema
-  answered 400 to every valid call; on 0.21.0 the build refuses the call and
-  names the keyword. A `schemaCompile` literal with such a keyword that
-  nothing reads is refused too, unless a tool catalog names it.
+- **A validation call over a schema `zttp:validate` cannot compile fails the
+  build with ZTS514.** `schemaCompile` returns false at runtime for a schema
+  with a keyword outside the supported list, and every later `validateJson`,
+  `validateObject`, `coerceJson`, or `decodeJson` on it refused every input. A
+  handler that built on 0.20.0 with such a schema answered 400 to every valid
+  call; on 0.21.0 the build refuses the call and names the keyword. A
+  `schemaCompile` literal with such a keyword that nothing reads is refused too,
+  unless a tool catalog names it.
 
-- **An effect pass that does not converge no longer reports a clean row.**
-  The propagation runs at most 16 passes. A call chain it could not cross in
-  that bound used to leave the caller's row without the callee's effects, so
-  a handler that reached `Date.now()` twenty calls deep answered
-  `deterministic`. Such rows are now `lower_bound` and refuse `total`,
-  `pure`, `read_only`, and `deterministic`. A handler whose proof rested on
-  that silence reports a weaker verdict after upgrading, with no change to
-  its own source.
+- **An effect pass that does not converge no longer reports a clean row.** The
+  propagation runs at most 16 passes. A call chain it could not cross in that
+  bound used to leave the caller's row without the callee's effects, so a
+  handler that reached `Date.now()` twenty calls deep answered `deterministic`.
+  Such rows are now `lower_bound` and refuse `total`, `pure`, `read_only`, and
+  `deterministic`. A handler whose proof rested on that silence reports a weaker
+  verdict after upgrading, with no change to its own source.
 
 ### Added
 
 - **Tool routes: `zttp:tool` with `toolCatalog` and `toolInput`.** A handler
   declares its tools once at module scope. Each entry names a `routerMatch`
   route, a description, an input and an output schema registered with
-  `schemaCompile`, and `maxInputBytes`. Tool schemas use a closed subset:
-  every object carries `"additionalProperties": false`, every string a
-  `maxLength`, and every array a `maxItems`. The build refuses a catalog that
-  breaks a rule with ZTS513 and names the tool, the line, and the field.
-  Before the handler runs, the runtime answers 413 to an input over the byte
-  bound and 400 to one the schema refuses, with the reason and byte offset;
-  after it, a 2xx body the output schema refuses is answered 500. The tool
-  reads its validated input with `toolInput(name, req)`, a `Result` whose
-  value type comes from the schema. Each tool may call only the module
-  exports its own route reaches, and the build refuses a tool that reads
-  state a separate call wrote: `zttp:cache` reads, `zttp:sql`,
-  `queue.receive`, and `durable.waitSignal`. The catalog is encoded as
-  canonical `ZTCAT1`, bound into the artifact, and checked by the acceptance
-  kernel, so an artifact whose catalog bytes change refuses to start.
-  `examples/tools/` is a complete project, and `zig build
-  test-reference-tools` builds it and drives real requests through each
-  boundary. The built-in module surface is 28 specifiers.
+  `schemaCompile`, and `maxInputBytes`. Tool schemas use a closed subset: every
+  object carries `"additionalProperties": false`, every string a `maxLength`,
+  and every array a `maxItems`. The build refuses a catalog that breaks a rule
+  with ZTS513 and names the tool, the line, and the field. Before the handler
+  runs, the runtime answers 413 to an input over the byte bound and 400 to one
+  the schema refuses, with the reason and byte offset; after it, a 2xx body the
+  output schema refuses is answered 500. The tool reads its validated input with
+  `toolInput(name, req)`, a `Result` whose value type comes from the schema.
+  Each tool may call only the module exports its own route reaches, and the
+  build refuses a tool that reads state a separate call wrote: `zttp:cache`
+  reads, `zttp:sql`, `queue.receive`, and `durable.waitSignal`. The catalog is
+  encoded as canonical `ZTCAT1`, bound into the artifact, and checked by the
+  acceptance kernel, so an artifact whose catalog bytes change refuses to start.
+  `examples/tools/` is a complete project, and
+  `zig build
+  test-reference-tools` builds it and drives real requests through
+  each boundary. The built-in module surface is 28 specifiers.
 
 - **Verified tool callers with per-tool scope.** `zttp.json` gains
-  `"auth": { "keyEnv": ..., "tenantClaim": ... }`. On a tool request the
-  runtime requires `Authorization: Bearer` with an HS256 JWT and answers 401
-  with the reason on a missing token, a bad signature, an unexpected `alg`,
-  an expired token, or a missing `sub` or tenant claim. The handler receives
-  `req.subject` and `req.tenant` and no `authorization` header. A catalog
-  `scope: { tenant: "<field>" }` binds an input field to the verified
-  identity, and a request whose field differs gets 403. A server with a tool
-  catalog refuses to start without the key.
+  `"auth": { "keyEnv": ..., "tenantClaim": ... }`. On a tool request the runtime
+  requires `Authorization: Bearer` with an HS256 JWT and answers 401 with the
+  reason on a missing token, a bad signature, an unexpected `alg`, an expired
+  token, or a missing `sub` or tenant claim. The handler receives `req.subject`
+  and `req.tenant` and no `authorization` header. A catalog
+  `scope: { tenant: "<field>" }` binds an input field to the verified identity,
+  and a request whose field differs gets 403. A server with a tool catalog
+  refuses to start without the key.
 
 - **Outbound credentials the handler never sees.** `zttp.json` gains a
   `credentials` object. Each reference names the environment variable, one
   endpoint, one header with an optional scheme, and the methods and path
   prefixes the value may go into. A tool names one with
   `fetch(url, { credential: "name" })`, and each tool can use only the
-  credentials its own route names. The build refuses a non-literal name, a
-  name `zttp.json` does not define, and a call at another endpoint. The
-  server reads every value once at startup and does not start when a
-  variable is unset or empty. The runtime adds the header only after it
-  checks the exact request it is about to send; a refusal is a 599 fetch
-  error with the code `CredentialRefused`, and no detail holds the value.
-  Only the synchronous `fetch` injects: `fetchWithRetry`, a durable fetch,
-  the `zttp:io` parallel path, and `httpRequest` refuse with
-  `path_unsupported`. A response that echoes the value is refused with
-  `CredentialReflected`. See
+  credentials its own route names. The build refuses a non-literal name, a name
+  `zttp.json` does not define, and a call at another endpoint. The server reads
+  every value once at startup and does not start when a variable is unset or
+  empty. The runtime adds the header only after it checks the exact request it
+  is about to send; a refusal is a 599 fetch error with the code
+  `CredentialRefused`, and no detail holds the value. Only the synchronous
+  `fetch` injects: `fetchWithRetry`, a durable fetch, the `zttp:io` parallel
+  path, and `httpRequest` refuse with `path_unsupported`. A response that echoes
+  the value is refused with `CredentialReflected`. See
   [docs/contracts-and-sandboxing.md](docs/contracts-and-sandboxing.md).
 
 - **The consumer declaration: declared classifications and a capability
   ceiling.** A JSON file named by the `declaration` key in `zttp.json`, by
   `zttp check --declaration <path>`, or by `-Ddeclaration` on a `-Dhandler`
   build. Version 1 carries `classifications`: each entry names a source
-  (`fetch:<host>` or `service:<name>`), a dot-separated path, a label
-  (`secret` or `credential`), whether the analysis must see it, and a
-  reason. The flow checker tracks where a value came from and applies the
-  declared label by whole path, through aliases, member reads, helpers, and
-  imported helpers; a leak names the declared entry. A required entry the
-  analysis never saw fails the build and the check. Version 2 adds
+  (`fetch:<host>` or `service:<name>`), a dot-separated path, a label (`secret`
+  or `credential`), whether the analysis must see it, and a reason. The flow
+  checker tracks where a value came from and applies the declared label by whole
+  path, through aliases, member reads, helpers, and imported helpers; a leak
+  names the declared entry. A required entry the analysis never saw fails the
+  build and the check. Version 2 adds
   `"ceiling": { "profile": ..., "exclude": [...] }` over the `boundary`,
   `adapter`, and `ledger` profiles; a handler outside its ceiling refuses to
   build, the declaration ships in the artifact as `ZTDCL1`, and every module
@@ -973,129 +1276,127 @@ certificates, and bundles built by 0.21.0 remain valid.
 - **Application invariants over a protected ledger.** `zttp:ledger` exports
   `post`, and `zttp.json` names the specification with `invariants` and the
   store with `ledger` (`--ledger <file>` on the command line). Two kinds are
-  supported: `balance_conservation_v1`, which every specification must
-  declare, and `declared_accounts_v1`, an optional set of exact and prefix
-  account rules matched case-sensitively over bytes. A posting that names an
-  undeclared account is refused whole with `undeclared_account` before
-  anything is written, and an existing store that holds one does not open. A
-  specification that names more than balance conservation uses
-  `"version": 2` and invariant wire schema 2. The acceptance kernel verifies
-  that every protected operation the handler reaches is covered, and the
-  artifact binds the linked adapter manifest, so a serving binary whose
-  adapter differs from the one the artifact was built with is refused. The
-  invariant status line states write applicability first. See the
-  Application Invariants section of [docs/user-guide.md](docs/user-guide.md).
+  supported: `balance_conservation_v1`, which every specification must declare,
+  and `declared_accounts_v1`, an optional set of exact and prefix account rules
+  matched case-sensitively over bytes. A posting that names an undeclared
+  account is refused whole with `undeclared_account` before anything is written,
+  and an existing store that holds one does not open. A specification that names
+  more than balance conservation uses `"version": 2` and invariant wire
+  schema 2. The acceptance kernel verifies that every protected operation the
+  handler reaches is covered, and the artifact binds the linked adapter
+  manifest, so a serving binary whose adapter differs from the one the artifact
+  was built with is refused. The invariant status line states write
+  applicability first. See the Application Invariants section of
+  [docs/user-guide.md](docs/user-guide.md).
 
 - **`zttp invariant list` and `zttp invariant author`.** `list` prints the
   closed catalog of kinds from the kernel's own table. `author` turns an
   explicit selection into a reviewable candidate: `--kind` is required and
-  repeatable, with `--ledger`, `--currency CODE:SCALE`, `--account-exact`,
-  and `--account-prefix`; a sentence given with `--statement` is recorded
-  beside the candidate, never inside it. `--advise` asks an advisory
-  classifier whether the sentence matches the selection, needs
-  `TYPESAFE_API_KEY`, sends only the sentence and the catalog's published
-  descriptions, and withholds the candidate on a missing, malformed, or
-  disagreeing answer. Listed by `zttp help --all` under Proof ledger.
+  repeatable, with `--ledger`, `--currency CODE:SCALE`, `--account-exact`, and
+  `--account-prefix`; a sentence given with `--statement` is recorded beside the
+  candidate, never inside it. `--advise` asks an advisory classifier whether the
+  sentence matches the selection, needs `TYPESAFE_API_KEY`, sends only the
+  sentence and the catalog's published descriptions, and withholds the candidate
+  on a missing, malformed, or disagreeing answer. Listed by `zttp help --all`
+  under Proof ledger.
 
-- **The outbound connect and TLS handshake are bounded.** One absolute
-  deadline from `--outbound-timeout-ms` now covers the connect, the
-  handshake, and the exchange on every outbound backend. Name resolution is
-  not bounded.
+- **The outbound connect and TLS handshake are bounded.** One absolute deadline
+  from `--outbound-timeout-ms` now covers the connect, the handshake, and the
+  exchange on every outbound backend. Name resolution is not bounded.
 
 ### Changed
 
 - **The published convergence and coverage evidence was re-recorded on an
   amended corpus.** Two cases were corrected: `cache-counter-holes` seeded a
   capsule no fill could discharge after `cacheGet` declared `unknown`, and
-  `workflow-nested-dispatch-avoidance` stubbed a fetch its prompt never
-  asked for. The corpus identity moved from `0012ad8ca6d5` to
-  `e6801afae099`, and the tool catalog and ZTS514 moved the policy hash, so
-  the DeepSeek corpus was re-recorded. The latest row measures a 73%
-  (14/19) first-draft veto pass and 100% (18/18) intent pass, against 42%
-  (8/19) and 77% (14/18) at 0.20.0. The two rows measure different prompts
-  and a different analyzer and are not a difference to subtract. The
-  compiler advertises 61 rules. See
+  `workflow-nested-dispatch-avoidance` stubbed a fetch its prompt never asked
+  for. The corpus identity moved from `0012ad8ca6d5` to `e6801afae099`, and the
+  tool catalog and ZTS514 moved the policy hash, so the DeepSeek corpus was
+  re-recorded. The latest row measures a 73% (14/19) first-draft veto pass and
+  100% (18/18) intent pass, against 42% (8/19) and 77% (14/18) at 0.20.0. The
+  two rows measure different prompts and a different analyzer and are not a
+  difference to subtract. The compiler advertises 61 rules. See
   [docs/convergence.md](docs/convergence.md) and
   [docs/coverage.md](docs/coverage.md).
 
 ### Fixed
 
-- **Response objects and HTTP wire output use the same status text**,
-  including `202 Accepted`, `408 Request Timeout`, `413 Payload Too Large`,
+- **Response objects and HTTP wire output use the same status text**, including
+  `202 Accepted`, `408 Request Timeout`, `413 Payload Too Large`,
   `502 Bad Gateway`, and `599 Network Connect Timeout Error`. Fetch responses
   retain reason phrases supplied by the upstream server or replay record.
 
 - **Every `zttp:service` call failed, and `fetchWithRetry` crashed.** Both
-  modules read their state through the SDK, which unwraps an envelope, while
-  the runtime installed a bare pointer, so `serviceCall` read the wrong
-  struct and failed with `NativeFunctionError`, and `fetchWithRetry` called
-  a heap address. Both are now installed in the envelope, and a test calls
-  each.
+  modules read their state through the SDK, which unwraps an envelope, while the
+  runtime installed a bare pointer, so `serviceCall` read the wrong struct and
+  failed with `NativeFunctionError`, and `fetchWithRetry` called a heap address.
+  Both are now installed in the envelope, and a test calls each.
 
-- **A `fetch` with `POST`, `PUT`, or `PATCH` and no body panicked the
-  worker.** The synchronous fetch, the `zttp:io` parallel worker, and
-  `httpRequest` now send an empty body with `Content-Length: 0`.
+- **A `fetch` with `POST`, `PUT`, or `PATCH` and no body panicked the worker.**
+  The synchronous fetch, the `zttp:io` parallel worker, and `httpRequest` now
+  send an empty body with `Content-Length: 0`.
 
-- **A damaged deployment artifact started as a plain runtime.** A short
-  read, a checksum mismatch, or a framed payload over 100 MiB made the
-  binary read as "no payload", so it started the plain `zttp-runtime` and,
-  run from a project directory, served that project's source with no proof
-  and no ceiling. The binary now exits 1 with its own message on every
-  inspection error. `zttp proofs bundle` and `zttp proofs verify` exit 1 on a
-  damaged artifact instead of writing a hash-only bundle. A plain runtime
-  binary with no trailer is unchanged.
+- **A damaged deployment artifact started as a plain runtime.** A short read, a
+  checksum mismatch, or a framed payload over 100 MiB made the binary read as
+  "no payload", so it started the plain `zttp-runtime` and, run from a project
+  directory, served that project's source with no proof and no ceiling. The
+  binary now exits 1 with its own message on every inspection error.
+  `zttp proofs bundle` and `zttp proofs verify` exit 1 on a damaged artifact
+  instead of writing a hash-only bundle. A plain runtime binary with no trailer
+  is unchanged.
 
 - **A recursive helper no longer fails `pure`, `read_only`, and
   `deterministic`.** Recursion refuses `total` alone, and the suggestion to
-  remove the recursion appears only there. A recursive impure helper still
-  fails `pure` for the impurity.
+  remove the recursion appears only there. A recursive impure helper still fails
+  `pure` for the impurity.
 
-- **A certificate could disclose a trusted edge at a proof node the IR does
-  not have and be accepted.** Every evidence node and inventory node is now
-  bounded to the proof IR. The acceptance kernel also keeps its runtime
-  safety checks in release builds, so a missed bound on certificate bytes
-  stops the server at start instead of being undefined behavior.
+- **A certificate could disclose a trusted edge at a proof node the IR does not
+  have and be accepted.** Every evidence node and inventory node is now bounded
+  to the proof IR. The acceptance kernel also keeps its runtime safety checks in
+  release builds, so a missed bound on certificate bytes stops the server at
+  start instead of being undefined behavior.
 
-- **A partner manifest export refused after construction freed its name
-  twice.** An unknown contract category or a bad return label, flag, or law
-  on an export crashed the loader instead of reporting the refusal.
+- **A partner manifest export refused after construction freed its name twice.**
+  An unknown contract category or a bad return label, flag, or law on an export
+  crashed the loader instead of reporting the refusal.
 
 ### Removed
 
 - The acceptance reason code `rule_family_mismatch` (1503). No path could
   produce it: the evidence shape check already refuses the mismatch as
-  `evidence_edge_invalid`. The vocabulary envelope loses one member; the
-  policy hash does not move.
+  `evidence_edge_invalid`. The vocabulary envelope loses one member; the policy
+  hash does not move.
+
 ## [0.20.0] - 2026-09-09
 
 ### Breaking changes
 
-- **Five store reads now report what they cannot know, so a handler that
-  proved a property through one may stop proving it.** `cacheGet`, `sqlOne`,
-  `sqlMany`, `queue.receive`, and `durable.waitSignal` hand back a value some
-  separate write put there, and the reading call holds no reference to that
-  value, so no dataflow rule can reach it. Each now declares `unknown` in its
-  return labels. A handler that reported `no_secret_leakage: PROVEN` through
-  one of these reports a weaker verdict after upgrading, **with no change to
-  its own source**. Declaring the property it can still prove, or moving the
-  read behind a validator, is the repair.
+- **Five store reads now report what they cannot know, so a handler that proved
+  a property through one may stop proving it.** `cacheGet`, `sqlOne`, `sqlMany`,
+  `queue.receive`, and `durable.waitSignal` hand back a value some separate
+  write put there, and the reading call holds no reference to that value, so no
+  dataflow rule can reach it. Each now declares `unknown` in its return labels.
+  A handler that reported `no_secret_leakage: PROVEN` through one of these
+  reports a weaker verdict after upgrading, **with no change to its own
+  source**. Declaring the property it can still prove, or moving the read behind
+  a validator, is the repair.
 
 - **`zttp:scope`'s `using` no longer launders the resource it hands back.** It
   returns its first argument unchanged, and the label propagation was never
   wired to that, so a secret passed through it arrived at the response
-  unlabelled. A handler relying on that silence to prove
-  `no_secret_leakage` or `no_credential_leakage` now fails the check.
+  unlabelled. A handler relying on that silence to prove `no_secret_leakage` or
+  `no_credential_leakage` now fails the check.
 
-- **A dynamic capability category denies instead of admitting.** Env, cache,
-  and SQL capability decisions are made on the normalized identifier, and an
-  egress rule names the destination rather than the host string, checked
-  before the socket opens. A policy that leaned on the previous looser
-  categorization may need its resources spelled out.
+- **A dynamic capability category denies instead of admitting.** Env, cache, and
+  SQL capability decisions are made on the normalized identifier, and an egress
+  rule names the destination rather than the host string, checked before the
+  socket opens. A policy that leaned on the previous looser categorization may
+  need its resources spelled out.
 
 - **`mask` is bounded by the argument that decides how much it reveals.** The
-  declassification holds only while that argument is a compile-time literal;
-  a runtime value puts the magnitude of the declassification in whatever
-  computes it. Malformed durable framing is refused rather than parsed.
+  declassification holds only while that argument is a compile-time literal; a
+  runtime value puts the magnitude of the declassification in whatever computes
+  it. Malformed durable framing is refused rather than parsed.
 
 ### Added
 
@@ -1110,23 +1411,22 @@ certificates, and bundles built by 0.21.0 remain valid.
   disclosed trusted boundary is pinned in both directions by
   `zig build test-proof-ratchet` and `test-proof-ratchet-drift`. One of the
   eight properties, `response_total`, is re-derived by the consumer; the other
-  seven are disclosed at a weaker grade and are accepted on the producer's
-  word. [docs/verification.md](docs/verification.md) says which, in as many
-  words.
+  seven are disclosed at a weaker grade and are accepted on the producer's word.
+  [docs/verification.md](docs/verification.md) says which, in as many words.
 
-- **Residual capability guards.** A computed capability resource is
-  classified and guarded rather than refused outright. Guard coverage is
-  reported beside the proof and never folded into it, and a denial names the
-  guard that fired instead of echoing the request's bytes.
+- **Residual capability guards.** A computed capability resource is classified
+  and guarded rather than refused outright. Guard coverage is reported beside
+  the proof and never folded into it, and a denial names the guard that fired
+  instead of echoing the request's bytes.
 
 ### Changed
 
-- **The published convergence and coverage evidence was re-recorded.**
-  Declaring `unknown` on the five store reads changed the module graph hash,
-  which every cassette covers, so the DeepSeek corpus was re-recorded. The
+- **The published convergence and coverage evidence was re-recorded.** Declaring
+  `unknown` on the five store reads changed the module graph hash, which every
+  cassette covers, so the DeepSeek corpus was re-recorded. The
   first-attempt-green rate moved from 57% (11/19) to 42% (8/19). Read the
-  attribution beside the number rather than the number alone: of the five
-  cases that regressed, only `sql-users` and `cache-counter-holes` carry
+  attribution beside the number rather than the number alone: of the five cases
+  that regressed, only `sql-users` and `cache-counter-holes` carry
   spec-discharge codes this change can cause, and one draw per case cannot
   separate a three-case move from noise. See
   [docs/convergence.md](docs/convergence.md).
@@ -1140,16 +1440,16 @@ certificates, and bundles built by 0.21.0 remain valid.
 - The `sql-crud` example claims only what a database read can prove.
 - The fuzz switch handles `UnknownMethod`; four dead JIT tier-promotion
   constants removed.
-- A failing intent check now reports its own output. The pin test used to
-  re-run `zttp test` in the same workspace and print that instead, which
-  inherits the first run's leftover state and describes a different run.
+- A failing intent check now reports its own output. The pin test used to re-run
+  `zttp test` in the same workspace and print that instead, which inherits the
+  first run's leftover state and describes a different run.
 
 ### Build
 
-- `zig build test` now runs the 56 example handler suites, which previously
-  ran only from `scripts/verify.sh`.
-- Two gates added: every script under `scripts/` must be invoked by something
-  or carry a reason, and every top-level build step's work must be run by
+- `zig build test` now runs the 56 example handler suites, which previously ran
+  only from `scripts/verify.sh`.
+- Two gates added: every script under `scripts/` must be invoked by something or
+  carry a reason, and every top-level build step's work must be run by
   something. The second walks the real build graph rather than parsing source.
 
 ## [0.19.0] - 2026-08-27
@@ -1160,20 +1460,19 @@ certificates, and bundles built by 0.21.0 remain valid.
   executables; `zttp:*` virtual modules; `ZTTP_*` environment and installer
   variables; the `Zttp-Attest` header; the `~/.zttp` install directory; and
   `zttp-...` release archives. Releases through v0.18.0 retain the historical
-  `zigttp`, `zigttp-runtime`, `zigts`, `zigttp:*`, `ZIGTTP_*`,
-  `Zigttp-Attest`, `~/.zigttp`, and `zigttp-...` names. The current installer
-  recognizes those archives and exposes their executables under the current
-  command names; their runtime interfaces and reported identities remain
-  historical.
+  `zigttp`, `zigttp-runtime`, `zigts`, `zigttp:*`, `ZIGTTP_*`, `Zigttp-Attest`,
+  `~/.zigttp`, and `zigttp-...` names. The current installer recognizes those
+  archives and exposes their executables under the current command names; their
+  runtime interfaces and reported identities remain historical.
 
 - **WebSocket support removed.** The `zttp:websocket` module, its runtime frame
   loop, and its contract capability are gone. Handlers that imported it no
   longer compile. The built-in module surface is 26 specifiers.
 
 - **Three fail-closed tightenings refuse input that 0.18.0 accepted.**
-  - A `zttp.json` whose `policy` entry names a missing, unreadable, or
-    malformed file is an error at every analyzer boundary, instead of falling
-    back to unrestricted analysis. Repair the path or drop the entry.
+  - A `zttp.json` whose `policy` entry names a missing, unreadable, or malformed
+    file is an error at every analyzer boundary, instead of falling back to
+    unrestricted analysis. Repair the path or drop the entry.
   - An edge config with `timeoutMs: 0` is rejected at startup. Set a positive
     value, or omit the field for the `30000` default.
   - `zttp proofs verify` rejects a bundle manifest that omits `contract`, names
@@ -1215,11 +1514,11 @@ certificates, and bundles built by 0.21.0 remain valid.
   queue instead of one detached thread each. A newly accepted connection is
   closed when the queue is full, workers are joined before handler state is
   released, and `timeoutMs: 0` is rejected at startup.
-- **`zttp proofs verify` refuses an ambiguous bundle.** The manifest must name
-  a `contract` component and may add `binary` and `replay`, each with its own
+- **`zttp proofs verify` refuses an ambiguous bundle.** The manifest must name a
+  `contract` component and may add `binary` and `replay`, each with its own
   relative path and a lowercase sha256. Every path segment is opened without
-  following symlinks, so a component that resolves outside the bundle is
-  refused instead of hashed.
+  following symlinks, so a component that resolves outside the bundle is refused
+  instead of hashed.
 - **`zttp proofs gate` classifies added and deleted TypeScript before it
   judges.** An added file is `additive` only after the analyzer proves it is a
   handler; a changed file the analyzer cannot read exits `2` instead of being
@@ -1227,8 +1526,8 @@ certificates, and bundles built by 0.21.0 remain valid.
 - **`scripts/verify.sh` is the one gate.** CI and the release workflow each run
   it as a single step rather than repeating a partial list, and it now also
   builds the freestanding `wasm` analyzer. `bash scripts/verify.sh --release`,
-  which the release workflow uses, adds a release-evidence provenance check
-  that requires coverage and convergence to come from a clean source commit the
+  which the release workflow uses, adds a release-evidence provenance check that
+  requires coverage and convergence to come from a clean source commit the
   release tree still matches. Per-commit CI does not run that check, because
   every ordinary source commit would fail it until the corpus is replayed and
   both pages republished.
@@ -1247,8 +1546,8 @@ certificates, and bundles built by 0.21.0 remain valid.
   implementation, state callback, or libc string path reaches the browser
   artifact.
 - **TSX handlers lost their declared proof signature.** Type annotations are
-  recorded before TSX lowering while IR locations come from the lowered
-  program, so a `.tsx` handler resolves its signature by name.
+  recorded before TSX lowering while IR locations come from the lowered program,
+  so a `.tsx` handler resolves its signature by name.
 - **The evidence publishers could not run from a clean checkout.** The build
   runs `scripts/*.py` and nothing ignored `scripts/__pycache__/`, so every
   replay stamped its coverage and convergence markers `sourceDirty: true` and
@@ -1266,19 +1565,19 @@ long-standing use-after-free in runtime teardown.
 ### Security
 
 - The embedded runtime policy is now covered by the signed proof receipt. The
-  JWS committed to the contract and bytecode hashes but never to payload
-  section 4 - the env/egress/cache/sql allowlist the sandbox actually enforces.
-  Two claim names looked like they covered it and did not: `policy_sha256` is
-  the analyzer's rule-registry hash and `capability_hash` is the
-  clock/crypto/random matrix. Section 4's only guard was CRC-32, which the
-  source already described as "an accidental-corruption check, not an integrity
-  control", so an attacker with write access to the artifact could widen egress,
-  recompute the CRC, and keep serving a valid `Zigttp-Attest` envelope while
-  enforcing the widened policy. A new `runtime_policy_sha256` claim binds the
-  exact serialized section-4 bytes, and startup fails closed on a mismatch.
-  **Artifacts built before this release carry an unpinned claim and are refused
-  with a rebuild message; rebuild and redeploy them.** Stripping the attestation
-  entirely still works and remains honest: no headers, no claim.
+  JWS committed to the contract and bytecode hashes but never to payload section
+  4 - the env/egress/cache/sql allowlist the sandbox actually enforces. Two
+  claim names looked like they covered it and did not: `policy_sha256` is the
+  analyzer's rule-registry hash and `capability_hash` is the clock/crypto/random
+  matrix. Section 4's only guard was CRC-32, which the source already described
+  as "an accidental-corruption check, not an integrity control", so an attacker
+  with write access to the artifact could widen egress, recompute the CRC, and
+  keep serving a valid `Zigttp-Attest` envelope while enforcing the widened
+  policy. A new `runtime_policy_sha256` claim binds the exact serialized
+  section-4 bytes, and startup fails closed on a mismatch. **Artifacts built
+  before this release carry an unpinned claim and are refused with a rebuild
+  message; rebuild and redeploy them.** Stripping the attestation entirely still
+  works and remains honest: no headers, no claim.
 - Malformed embedded contracts now fail closed. A contract that would not parse
   was logged and ignored, silently disabling env-var validation, the route
   pre-filter, proof-cache eligibility and attestation setup. An absent contract
@@ -1288,7 +1587,7 @@ long-standing use-after-free in runtime teardown.
   declaring narrower egress silently ran with the orchestrator's wider
   allowlist; a target whose contract cannot be extracted is now refused rather
   than falling back to inheritance.
-- The edge server (`-Dedge`) now bounds the *encoded* size of a chunked body and
+- The edge server (`-Dedge`) now bounds the _encoded_ size of a chunked body and
   parses it resumably. It capped only the decoded payload, so many tiny chunks
   carrying large chunk-extension size-lines could drive unbounded buffer growth
   while staying under `max_body_size`, and it reparsed the whole body from byte
@@ -1300,28 +1599,29 @@ long-standing use-after-free in runtime teardown.
 ### Fixed
 
 - Use-after-free in runtime teardown, the root cause of the Linux glibc heap
-  corruption ("double free or corruption (fasttop)",
-  "malloc_consolidate(): unaligned fastbin chunk") that had 27 tests gated off
-  on Linux with no isolated cause. `Context.deinit` freed tracked builtins in
-  registration order, but builtins form a *graph*: nine held a `.prototype`
-  pointing at an object the same teardown had already freed, and
-  `destroyBuiltin` then dereferenced the freed header. Teardown is now two-phase
+  corruption ("double free or corruption (fasttop)", "malloc_consolidate():
+  unaligned fastbin chunk") that had 27 tests gated off on Linux with no
+  isolated cause. `Context.deinit` freed tracked builtins in registration order,
+  but builtins form a _graph_: nine held a `.prototype` pointing at an object
+  the same teardown had already freed, and `destroyBuiltin` then dereferenced
+  the freed header. Teardown is now two-phase
   - scrub every root's slots, then free - which is allocation-free and
-  order-independent. All 27 tests are un-gated. Deployed binaries were latent
-  rather than aborting (`runtime_cli` uses `smp_allocator`, never
-  `c_allocator`), but it was UB on every teardown.
+    order-independent. All 27 tests are un-gated. Deployed binaries were latent
+    rather than aborting (`runtime_cli` uses `smp_allocator`, never
+    `c_allocator`), but it was UB on every teardown.
 - Responses with 1xx, 204 or 304 statuses no longer emit a body or a
   `Content-Length`. Framing derived Content-Length from the body for every
-  status and suppressed the body only for HEAD, so `Response.json(data,
-  {status: 204})` shipped a 204 with a JSON body - a keep-alive framing hazard
-  per RFC 9112 6.2. 1xx statuses also rendered as `HTTP/1.1 100 Unknown`.
-- `&&`, `||` and `??` now infer the operand types they actually return
-  (`A | B`, and `NonNullable<A> | B`) instead of `boolean` and a discarded
-  fallback. This was unsound in both directions: `const s: string = x && y` was
-  falsely rejected, while `const b: boolean = x && y` was accepted and held a
-  string at runtime. Union construction now flattens and dedupes, and a latent
-  silent truncation that dropped union members past a fixed 32-member cap is
-  gone.
+  status and suppressed the body only for HEAD, so
+  `Response.json(data,
+  {status: 204})` shipped a 204 with a JSON body - a
+  keep-alive framing hazard per RFC 9112 6.2. 1xx statuses also rendered as
+  `HTTP/1.1 100 Unknown`.
+- `&&`, `||` and `??` now infer the operand types they actually return (`A | B`,
+  and `NonNullable<A> | B`) instead of `boolean` and a discarded fallback. This
+  was unsound in both directions: `const s: string = x && y` was falsely
+  rejected, while `const b: boolean = x && y` was accepted and held a string at
+  runtime. Union construction now flattens and dedupes, and a latent silent
+  truncation that dropped union members past a fixed 32-member cap is gone.
 - `io.race()` returns each thunk's final fetch instead of an intermediate one. A
   thunk performing two fetches (auth, then the real request) registered two
   descriptors and the intermediate response could win, because the winner was
@@ -1406,155 +1706,437 @@ long-standing use-after-free in runtime teardown.
 
 ### Added
 
-- **Cost Contracts:** the compiler proves each handler's input-relative resource complexity as a signed per-route cost envelope. An I/O call inside a `for...of` over a request-derived collection now reports a linear bound (`1 + 1*|ids|`) instead of the previous `max_io_depth` undercount that walked the loop body once. Bounds discharge to a constant by sizing the loop source: a literal array, `range(n)`, `Object.keys` of an object literal, `.slice(0, k)`, a SQL statement ending in `LIMIT n`, or a `zigttp:validate` schema field declaring the newly supported `maxItems` keyword. Surfaced as the `cost_bounded` proof chip and `Spec<"cost_bounded">`, a `contract_diff` cost lane (widening a bound to `unbounded` is breaking; a bounded widening is additive) that feeds `prove`, `prove-behavior`, the expert equivalence receipt, and `proofs gate`, deploy manifest tags (`zigttp:costClass` / `zigttp:costBound` / `zigttp:costSource` / `zigttp:costWorstCase`), and a log-only runtime cost fuse that records a `cost_bounded` soundness incident when a request exceeds its proven envelope. The `costEnvelope` is written to `contract.json` and covered by the `Zigttp-Attest` JWS signature.
+- **Cost Contracts:** the compiler proves each handler's input-relative resource
+  complexity as a signed per-route cost envelope. An I/O call inside a
+  `for...of` over a request-derived collection now reports a linear bound
+  (`1 + 1*|ids|`) instead of the previous `max_io_depth` undercount that walked
+  the loop body once. Bounds discharge to a constant by sizing the loop source:
+  a literal array, `range(n)`, `Object.keys` of an object literal,
+  `.slice(0, k)`, a SQL statement ending in `LIMIT n`, or a `zigttp:validate`
+  schema field declaring the newly supported `maxItems` keyword. Surfaced as the
+  `cost_bounded` proof chip and `Spec<"cost_bounded">`, a `contract_diff` cost
+  lane (widening a bound to `unbounded` is breaking; a bounded widening is
+  additive) that feeds `prove`, `prove-behavior`, the expert equivalence
+  receipt, and `proofs gate`, deploy manifest tags (`zigttp:costClass` /
+  `zigttp:costBound` / `zigttp:costSource` / `zigttp:costWorstCase`), and a
+  log-only runtime cost fuse that records a `cost_bounded` soundness incident
+  when a request exceeds its proven envelope. The `costEnvelope` is written to
+  `contract.json` and covered by the `Zigttp-Attest` JWS signature.
 
 ### Changed
 
-- **Breaking:** `zigttp:websocket` no longer exports `roomFromPath`. Upgrade handlers now receive the normalized request path as the room key and callbacks receive that room explicitly; migrate callers to the callback `room` argument or `getWebSockets(room)`. This is an intentional beta cutover with no compatibility stub.
-- **Breaking:** generic `tools.invoke` RPC access is now limited to in-process analysis and workspace reads. Tools that execute processes, persist agent state, or write the workspace remain available only on their explicitly trusted/model surfaces and are omitted from RPC discovery.
-- **Breaking:** durable `run()` no longer trusts an automatic retry or a duplicate-response replay by default. Reusing a completed durable response, or retrying a run that a crash left incomplete, now requires either a workflow proof (`idempotent` for response reuse, `retry_safe` for retries) or a client-supplied `Idempotency-Key` header matching the `run()` key, recorded in an on-disk ledger keyed by that header. Without one of those, the handler gets a soft `599` JSON error (`DurableIdempotencyUnproven` / `DurableRetryUnproven`) instead of silently re-running or replaying a side effect. Enforcement is on by default for any handler with durable storage configured; unproven workflows should either declare `Spec<"idempotent" | "retry_safe">` or have callers send `Idempotency-Key`.
-- `zigttp link`/`zigttp rollout`: payload-compatibility, cross-boundary/injection, and failure-cascade/retry-safety checks now also run over HATEOAS affordance links (`resource()`/`follow()`), not just ordinary `fetchSync`/`serviceCall` links. An existing `system.json` whose affordance links were not previously proof-checked may see `zigttp rollout` report `needs_review`/`breaking` after upgrading, with no handler code change.
+- **Breaking:** `zigttp:websocket` no longer exports `roomFromPath`. Upgrade
+  handlers now receive the normalized request path as the room key and callbacks
+  receive that room explicitly; migrate callers to the callback `room` argument
+  or `getWebSockets(room)`. This is an intentional beta cutover with no
+  compatibility stub.
+- **Breaking:** generic `tools.invoke` RPC access is now limited to in-process
+  analysis and workspace reads. Tools that execute processes, persist agent
+  state, or write the workspace remain available only on their explicitly
+  trusted/model surfaces and are omitted from RPC discovery.
+- **Breaking:** durable `run()` no longer trusts an automatic retry or a
+  duplicate-response replay by default. Reusing a completed durable response, or
+  retrying a run that a crash left incomplete, now requires either a workflow
+  proof (`idempotent` for response reuse, `retry_safe` for retries) or a
+  client-supplied `Idempotency-Key` header matching the `run()` key, recorded in
+  an on-disk ledger keyed by that header. Without one of those, the handler gets
+  a soft `599` JSON error (`DurableIdempotencyUnproven` /
+  `DurableRetryUnproven`) instead of silently re-running or replaying a side
+  effect. Enforcement is on by default for any handler with durable storage
+  configured; unproven workflows should either declare
+  `Spec<"idempotent" | "retry_safe">` or have callers send `Idempotency-Key`.
+- `zigttp link`/`zigttp rollout`: payload-compatibility,
+  cross-boundary/injection, and failure-cascade/retry-safety checks now also run
+  over HATEOAS affordance links (`resource()`/`follow()`), not just ordinary
+  `fetchSync`/`serviceCall` links. An existing `system.json` whose affordance
+  links were not previously proof-checked may see `zigttp rollout` report
+  `needs_review`/`breaking` after upgrading, with no handler code change.
 
 ### Fixed
 
-- Durable crash recovery no longer double-frees nested function bytecode when `recoverOne` replays a run to completion. Every non-closure function value created at runtime (including the zero-upvalue arrow callbacks passed to `run()`/`step()`) shared its underlying bytecode with the enclosing function's constant pool, so both were freed independently on teardown; a durable run resuming after a crash and finishing successfully could corrupt memory. Fixed by deduplicating bytecode teardown against a single per-teardown-pass tracking set.
-- Durable-run dead-letter quarantine (`durable dead-runs`) now actually survives a server restart: the standing dead-run check previously lived only inside the scheduler's tracked poll path, so the untracked recovery pass run once at every `zigttp serve --durable` startup re-attempted every incomplete oplog unconditionally, including ones with a standing `quarantined` or operator-`discarded` record. The check now runs unconditionally for every recovery pass.
-- `zigttp durable dead-runs replay` no longer reports success when the on-disk record fails to delete; a failed delete now surfaces as an error instead of leaving the run permanently skipped while the operator was told it was cleared.
-- `zigttp durable dead-runs list` no longer aborts entirely when one record file is malformed; the corrupt entry is skipped so other quarantined runs still show.
-- `zigttp durable --help` now writes to stdout, matching every other help path in the CLI (it previously wrote to stderr).
-- A dead-run record write that fails to persist (disk full, permission error) no longer silently un-quarantines the run on the next poll; the retry tracker now tracks whether the write was actually confirmed and retries it instead of treating a missing record as an external `replay`.
-- `durable dead-runs replay`/`discard` now serialize against each other (and against the server's own quarantine writes) for the same run id, so two concurrent invocations can no longer interleave and silently reverse each other's reported success.
+- Durable crash recovery no longer double-frees nested function bytecode when
+  `recoverOne` replays a run to completion. Every non-closure function value
+  created at runtime (including the zero-upvalue arrow callbacks passed to
+  `run()`/`step()`) shared its underlying bytecode with the enclosing function's
+  constant pool, so both were freed independently on teardown; a durable run
+  resuming after a crash and finishing successfully could corrupt memory. Fixed
+  by deduplicating bytecode teardown against a single per-teardown-pass tracking
+  set.
+- Durable-run dead-letter quarantine (`durable dead-runs`) now actually survives
+  a server restart: the standing dead-run check previously lived only inside the
+  scheduler's tracked poll path, so the untracked recovery pass run once at
+  every `zigttp serve --durable` startup re-attempted every incomplete oplog
+  unconditionally, including ones with a standing `quarantined` or
+  operator-`discarded` record. The check now runs unconditionally for every
+  recovery pass.
+- `zigttp durable dead-runs replay` no longer reports success when the on-disk
+  record fails to delete; a failed delete now surfaces as an error instead of
+  leaving the run permanently skipped while the operator was told it was
+  cleared.
+- `zigttp durable dead-runs list` no longer aborts entirely when one record file
+  is malformed; the corrupt entry is skipped so other quarantined runs still
+  show.
+- `zigttp durable --help` now writes to stdout, matching every other help path
+  in the CLI (it previously wrote to stderr).
+- A dead-run record write that fails to persist (disk full, permission error) no
+  longer silently un-quarantines the run on the next poll; the retry tracker now
+  tracks whether the write was actually confirmed and retries it instead of
+  treating a missing record as an external `replay`.
+- `durable dead-runs replay`/`discard` now serialize against each other (and
+  against the server's own quarantine writes) for the same run id, so two
+  concurrent invocations can no longer interleave and silently reverse each
+  other's reported success.
 
 ### Added
 
-- Source-mapped runtime traps: the JS engine now carries a per-function line table (source `offset -> line:column`) from IR through bytecode generation, peephole compaction, and the bytecode cache (format v4), so an interpreter-tier type fault (TypeError/NotCallable) records the original source line of the faulting instruction. The resolved `line:column` is surfaced in the type-fault 500 response body and in the soundness-incident record. JIT-tier source maps, filename threading, and per-response-path proof attribution are follow-ups.
-- Proof-explained failures: a runtime handler fault no longer returns a bare `500 Internal Server Error`. The runtime maps the fault to the proof chip that guards its class (a type error to `optional_safe`/`result_safe`, a non-Response return to `exhaustive_returns`) and attributes it against what the handler actually proved: the body names the *unproven* guarding chip as the predicted cause, and a fault on a path where every guarding chip was proven is flagged as a (possible) soundness incident. Covers all three runtime 500 paths (handler-error, pending-exception, non-Response return).
-- `--incident-log <FILE>`: opt-in JSONL sink for soundness incidents. Each confirmed incident (a runtime fault on a path the compiler proved safe) is appended as one JSON line (`{kind, method, path, proven, detail}`) through a shared O_APPEND fd, alongside the always-on error log. Off by default.
-- `--workflow-queue`: recovery for `.reclaim-*` files left behind by a crashed lease-reclaim attempt (a stray reclaim is now surfaced via `zigttp` queue tooling and reclaimed automatically once it is older than the lease window, instead of being invisible to future claims).
-- `--workflow-queue`: a dead-lettered child request is now resolvable via `zigttp proof replay`/queue replay instead of returning a terminal error to the parent durable step.
-- Durable fetch (`zigttp:fetch`'s `fetch()`) now stops its retry/backoff loop as soon as the enclosing step's deadline passes, instead of continuing to retry past it.
-- `--workflow-queue`: lease-reclaim retry time is now jittered so items whose leases expire around the same wall-clock moment don't all become re-eligible in the same scheduler tick.
-- `durable dead-runs list|show|replay|discard`: operator CLI for durable-run dead-letter records, mirroring `workflow-queue`'s existing dead-letter surface for a permanently-failed crash-recovery run instead of queued child dispatch.
-- `ZTS509`: fails the build when `workflow.call`/`saga`/`fanout`/`follow` is used inside a `durable.step()` callback instead of silently losing durability at runtime.
-- `ZTS510`: proves that a statically-constructed `saga([...])` has a `compensate` on every step except possibly the last; dynamically-constructed sagas remain unproven.
+- Source-mapped runtime traps: the JS engine now carries a per-function line
+  table (source `offset -> line:column`) from IR through bytecode generation,
+  peephole compaction, and the bytecode cache (format v4), so an
+  interpreter-tier type fault (TypeError/NotCallable) records the original
+  source line of the faulting instruction. The resolved `line:column` is
+  surfaced in the type-fault 500 response body and in the soundness-incident
+  record. JIT-tier source maps, filename threading, and per-response-path proof
+  attribution are follow-ups.
+- Proof-explained failures: a runtime handler fault no longer returns a bare
+  `500 Internal Server Error`. The runtime maps the fault to the proof chip that
+  guards its class (a type error to `optional_safe`/`result_safe`, a
+  non-Response return to `exhaustive_returns`) and attributes it against what
+  the handler actually proved: the body names the _unproven_ guarding chip as
+  the predicted cause, and a fault on a path where every guarding chip was
+  proven is flagged as a (possible) soundness incident. Covers all three runtime
+  500 paths (handler-error, pending-exception, non-Response return).
+- `--incident-log <FILE>`: opt-in JSONL sink for soundness incidents. Each
+  confirmed incident (a runtime fault on a path the compiler proved safe) is
+  appended as one JSON line (`{kind, method, path, proven, detail}`) through a
+  shared O_APPEND fd, alongside the always-on error log. Off by default.
+- `--workflow-queue`: recovery for `.reclaim-*` files left behind by a crashed
+  lease-reclaim attempt (a stray reclaim is now surfaced via `zigttp` queue
+  tooling and reclaimed automatically once it is older than the lease window,
+  instead of being invisible to future claims).
+- `--workflow-queue`: a dead-lettered child request is now resolvable via
+  `zigttp proof replay`/queue replay instead of returning a terminal error to
+  the parent durable step.
+- Durable fetch (`zigttp:fetch`'s `fetch()`) now stops its retry/backoff loop as
+  soon as the enclosing step's deadline passes, instead of continuing to retry
+  past it.
+- `--workflow-queue`: lease-reclaim retry time is now jittered so items whose
+  leases expire around the same wall-clock moment don't all become re-eligible
+  in the same scheduler tick.
+- `durable dead-runs list|show|replay|discard`: operator CLI for durable-run
+  dead-letter records, mirroring `workflow-queue`'s existing dead-letter surface
+  for a permanently-failed crash-recovery run instead of queued child dispatch.
+- `ZTS509`: fails the build when `workflow.call`/`saga`/`fanout`/`follow` is
+  used inside a `durable.step()` callback instead of silently losing durability
+  at runtime.
+- `ZTS510`: proves that a statically-constructed `saga([...])` has a
+  `compensate` on every step except possibly the last; dynamically-constructed
+  sagas remain unproven.
 
 ## [0.1.1-beta] - 2026-06-29
 
 ### Added
 
-- `zigttp expert`: the agent asks one clarifying question when a request is materially ambiguous (which auth scheme, which route, what "safe" means) instead of guessing and spending its veto/round-trip budget on a misread. Implemented as a persona rule in `packages/pi/src/expert_persona.zig`: the question ends the turn as plain text and the answer continues on the next line, reusing the existing multi-turn transcript (no turn-machine change).
-- `zigttp expert`: per-session metrics. Each session writes a `session_summary` event to `events.jsonl` at close with turn count, model round-trips, verified-edit count, round-trips to first green proof, and a proven-path ratio (discharged proof guarantees over those tracked, read from the final verified handler's `PropertiesSnapshot`). `/ledger` prints the live numbers mid-session. Metrics key on the `verified_patch` signal, so a plain-text clarifying turn counts as a turn without being mistaken for an applied edit.
-- `zigttp:queue`: opt-in actor-style messaging (`send`, `request`, `receive`, `ack`, `nack`, `reply`) backed by a new in-memory `ActorQueue` with per-actor priority mailboxes, lease-based redelivery, and dead-lettering after max attempts. Wired through `RuntimeConfig`/server/`runtime_cli` behind `--actor-queue`.
-- `--workflow-queue`: opt-in persisted durable dispatch queue for `zigttp:workflow` call/follow/fanout child requests. Child requests are persisted under the durable workflow queue, leased while running, and completed response parts are written before the parent durable step result is recorded. Requires durable storage and a system bundle; saga dispatch remains unsupported in queue mode since its closure-based dispatch does not fit the flat queued child boundary.
+- `zigttp expert`: the agent asks one clarifying question when a request is
+  materially ambiguous (which auth scheme, which route, what "safe" means)
+  instead of guessing and spending its veto/round-trip budget on a misread.
+  Implemented as a persona rule in `packages/pi/src/expert_persona.zig`: the
+  question ends the turn as plain text and the answer continues on the next
+  line, reusing the existing multi-turn transcript (no turn-machine change).
+- `zigttp expert`: per-session metrics. Each session writes a `session_summary`
+  event to `events.jsonl` at close with turn count, model round-trips,
+  verified-edit count, round-trips to first green proof, and a proven-path ratio
+  (discharged proof guarantees over those tracked, read from the final verified
+  handler's `PropertiesSnapshot`). `/ledger` prints the live numbers
+  mid-session. Metrics key on the `verified_patch` signal, so a plain-text
+  clarifying turn counts as a turn without being mistaken for an applied edit.
+- `zigttp:queue`: opt-in actor-style messaging (`send`, `request`, `receive`,
+  `ack`, `nack`, `reply`) backed by a new in-memory `ActorQueue` with per-actor
+  priority mailboxes, lease-based redelivery, and dead-lettering after max
+  attempts. Wired through `RuntimeConfig`/server/`runtime_cli` behind
+  `--actor-queue`.
+- `--workflow-queue`: opt-in persisted durable dispatch queue for
+  `zigttp:workflow` call/follow/fanout child requests. Child requests are
+  persisted under the durable workflow queue, leased while running, and
+  completed response parts are written before the parent durable step result is
+  recorded. Requires durable storage and a system bundle; saga dispatch remains
+  unsupported in queue mode since its closure-based dispatch does not fit the
+  flat queued child boundary.
 
 ## [0.1.0-beta] - 2026-06-23
 
 ### Added
 
-- v0.1.0-beta polish slice: capability-denial unit tests in `packages/zigts/src/module_binding.zig` pin both halves of policy gating (the `ctx.capability_policy.allowsXxx` check and the active-module `.policy_check` declaration) across env, cache, sql, sql-write, and egress; deterministic HTTP-parser fuzz harness in `packages/runtime/src/http_parser.zig` covers parseRequestLine, parseQueryString, parseContentLengthValue, parseContentLength, and findHeaderEnd across 16k+ seeded iterations and pins regression behavior for CR/LF preservation and `..` path traversal preservation; studio JSON/ndjson responses are bounded at 1 MiB via the new `finishStudioOwnedResponse` helper, returning 413 on overflow instead of unbounded `setBodyOwned`.
-- `docs/contracts-and-sandboxing.md`: explicit per-request vs startup vs hot-swap vs build-time enforcement story, including the `routes_dynamic = true` fall-through and the hot-swap pool-policy transition.
-- `docs/roadmap.md`: single forward-looking doc naming hosted cloud deploy, the evented I/O backend, runtime multipart parsing, and JIT code-cache eviction as explicit non-goals for v0.1.0.
-- `precompile`: `--build-time` and `--git-commit` CLI flags. `build.zig` now captures the short git SHA at configure time and passes it through, so `comptime(__BUILD_TIME__)` and `comptime(__GIT_COMMIT__)` substitute real values (ISO-8601 UTC timestamp and 12-char SHA) instead of `undefined`. Falls back to the wall clock and the sentinel `"unknown"` when neither flag nor git is available.
-- `SECURITY.md` / `docs/threat-model.md`: explicit statement that only bytecode passing `bytecode_verifier.zig` is dispatched into the VM, and a Known Footguns section calling out that `multipart/form-data` parsing is handler-side, not runtime-side.
-- `CLAUDE.md` virtual-modules section: corrected to describe the two-tier registry that already exists (`packages/modules/src/root.zig::catalog` + `all_bindings` for SDK-pure modules; `packages/zigts/src/builtin_modules.zig::builtins` for the engine-coupled superset). Previous wording wrongly implied bindings were declared in `module_binding.zig`.
-- Witness corpus: every flow-property counterexample the compiler discovers persists to `.zigttp/witnesses/<short_hash>/<key>.witness.jsonl` so a falsifying input does not need to be rediscovered next session. Auto-population runs in `precompile.runCheckOnly` so `zigts check`, `zig build -Dhandler=...`, `--watch --prove`, and the agent tools (`pi_repair_plan`, `pi_goal_check`) all populate the corpus on every analysis pass. The format reuses `counterexample.writeJsonl` exactly so persisted witnesses feed the runtime witness-replay path without translation; inspect and manage them with `zigttp witnesses`.
-- `zigttp witnesses` CLI: `list`, `pin`, `unpin`, `prune`, and `synthesize` subcommands manage the corpus. `list` with no handler argument summarises every corpus directory discovered under `.zigttp/witnesses/`. `synthesize <handler> <spec>` seeds a structural witness for one of the cause-only specs (`deterministic`, `read_only`, `retry_safe`, `idempotent`, `state_isolated`, `fault_covered`) using the per-property `Try:` suggestion from `spec_discharge.suggestionFor`.
-- `pi_witnesses` agent tool plus `/witnesses <path>` slash command: returns total + per-property counts + first 20 entries with property, summary, and pinned status. The expert persona's new "Witness corpus awareness" block steers the agent to consult coverage before drafting repair (Specs with zero witnesses are unprobed; pinned witnesses are load-bearing).
-- `zigts check --json` proof envelope grows a `proof.witnesses` block (total + by_property breakdown) read from the on-disk corpus per check.
-- Proof studio gains a Witnesses tile in the right pane: total, per-property counts, and the first 20 entries with key prefix, summary, and pinned status. Heading hides itself on empty corpora.
-- `--watch --prove` HUD toast: when a build re-fires a previously pinned witness, `live_reload` prints `[witnesses] N pinned witness(es) re-fired` so authors notice regressions of patterns they explicitly chose to defend.
-- Default `Spec<...>` declarations on `examples/handler/handler.ts` and `examples/system/users.ts` showing the proof-first authoring style. Both discharge cleanly against today's classifier.
-- `zigts expert`: full token accounting per session - input, cache-read, cache-write, and output tokens tracked cumulatively and displayed after each model turn as `[tokens: in=N cache_r=N cache_w=N out=N]`.
-- `zigts expert`: session compaction via `/compact` - collapses the current transcript into a single system note; the session continues from the summary.
-- `zigts expert`: session branching via `/fork` and `--fork <session-id>` - opens a new session that continues from the end of an existing session's transcript.
-- `zigts expert`: `/tree` command lists all sessions for the current workspace with creation timestamps.
+- v0.1.0-beta polish slice: capability-denial unit tests in
+  `packages/zigts/src/module_binding.zig` pin both halves of policy gating (the
+  `ctx.capability_policy.allowsXxx` check and the active-module `.policy_check`
+  declaration) across env, cache, sql, sql-write, and egress; deterministic
+  HTTP-parser fuzz harness in `packages/runtime/src/http_parser.zig` covers
+  parseRequestLine, parseQueryString, parseContentLengthValue,
+  parseContentLength, and findHeaderEnd across 16k+ seeded iterations and pins
+  regression behavior for CR/LF preservation and `..` path traversal
+  preservation; studio JSON/ndjson responses are bounded at 1 MiB via the new
+  `finishStudioOwnedResponse` helper, returning 413 on overflow instead of
+  unbounded `setBodyOwned`.
+- `docs/contracts-and-sandboxing.md`: explicit per-request vs startup vs
+  hot-swap vs build-time enforcement story, including the
+  `routes_dynamic = true` fall-through and the hot-swap pool-policy transition.
+- `docs/roadmap.md`: single forward-looking doc naming hosted cloud deploy, the
+  evented I/O backend, runtime multipart parsing, and JIT code-cache eviction as
+  explicit non-goals for v0.1.0.
+- `precompile`: `--build-time` and `--git-commit` CLI flags. `build.zig` now
+  captures the short git SHA at configure time and passes it through, so
+  `comptime(__BUILD_TIME__)` and `comptime(__GIT_COMMIT__)` substitute real
+  values (ISO-8601 UTC timestamp and 12-char SHA) instead of `undefined`. Falls
+  back to the wall clock and the sentinel `"unknown"` when neither flag nor git
+  is available.
+- `SECURITY.md` / `docs/threat-model.md`: explicit statement that only bytecode
+  passing `bytecode_verifier.zig` is dispatched into the VM, and a Known
+  Footguns section calling out that `multipart/form-data` parsing is
+  handler-side, not runtime-side.
+- `CLAUDE.md` virtual-modules section: corrected to describe the two-tier
+  registry that already exists (`packages/modules/src/root.zig::catalog` +
+  `all_bindings` for SDK-pure modules;
+  `packages/zigts/src/builtin_modules.zig::builtins` for the engine-coupled
+  superset). Previous wording wrongly implied bindings were declared in
+  `module_binding.zig`.
+- Witness corpus: every flow-property counterexample the compiler discovers
+  persists to `.zigttp/witnesses/<short_hash>/<key>.witness.jsonl` so a
+  falsifying input does not need to be rediscovered next session.
+  Auto-population runs in `precompile.runCheckOnly` so `zigts check`,
+  `zig build -Dhandler=...`, `--watch --prove`, and the agent tools
+  (`pi_repair_plan`, `pi_goal_check`) all populate the corpus on every analysis
+  pass. The format reuses `counterexample.writeJsonl` exactly so persisted
+  witnesses feed the runtime witness-replay path without translation; inspect
+  and manage them with `zigttp witnesses`.
+- `zigttp witnesses` CLI: `list`, `pin`, `unpin`, `prune`, and `synthesize`
+  subcommands manage the corpus. `list` with no handler argument summarises
+  every corpus directory discovered under `.zigttp/witnesses/`.
+  `synthesize <handler> <spec>` seeds a structural witness for one of the
+  cause-only specs (`deterministic`, `read_only`, `retry_safe`, `idempotent`,
+  `state_isolated`, `fault_covered`) using the per-property `Try:` suggestion
+  from `spec_discharge.suggestionFor`.
+- `pi_witnesses` agent tool plus `/witnesses <path>` slash command: returns
+  total + per-property counts + first 20 entries with property, summary, and
+  pinned status. The expert persona's new "Witness corpus awareness" block
+  steers the agent to consult coverage before drafting repair (Specs with zero
+  witnesses are unprobed; pinned witnesses are load-bearing).
+- `zigts check --json` proof envelope grows a `proof.witnesses` block (total +
+  by_property breakdown) read from the on-disk corpus per check.
+- Proof studio gains a Witnesses tile in the right pane: total, per-property
+  counts, and the first 20 entries with key prefix, summary, and pinned status.
+  Heading hides itself on empty corpora.
+- `--watch --prove` HUD toast: when a build re-fires a previously pinned
+  witness, `live_reload` prints `[witnesses] N pinned witness(es) re-fired` so
+  authors notice regressions of patterns they explicitly chose to defend.
+- Default `Spec<...>` declarations on `examples/handler/handler.ts` and
+  `examples/system/users.ts` showing the proof-first authoring style. Both
+  discharge cleanly against today's classifier.
+- `zigts expert`: full token accounting per session - input, cache-read,
+  cache-write, and output tokens tracked cumulatively and displayed after each
+  model turn as `[tokens: in=N cache_r=N cache_w=N out=N]`.
+- `zigts expert`: session compaction via `/compact` - collapses the current
+  transcript into a single system note; the session continues from the summary.
+- `zigts expert`: session branching via `/fork` and `--fork <session-id>` -
+  opens a new session that continues from the end of an existing session's
+  transcript.
+- `zigts expert`: `/tree` command lists all sessions for the current workspace
+  with creation timestamps.
 - `zigts expert`: `--continue` flag as an alias for `--resume`.
-- `zigts expert`: `--tools minimal|full` flag selects the tool preset at launch. `minimal` loads only workspace read/list/search; `full` loads the complete compiler tool set (default).
-- `zigts expert`: `/model` shows the active model and lists available IDs; `/model <id>` switches mid-session. Unknown IDs print an error.
-- `zigts expert`: skills catalog with `/skills` and `/skill:<name>` - lists baked-in skill shortcuts and sends the selected skill body as a model prompt.
-- `zigts expert`: prompt template catalog with `/templates` and `/template:<name> [args...]` - lists baked-in templates and expands positional args (`{{1}}`, `{{2}}`, `{{args}}`) before sending.
-- `zigts expert`: `/settings`, `/hotkeys`, and `/changelog` informational commands.
-- `zigts expert`: Route Forge v1 with `/feature route ...` preview, `/forge route ...` compiler-proven route candidates, and explicit REPL apply through the existing compiler veto.
-- Author-declared spec obligations via the built-in `Spec<...>` generic alias from `zigttp:types`. Authors write `import type { Spec } from "zigttp:types"`, alias the obligations as a normal TS type (e.g. `type Guardrails = Spec<"idempotent" | "deterministic">`), and intersect them on the handler return type (`Response & Guardrails`). The verifier discharges declared specs against `HandlerProperties` and emits ZTS500 (not_discharged), ZTS501 (incompatible_with_import), or ZTS502 (unknown_name). The proof HUD, proof ledger, `zigts check --json`, and `pi_specs_status` agent tool all expose the active set.
-- TypeScript intersection types (`A & B`) in the type pool: parser support, instantiation substitution, structural assignability, and round-trip resolution through `TypeEnv` aliases. Prerequisite for the `Spec<...>` annotation form; also unblocks future intersection-typed primitives.
-- `zigts expert`: `pi_specs_status` tool returns the active spec set declared on the handler return type plus each spec's discharge state. The persona's "Spec-driven repair" block routes spec questions through this tool rather than the `--goal` flag.
-- Root-level `LICENSE` (MIT), `SECURITY.md`, `CONTRIBUTING.md`, and `CODEOWNERS`.
+- `zigts expert`: `--tools minimal|full` flag selects the tool preset at launch.
+  `minimal` loads only workspace read/list/search; `full` loads the complete
+  compiler tool set (default).
+- `zigts expert`: `/model` shows the active model and lists available IDs;
+  `/model <id>` switches mid-session. Unknown IDs print an error.
+- `zigts expert`: skills catalog with `/skills` and `/skill:<name>` - lists
+  baked-in skill shortcuts and sends the selected skill body as a model prompt.
+- `zigts expert`: prompt template catalog with `/templates` and
+  `/template:<name> [args...]` - lists baked-in templates and expands positional
+  args (`{{1}}`, `{{2}}`, `{{args}}`) before sending.
+- `zigts expert`: `/settings`, `/hotkeys`, and `/changelog` informational
+  commands.
+- `zigts expert`: Route Forge v1 with `/feature route ...` preview,
+  `/forge route ...` compiler-proven route candidates, and explicit REPL apply
+  through the existing compiler veto.
+- Author-declared spec obligations via the built-in `Spec<...>` generic alias
+  from `zigttp:types`. Authors write `import type { Spec } from "zigttp:types"`,
+  alias the obligations as a normal TS type (e.g.
+  `type Guardrails = Spec<"idempotent" | "deterministic">`), and intersect them
+  on the handler return type (`Response & Guardrails`). The verifier discharges
+  declared specs against `HandlerProperties` and emits ZTS500 (not_discharged),
+  ZTS501 (incompatible_with_import), or ZTS502 (unknown_name). The proof HUD,
+  proof ledger, `zigts check --json`, and `pi_specs_status` agent tool all
+  expose the active set.
+- TypeScript intersection types (`A & B`) in the type pool: parser support,
+  instantiation substitution, structural assignability, and round-trip
+  resolution through `TypeEnv` aliases. Prerequisite for the `Spec<...>`
+  annotation form; also unblocks future intersection-typed primitives.
+- `zigts expert`: `pi_specs_status` tool returns the active spec set declared on
+  the handler return type plus each spec's discharge state. The persona's
+  "Spec-driven repair" block routes spec questions through this tool rather than
+  the `--goal` flag.
+- Root-level `LICENSE` (MIT), `SECURITY.md`, `CONTRIBUTING.md`, and
+  `CODEOWNERS`.
 - This `CHANGELOG.md`.
-- `docs/internals/capabilities.md` - complete capability enforcement map: every `ModuleCapability` variant, which virtual modules declare it, and the enforcement helpers (`pushActiveModuleContext`, `requireCapability`, `wrapNativeFnWithCapabilities`) that gate it. Explains the thread-local context model that makes capability enforcement compose with `HandlerPool`.
-- `packages/runtime/src/handler_loader.zig` - shared loader that collapses the duplicated `HandlerSource` switch in `replay_runner.zig`, `test_runner.zig`, and `durable_recovery.zig` into a single `load(allocator, handler, label)` helper, plus inline tests covering `inline_code`, `embedded_bytecode`, and `appended_payload` branches.
-- Linux (`ubuntu-latest`) entry in the CI test matrix. `.github/workflows/release.yml` now runs `zig build test test-zigts test-zruntime`, the release build, `scripts/test-examples.sh`, the policy-hash check, and the expert subsystem verification on both macOS and Linux.
+- `docs/internals/capabilities.md` - complete capability enforcement map: every
+  `ModuleCapability` variant, which virtual modules declare it, and the
+  enforcement helpers (`pushActiveModuleContext`, `requireCapability`,
+  `wrapNativeFnWithCapabilities`) that gate it. Explains the thread-local
+  context model that makes capability enforcement compose with `HandlerPool`.
+- `packages/runtime/src/handler_loader.zig` - shared loader that collapses the
+  duplicated `HandlerSource` switch in `replay_runner.zig`, `test_runner.zig`,
+  and `durable_recovery.zig` into a single `load(allocator, handler, label)`
+  helper, plus inline tests covering `inline_code`, `embedded_bytecode`, and
+  `appended_payload` branches.
+- Linux (`ubuntu-latest`) entry in the CI test matrix.
+  `.github/workflows/release.yml` now runs
+  `zig build test test-zigts test-zruntime`, the release build,
+  `scripts/test-examples.sh`, the policy-hash check, and the expert subsystem
+  verification on both macOS and Linux.
 
 ### Changed
 
-- `zigttp expert` and `zigts expert` now fail fast when no model backend is configured. With neither `ANTHROPIC_API_KEY` nor `OPENAI_API_KEY` set to a non-empty value, the CLI prints setup guidance and exits non-zero instead of launching the agent UI on the offline stub. This is a v1 semantic change to the contract published in `docs/internals/zigts-expert-contract.md`; the prior stub fallback for an unset environment is no longer reachable from either CLI, including the `--print --mode json` event stream.
-- Hosted cloud deploy is deferred from v0.1.0-beta. `zigttp deploy --cloud`, `login`, `logout`, `review`, `grants`, and `revoke-grant` are gated at the CLI boundary and reject with a "not in this beta" message; they are dropped from `zigttp help --all`. The control-plane code stays in `packages/runtime/src/deploy/`, ready to re-enable once the path has CI smoke coverage.
-  - _Correction (as of 0.18.0): only the `deploy --cloud` flag-level rejection remains. The account verbs (`login`/`logout`/`review`/`grants`/`revoke-grant`) were removed entirely and now hit the generic unknown-command path, and `packages/runtime/src/deploy/` no longer exists._
-- The experimental `assert-intent` command is hidden from `zigttp help --all`; it still dispatches for callers that invoke it directly.
-  - _Correction (as of 0.18.0): `assert-intent` no longer dispatches at all; a guard in `cli_help.zig` keeps it out of `help --all`. Intent assertions are extracted into the contract at build time (`-Dcontract`), not via a command._
+- `zigttp expert` and `zigts expert` now fail fast when no model backend is
+  configured. With neither `ANTHROPIC_API_KEY` nor `OPENAI_API_KEY` set to a
+  non-empty value, the CLI prints setup guidance and exits non-zero instead of
+  launching the agent UI on the offline stub. This is a v1 semantic change to
+  the contract published in `docs/internals/zigts-expert-contract.md`; the prior
+  stub fallback for an unset environment is no longer reachable from either CLI,
+  including the `--print --mode json` event stream.
+- Hosted cloud deploy is deferred from v0.1.0-beta. `zigttp deploy --cloud`,
+  `login`, `logout`, `review`, `grants`, and `revoke-grant` are gated at the CLI
+  boundary and reject with a "not in this beta" message; they are dropped from
+  `zigttp help --all`. The control-plane code stays in
+  `packages/runtime/src/deploy/`, ready to re-enable once the path has CI smoke
+  coverage.
+  - _Correction (as of 0.18.0): only the `deploy --cloud` flag-level rejection
+    remains. The account verbs
+    (`login`/`logout`/`review`/`grants`/`revoke-grant`) were removed entirely
+    and now hit the generic unknown-command path, and
+    `packages/runtime/src/deploy/` no longer exists._
+- The experimental `assert-intent` command is hidden from `zigttp help --all`;
+  it still dispatches for callers that invoke it directly.
+  - _Correction (as of 0.18.0): `assert-intent` no longer dispatches at all; a
+    guard in `cli_help.zig` keeps it out of `help --all`. Intent assertions are
+    extracted into the contract at build time (`-Dcontract`), not via a
+    command._
 - `AGENTS.md` documentation index now covers the full `docs/` directory.
-- `scripts/test-examples.sh` runs `zig build` up-front so CI fails fast on a broken runtime rather than emitting N cryptic per-suite errors.
-- `replay_runner.zig`, `test_runner.zig`, and `durable_recovery.zig` delegate handler-source loading to `handler_loader.zig` instead of each carrying its own switch.
+- `scripts/test-examples.sh` runs `zig build` up-front so CI fails fast on a
+  broken runtime rather than emitting N cryptic per-suite errors.
+- `replay_runner.zig`, `test_runner.zig`, and `durable_recovery.zig` delegate
+  handler-source loading to `handler_loader.zig` instead of each carrying its
+  own switch.
 
 ### Fixed
 
-- `Runtime.installHttpConstructors` (and the structurally similar `install*` siblings in `zruntime.zig`) no longer leak the just-created prototype/constructor JSObject when a midway `addDynamicMethod` returns `OutOfMemory`. Each object now carries an `_unowned` flag with an `errdefer ...destroyBuiltin(...)` guard until it is appended to `ctx.builtin_objects`, so a mid-init allocation failure frees the orphan instead of leaking it. The previously `SkipZigTest`'d `HandlerPool init under FailingAllocator never leaks` test is now active and sweeps the regression fail points.
-- Removed an unsafe `catch unreachable` on the outbound `fetch` hot path in `zruntime.zig`; malformed URI hosts now return a typed `InvalidUrl` fetch error instead of panicking the worker.
-- `builtins/math.zig:prng` is now `threadlocal`. The `Math.random` PRNG state was shared across all pool workers with no synchronization; each worker now owns its own stream. Trace recording and replay semantics are unchanged.
-- `builtins/json.zig:json_shape_cache` is now `threadlocal`. The comment already called it "Thread-local JSON shape cache" but the declaration had drifted to a plain global. Per-thread is what the comment promised and what `clearJsonShapeCache` (called during per-context setup) assumed.
-- `interpreter.zig:call_trace_count` is now `threadlocal`. This is a debug-only counter (`ZTS_CALL_TRACE`) that gates how many call-trace lines get printed; as a global it could drop increments under concurrent traced calls. The semantics are now a per-worker print budget instead of a global one - acceptable because the feature is opt-in diagnostic output. The remaining env-var caches at `interpreter.zig` are unchanged: their races are benign same-value writes.
+- `Runtime.installHttpConstructors` (and the structurally similar `install*`
+  siblings in `zruntime.zig`) no longer leak the just-created
+  prototype/constructor JSObject when a midway `addDynamicMethod` returns
+  `OutOfMemory`. Each object now carries an `_unowned` flag with an
+  `errdefer ...destroyBuiltin(...)` guard until it is appended to
+  `ctx.builtin_objects`, so a mid-init allocation failure frees the orphan
+  instead of leaking it. The previously `SkipZigTest`'d
+  `HandlerPool init under FailingAllocator never leaks` test is now active and
+  sweeps the regression fail points.
+- Removed an unsafe `catch unreachable` on the outbound `fetch` hot path in
+  `zruntime.zig`; malformed URI hosts now return a typed `InvalidUrl` fetch
+  error instead of panicking the worker.
+- `builtins/math.zig:prng` is now `threadlocal`. The `Math.random` PRNG state
+  was shared across all pool workers with no synchronization; each worker now
+  owns its own stream. Trace recording and replay semantics are unchanged.
+- `builtins/json.zig:json_shape_cache` is now `threadlocal`. The comment already
+  called it "Thread-local JSON shape cache" but the declaration had drifted to a
+  plain global. Per-thread is what the comment promised and what
+  `clearJsonShapeCache` (called during per-context setup) assumed.
+- `interpreter.zig:call_trace_count` is now `threadlocal`. This is a debug-only
+  counter (`ZTS_CALL_TRACE`) that gates how many call-trace lines get printed;
+  as a global it could drop increments under concurrent traced calls. The
+  semantics are now a per-worker print budget instead of a global one -
+  acceptable because the feature is opt-in diagnostic output. The remaining
+  env-var caches at `interpreter.zig` are unchanged: their races are benign
+  same-value writes.
 
 ## [0.16.0-rc2] - 2026
 
-Post-monorepo restructure. Deploy subsystem matured, scope module added, proven live reload shipped.
+Post-monorepo restructure. Deploy subsystem matured, scope module added, proven
+live reload shipped.
 
 ### Added
 
-- `zigttp:scope` virtual module for request-scoped lifecycle management with documented contract semantics.
-- Proven live reload: `--watch --prove` diffs handler contracts on save and only hot-swaps when the verdict is `safe` / `safe_with_additions`; `--force-swap` overrides.
-- Durable admin API and workflow graph extraction for inspecting long-running durable runs.
-- Proof-driven response cache for handlers proven `deterministic` + `read_only`; GET/HEAD responses are served from Zig memory with `X-Zigttp-Proof-Cache: hit`.
-- `zigttp:service` virtual module for named internal service calls with compile-time payload typing and cross-handler contract proofs.
-- Self-extracting binaries parse the embedded contract at startup for env-var validation and route pre-filtering.
-- `zigts` type system enhancements (phases 0-6): generic aliases, structural object matching, discriminated union narrowing, type guard functions, distinct types, readonly, template literal types.
-- `zigts expert` CLI namespace plus PreToolUse / PostToolUse / SessionStart hook scripts for Claude Code integration.
+- `zigttp:scope` virtual module for request-scoped lifecycle management with
+  documented contract semantics.
+- Proven live reload: `--watch --prove` diffs handler contracts on save and only
+  hot-swaps when the verdict is `safe` / `safe_with_additions`; `--force-swap`
+  overrides.
+- Durable admin API and workflow graph extraction for inspecting long-running
+  durable runs.
+- Proof-driven response cache for handlers proven `deterministic` + `read_only`;
+  GET/HEAD responses are served from Zig memory with
+  `X-Zigttp-Proof-Cache: hit`.
+- `zigttp:service` virtual module for named internal service calls with
+  compile-time payload typing and cross-handler contract proofs.
+- Self-extracting binaries parse the embedded contract at startup for env-var
+  validation and route pre-filtering.
+- `zigts` type system enhancements (phases 0-6): generic aliases, structural
+  object matching, discriminated union narrowing, type guard functions, distinct
+  types, readonly, template literal types.
+- `zigts expert` CLI namespace plus PreToolUse / PostToolUse / SessionStart hook
+  scripts for Claude Code integration.
 - Rule review system with diff-aware analysis and CI policy-hash assertion.
-- Build-time capability audit: every virtual module implementation must route through the checked helpers in `module_binding.zig`.
-- `zigttp deploy` UX: content-addressed OCI refs, env-var config surface, region/wait flags, session refresh, progress output; `zigttp login` supports both interactive token prompt and stdin modes.
-- `zigttp:url` and parallel/race I/O primitives (`zigttp:io.parallel`, `zigttp:io.race`).
+- Build-time capability audit: every virtual module implementation must route
+  through the checked helpers in `module_binding.zig`.
+- `zigttp deploy` UX: content-addressed OCI refs, env-var config surface,
+  region/wait flags, session refresh, progress output; `zigttp login` supports
+  both interactive token prompt and stdin modes.
+- `zigttp:url` and parallel/race I/O primitives (`zigttp:io.parallel`,
+  `zigttp:io.race`).
 - Step-by-step deploy tutorial (now part of `docs/user-guide.md`).
 
 ### Changed
 
-- Repository restructured into a Zig monorepo under `packages/` (`runtime`, `zigts`, `tools`, `zigttp-sdk`, `zigttp-ext-demo`).
-- `zigts` module lookups are now scoped by specifier so `zigttp-ext` bindings resolve cleanly.
-- `--durable-admin` embedded subcommand removed in favor of the standalone `zigttp-admin` binary.
-- Deploy subsystem refactored: extracted `json_util`, `threadedIo`, `stderrLine`; removed dead `plan.zig`, `redact`, `render_adapter`, and unused AWS manifest path.
-- Docs aligned with restructure: stale paths fixed in `docs/architecture.md`; `switch` references removed across all docs (the JS subset has no `switch`).
+- Repository restructured into a Zig monorepo under `packages/` (`runtime`,
+  `zigts`, `tools`, `zigttp-sdk`, `zigttp-ext-demo`).
+- `zigts` module lookups are now scoped by specifier so `zigttp-ext` bindings
+  resolve cleanly.
+- `--durable-admin` embedded subcommand removed in favor of the standalone
+  `zigttp-admin` binary.
+- Deploy subsystem refactored: extracted `json_util`, `threadedIo`,
+  `stderrLine`; removed dead `plan.zig`, `redact`, `render_adapter`, and unused
+  AWS manifest path.
+- Docs aligned with restructure: stale paths fixed in `docs/architecture.md`;
+  `switch` references removed across all docs (the JS subset has no `switch`).
 
 ### Fixed
 
-- CI: run tests on macOS only (Linux CI remains open; see P1.1 in the project assessment plan), opt into Node.js 24 for GitHub Actions, consolidate test steps and add job timeouts.
+- CI: run tests on macOS only (Linux CI remains open; see P1.1 in the project
+  assessment plan), opt into Node.js 24 for GitHub Actions, consolidate test
+  steps and add job timeouts.
 - Parser: removed an unreachable branch after for-of handling.
-- Stripper / type checker: collapsed duplicated fallback paths; added coverage for the exported distinct-type path.
+- Stripper / type checker: collapsed duplicated fallback paths; added coverage
+  for the exported distinct-type path.
 
 ## [0.16.0-rc1] - 2026
 
 ### Fixed
 
-- CI: run tests on macOS only and consolidate test steps with explicit job timeouts after intermittent runner failures on the previous matrix.
+- CI: run tests on macOS only and consolidate test steps with explicit job
+  timeouts after intermittent runner failures on the previous matrix.
 
 ## [0.15.0] and earlier
 
-See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items. Known-issue notes from that era include:
+See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items.
+Known-issue notes from that era include:
 
-- Closure data freed as `BytecodeFunctionData` (fixed via destroyFull closure discriminator).
+- Closure data freed as `BytecodeFunctionData` (fixed via destroyFull closure
+  discriminator).
 - Chunked transfer encoding rejected with 501 rather than mis-parsed.
 - Bytecode cache validated after deserialization instead of trusted.
-- Static file path traversal via symlinks blocked with check-before-open + `follow_symlinks=false`.
-- HandlerPool test flake under the build runner (root cause was the closure destroyFull bug above).
+- Static file path traversal via symlinks blocked with check-before-open +
+  `follow_symlinks=false`.
+- HandlerPool test flake under the build runner (root cause was the closure
+  destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zttp/compare/v0.27.0...HEAD
-[0.27.0]: https://github.com/srdjan/zttp/compare/v0.26.0...v0.27.0
+[Unreleased]: https://github.com/srdjan/zttp/compare/v0.27.1...HEAD
+[0.27.1]: https://github.com/srdjan/zttp/compare/v0.26.0...v0.27.1
 [0.26.0]: https://github.com/srdjan/zttp/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/srdjan/zttp/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/srdjan/zttp/compare/v0.22.3...v0.24.0
