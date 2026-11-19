@@ -386,7 +386,8 @@ packages/zts/src/ir_identity.zig init catch-switch
 # A spent work budget leaves the match not provably exhaustive, or drops only
 # the redundancy verdict. The first adds the ZTS205 warning and reports
 # exhaustive only when the arms were proven to cover the type. The second drops
-# the ZTS216 unreachable-arm warning, which no verdict depends on. OutOfMemory
+# the ZTS216 unreachable-arm error for that match: a redundant arm is dead code,
+# and no proof verdict depends on it. OutOfMemory
 # propagates in both. `renderTop` sets `open`, which renders the witness as
 # `default`, the widest text; it changes no verdict.
 packages/zts/src/match_analysis.zig analyze catch-switch

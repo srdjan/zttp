@@ -182,7 +182,7 @@ const refusal_rows_a = [_]RefusalRow{
         .clean = c(top("import { dictEmpty } from \"zttp:collections\";\nconst d: Dict<string, number> = dictEmpty();")),
     },
     .{
-        .key = "An `import type` of a name that the module does not export",
+        .key = "An `import type` of a name that a built-in module does not export",
         .refused = &.{
             r("import type", top("import type { Nope } from \"zttp:fetch\";")),
             r("import type", top("import type { FetchOptions, Nope } from \"zttp:fetch\";")),

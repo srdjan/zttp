@@ -75,7 +75,9 @@ zttp serve -e "function handler(req) { return Response.json({ ok: true }); }"
 
 `zttp serve` stops on a parser refusal and on a sound-mode type error.
 It does not run the strict check of `zttp check`. A handler that
-`zttp check` refuses can still run under `zttp serve`.
+`zttp check` refuses can still run under `zttp serve`. When the project
+configures a handler policy, `zttp serve` runs the full check first and
+refuses the handler on any error.
 
 Common `dev` and `serve` flags:
 
@@ -436,13 +438,13 @@ as `default:` rather than `when _:`.
 |---|---|---|
 | ZTS602 | Dynamic capability access | A configured policy can cover computed env keys, egress endpoints, and cache namespaces as residual guards. The diagnostic names the guard kind, required section, assurance consequence, and `zttp check <handler.ts> --contract`. Computed SQL names, route paths, and unguarded exports remain literal-only. |
 | ZTS604 | Avoidable `let` | Use `const` unless the binding is reassigned. |
-| ZTS605 | Dynamic computed property access | Use a typed field, a literal key, or narrow the object before indexing. |
+| ZTS605 | Dynamic computed property access | Read a typed field (`r.a`), or read a `Dict` with `dictGet`. |
 | ZTS610 | Public helper effects | Annotate the helper return type with `Effects<T, "...">`. |
 | ZTS611 | Public helper proof capsule | Annotate the helper return type with `Proof<T, "...">`. |
 | ZTS623 | Internal helper ceiling | Remove the `Effects<...>`: placement is decidable, and the handler budget already bounds an internal helper. |
 | ZTS612 | Effectful `?:` arm | A `?:` arm must be a pure value. Bind the effectful call first, or use `match`. |
 | ZTS613 | Compound assignment | Write the full assignment. |
-| ZTS614 | Non-leading object spread | Put spread first or write explicit fields. |
+| ZTS614 | Non-leading object spread | Use one leading spread, then explicit fields. |
 | ZTS616 | Call-site spread | Pass explicit arguments. |
 | ZTS054 | Default parameter | Use `T | undefined` and resolve the default at the start of the body. |
 | ZTS055 | Optional parameter shorthand | Write `name: T | undefined`. |
@@ -454,8 +456,9 @@ as `default:` rather than `when _:`.
 | ZTS620 | Boolean compared to boolean literal | Use the boolean expression or negation directly. |
 | ZTS621 | Chained conditional arms | Use `match` over one scrutinee, or an if/else chain. |
 
-A pure `?:` is canonical. Only an effectful arm (ZTS612) or a conditional
-nested inside another conditional (ZTS621) is diagnosed.
+A `?:` whose arms are values with no call is canonical. An arm with a call
+(ZTS612), even a call of a pure method, and a conditional nested inside
+another conditional (ZTS621) are diagnosed.
 
 Declaration destructuring is refused at the parser boundary. Bind the source
 to one name, then read members or indexed elements with explicit `const`

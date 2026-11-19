@@ -32,8 +32,10 @@ Three layers report restrictions, in this order:
 2. The type checker reports `ZTS1xx` and `ZTS2xx` codes.
 3. The strict checker reports `ZTS6xx` codes for the canonical profile.
 
-A layer runs only when the layers before it pass. For example, a `ZTS204`
-type error hides a `ZTS624` strict error in the same function.
+Every layer runs. The check does not show a later diagnostic whose node lies
+inside the node of a type error, and that diagnostic returns once the type
+error is fixed. For example, a `ZTS204` type error on a returned expression
+hides a `ZTS624` strict error inside that expression.
 
 ## Source Files And Modules
 
@@ -51,7 +53,7 @@ type error hides a `ZTS624` strict error in the same function.
 | A top-level `let` that is never reassigned | ZTS604 | `const` |
 | A handler that writes to a module-scope variable | ZTS310 | Function-local state |
 | An unknown `zttp:` module, or a name that the module does not export | ZTS206, ZTS207 | A module and an export from `packages/zts/src/builtin_modules.zig` |
-| An `import type` of a name that the module does not export | ZTS207 | A type that the module exports, such as `import type { FetchOptions } from "zttp:fetch";` |
+| An `import type` of a name that a built-in module does not export | ZTS207 | A type that the module exports, such as `import type { FetchOptions } from "zttp:fetch";` |
 | `namespace` and `module` declarations | ZTS001 | ES modules |
 | An `import` after a declaration | ZTS002 | Move each `import` above the first declaration |
 | An `import` or `export` inside a function body | ZTS002 | Move the `import` or `export` to the top level |
@@ -150,8 +152,8 @@ is the only arity flexibility in the profile.
 ## Statements And Control Flow
 
 The statement set is: `const`, necessary `let`, plain assignment, expression
-statement, `if`/`else`, `for...of`, `assert`, `return`, `break`, `continue`,
-and local function declaration. A block is only the body of a function, `if`,
+statement, `if`/`else`, `for...of`, `assert`, `return`, `break`, and
+`continue`. A block is only the body of a function, `if`,
 `else`, or `for...of`.
 
 | Refused form | Code | Write instead |
@@ -325,6 +327,11 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | `readonly` on a record type, such as `readonly { a: number }` | ZTS001 | The record type |
 | A type name that is not declared, imported, or ambient, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error`, `object`, and the utility types `Partial<T>`, `Required<T>`, `Pick<T, K>`, `Omit<T, K>`, and `Readonly<T>` | ZTS065 | A declared or imported type, or an ambient type from `meta` |
 | `FetchOptions` with no import | ZTS065 | Write `import type { FetchOptions } from "zttp:fetch";` |
+
+The ZTS065 check counts a function type parameter as declared in the whole
+file, so a stray `T` outside its function passes it. The type checker then
+reads that `T` as an opaque type, which refuses any use that needs its
+shape.
 
 The admitted types are listed in section 5.7 of the
 [specification](spec/zts-model-1.md). The specification also excludes these
