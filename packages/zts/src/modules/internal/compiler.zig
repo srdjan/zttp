@@ -12,6 +12,7 @@ const string = @import("../../string.zig");
 const bytecode = @import("../../bytecode.zig");
 const object = @import("../../object.zig");
 const translation_witness = @import("../../translation_witness.zig");
+const source_frontend = @import("../../source_frontend.zig");
 
 pub const CompiledModule = struct {
     func: bytecode.FunctionBytecode,
@@ -89,7 +90,14 @@ pub const ModuleCompiler = struct {
                 if (formatted.len > 0) if (!@import("builtin").is_test) std.log.err("{s}", .{formatted});
                 return err;
             };
-            try parser.type_store.validateRuntimeOwners(self.allocator, zts_parser.IrView.fromIRStore(&parser.nodes, &parser.constants));
+            const view = zts_parser.IrView.fromIRStore(&parser.nodes, &parser.constants);
+            try parser.type_store.validateRuntimeOwners(self.allocator, view);
+            if (try source_frontend.refuseUndeclaredTypes(self.allocator, parser, self.atoms, module.source, view, root)) {
+                var err_buf: [1024]u8 = undefined;
+                const formatted = parser.errors.formatFirstError(&err_buf);
+                if (formatted.len > 0) if (!@import("builtin").is_test) std.log.err("{s}: {s}", .{ module.path, formatted });
+                return error.ParseError;
+            }
             const cg = &codegens[index];
             cg.* = zts_parser.CodeGen.initWithIRStore(self.allocator, &parser.nodes, &parser.constants, &parser.scopes, self.strings, self.atoms);
             errdefer {

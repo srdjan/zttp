@@ -274,6 +274,17 @@ pub fn compileHandler(
         },
         .recovered_admission_refused => unreachable,
     };
+    if (try zts.refuseUndeclaredTypes(
+        allocator,
+        &js_parser,
+        &atoms,
+        source,
+        zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
+        root,
+    )) {
+        printParseErrors(allocator, diag_view, js_parser.getProjectedErrors());
+        return error.ParseError;
+    }
 
     try validateVirtualModuleImports(
         zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
@@ -3377,6 +3388,38 @@ const parity_refused_rows = [_]ParityRow{
         .entry = parityEntry("result_safe"),
         .files = &.{.{ .name = "lib.ts", .source = "export function f(): string {\n  const b = while;\n  return \"x\";\n}\n" }},
         .code = "ZTS002",
+        .file = "lib.ts",
+    },
+    .{
+        .label = "entry names a type that nothing declares",
+        .entry = "function g(o: Nope): number {\n  return 1;\n}\n" ++
+            "export function handler(req: Request): Response {\n  return Response.text(\"x\");\n}\n",
+        .files = &.{},
+        .code = "ZTS065",
+        .file = "entry.ts",
+    },
+    .{
+        .label = "entry uses FetchOptions without importing it",
+        .entry = "function g(o: FetchOptions): number {\n  return 1;\n}\n" ++
+            "export function handler(req: Request): Response {\n  return Response.text(\"x\");\n}\n",
+        .files = &.{},
+        .code = "ZTS065",
+        .file = "entry.ts",
+    },
+    .{
+        .label = "entry imports a type that the module does not export",
+        .entry = "import type { Nonexistent } from \"zttp:fetch\";\n" ++
+            "function g(o: Nonexistent): number {\n  return 1;\n}\n" ++
+            "export function handler(req: Request): Response {\n  return Response.text(\"x\");\n}\n",
+        .files = &.{},
+        .code = "ZTS207",
+        .file = "entry.ts",
+    },
+    .{
+        .label = "dependency names a type that nothing declares",
+        .entry = parityEntry("result_safe"),
+        .files = &.{.{ .name = "lib.ts", .source = "function g(o: Nope): number {\n  return 1;\n}\nexport function f(): string {\n  return \"x\";\n}\n" }},
+        .code = "ZTS065",
         .file = "lib.ts",
     },
     .{

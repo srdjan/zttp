@@ -148,6 +148,46 @@ pub const AcceptedDirectCapabilities = struct {
     type_store: *const parser.type_syntax.Store,
 };
 
+/// Refuse each type name of an accepted program that resolves to nothing
+/// (ZTS065) and each `import type` of a name that its module does not export
+/// (ZTS207), at the name. The refusals join the parser's errors, and the
+/// result is true when there was at least one. Every frontend that parses a
+/// module for checking or compiling calls this after the parse is accepted:
+/// `DirectCheckSource`, `precompile.compileHandler`, and `ModuleCompiler`.
+pub fn refuseUndeclaredTypes(
+    allocator: std.mem.Allocator,
+    p: *parser.JsParser,
+    atoms: *atom_table.AtomTable,
+    source: []const u8,
+    view: parser.IrView,
+    root: parser.NodeIndex,
+) !bool {
+    const refusals = try type_names.undeclared(allocator, &p.type_store, view, root, atoms);
+    defer allocator.free(refusals);
+    if (refusals.len == 0) return false;
+    for (refusals) |refusal| {
+        const token = parser.type_syntax.tokenAtOffset(source, refusal.offset);
+        switch (refusal.kind) {
+            .undeclared_name => p.errors.addErrorFmt(
+                .undeclared_type_name,
+                token.location(),
+                "type name `{s}` is not declared",
+                .{refusal.name},
+                type_names.repairFor(refusal.name),
+            ),
+            .unexported_type => p.errors.addErrorFmt(
+                .unexported_type_import,
+                token.location(),
+                "module '{s}' does not export type '{s}'",
+                .{ refusal.module, refusal.name },
+                "import a type that the module exports",
+            ),
+        }
+    }
+    if (p.errors.outOfMemory()) return error.OutOfMemory;
+    return true;
+}
+
 /// Owns one direct TypeScript parse and its atom table.
 /// Initialize the owner in final storage. The parser borrows `atoms`, so an
 /// initialized owner cannot move. The source and path remain borrowed and must
@@ -267,29 +307,7 @@ pub const DirectCheckSource = struct {
         view: parser.IrView,
         root: parser.NodeIndex,
     ) !bool {
-        const refusals = try type_names.undeclared(allocator, &self.parser.type_store, view, root, &self.atoms);
-        defer allocator.free(refusals);
-        if (refusals.len == 0) return false;
-        for (refusals) |refusal| {
-            const token = parser.type_syntax.tokenAtOffset(self.source, refusal.offset);
-            switch (refusal.kind) {
-                .undeclared_name => self.parser.errors.addErrorFmt(
-                    .undeclared_type_name,
-                    token.location(),
-                    "type name `{s}` is not declared",
-                    .{refusal.name},
-                    type_names.repairFor(refusal.name),
-                ),
-                .unexported_type => self.parser.errors.addErrorFmt(
-                    .unexported_type_import,
-                    token.location(),
-                    "module '{s}' does not export type '{s}'",
-                    .{ refusal.module, refusal.name },
-                    "import a type that the module exports",
-                ),
-            }
-        }
-        if (self.parser.errors.outOfMemory()) return error.OutOfMemory;
+        if (!try refuseUndeclaredTypes(allocator, &self.parser, &self.atoms, self.source, view, root)) return false;
         self.parse_outcome = .{ .parser_refused = .{
             .first_error = error.ParseError,
             .projected_error_count = self.parser.getProjectedErrors().len,
