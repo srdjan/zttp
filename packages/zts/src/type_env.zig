@@ -263,6 +263,19 @@ pub const GenericScope = struct {
         }
         return null;
     }
+
+    /// The `extends` bound of the parameter `name` (`null_type_idx` when it has
+    /// none), or null when this scope declares no such parameter.
+    pub fn constraintOf(self: *const GenericScope, name: []const u8) ?TypeIndex {
+        for (0..self.count) |i| {
+            if (self.params[i].name_len == name.len and
+                std.mem.eql(u8, self.params[i].name[0..self.params[i].name_len], name))
+            {
+                return self.params[i].constraint;
+            }
+        }
+        return null;
+    }
 };
 
 /// One declared type parameter of a function signature.
@@ -354,6 +367,11 @@ pub const GenericAlias = struct {
     param_constraints: [8]TypeIndex = @splat(null_type_idx),
     param_count: u8 = 0,
     body: TypeIndex = null_type_idx,
+    /// A generic alias application in `body` whose argument is outside the
+    /// bound of its parameter, such as `Box<U>` for an unbounded `U`. An
+    /// application of this alias stays uninstantiated, and the checker reports
+    /// the breach where the alias is used.
+    body_breach: ?AliasBreach = null,
 };
 
 /// An alias argument outside the bound of its parameter.
@@ -1532,18 +1550,57 @@ pub const TypeEnv = struct {
         return .{ .changed = new_members };
     }
 
+    /// The bound that the type parameter `idx` declares in the enclosing
+    /// generic scopes (`unknown` when it declares none; a bound that names
+    /// another parameter is followed), or null when `idx` names no type
+    /// parameter that a scope declares.
+    fn scopedTypeParamBound(self: *const TypeEnv, idx: TypeIndex) ?TypeIndex {
+        var current = idx;
+        var hops: u8 = 0;
+        while (hops < 8) : (hops += 1) {
+            if (!self.isTypeParameterLike(current)) return if (hops == 0) null else current;
+            const name = self.pool.getRefName(current);
+            var declared: ?TypeIndex = null;
+            var level = self.generic_scopes.items.len;
+            while (level > 0) {
+                level -= 1;
+                declared = self.generic_scopes.items[level].constraintOf(name);
+                if (declared != null) break;
+            }
+            const bound = declared orelse return if (hops == 0) null else current;
+            if (bound == null_type_idx) return self.pool.idx_unknown;
+            current = bound;
+        }
+        return self.pool.idx_unknown;
+    }
+
     /// The first argument of an application of `alias` that is outside the
     /// bound of its parameter. `args` is rewritten in place with each nested
     /// application instantiated, which a bound is judged against. A bound
     /// may name an earlier parameter, so it is instantiated with `args` first.
-    /// A type parameter used as an argument is admitted: only its own
-    /// declaration knows its constraint.
-    pub fn firstAliasArgBreach(self: *TypeEnv, alias: GenericAlias, args: []TypeIndex) ?AliasBreach {
+    /// A type parameter used as an argument is judged through its own bound,
+    /// read from the enclosing generic scopes, and an unbounded one has the
+    /// bound `unknown`. Outside any scope, `unscoped_is_breach` decides: an
+    /// application that `TypeEnv` left uninstantiated is a breach, and the
+    /// checker asks with it set, while instantiation admits a type parameter
+    /// that no scope can judge.
+    pub fn firstAliasArgBreach(
+        self: *TypeEnv,
+        alias: GenericAlias,
+        args: []TypeIndex,
+        unscoped_is_breach: bool,
+    ) ?AliasBreach {
         for (args) |*arg| arg.* = self.tryInstantiateGenericApp(arg.*);
         for (args, 0..) |arg, i| {
             const declared = alias.param_constraints[i];
             if (declared == null_type_idx) continue;
-            if (self.pool.getTag(arg) == .t_generic_param) continue;
+            var tested = arg;
+            if (self.scopedTypeParamBound(arg)) |own_bound| {
+                tested = own_bound;
+            } else if (self.isTypeParameterLike(arg)) {
+                if (!unscoped_is_breach and self.pool.getTag(arg) == .t_generic_param) continue;
+                tested = self.pool.idx_unknown;
+            }
             const bound = self.pool.instantiate(
                 self.allocator,
                 declared,
@@ -1551,8 +1608,73 @@ pub const TypeEnv = struct {
                 args,
                 0,
             );
-            if (self.isAssignableTo(arg, bound)) continue;
+            if (self.isAssignableTo(tested, bound)) continue;
             return .{ .name = alias.param_names[i], .arg = arg, .constraint = bound };
+        }
+        return null;
+    }
+
+    fn isTypeParameterLike(self: *const TypeEnv, idx: TypeIndex) bool {
+        return switch (self.pool.getTag(idx) orelse return false) {
+            .t_generic_param => true,
+            .t_ref => self.resolveRef(idx) == idx,
+            // exhaustive: every other tag names a concrete type, not a type
+            // parameter. The answer only selects which bound a diagnostic
+            // judges and decides no proof verdict.
+            else => false,
+        };
+    }
+
+    /// The first application in the alias body `idx` that `firstAliasArgBreach`
+    /// refuses with `unscoped_is_breach` set: `TypeEnv` leaves such an
+    /// application uninstantiated, so it is still an application here.
+    fn firstBodyBreach(self: *TypeEnv, idx: TypeIndex, depth: u8) ?AliasBreach {
+        if (idx == null_type_idx or depth >= 8) return null;
+        const pool = self.pool;
+        switch (pool.getTag(idx) orelse return null) {
+            .t_generic_app => {
+                const info = pool.getGenericAppInfo(idx);
+                if (info.base == null_type_idx) return null;
+                if (self.generic_aliases.get(pool.getRefName(info.base))) |other| {
+                    if (info.args.len == other.param_count) {
+                        var args: [8]TypeIndex = undefined;
+                        @memcpy(args[0..other.param_count], info.args);
+                        if (self.firstAliasArgBreach(other, args[0..other.param_count], true)) |breach| return breach;
+                    }
+                }
+                return self.firstBodyBreachIn(pool.getGenericAppInfo(idx).args, depth);
+            },
+            .t_array => return self.firstBodyBreach(pool.getArrayElement(idx), depth + 1),
+            .t_nullable => return self.firstBodyBreach(pool.getNullableInner(idx), depth + 1),
+            .t_dict => return self.firstBodyBreach(pool.getDictKey(idx), depth + 1) orelse
+                self.firstBodyBreach(pool.getDictValue(idx), depth + 1),
+            .t_union => return self.firstBodyBreachIn(pool.getUnionMembers(idx), depth),
+            .t_intersection => return self.firstBodyBreachIn(pool.getIntersectionMembers(idx), depth),
+            .t_tuple => return self.firstBodyBreachIn(pool.getTupleElements(idx), depth),
+            .t_record => {
+                // Read each field afresh: an instantiation may reallocate the pool.
+                var i: usize = 0;
+                while (i < pool.getRecordFields(idx).len) : (i += 1) {
+                    const field_type = pool.getRecordFields(idx)[i].type_idx;
+                    if (self.firstBodyBreach(field_type, depth + 1)) |breach| return breach;
+                }
+                return null;
+            },
+            // exhaustive: every other tag is a leaf, or a form that holds no
+            // alias application in a position a handler can name. The walk
+            // reports a diagnostic at a use of the alias and decides no proof
+            // verdict.
+            else => return null,
+        }
+    }
+
+    fn firstBodyBreachIn(self: *TypeEnv, members: []const TypeIndex, depth: u8) ?AliasBreach {
+        // Copy: an instantiation inside the walk may reallocate the pool's member list.
+        var copy: [16]TypeIndex = undefined;
+        const count = @min(members.len, copy.len);
+        @memcpy(copy[0..count], members[0..count]);
+        for (copy[0..count]) |member| {
+            if (self.firstBodyBreach(member, depth + 1)) |breach| return breach;
         }
         return null;
     }
@@ -1645,9 +1767,11 @@ pub const TypeEnv = struct {
                 for (0..argc) |i| {
                     inst_args[i] = self.tryInstantiateGenericApp(inst_args[i]);
                 }
-                // An argument outside its bound leaves the application
-                // uninstantiated: the checker reports it from the annotation.
-                if (self.firstAliasArgBreach(alias, inst_args[0..argc]) != null) return idx;
+                // An argument outside its bound, or a body that holds such an
+                // application, leaves the application uninstantiated: the
+                // checker reports it from the annotation.
+                if (alias.body_breach != null) return idx;
+                if (self.firstAliasArgBreach(alias, inst_args[0..argc], false) != null) return idx;
                 return self.pool.instantiate(
                     self.allocator,
                     alias.body,
@@ -2447,6 +2571,7 @@ pub const TypeEnv = struct {
             alias.param_constraints[index] = parameter.constraint;
         }
         alias.param_count = owner.count;
+        alias.body_breach = self.firstBodyBreach(body, 0);
         const owned_name = self.internName(name);
         try self.ensureHealthy();
         {

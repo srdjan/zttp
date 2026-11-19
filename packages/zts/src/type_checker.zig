@@ -8481,7 +8481,11 @@ pub const TypeChecker = struct {
         // list, which an instantiation may reallocate.
         var args: [8]TypeIndex = undefined;
         @memcpy(args[0..alias.param_count], info.args);
-        const breach = self.env.firstAliasArgBreach(alias, args[0..alias.param_count]) orelse return null;
+        // `TypeEnv` judged a type parameter argument through its own bound
+        // while that bound's scope was open, and it leaves only a breach
+        // uninstantiated, so a type parameter that reaches here is a breach.
+        const breach = self.env.firstAliasArgBreach(alias, args[0..alias.param_count], true) orelse
+            alias.body_breach orelse return null;
         return .{ .alias_arg = breach };
     }
 

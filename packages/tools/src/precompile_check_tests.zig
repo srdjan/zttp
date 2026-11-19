@@ -15287,3 +15287,49 @@ test "CHECK admits a Dict key type that is assignable to a string or a number" {
     try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
     try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
 }
+
+test "CHECK refuses a type parameter whose own bound breaks the bound of a generic alias parameter" {
+    const box = "structural Box<T extends string> = { value: T };\n";
+    const handler_line = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+    const cases = [_]struct { source: []const u8, message: []const u8, line: u32, column: u32 }{
+        .{ .source = box ++ "function f<T>(b: Box<T>): number { return 1; }\n" ++ handler_line, .message = "type argument T for 'T' does not satisfy constraint string", .line = 2, .column = 15 },
+        .{ .source = box ++ "function f<T extends number>(b: Box<T>): number { return 1; }\n" ++ handler_line, .message = "type argument T for 'T' does not satisfy constraint string", .line = 2, .column = 30 },
+        .{ .source = box ++ "structural Wrap<U> = Box<U>;\nfunction f(w: Wrap<\"a\">): number { return 1; }\n" ++ handler_line, .message = "type argument U for 'T' does not satisfy constraint string", .line = 3, .column = 12 },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("alias type parameter refusal failed for source:\n{s}\n", .{case.source});
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
+            .code = "ZTS209",
+            .message = case.message,
+            .line = case.line,
+            .column = case.column,
+            .suggestion = "Pass a type argument that satisfies the constraint.",
+        });
+    }
+}
+
+test "CHECK admits a type parameter whose own bound satisfies the bound of a generic alias parameter" {
+    const source =
+        "structural Box<T extends string> = { value: T };\n" ++
+        "structural Wrap<U extends string> = Box<U>;\n" ++
+        "function f1<T extends string>(b: Box<T>): number { return 1; }\n" ++
+        "function f2<T extends \"a\" | \"b\">(b: Box<T>): number { return 1; }\n" ++
+        "function f4(w: Wrap<\"a\">): string { return w.value; }\n" ++
+        "function f5<T extends string, U extends T>(b: Box<U>): number { return 1; }\n" ++
+        "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+    try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+}

@@ -1197,8 +1197,11 @@ const refusal_rows_b = [_]RefusalRow{
             r("Box<number>", top(box_alias ++ "function g(f: (b: Box<number>) => number): number {\n  return 1;\n}")),
             r("Box<number>", top(box_alias ++ "structural Wrapped = Box<number>;\nfunction g(w: Wrapped): number {\n  return 1;\n}")),
             r("structural Box<T extends string> = { value: T };", top("structural Bag<K extends DictKey, V> = Dict<K, V>;\nfunction g(b: Bag<boolean, string>): number {\n  return 1;\n}")),
+            r("structural Box<T extends string> = { value: T };", top(box_alias ++ "function g<T>(b: Box<T>): number {\n  return 1;\n}")),
+            r("structural Box<T extends string> = { value: T };", top(box_alias ++ "function g<T extends number>(b: Box<T>): number {\n  return 1;\n}")),
+            r("structural Box<T extends string> = { value: T };", top(box_alias ++ "structural Wrap<U> = Box<U>;\nfunction g(w: Wrap<\"a\">): number {\n  return 1;\n}")),
         },
-        .clean = c(top(box_alias ++ "function g(b: Box<string>): number {\n  return 1;\n}")),
+        .clean = c(top(box_alias ++ "structural Wrap<U extends string> = Box<U>;\nfunction g(b: Box<string>): number {\n  return 1;\n}\nfunction h<T extends string>(b: Box<T>): number {\n  return 1;\n}\nfunction k(w: Wrap<\"a\">): number {\n  return 1;\n}")),
     },
 
     // ----- Ambient Names And Effects -----
