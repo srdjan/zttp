@@ -17,7 +17,7 @@
 //! freeze reach clients through the version-2 `restrictions` operation only.
 //!
 //! Every `enforced_by` entry was measured against the built binary on
-//! 2026-07-31 by running `zts check --json` over a minimal handler containing
+//! 2026-11-19 by running `zts check --json` over a minimal handler containing
 //! the construct, not inferred from the parser source. A row that no diagnostic
 //! rejects carries `unenforced_note` instead, which is how the enforcement gaps
 //! below became visible in the first place.
@@ -200,8 +200,9 @@ pub const entries = [_]RestrictionEntry{
         .failure_class = "ambient scheduling and non-deterministic interleavings",
         .proof_unlocked = "deterministic effect boundary and replayable I/O",
         // Measured: `export async function handler` is rejected by the parser's
-        // expected-token path (ZTS002), not by the unsupported-feature path.
-        .enforced_by = &.{"ZTS002"},
+        // expected-token path (ZTS002). A plain `async function` and `Promise`
+        // take the unsupported-feature path (ZTS001).
+        .enforced_by = &.{ "ZTS001", "ZTS002" },
         .v1_feature_name = "async/await",
     },
     .{
