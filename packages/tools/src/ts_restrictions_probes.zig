@@ -986,7 +986,11 @@ const refusal_rows_b = [_]RefusalRow{
     },
     .{
         .key = "A mutating method on a `readonly` array",
-        .refused = &.{r("readonly", top("function g(xs: readonly number[]): number {\n  xs.push(1);\n  return 1;\n}"))},
+        .refused = &.{
+            r("readonly", top("function g(xs: readonly number[]): number {\n  xs.push(1);\n  return 1;\n}")),
+            r("readonly", top("function g(xs: readonly number[]): number {\n  xs[0] = 9;\n  return 1;\n}")),
+            r("readonly", top("function g(t: readonly [number, number]): number {\n  t[0] = 5;\n  return 1;\n}")),
+        },
         .clean = c(top("function g(xs: readonly number[]): number[] {\n  const ys: number[] = xs.slice(0, 1);\n  ys.push(1);\n  return ys;\n}")),
     },
     .{
@@ -994,6 +998,10 @@ const refusal_rows_b = [_]RefusalRow{
         .refused = &.{
             r("readonly", top("structural R = { readonly a: number };\nfunction g(r: R): number {\n  r.a = 2;\n  return r.a;\n}")),
             r("readonly", top("structural In = { readonly a: number };\nstructural Out = { inner: In };\nfunction g(o: Out): number {\n  o.inner.a = 2;\n  return o.inner.a;\n}")),
+            r("readonly", top("structural R = { readonly a: number };\nfunction g(os: R[]): number {\n  for (const e of os) {\n    e.a = 7;\n  }\n  return 1;\n}")),
+            r("readonly", top("structural R = { readonly a: number };\nfunction g(o: R | undefined): number {\n  if (o !== undefined) {\n    o.a = 3;\n  }\n  return 1;\n}")),
+            r("readonly", top("structural R = { readonly a: number };\nfunction g(o: R, k: \"a\"): number {\n  o[k] = 3;\n  return 1;\n}")),
+            r("readonly", top("structural R = { readonly a: number };\nfunction g(o: R): number {\n  o[\"a\"] = 3;\n  return 1;\n}")),
         },
         .clean = c(top("structural R = { readonly a: number };\nfunction g(r: R): R {\n  return { a: 2 };\n}")),
     },

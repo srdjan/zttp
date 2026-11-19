@@ -135,6 +135,9 @@ pub const TypeNode = struct {
     data: TypeData,
     /// For nominal types (capability interfaces), prevents structural forgery.
     nominal: bool = false,
+    /// Set on a `t_tuple` written `readonly [T, U]`. A tuple has no spare
+    /// payload word for the flag, as `t_array` has in `data.b`.
+    readonly_tuple: bool = false,
     /// The declared name of a `distinct type`. A nominal node copies its base
     /// node's tag and data, so without the name two distinct types over the
     /// same base differ only by pool index - and a canonical key computed from
@@ -817,6 +820,21 @@ pub const TypePool = struct {
         return data.b == 1;
     }
 
+    /// Whether a tuple type forbids writes through it. False for every
+    /// non-tuple type.
+    pub fn isReadonlyTuple(self: *const TypePool, idx: TypeIndex) bool {
+        if (self.getTag(idx) != .t_tuple) return false;
+        return self.nodes.items[idx].readonly_tuple;
+    }
+
+    /// Create a `readonly [T, U]` that shares the element list of `tuple`.
+    /// Any type that is not a tuple comes back unchanged.
+    pub fn addReadonlyTuple(self: *TypePool, allocator: std.mem.Allocator, tuple: TypeIndex) TypeIndex {
+        if (self.getTag(tuple) != .t_tuple or self.isReadonlyTuple(tuple)) return tuple;
+        const data = self.getData(tuple) orelse return tuple;
+        return self.addNode(allocator, .{ .tag = .t_tuple, .data = data, .readonly_tuple = true });
+    }
+
     /// Create a tuple type.
     pub fn addTuple(self: *TypePool, allocator: std.mem.Allocator, elements: []const TypeIndex) TypeIndex {
         if (self.isPoisoned()) return null_type_idx;
@@ -1007,7 +1025,8 @@ pub const TypePool = struct {
                     if (e.* != old) changed = true;
                 }
                 if (!changed) return idx;
-                return self.addTuple(allocator, new_elems);
+                const rebuilt = self.addTuple(allocator, new_elems);
+                return if (self.isReadonlyTuple(idx)) self.addReadonlyTuple(allocator, rebuilt) else rebuilt;
             },
             .t_function => {
                 // Copy params before the loop (shared params list may realloc).
@@ -1662,7 +1681,10 @@ pub const TypePool = struct {
                 },
                 .t_literal_string, .t_literal_number, .t_literal_bool => self.literalEquals(source, target),
                 .t_ref => std.mem.eql(u8, self.getRefName(source), self.getRefName(target)),
+                // A readonly tuple is not assignable to a mutable one, for the
+                // reason the array arm above gives.
                 .t_tuple => blk: {
+                    if (self.isReadonlyTuple(source) and !self.isReadonlyTuple(target)) break :blk false;
                     const src_elems = self.getTupleElements(source);
                     const tgt_elems = self.getTupleElements(target);
                     if (src_elems.len != tgt_elems.len) break :blk false;
@@ -3817,4 +3839,23 @@ test "a literal string past 255 bytes fails closed instead of sharing a node" {
     try std.testing.expectEqual(null_type_idx, pool.addLiteralString(allocator, &long_a));
     try std.testing.expectEqual(null_type_idx, pool.addLiteralString(allocator, &long_b));
     try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
+}
+
+test "a readonly tuple keeps its elements and stays readonly through instantiate" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const t_param = pool.addGenericParam(allocator, "T");
+    const mutable = pool.addTuple(allocator, &.{ t_param, pool.idx_number });
+    const readonly = pool.addReadonlyTuple(allocator, mutable);
+
+    try std.testing.expect(!pool.isReadonlyTuple(mutable));
+    try std.testing.expect(pool.isReadonlyTuple(readonly));
+    try std.testing.expectEqual(@as(usize, 2), pool.getTupleElements(readonly).len);
+    try std.testing.expect(!pool.isReadonlyTuple(pool.idx_number));
+
+    const instantiated = pool.instantiate(allocator, readonly, &.{"T"}, &.{pool.idx_string}, 0);
+    try std.testing.expect(pool.isReadonlyTuple(instantiated));
+    try std.testing.expectEqual(pool.idx_string, pool.getTupleElements(instantiated)[0]);
 }

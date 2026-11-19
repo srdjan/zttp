@@ -111,7 +111,7 @@ pub const DiagnosticKind = enum {
     unencodable_json_payload, // a `Response.json` payload whose type cannot be JSON
     string_add, // string-valued use of + instead of explicit join
     nominal_constructor_call, // a nominal type name used in call position
-    readonly_mutation, // a mutating array method called on a readonly receiver, or a write to a readonly field
+    readonly_mutation, // a mutating array method called on a readonly receiver, or a write to a readonly field, array element, or tuple element
     function_value_binding, // a `const` or `let` whose type is a function type
     non_iterable_loop, // a `for...of` over a value that is not an array, a tuple, or `range(n)`
 };
@@ -1947,39 +1947,8 @@ pub const TypeChecker = struct {
                             }
                         }
                     }
-                } else if (target_tag == .member_access) {
-                    // Check readonly field assignment
-                    const member = self.ir_view.getMember(asgn.target) orelse return;
-                    self.recordAbsentReceiver(asgn.target, member.object);
-                    const obj_tag = self.ir_view.getTag(member.object) orelse return;
-                    // A name reads its type through the narrowing overlay, not
-                    // `binding_types`: the readonly record is usually reached
-                    // by a guard (`if (v !== undefined) { v.id = "x"; }`), and
-                    // reading the declaration finds the nullable node instead.
-                    // Any other receiver, such as `o.inner` in `o.inner.a = 2`,
-                    // reads its inferred type; checking only a name let a write
-                    // through a nested receiver pass in silence.
-                    const receiver_type: ?TypeIndex = if (obj_tag == .identifier) blk: {
-                        const binding = self.ir_view.getBinding(member.object) orelse return;
-                        break :blk self.currentBindingType(binding);
-                    } else blk: {
-                        const inferred = self.env.resolveRef(self.inferType(member.object));
-                        break :blk if (inferred == null_type_idx) null else inferred;
-                    };
-                    if (receiver_type) |obj_type| {
-                        const prop_name = self.resolveAtomName(member.property) orelse return;
-                        if (self.env.pool.lookupRecordField(obj_type, prop_name)) |field| {
-                            if (field.readonly) {
-                                self.addDiagnostic(.{
-                                    .severity = .err,
-                                    .kind = .readonly_mutation,
-                                    .node = node,
-                                    .message = "cannot assign to readonly property",
-                                    .help = "build a new record with the changed field, or remove the readonly modifier",
-                                });
-                            }
-                        }
-                    }
+                } else if (target_tag == .member_access or target_tag == .computed_access) {
+                    self.reportReadonlyWrite(node, asgn.target, target_tag);
                 }
             },
 
@@ -8697,6 +8666,64 @@ pub const TypeChecker = struct {
         });
     }
 
+    /// Refuse a write through a `readonly` field, array, or tuple: `o.f = v`,
+    /// `o["f"] = v`, `o[k] = v` with `k` of a string literal type, and
+    /// `xs[i] = v`.
+    ///
+    /// A name reads its type through the narrowing overlay, not `binding_types`:
+    /// the readonly record is usually reached by a guard
+    /// (`if (v !== undefined) { v.id = "x"; }`), and reading the declaration
+    /// finds the nullable node instead. A name that has no recorded type, such
+    /// as a `for...of` variable, and any other receiver, such as `o.inner` in
+    /// `o.inner.a = 2`, read their inferred type. Every receiver type is
+    /// resolved through `resolveRef`, because a named type is a reference node
+    /// until it is resolved.
+    fn reportReadonlyWrite(self: *TypeChecker, node: NodeIndex, target: NodeIndex, target_tag: ir.NodeTag) void {
+        const member = self.ir_view.getMember(target) orelse return;
+        if (target_tag == .member_access) self.recordAbsentReceiver(target, member.object);
+        const obj_tag = self.ir_view.getTag(member.object) orelse return;
+        var declared: TypeIndex = null_type_idx;
+        if (obj_tag == .identifier) {
+            const binding = self.ir_view.getBinding(member.object) orelse return;
+            declared = self.currentBindingType(binding) orelse null_type_idx;
+        }
+        if (declared == null_type_idx) declared = self.inferType(member.object);
+        const receiver = self.env.resolveRef(declared);
+        if (receiver == null_type_idx) return;
+
+        const pool = self.env.pool;
+        const field_name: []const u8 = blk: {
+            if (target_tag == .member_access) break :blk self.resolveAtomName(member.property) orelse return;
+            if (member.computed == null_node) return;
+            if (pool.isReadonlyArray(receiver) or pool.isReadonlyTuple(receiver)) {
+                self.addReadonlyElementWrite(node);
+                return;
+            }
+            if (self.getLiteralString(member.computed)) |key| break :blk key;
+            const key_type = self.env.resolveRef(self.inferType(member.computed));
+            break :blk pool.getLiteralStringValue(key_type) orelse return;
+        };
+        const field = pool.lookupRecordField(receiver, field_name) orelse return;
+        if (!field.readonly) return;
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .readonly_mutation,
+            .node = node,
+            .message = "cannot assign to readonly property",
+            .help = "build a new record with the changed field, or remove the readonly modifier",
+        });
+    }
+
+    fn addReadonlyElementWrite(self: *TypeChecker, node: NodeIndex) void {
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .readonly_mutation,
+            .node = node,
+            .message = "cannot assign to an element of a readonly array or tuple",
+            .help = "drop `readonly` from the declared type, or build a new array instead of writing to this one",
+        });
+    }
+
     /// Which slot of a container a write reaches.
     const WriteSlot = union(enum) {
         /// A record field named by `o.f` or `o["f"]`.
@@ -14135,4 +14162,16 @@ test "a write to a readonly field is caught through a nested receiver" {
     try std.testing.expectEqual(@as(usize, 1), seen.len);
     try std.testing.expectEqual(DiagnosticKind.readonly_mutation, seen[0].kind);
     try std.testing.expectEqualStrings("cannot assign to readonly property", seen[0].message);
+}
+
+test "a readonly tuple is not assignable to a mutable tuple" {
+    // A readonly array is refused where a mutable array is expected; a
+    // readonly tuple was not, so `m[0] = 5` wrote through the alias.
+    try checkTypedSource(
+        \\function g(): number {
+        \\  const t: readonly [number, number] = [1, 2];
+        \\  const m: [number, number] = t;
+        \\  return m[0];
+        \\}
+    , 1, 0);
 }

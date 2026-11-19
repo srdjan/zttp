@@ -644,6 +644,9 @@ pub fn lowerOwnedRange(
                 if (pool.getTag(inner) == .t_array and !pool.isReadonlyArray(inner)) {
                     break :blk pool.addReadonlyArray(allocator, pool.getArrayElement(inner));
                 }
+                if (pool.getTag(inner) == .t_tuple) {
+                    break :blk pool.addReadonlyTuple(allocator, inner);
+                }
                 if (pool.getTag(inner) == .t_ref or pool.getTag(inner) == .t_generic_app) {
                     const base = pool.addRef(allocator, "Readonly");
                     break :blk pool.addGenericApp(allocator, base, &.{inner});
