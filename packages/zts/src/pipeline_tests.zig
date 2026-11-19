@@ -7351,3 +7351,22 @@ test "array brackets with trivia between them are an array" {
     try expectNoTypeDiagnostic("function f(x: number[ ]): number { return x.length; }");
     try expectNoTypeDiagnostic("function f(x: number[/* c */]): number { return x.length; }");
 }
+
+test "a top-level initializer with a builtin call that takes a non-function argument is admitted" {
+    // The ZTS630 walk read every call argument as a function body, so a
+    // string or number argument decoded unrelated data, recursed without end,
+    // and crashed the check, or reported a false ZTS630.
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 0), session.resolved.strictDiagnostics().len);
+            try testing.expectEqual(@as(usize, 0), session.resolved.typeDiagnostics().len);
+        }
+    };
+    try withSession(testing.allocator,
+        \\const a: string = "a,b".split(",").join("-");
+        \\const n: number = Math.floor(1.5);
+        \\function handler(req: Request): Response {
+        \\  return Response.text([a, String(n)].join(""));
+        \\}
+    , Probe.run);
+}

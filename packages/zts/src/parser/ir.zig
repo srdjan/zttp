@@ -1883,12 +1883,17 @@ pub const IrView = struct {
         };
     }
 
-    /// Get function expression data of a `function_expr` or `arrow_function`.
-    /// A `function_decl` holds `var_decl` data (a binding and the function
-    /// expression as `init`), not function data, so this returns null for it
-    /// on both implementations. Read a declaration with `getFunctionOfDecl`.
+    /// Get function expression data of a `function_expr` or `arrow_function`,
+    /// or null for any other node. Another tag stores unrelated data at the
+    /// same offsets, and reading it as a function decoded a body that did not
+    /// exist. A `function_decl` holds `var_decl` data (a binding and the
+    /// function expression as `init`); read it with `getFunctionOfDecl`.
     pub fn getFunction(self: IrView, idx: NodeIndex) ?Node.FunctionExpr {
-        if (self.getTag(idx) == .function_decl) return null;
+        switch (self.getTag(idx) orelse return null) {
+            .function_expr, .arrow_function => {},
+            // exhaustive: only these two tags carry a function payload.
+            else => return null,
+        }
         const ir = self.store;
         return blk: {
             if (idx >= ir.data.items.len) break :blk null;
