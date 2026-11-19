@@ -409,6 +409,29 @@ exports a `FetchOptions` type, and an unimported `FetchOptions` gets
 ZTS065. The rejected option was (b): publish `FetchOptions` as an ambient
 type.
 
+### Decision 29: a callback in a top-level initializer
+
+The U6 review found that `const b: number[] = xs.map((x: number): number
+=> x * 2);` at top level passes `zts check`, and `b` is `undefined` at
+run time under `zttp serve` and in a compiled binary. `filter`, `reduce`,
+`some`, a named callback, and a helper that calls `map` behave the same.
+The pre-plan binary behaves the same, so the defect is in the runtime.
+The owner chose option (a) on 2026-11-19: ZTS630 refuses a top-level
+initializer that passes a function value as a call argument, directly or
+through a called module function, and the run-time defect stays an open
+item. The rejected option was (b): make module initialization run the
+callback.
+
+### Decision 30: a declaration that redefines an ambient type name
+
+The U6 review found that `structural Request = number;` passes `zts
+check`, and the handler answers 500. `structural Response = string;`,
+`structural string = number;`, and a declaration beside an `import type`
+of the same name pass too. The owner chose option (a) on 2026-11-19: a
+declaration whose name is an ambient type name or a name that an
+`import type` binds gets ZTS019. The rejected option was (b): record it
+as an open item.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -1663,3 +1686,42 @@ later.
     followed by a space or a newline. A condition with such a `;` inside a
     string is refused, never accepted. How often this occurs is not
     measured.
+- The U6 review ran on 2026-11-18 and 2026-11-19 over 46edf7b7^..d0ceef8f:
+  a Codex astra fact-check and a Fable adversarial review with probes. I
+  verified each finding below with a probe before I acted on it.
+  - Confirmed and fixed: `zttp compile` wrote a binary for a source that
+    `zts check` refuses with ZTS065 (d9981bbb); a readonly write through a
+    nested receiver passed (2201d141); `zts check` crashed on
+    `"a,b".split(",").join("-")` in a top-level initializer, because
+    `IrView.getFunction` read any node as a function (62ee593f); no form
+    of a `match` after an early-return narrowing passed, a regression of
+    6b07d797 (32fa4363); readonly element, loop, narrowed, and keyed
+    writes passed (e8796729); a missing builtin argument and a non-string
+    `Response` body passed (4ccb9dfd); `for...of` over a value with no type,
+    over a `null` member, and over a bad `range` call passed (cb6f4b8e).
+  - Confirmed, with a fix unit: a callback in a top-level initializer
+    reads `undefined` at run time (U6-R6, Decision 29 a), and a
+    declaration could redefine an ambient type name (U6-R7, Decision 30 a).
+  - Corrected documents: docs/ts-restrictions.md, docs/cli.md, AGENTS.md,
+    and two allowlist reasons (f0d2ab31).
+  - These findings stay open:
+    - The run-time defect behind the initializer callback is not
+      diagnosed; U6-R6 refuses the form.
+    - `range(1.5)` and `range(-1)` pass: their type is `number`.
+    - A write through a record alias that drops `readonly` passes.
+    - A refusal in a graph file module prints its message without the
+      code.
+    - The ZTS216 redundancy verdict is dropped when the analysis budget
+      runs out; no proof verdict depends on it.
+    - The text output of a `zttp:types` value import shows no code; the
+      JSON output shows ZTS053.
+    - `match (Math)` with only a `default` arm passes.
+    - The C-style `for` diagnostic names `for (let x of array)`, which
+      ZTS604 refuses.
+    - docs/user-guide.md shows `if (token === undefined) return ...;`,
+      which ZTS070 refuses. Spec 6 lists `Result` and `HtmlNode` as
+      ambient types, and the compiler refuses `Result<...>` with ZTS065.
+    - `import type { FetchOptions as FO }` makes `FO` an opaque type.
+    - `function f<T extends string>(b: Box<T>): T { return b.value; }`
+      gets ZTS204.
+    - A method call on a union receiver gets no ZTS203 check.
