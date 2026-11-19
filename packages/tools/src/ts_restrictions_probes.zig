@@ -1374,7 +1374,7 @@ const refusal_rows_b = [_]RefusalRow{
             r("const k: string = env(\"K\") ?? \"\";", top("import { env } from \"zttp:env\";\nconst k: string = env(\"K\") ?? \"\";")),
             r("const n: number = bump();", top("const log: number[] = [];\nfunction bump(): number {\n  log.push(1);\n  return log.length;\n}\nconst n: number = bump();")),
         },
-        .clean = c(top("function double(n: number): number {\n  return n * 2;\n}\nconst d: number = double(2);\nconst xs: number[] = [1, 2].map((x: number): number => x * 2);")),
+        .clean = c(top("function double(n: number): number {\n  return n * 2;\n}\nconst d: number = double(2);")),
     },
     .{
         .key = "A top-level initializer that reaches a module declaration at or after it, such as `const a: number = b;` and `const n: number = f();` for a function that reads a name that the module declares later",
@@ -1383,6 +1383,14 @@ const refusal_rows_b = [_]RefusalRow{
             r("const n: number = f();", top("function f(): number {\n  return later;\n}\nconst n: number = f();\nconst later: number = 5;")),
         },
         .clean = c(top("function isEven(n: number): boolean {\n  if (n === 0) {\n    return true;\n  }\n  return isOdd(n - 1);\n}\nfunction isOdd(n: number): boolean {\n  if (n === 0) {\n    return false;\n  }\n  return isEven(n - 1);\n}\nfunction read(): number {\n  return later;\n}\nconst later: number = 5;\nconst even: boolean = isEven(4);")),
+    },
+    .{
+        .key = "A top-level initializer that passes a function to a call, such as `const b: number[] = xs.map((x: number): number => x * 2);` and `const b: number[] = doubled(xs);` for a helper that calls map",
+        .refused = &.{
+            r("const b: number[] = xs.map((x: number): number => x * 2);", top("const xs: number[] = [1, 2, 3];\nconst b: number[] = xs.map((x: number): number => x * 2);")),
+            r("const b: number[] = doubled(xs);", top("function doubled(xs: number[]): number[] {\n  return xs.map((x: number): number => x * 2);\n}\nconst b: number[] = doubled([1, 2, 3]);")),
+        },
+        .clean = c(top("function isBig(n: number): boolean {\n  return n > 1;\n}\nconst d: number = 2;\nfunction count(): number {\n  const xs: number[] = [1, 2, 3].filter(isBig);\n  return xs.length + d;\n}")),
     },
     .{
         .key = "`import { ... } from \"zttp:types\"`",

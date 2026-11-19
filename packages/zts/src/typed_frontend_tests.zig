@@ -8342,7 +8342,9 @@ fn expectDirectPredicateConsumerInner(
     defer direct_strict.deinit();
     const strict_ok = try direct_strict.check(direct_root);
     const expected_strict: []const strict_checker_mod.DiagnosticKind = switch (case) {
-        .mixed_untyped_target, .compact_target_position, .target_after_sixteen => &.{.missing_public_annotation},
+        .mixed_untyped_target => &.{.missing_public_annotation},
+        .compact_target_position, .target_after_sixteen => &.{ .missing_public_annotation, .effectful_module_initializer },
+        .arrow_value, .arrow_guard_unverified, .arrow_ordinary_tab, .quoted_value => &.{.effectful_module_initializer},
         else => &.{},
     };
     try std.testing.expectEqual(@as(u32, @intCast(expected_strict.len)), strict_ok);

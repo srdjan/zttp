@@ -441,10 +441,12 @@ pub const StrictChecker = struct {
         shared_write,
         unreadable_callee,
         later_declaration,
+        callback_argument,
 
         fn message(self: InitEffect) []const u8 {
             return switch (self) {
                 .later_declaration => "a top-level initializer must not reach a declaration at or after it",
+                .callback_argument => "a top-level initializer must not pass a function to a call, because module initialization does not run a callback",
                 .varying_read => "a top-level initializer must be pure, and this one reads a value that varies between runs",
                 .effectful_import => "a top-level initializer must be pure, and this one calls an import that has an effect",
                 .module_write => "a top-level initializer must be pure, and this one writes module state",
@@ -487,8 +489,9 @@ pub const StrictChecker = struct {
     /// initializer is refused when it reads the clock or random, calls an
     /// import that declares an effect or a capability, writes module state, or
     /// calls a module function whose body does one of these. A function value
-    /// that the initializer only holds runs nothing. A callback runs when a
-    /// builtin or a method receives it. A call whose body this module cannot
+    /// that the initializer only holds runs nothing. A function that the
+    /// initializer passes to a call is refused as a callback, because module
+    /// initialization does not run one. A call whose body this module cannot
     /// read, such as an import from another application module or a function
     /// held in a record field, is refused: answering pure for it would report
     /// the absence of information as a fact. For the same reason a write is
@@ -544,7 +547,10 @@ pub const StrictChecker = struct {
                 .kind = .effectful_module_initializer,
                 .node = finding.node,
                 .message = finding.effect.message(),
-                .help = "Compute the value inside a function, such as the handler. Write a registration as a bare statement.",
+                .help = if (finding.effect == .callback_argument)
+                    "Compute the value inside a function, such as the handler."
+                else
+                    "Compute the value inside a function, such as the handler. Write a registration as a bare statement.",
             });
         }
     }
@@ -710,23 +716,27 @@ pub const StrictChecker = struct {
         }
     }
 
-    /// A builtin or a method may run a function it receives, so the body of
-    /// a function argument counts: an inline one, or a named one.
+    /// A builtin or a method may run a function it receives, and module
+    /// initialization does not run a callback. The body of a function
+    /// argument counts first, so a body that has its own effect keeps that
+    /// answer. An inline function or a named module function that has none is
+    /// still refused as `callback_argument`.
     fn callbackEffect(self: *StrictChecker, call: ir.Node.CallExpr, walk: *InitWalk) std.mem.Allocator.Error!?InitEffect {
         for (0..call.args_count) |i| {
             const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
             if (self.ir_view.getFunction(arg)) |func| {
                 if (try self.initEffect(func.body, walk)) |finding| return finding.effect;
-                continue;
+                return .callback_argument;
             }
             if (self.ir_view.getTag(arg) != .identifier) continue;
             if (self.importedFunctionForCallee(arg)) |imported| {
                 if (importEffect(imported)) |effect| return effect;
-                continue;
+                return .callback_argument;
             }
             const binding = self.ir_view.getBinding(arg) orelse continue;
             if (!walk.bodies.contains(bindingKey(binding))) continue;
             if (try self.functionEffect(bindingKey(binding), walk)) |effect| return effect;
+            return .callback_argument;
         }
         return null;
     }

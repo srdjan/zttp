@@ -5109,6 +5109,100 @@ test "later module declaration: a local declared later in the same function is s
     , Probe.run);
 }
 
+const callback_refusal = "a top-level initializer must not pass a function to a call, because module initialization does not run a callback";
+
+test "module initializer callback: an arrow passed to map is refused with ZTS630" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try expectOneInitializerEffect(session, 2, 27, callback_refusal);
+        }
+    };
+    try withSession(testing.allocator,
+        \\const xs: number[] = [1, 2, 3];
+        \\const b: number[] = xs.map((x: number): number => x * 2);
+    , Probe.run);
+}
+
+test "module initializer callback: a named function passed to filter is refused with ZTS630" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try expectOneInitializerEffect(session, 4, 39, callback_refusal);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function isBig(n: number): boolean {
+        \\  return n > 1;
+        \\}
+        \\const big: number[] = [1, 2, 3].filter(isBig);
+    , Probe.run);
+}
+
+test "module initializer callback: a helper that calls map, called from an initializer, is refused with ZTS630" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try expectOneInitializerEffect(session, 4, 28, callback_refusal);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function doubled(xs: number[]): number[] {
+        \\  return xs.map((x: number): number => x * 2);
+        \\}
+        \\const b: number[] = doubled([1, 2, 3]);
+    , Probe.run);
+}
+
+test "module initializer callback: a helper two calls down that calls map is refused with ZTS630" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try expectOneInitializerEffect(session, 7, 26, callback_refusal);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function doubled(xs: number[]): number[] {
+        \\  return xs.map((x: number): number => x * 2);
+        \\}
+        \\function outer(): number[] {
+        \\  return doubled([1, 2, 3]);
+        \\}
+        \\const b: number[] = outer();
+    , Probe.run);
+}
+
+test "module initializer callback: the same calls inside a function are admitted" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 0), session.resolved.strictDiagnostics().len);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function isBig(n: number): boolean {
+        \\  return n > 1;
+        \\}
+        \\export function handler(req: Request): Response {
+        \\  const xs: number[] = [1, 2, 3];
+        \\  const a: number[] = xs.map((x: number): number => x * 2);
+        \\  const b: number[] = xs.filter(isBig);
+        \\  return Response.text(String(a.length + b.length));
+        \\}
+    , Probe.run);
+}
+
+test "module initializer callback: an initializer that calls a pure module function with no callback is admitted" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 0), session.resolved.strictDiagnostics().len);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function double(n: number): number {
+        \\  return n * 2;
+        \\}
+        \\const d: number = double(2);
+        \\const xs: number[] = [1, 2, 3];
+        \\const total: number = xs.length + d;
+    , Probe.run);
+}
+
 test "result error type: the error of err(5) is not a string at a string parameter" {
     try expectOneArgMismatch(
         \\import { err } from "zttp:result";
@@ -7459,4 +7553,16 @@ test "Response.text with no body is ZTS202" {
     try expectOneCountMismatch(
         \\function f(): Response { return Response.text(); }
     , "Response.text takes a body argument");
+}
+
+test "module initializer callback: an imported function passed to map is refused with ZTS630" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try expectOneInitializerEffect(session, 2, 21, callback_refusal);
+        }
+    };
+    try withSession(testing.allocator,
+        \\import { parseJson } from "zttp:json";
+        \\const r = ["{}"].map(parseJson);
+    , Probe.run);
 }
