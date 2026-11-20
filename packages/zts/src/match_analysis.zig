@@ -231,28 +231,362 @@ pub const MatchAnalysis = struct {
     pub fn narrowTypeForPattern(self: *const MatchAnalysis, source_type: TypeIndex, pattern: NodeIndex) std.mem.Allocator.Error!TypeIndex {
         if (source_type == null_type_idx) return null_type_idx;
         if (pattern == null_node) return source_type;
+        return self.matchedType(source_type, pattern, 0);
+    }
 
-        var matches = std.ArrayList(TypeIndex).empty;
-        defer matches.deinit(self.allocator);
+    pub fn remainingTypeAfterPattern(self: *const MatchAnalysis, source_type: TypeIndex, pattern: NodeIndex) std.mem.Allocator.Error!TypeIndex {
+        if (source_type == null_type_idx or pattern == null_node) return self.pool.idx_never;
 
-        try self.collectMatchingTypes(source_type, pattern, &matches);
-        return switch (matches.items.len) {
-            0 => null_type_idx,
-            1 => matches.items[0],
-            else => self.pool.addUnion(self.allocator, matches.items),
+        var remaining = std.ArrayList(TypeIndex).empty;
+        defer remaining.deinit(self.allocator);
+        try self.appendRemainingTypes(source_type, pattern, &remaining, 0);
+        return switch (remaining.items.len) {
+            0 => self.pool.idx_never,
+            1 => remaining.items[0],
+            else => self.pool.addUnion(self.allocator, remaining.items),
         };
     }
 
-    fn collectMatchingTypes(self: *const MatchAnalysis, source_type: TypeIndex, pattern: NodeIndex, out: *std.ArrayList(TypeIndex)) !void {
-        var variants = std.ArrayList(TypeIndex).empty;
-        defer variants.deinit(self.allocator);
-        try self.collectVariants(source_type, &variants);
+    fn matchedType(self: *const MatchAnalysis, source_type: TypeIndex, pattern: NodeIndex, depth: u16) std.mem.Allocator.Error!TypeIndex {
+        if (depth >= max_walk_depth or pattern == null_node) return source_type;
+        const resolved = if (self.env) |env| env.resolveRef(source_type) else source_type;
+        if (resolved != source_type) return self.matchedType(resolved, pattern, depth + 1);
+        const type_tag = self.pool.getTag(resolved) orelse return null_type_idx;
+        // Scalar brands have no branded-literal representation. Keep their identity.
+        if (self.pool.unwrapNominal(resolved) != resolved) {
+            return if (self.patternCanMatchType(pattern, resolved)) resolved else null_type_idx;
+        }
+        if (type_tag == .t_union or type_tag == .t_nullable) {
+            var variants = std.ArrayList(TypeIndex).empty;
+            defer variants.deinit(self.allocator);
+            try self.collectVariants(resolved, &variants);
+            var matched = std.ArrayList(TypeIndex).empty;
+            defer matched.deinit(self.allocator);
+            for (variants.items) |variant| {
+                const narrowed = try self.matchedType(variant, pattern, depth + 1);
+                if (narrowed != null_type_idx and narrowed != self.pool.idx_never) try self.appendUnique(&matched, narrowed);
+            }
+            return switch (matched.items.len) {
+                0 => null_type_idx,
+                1 => matched.items[0],
+                else => self.pool.addUnion(self.allocator, matched.items),
+            };
+        }
 
-        for (variants.items) |variant| {
-            if (self.patternCanMatchType(pattern, variant)) {
-                try self.appendUnique(out, variant);
+        const pattern_tag = self.ir_view.getTag(pattern) orelse return null_type_idx;
+        if (type_tag == .t_intersection and pattern_tag == .match_pattern) {
+            const structural = try self.structuralRecordForIntersection(resolved, depth + 1);
+            if (structural != null_type_idx) {
+                const refined = try self.matchedRecordType(structural, pattern, depth + 1);
+                if (refined == null_type_idx or refined == self.pool.idx_never) return null_type_idx;
+                if (self.patternFullyCoversType(pattern, structural)) return source_type;
+                return self.pool.addIntersection(self.allocator, &.{ source_type, refined });
             }
         }
+        if (type_tag == .t_intersection or
+            type_tag == .t_generic_param or
+            type_tag == .t_generic_app)
+        {
+            const refinement = try self.matchedType(self.pool.idx_unknown, pattern, depth + 1);
+            if (refinement == null_type_idx or refinement == self.pool.idx_unknown) return source_type;
+            return self.pool.addIntersection(self.allocator, &.{ source_type, refinement });
+        }
+        if (type_tag == .t_unknown_type) {
+            return switch (pattern_tag) {
+                .match_type_test => self.typeForTest(pattern),
+                .lit_string => self.literalStringType(pattern),
+                .lit_int => self.literalNumberType(pattern),
+                .lit_float => self.pool.idx_number,
+                .lit_bool => self.literalBoolType(pattern),
+                .lit_null => self.pool.idx_null,
+                .lit_undefined => self.pool.idx_undefined,
+                .match_pattern => self.matchedUnknownRecordType(pattern, depth + 1),
+                .array_pattern => self.matchedArrayType(resolved, pattern, depth + 1),
+                // exhaustive: identifier wildcards retain unknown; other nodes supply no recognized refinement.
+                else => source_type,
+            };
+        }
+        return switch (pattern_tag) {
+            .lit_string => if (self.stringPatternCanMatchType(pattern, resolved))
+                self.literalStringType(pattern)
+            else
+                null_type_idx,
+            .lit_int => if (self.intPatternCanMatchType(pattern, resolved))
+                self.literalNumberType(pattern)
+            else
+                null_type_idx,
+            .lit_float => if (self.floatPatternCanMatchType(pattern, resolved)) resolved else null_type_idx,
+            .lit_bool => if (self.boolPatternCanMatchType(pattern, resolved))
+                self.literalBoolType(pattern)
+            else
+                null_type_idx,
+            .lit_null => if (type_tag == .t_null) resolved else null_type_idx,
+            .lit_undefined => if (type_tag == .t_undefined) resolved else null_type_idx,
+            .match_type_test => if (self.typeTestCoversType(pattern, resolved)) resolved else null_type_idx,
+            .match_pattern => self.matchedRecordType(resolved, pattern, depth + 1),
+            .array_pattern => self.matchedArrayType(resolved, pattern, depth + 1),
+            .identifier => resolved,
+            // exhaustive: non-pattern expressions cannot select a typed value.
+            else => null_type_idx,
+        };
+    }
+
+    fn structuralRecordForIntersection(
+        self: *const MatchAnalysis,
+        source_type: TypeIndex,
+        depth: u16,
+    ) std.mem.Allocator.Error!TypeIndex {
+        if (depth >= max_walk_depth) return null_type_idx;
+        var fields = std.ArrayList(type_pool_mod.RecordField).empty;
+        defer fields.deinit(self.allocator);
+        try self.appendIntersectionFields(source_type, &fields, depth + 1);
+        if (fields.items.len == 0) return null_type_idx;
+        return self.pool.addRecord(self.allocator, fields.items);
+    }
+
+    fn appendIntersectionFields(
+        self: *const MatchAnalysis,
+        source_type: TypeIndex,
+        fields: *std.ArrayList(type_pool_mod.RecordField),
+        depth: u16,
+    ) std.mem.Allocator.Error!void {
+        if (depth >= max_walk_depth) return;
+        const resolved = if (self.env) |env| env.resolveRef(source_type) else source_type;
+        const tag = self.pool.getTag(resolved) orelse return;
+        if (tag == .t_intersection) {
+            for (self.pool.getIntersectionMembers(resolved)) |member| {
+                try self.appendIntersectionFields(member, fields, depth + 1);
+            }
+            return;
+        }
+        if (tag != .t_record) return;
+        for (self.pool.getRecordFields(resolved)) |field| {
+            const name = self.pool.getName(field.name_start, field.name_len);
+            if (self.recordFieldIndex(fields.items, name)) |index| {
+                fields.items[index].type_idx = self.pool.addIntersection(
+                    self.allocator,
+                    &.{ fields.items[index].type_idx, field.type_idx },
+                );
+                fields.items[index].optional = fields.items[index].optional and field.optional;
+                fields.items[index].readonly = fields.items[index].readonly or field.readonly;
+            } else {
+                try fields.append(self.allocator, field);
+            }
+        }
+    }
+
+    fn appendRemainingTypes(
+        self: *const MatchAnalysis,
+        source_type: TypeIndex,
+        pattern: NodeIndex,
+        out: *std.ArrayList(TypeIndex),
+        depth: u16,
+    ) std.mem.Allocator.Error!void {
+        if (depth >= max_walk_depth) return self.appendUnique(out, source_type);
+        const resolved = if (self.env) |env| env.resolveRef(source_type) else source_type;
+        if (resolved != source_type) return self.appendRemainingTypes(resolved, pattern, out, depth + 1);
+        const type_tag = self.pool.getTag(resolved) orelse return;
+        if (self.pool.unwrapNominal(resolved) != resolved) {
+            if (!self.patternFullyCoversType(pattern, resolved)) try self.appendUnique(out, resolved);
+            return;
+        }
+        if (type_tag == .t_union or type_tag == .t_nullable) {
+            var variants = std.ArrayList(TypeIndex).empty;
+            defer variants.deinit(self.allocator);
+            try self.collectVariants(resolved, &variants);
+            for (variants.items) |variant| try self.appendRemainingTypes(variant, pattern, out, depth + 1);
+            return;
+        }
+        if (self.ir_view.getTag(pattern) == .match_pattern and type_tag == .t_record) {
+            try self.appendRemainingRecordTypes(resolved, pattern, out, depth + 1);
+            return;
+        }
+        if (type_tag == .t_boolean and self.ir_view.getTag(pattern) == .lit_bool) {
+            const selected = self.ir_view.getBoolValue(pattern) orelse return self.appendUnique(out, resolved);
+            return self.appendUnique(out, self.pool.addLiteralBool(self.allocator, !selected));
+        }
+        if (!self.patternFullyCoversType(pattern, resolved)) try self.appendUnique(out, resolved);
+    }
+
+    fn matchedRecordType(self: *const MatchAnalysis, source_type: TypeIndex, pattern: NodeIndex, depth: u16) std.mem.Allocator.Error!TypeIndex {
+        if (self.pool.getTag(source_type) != .t_record) return null_type_idx;
+        const record = self.ir_view.getMatchPattern(pattern) orelse return null_type_idx;
+        const source_fields = self.pool.getRecordFields(source_type);
+        var fields = std.ArrayList(type_pool_mod.RecordField).empty;
+        defer fields.deinit(self.allocator);
+        try fields.appendSlice(self.allocator, source_fields);
+        for (0..record.props_count) |i| {
+            const property_node = self.ir_view.getListIndex(record.props_start, @intCast(i));
+            const property = self.ir_view.getProperty(property_node) orelse return null_type_idx;
+            const name = self.patternPropertyName(property.key) orelse return null_type_idx;
+            const field_index = self.recordFieldIndex(fields.items, name) orelse blk: {
+                const added = try self.fieldForUnknownPattern(name, property.value, depth + 1);
+                try fields.append(self.allocator, added);
+                break :blk fields.items.len - 1;
+            };
+            const narrowed = if (property.value == null_node)
+                try self.withoutUndefined(fields.items[field_index].type_idx, depth + 1)
+            else
+                try self.matchedType(fields.items[field_index].type_idx, property.value, depth + 1);
+            if (narrowed == null_type_idx or narrowed == self.pool.idx_never) return null_type_idx;
+            fields.items[field_index].type_idx = narrowed;
+            fields.items[field_index].optional = false;
+        }
+        return self.pool.addRecord(self.allocator, fields.items);
+    }
+
+    fn matchedUnknownRecordType(self: *const MatchAnalysis, pattern: NodeIndex, depth: u16) std.mem.Allocator.Error!TypeIndex {
+        const record = self.ir_view.getMatchPattern(pattern) orelse return null_type_idx;
+        var fields = std.ArrayList(type_pool_mod.RecordField).empty;
+        defer fields.deinit(self.allocator);
+        for (0..record.props_count) |i| {
+            const property_node = self.ir_view.getListIndex(record.props_start, @intCast(i));
+            const property = self.ir_view.getProperty(property_node) orelse return null_type_idx;
+            const name = self.patternPropertyName(property.key) orelse return null_type_idx;
+            try fields.append(self.allocator, try self.fieldForUnknownPattern(name, property.value, depth + 1));
+        }
+        return self.pool.addRecord(self.allocator, fields.items);
+    }
+
+    fn fieldForUnknownPattern(
+        self: *const MatchAnalysis,
+        name: []const u8,
+        pattern: NodeIndex,
+        depth: u16,
+    ) std.mem.Allocator.Error!type_pool_mod.RecordField {
+        const field_name = self.pool.addName(self.allocator, name);
+        const field_type = if (pattern == null_node)
+            self.pool.idx_unknown
+        else
+            try self.matchedType(self.pool.idx_unknown, pattern, depth + 1);
+        return .{
+            .name_start = field_name.start,
+            .name_len = field_name.len,
+            .type_idx = if (field_type == null_type_idx) self.pool.idx_unknown else field_type,
+            .optional = false,
+        };
+    }
+
+    fn matchedArrayType(self: *const MatchAnalysis, source_type: TypeIndex, pattern: NodeIndex, depth: u16) std.mem.Allocator.Error!TypeIndex {
+        const array = self.ir_view.getArray(pattern) orelse return null_type_idx;
+        const source_tag = self.pool.getTag(source_type) orelse return null_type_idx;
+        const tuple_source = if (source_tag == .t_tuple) self.pool.getTupleElements(source_type) else &.{};
+        if (source_tag == .t_tuple and tuple_source.len != array.elements_count) return null_type_idx;
+        if (source_tag != .t_unknown_type and source_tag != .t_array and source_tag != .t_tuple) return null_type_idx;
+        const elements = try self.allocator.alloc(TypeIndex, array.elements_count);
+        defer self.allocator.free(elements);
+        for (0..array.elements_count) |i| {
+            const element_pattern = self.ir_view.getListIndex(array.elements_start, @intCast(i));
+            const source_element = switch (source_tag) {
+                .t_array => self.pool.getArrayElement(source_type),
+                .t_tuple => tuple_source[i],
+                // exhaustive: the source-tag guard leaves only an unknown source here.
+                else => self.pool.idx_unknown,
+            };
+            elements[i] = if (element_pattern == null_node)
+                source_element
+            else
+                try self.matchedType(source_element, element_pattern, depth + 1);
+            if (elements[i] == null_type_idx or elements[i] == self.pool.idx_never) return null_type_idx;
+        }
+        return self.pool.addTuple(self.allocator, elements);
+    }
+
+    fn appendRemainingRecordTypes(
+        self: *const MatchAnalysis,
+        source_type: TypeIndex,
+        pattern: NodeIndex,
+        out: *std.ArrayList(TypeIndex),
+        depth: u16,
+    ) std.mem.Allocator.Error!void {
+        const record = self.ir_view.getMatchPattern(pattern) orelse return self.appendUnique(out, source_type);
+        const source_fields = self.pool.getRecordFields(source_type);
+        const prefix = try self.allocator.dupe(type_pool_mod.RecordField, source_fields);
+        defer self.allocator.free(prefix);
+        for (0..record.props_count) |i| {
+            const property_node = self.ir_view.getListIndex(record.props_start, @intCast(i));
+            const property = self.ir_view.getProperty(property_node) orelse return self.appendUnique(out, source_type);
+            const name = self.patternPropertyName(property.key) orelse return self.appendUnique(out, source_type);
+            const field_index = self.recordFieldIndex(prefix, name) orelse return self.appendUnique(out, source_type);
+            const original = prefix[field_index];
+            var field_remainders = std.ArrayList(TypeIndex).empty;
+            defer field_remainders.deinit(self.allocator);
+            const matched = if (property.value == null_node) blk: {
+                if (original.optional or self.typeCanBeUndefined(original.type_idx)) {
+                    try self.appendUnique(&field_remainders, self.pool.idx_undefined);
+                }
+                break :blk try self.withoutUndefined(original.type_idx, depth + 1);
+            } else blk: {
+                try self.appendRemainingTypes(original.type_idx, property.value, &field_remainders, depth + 1);
+                if (original.optional and field_remainders.items.len == 0) {
+                    try self.appendUnique(&field_remainders, self.pool.idx_never);
+                }
+                break :blk try self.matchedType(original.type_idx, property.value, depth + 1);
+            };
+            for (field_remainders.items) |field_type| {
+                const failed_fields = try self.allocator.dupe(type_pool_mod.RecordField, prefix);
+                defer self.allocator.free(failed_fields);
+                failed_fields[field_index].type_idx = field_type;
+                failed_fields[field_index].optional = original.optional;
+                try self.appendUnique(out, self.pool.addRecord(self.allocator, failed_fields));
+            }
+            if (matched == null_type_idx or matched == self.pool.idx_never) return;
+            prefix[field_index].type_idx = matched;
+            prefix[field_index].optional = false;
+        }
+    }
+
+    fn withoutUndefined(self: *const MatchAnalysis, source_type: TypeIndex, depth: u16) std.mem.Allocator.Error!TypeIndex {
+        if (depth >= max_walk_depth) return source_type;
+        const resolved = if (self.env) |env| env.resolveRef(source_type) else source_type;
+        const tag = self.pool.getTag(resolved) orelse return null_type_idx;
+        if (tag == .t_undefined) return self.pool.idx_never;
+        if (tag == .t_nullable) return self.pool.getNullableInner(resolved);
+        if (tag != .t_union) return resolved;
+        var kept = std.ArrayList(TypeIndex).empty;
+        defer kept.deinit(self.allocator);
+        for (self.pool.getUnionMembers(resolved)) |member| {
+            const present = try self.withoutUndefined(member, depth + 1);
+            if (present != null_type_idx and present != self.pool.idx_never) try self.appendUnique(&kept, present);
+        }
+        return switch (kept.items.len) {
+            0 => self.pool.idx_never,
+            1 => kept.items[0],
+            else => self.pool.addUnion(self.allocator, kept.items),
+        };
+    }
+
+    fn typeForTest(self: *const MatchAnalysis, pattern: NodeIndex) TypeIndex {
+        const type_test = self.ir_view.getMatchTypeTest(pattern) orelse return self.pool.idx_unknown;
+        return switch (type_test.kind) {
+            .boolean => self.pool.idx_boolean,
+            .number => self.pool.idx_number,
+            .string => self.pool.idx_string,
+            .array => self.pool.addArray(self.allocator, self.pool.idx_unknown),
+            .dict => self.pool.addDict(self.allocator, self.pool.idx_unknown, self.pool.idx_unknown),
+            .bytes => self.pool.idx_bytes,
+        };
+    }
+
+    fn literalStringType(self: *const MatchAnalysis, pattern: NodeIndex) TypeIndex {
+        const value = self.patternString(pattern) orelse return null_type_idx;
+        return self.pool.addLiteralString(self.allocator, value);
+    }
+
+    fn literalNumberType(self: *const MatchAnalysis, pattern: NodeIndex) TypeIndex {
+        const value = self.ir_view.getIntValue(pattern) orelse return null_type_idx;
+        return self.pool.addLiteralNumber(self.allocator, std.math.cast(i16, value) orelse return self.pool.idx_number);
+    }
+
+    fn literalBoolType(self: *const MatchAnalysis, pattern: NodeIndex) TypeIndex {
+        return self.pool.addLiteralBool(self.allocator, self.ir_view.getBoolValue(pattern) orelse return null_type_idx);
+    }
+
+    fn recordFieldIndex(self: *const MatchAnalysis, fields: []const type_pool_mod.RecordField, name: []const u8) ?usize {
+        for (fields, 0..) |field, index| {
+            if (std.mem.eql(u8, self.pool.getName(field.name_start, field.name_len), name)) return index;
+        }
+        return null;
     }
 
     fn collectVariants(self: *const MatchAnalysis, type_idx: TypeIndex, out: *std.ArrayList(TypeIndex)) !void {
@@ -320,6 +654,7 @@ pub const MatchAnalysis = struct {
         return switch (pattern_tag) {
             .lit_string => self.stringPatternCanMatchType(pattern, type_idx),
             .lit_int => self.intPatternCanMatchType(pattern, type_idx),
+            .lit_float => self.floatPatternCanMatchType(pattern, type_idx),
             .lit_bool => self.boolPatternCanMatchType(pattern, type_idx),
             .lit_null => type_tag == .t_null,
             .lit_undefined => type_tag == .t_undefined,
@@ -332,6 +667,91 @@ pub const MatchAnalysis = struct {
             .match_type_test => self.typeTestCoversType(pattern, type_idx),
             // exhaustive: a pattern form with no rule here answers false for every member, so no member
             //     matches and narrowing is skipped.
+            else => false,
+        };
+    }
+
+    fn patternFullyCoversType(self: *const MatchAnalysis, pattern: NodeIndex, type_idx: TypeIndex) bool {
+        if (pattern == null_node) return true;
+        if (type_idx == null_type_idx) return false;
+        if (self.env) |env| {
+            const resolved = env.resolveRef(type_idx);
+            if (resolved != type_idx) return self.patternFullyCoversType(pattern, resolved);
+        }
+
+        const type_tag = self.pool.getTag(type_idx) orelse return false;
+        switch (type_tag) {
+            .t_union => {
+                for (self.pool.getUnionMembers(type_idx)) |member| {
+                    if (!self.patternFullyCoversType(pattern, member)) return false;
+                }
+                return true;
+            },
+            .t_nullable => return self.patternFullyCoversType(pattern, self.pool.getNullableInner(type_idx)) and
+                self.patternFullyCoversType(pattern, self.pool.idx_undefined),
+            .t_intersection, .t_generic_param, .t_generic_app, .t_unknown_type => return false,
+            // exhaustive: concrete types use the pattern checks below.
+            else => {},
+        }
+
+        const pattern_tag = self.ir_view.getTag(pattern) orelse return false;
+        return switch (pattern_tag) {
+            .lit_string => type_tag == .t_literal_string and self.stringPatternCanMatchType(pattern, type_idx),
+            .lit_int => type_tag == .t_literal_number and self.intPatternCanMatchType(pattern, type_idx),
+            .lit_float => type_tag == .t_literal_number and self.floatPatternCanMatchType(pattern, type_idx),
+            .lit_bool => type_tag == .t_literal_bool and self.boolPatternCanMatchType(pattern, type_idx),
+            .lit_null => type_tag == .t_null,
+            .lit_undefined => type_tag == .t_undefined,
+            .identifier => true,
+            .match_type_test => self.typeTestCoversType(pattern, type_idx),
+            .match_pattern => self.objectPatternFullyCoversType(pattern, type_idx),
+            .array_pattern => self.arrayPatternFullyCoversType(pattern, type_idx),
+            // exhaustive: non-pattern expressions establish no coverage.
+            else => false,
+        };
+    }
+
+    fn objectPatternFullyCoversType(self: *const MatchAnalysis, pattern: NodeIndex, type_idx: TypeIndex) bool {
+        if (self.pool.getTag(type_idx) != .t_record) return false;
+        const match_pattern = self.ir_view.getMatchPattern(pattern) orelse return false;
+        for (0..match_pattern.props_count) |i| {
+            const prop_idx = self.ir_view.getListIndex(match_pattern.props_start, @intCast(i));
+            const prop = self.ir_view.getProperty(prop_idx) orelse return false;
+            const prop_name = self.patternPropertyName(prop.key) orelse return false;
+            const field = self.findRecordField(type_idx, prop_name) orelse return false;
+            if (field.optional) return false;
+            if (prop.value == null_node) {
+                if (self.typeCanBeUndefined(field.type_idx)) return false;
+                continue;
+            }
+            if (!self.patternFullyCoversType(prop.value, field.type_idx)) return false;
+        }
+        return true;
+    }
+
+    fn arrayPatternFullyCoversType(self: *const MatchAnalysis, pattern: NodeIndex, type_idx: TypeIndex) bool {
+        if (self.pool.getTag(type_idx) != .t_tuple) return false;
+        const array = self.ir_view.getArray(pattern) orelse return false;
+        const members = self.pool.getTupleElements(type_idx);
+        if (members.len != array.elements_count) return false;
+        for (0..array.elements_count) |i| {
+            const element = self.ir_view.getListIndex(array.elements_start, @intCast(i));
+            if (element != null_node and !self.patternFullyCoversType(element, members[i])) return false;
+        }
+        return true;
+    }
+
+    fn typeCanBeUndefined(self: *const MatchAnalysis, type_idx: TypeIndex) bool {
+        const resolved = if (self.env) |env| env.resolveRef(type_idx) else type_idx;
+        return switch (self.pool.getTag(resolved) orelse return true) {
+            .t_undefined, .t_nullable, .t_unknown_type, .t_generic_param, .t_generic_app => true,
+            .t_union => blk: {
+                for (self.pool.getUnionMembers(resolved)) |member| {
+                    if (self.typeCanBeUndefined(member)) break :blk true;
+                }
+                break :blk false;
+            },
+            // exhaustive: concrete non-union types other than undefined cannot contain undefined.
             else => false,
         };
     }
@@ -382,6 +802,21 @@ pub const MatchAnalysis = struct {
                 break :blk member_val == pattern_i16;
             },
             // exhaustive: any other type tag cannot hold an integer.
+            else => false,
+        };
+    }
+
+    fn floatPatternCanMatchType(self: *const MatchAnalysis, pattern: NodeIndex, type_idx: TypeIndex) bool {
+        const float_index = self.ir_view.getFloatIdx(pattern) orelse return false;
+        const pattern_value = self.ir_view.getFloat(float_index) orelse return false;
+        return switch (self.pool.getTag(type_idx) orelse return false) {
+            .t_number => true,
+            .t_literal_number => blk: {
+                const data = self.pool.getData(type_idx) orelse break :blk false;
+                const member_value: i16 = @bitCast(data.a);
+                break :blk pattern_value == @as(f64, @floatFromInt(member_value));
+            },
+            // exhaustive: other type tags cannot hold a number.
             else => false,
         };
     }

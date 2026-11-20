@@ -1901,6 +1901,7 @@ pub const Analyzer = struct {
     /// - P3: a property value of a module `const` object literal whose every
     ///   reference is the first argument of a `routerMatch` call, when every
     ///   route dispatch in the module is stable.
+    /// - P4: the direct arrow node of a lowered fluent-match callback arm.
     ///
     /// The scan reads every node, so a construct the walkers above never enter
     /// (a `match` arm, a `for...of` body, a nested closure, a module
@@ -1975,6 +1976,18 @@ pub const Analyzer = struct {
             {
                 self.closeFunctionArgument(self.ir_view.getListIndex(call.args_start, 0), &declared, closed);
             }
+        }
+
+        // P4. Intrinsic validation records only direct arrows as callback
+        // arms. The runtime invokes the selected arrow and retains no function
+        // value, while `walkBaseExpr` charges its body to the enclosing row.
+        for (0..node_count) |index| {
+            const arm_node: NodeIndex = @intCast(index);
+            if (self.ir_view.getTag(arm_node) != .match_arm) continue;
+            const arm = self.ir_view.getMatchArm(arm_node) orelse continue;
+            if (arm.kind != .callback or arm.body >= node_count) continue;
+            if (self.ir_view.getTag(arm.body) != .arrow_function) continue;
+            closed[arm.body] = true;
         }
 
         // P3.

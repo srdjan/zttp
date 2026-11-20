@@ -25,12 +25,14 @@ Baseline capture, the declaration study, and intrinsic metadata are complete.
 The metadata commit is `eeb3716d`. U3 (admit aliases and explicit nominal construction) is committed as `33c69fc8`.
 Its owning behavior checks pass. The aggregate remains held on empirical replay until the approved owner recording.
 
-The assertion worker completes U4 (lower imported invariant assertions) within its sixteen-turn implementation budget.
+U4 (lower imported invariant assertions) is committed as `079e845e` after its owning checks pass.
 The main agent owns the specification, verification, this log, and local commits.
-U5 (lower complete fluent match chains) and U6 (complete normalization and source cutover) have completed read-only preparation.
-Neither worker has permission to edit yet. The match representation must preserve singular subject evaluation across proof consumers.
+U5 (lower complete fluent match chains) passes its owning suites after main review and integration repairs.
+The aggregate remains held on empirical replay and policy drift. The main agent now owns its local commit.
+U6 (complete normalization and source cutover) has a prepared validator design and an ignored fixture inventory.
+Its implementation waits for the match commit because both units own parser and lowering files.
 
-Remaining implementation follows U4, U5, U6, and U7 (align authoring surfaces and website claims), in that order.
+Remaining implementation follows U5, U6, and U7 (align authoring surfaces and website claims), in that order.
 U8 (close evidence for the migrated profile) then requires the owner recording before the main agent publishes fresh evidence.
 The baseline inventory covers packages, examples, corpus files, shell fixtures, documentation, and embedded skills.
 
@@ -233,6 +235,22 @@ A correctly branded initializer must produce no constructor repair. Dependencies
 The normalizer must reuse resolved core import aliases. If a required name conflicts, the normalizer must retain the source and report the conflict.
 These steps need no new parser entry under D-016. An unadmitted parser entry or executable legacy capability would require a superseding owner decision.
 
+A four-turn refinement selects four implemented M4 declared-law validators: declaration, implicit nominal initializer, match, and assertion migration.
+Each validator rederives a deterministic replacement from retained records and checks accepted repaired source facts.
+No migration uses unsupported kernel comparison as equality. The validator taxonomy gains no new method.
+After declaration migration, exact ZTS200 evidence authorizes a raw nominal initializer wrap. An already-branded initializer receives no wrap.
+Unresolved or legacy dependencies keep the importer unchanged. Dependencies must be normalized and persisted first through the existing single-file calls.
+A caller may supply already-normalized dependency snapshots through its existing reader. The CLI cannot silently authorize writes against synthetic dependencies.
+
+The main agent measures a record-binding snapshot through the public legacy CLI and runtime.
+The valid handler mutates the matched record between two reads of the bound field. Its exact response is status 200 and body `old||old`.
+Migration must create callback-local constants for old pattern bindings. Repeated member reads cannot stand in for those snapshots.
+The ignored study is `demos/typescript-syntax-u6/snapshot-study/`. The legacy runtime log is `/tmp/zttp-syntax-u6-snapshot-runtime.log`.
+The fresh U5 development build exits zero. Its naive member-read target returns `old||new` and fails the legacy response test.
+The target with callback-local constants returns status 200 and exact body `old||old`, with exit zero.
+The two logs are `/tmp/zttp-syntax-u6-snapshot-naive.log` and `/tmp/zttp-syntax-u6-snapshot-preserved.log`.
+This confirms the snapshot migration law. It does not identify a defect in the new match engine.
+
 ## Baseline evidence
 
 The authorization commit is `d78d2775`. The compiler source remains `8b154522`; the earlier plan refresh is `0435bfde`.
@@ -335,3 +353,118 @@ Neither public comparison path receives callback arms. U5 therefore adds no unre
 U6 must validate migration through its named repair rules. It cannot treat an unsupported kernel result as equality.
 The consumer worker will increment path analysis from version 6 to 7 and flow analysis from version 10 to 11.
 These callback semantics change policy identity. Empirical pins remain unchanged until U8 and the owner recording.
+U4 is committed as `079e845e`. Both U5 workers now have execution signals.
+The first consumer regressions select four executions and fail at production parser admission before intrinsic lowering.
+Those cases cover boolean results, varying effects, and routed request and schema facts.
+The focused consumer checks pass callback returns, fallthrough, nested continuations, request aliases, Result aliases, and failed callback assertions.
+The main agent also runs one real CLI handler covering all six type descriptors, presence semantics, exact arrays, and selected-arm execution.
+Its exact response passes. A committed server regression now carries the same literal output.
+
+A public proof comparison confirms one remaining regression. The legacy control discharges `Proof<Response, "cost_bounded">` with exit zero.
+The equivalent fluent control exits one with ZTS500. It classifies an arm callback as an escaped anonymous function with an unbounded call cost.
+Generic arrow-body traversal did not establish the executed-callback classification.
+The consumer worker receives a six-turn repair extension and ownership of `effect_inference.zig`.
+Its new regression must preserve `cost_bounded` and retain the existing refusal for truly escaped functions.
+That repair passes its public CHECK regression and escaping-function controls.
+The main agent rebuilds and confirms the complete runtime case with `cost_bounded=true` and no diagnostics.
+
+Three review probes expose missing target refinement: unknown to a descriptor type, boolean literals, and finite fields inside one record.
+The legacy checker also lacks the boolean and record precision. The accepted callback contract still requires it.
+An eight-turn core extension adds shared matched-type and remainder refinement, including a two-field complement test.
+Its public CHECK regression passes. Inference also records temporary allocation failures instead of returning an unknown successful type.
+
+Two further CLI regressions reproduce undeclared lowercase descriptors. Before repair, `P.dict` and `P.bytes` exit zero instead of one.
+The lowerer now accepts only the declared case-sensitive names. Invalid intrinsic trees stop later type, boolean, and strict checks.
+This prevents an unrelated return diagnostic from preceding the actual refusal. Both cases now report one ZTS001 at line 3, column 29.
+The CLI regression runner passes all 40 cases after a separate nested-pattern repair.
+That positive case fails before the repair: the legacy profile accepts 33 nested records, while the new lowerer imposes a limit of 32.
+Pattern walks now use the original accepted node count as their bound. They do not add a smaller syntax limit.
+
+The public allocation-failure sweep passes its selected execution across the pipeline test roots.
+Its compiler-root selection reports three passing tests and its umbrella selection reports one passing test.
+The selection log is `/tmp/zttp-syntax-u5-allocation-selection.log`. These filtered checks remain development evidence only.
+
+Receipt component isolation restores only the previous policy hash and reproduces all prior contract and certificate bytes.
+The current policy identity is `57cd1d6828d199b62d7c698e56c9427149ffc989636a7ba9834548f91dfd6f1e`.
+The field proof is `/tmp/zttp-syntax-u5-policy-field-proof.log`. Current receipt goldens change; empirical recordings and pins do not.
+Main review rejects the proposed second live policy pin in `check-meta-drift.sh` and restores that script exactly.
+`policy-hash.txt` remains the single committed policy pin. Its drift gate stays held until the approved owner recording.
+The worker's passing metadata gate used the rejected script change and is not final evidence.
+
+The final shape review adds record refinement for unknown inputs and tuple refinement for unknown or typed arrays.
+Nested patterns retain literal fields. General-array and open-record remainders remain conservative.
+The review also reproduces lost nominal identity in literal callback arms.
+Scalar brands now retain their original type because the pool has no branded-literal representation.
+The public nominal regression fails before that repair and passes afterward.
+Float literal patterns now refine an unknown callback input to `number`.
+The float regression also fails before the repair and passes afterward.
+The selected float run reports three passing tests, including the public CHECK case.
+A readonly callback probe still reports ZTS215 for an element assignment.
+
+A nested optional-field probe exposes an incorrect `never` remainder for a tuple.
+The public CHECK regression expects ZTS203 for that callback annotation and fails before the repair.
+Full record coverage now requires each tested field to be required.
+The selected regression passes afterward, with three passing tests in its build selection.
+The obsolete matching-type collector is removed because the refinement code replaces its only caller.
+
+The unfiltered integration run exposes five current CLI snapshots with the previous policy hash.
+Their policy fields now carry the measured identity. No empirical pin changes.
+Four bytecode goldens change because type predicates duplicate the retained subject instead of evaluating the source path again.
+The existing generator writes 62 identity rows, with 58 successfully digested inputs.
+The main agent reviews all four changed rows.
+Five new allocation-error allowlist rows name the poison flag and mandatory `ensureHealthy` check.
+The proof-swallow, expert-golden, script-reachability, and spine checks pass after those integration repairs.
+
+The ignored normalization inventory lists 107 active TypeScript files and 62 embedded Zig migration candidates.
+It separates 26 immutable empirical files: nine source snapshots and seventeen transcripts.
+The manifests live under `demos/typescript-syntax-u6/inventory/`.
+The inventory does not authorize edits to the empirical files.
+
+The independent match review confirms a callback validation gap for generic subjects.
+The main agent separately reproduces the same gap for intersections.
+An unavailable narrowed type skips callback compatibility, so a record can reach a callback annotated as `string`.
+Public regressions fail before repair. The repair preserves intersection fields and intersects generic inputs with the tested shape.
+Explicit callback annotations remain authoritative inside callback bodies.
+The selected intersection and generic record checks each report three passing tests after repair.
+The reviewer reports no other confirmed defect and does not claim an unfiltered suite result.
+A follow-up public probe reproduces the generic gap for `P.number`; the final repair must cover every pattern kind.
+
+The second unfiltered run reports 9858 passing tests, six skipped tests, and two failed tests across 9866 tests.
+It completes 225 of 229 build steps. All owning behavior suites pass for that pre-repair source snapshot.
+The failed tests are the frozen rule-search digest and empirical replay. The metadata drift script also fails.
+The rule-search payload remains 1017 bytes. Changing only its policy field reproduces its exact prior SHA-256 digest.
+The current digest is `38eb111d4ec1acab188a0e3bbf4b2974458cc5398ad1006772b867a85d540d98`.
+The previous digest is `d580e82357e714f5be78713b0e3d4d5c4e911aea6c012e1d5e290fb1530be70d`.
+The frozen current-output assertion now uses the measured digest; its selected public tool test passes.
+The source files for that comparison are `/tmp/zttp-syntax-u5-search-current.json` and `/tmp/zttp-syntax-u5-search-old-policy.json`.
+The main agent will rerun unfiltered checks after the final callback repair and source review.
+
+The final generic repair applies every pattern through unknown-source refinement and retains the original source constraint.
+When refinement is unavailable, callback checking retains the remaining source type instead of skipping compatibility.
+The numeric descriptor control now accepts `number` and refuses `string` with one ZTS203.
+An inferred generic identity callback passes and preserves the outer `T` return type through the public CLI.
+The added CHECK case includes that control.
+Explicit outer-generic callback annotations expose a shared limitation: the existing array `map` control also reports `expected T, got T`.
+The match control reports `expected T, got T & number`. This unit does not change global generic assignability.
+The comparison is `/tmp/zttp-syntax-u5-generic-annotation-control-final.json`; the inferred control exits zero with no diagnostics.
+The main agent reviews the completed repair and freezes source for the final unfiltered run.
+The unfiltered proof-swallow and spine checks exit zero after that repair.
+The combined focused callback command passes six CHECK tests, but its filtered proof-swallow wrapper refuses the filter.
+That mixed command is not evidence for the unfiltered proof gate.
+
+The normalization brand-name rule is exact: lowercase the first ASCII character, preserve the remaining characters, then append `Brand`.
+For example, `UserId` becomes `userIdBrand`. A generated-name collision leaves the whole input unchanged with a diagnostic.
+Normalization must also update existing repair builders that emit legacy syntax.
+The implementation order remains: verify normalization, migrate executable sources, then remove legacy admission.
+
+The final frozen command is `env -u DEEPSEEK_API_KEY -u ZTTP_CODEGEN_RECORD zig build test-zts test-flow-census test-precompile test-proof-swallow test-contract-golden test-server test-zruntime check-spine test`.
+It exits one and reports 9867 passing tests, six skipped tests, and one failed test across 9874 tests.
+It completes 225 of 229 build steps. The only failed test is empirical replay; the policy drift script also fails.
+Every owning behavior suite passes. The log is `/tmp/zttp-syntax-u5-final-frozen.log`.
+The unfiltered CLI abuse gate passes all 40 cases. All 61 example suites pass.
+The flow census passes 640 probes, with no fail-open, over-refusal, weak, or absent verdict.
+The restriction census passes all 793 probes across 220 rows.
+The bytecode gate matches 62 inputs, including 58 successfully digested inputs.
+Formatting, diff, proof-swallow, layering, module-boundary, documentation, and spine checks pass.
+These results do not establish a passing aggregate or a completed migration.
+Normalization, source cutover, authoring updates, performance measurement, boundary mutations, and the owner recording remain.

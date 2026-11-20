@@ -801,8 +801,8 @@ as a record key, a record type field, a pattern key, and a member name after
 `protected`, `match`, `when`, `assert`, `true`, `false`, `null`, and
 `undefined`.
 
-The exact named import `import { assert } from "zttp:core";` is an exception.
-That import binds the compiler intrinsic under its own name. A renamed import
+Exact named imports of `assert` and `match` from `zttp:core` are exceptions.
+Each import binds the compiler intrinsic under its own name. A renamed import
 must use a name that is not reserved.
 
 A default is explicit in the parameter type, call, and function body:
@@ -1094,6 +1094,24 @@ pure; an effectful receiver or index is evaluated into a named `const` before
 the assignment so evaluation order remains explicit.
 
 #### `match`
+
+The imported form is `match(subject).with(pattern, callback).exhaustive()`.
+An open domain ends with `.otherwise(callback)` instead. The imports of
+`match` and `P` must resolve to `zttp:core`. Renamed imports retain that authority.
+Each chain evaluates one identifier or member path and invokes only its selected callback.
+A callback is a direct arrow with zero or one simple parameter. Existing
+parameter and return annotation rules apply. The parameter receives the
+pattern's narrowed subject; the final callback receives the remaining type.
+
+Patterns contain literal data and recognized descriptors. The descriptors are
+`P.boolean`, `P.number`, `P.string`, `P.array`, `P.Dict`, and `P.Bytes`.
+They are top-level tests. `P.any` is an unconstrained array position.
+`P.present` is a record-field test that refuses missing and `undefined` values;
+it accepts `null`. Descriptors are not runtime values.
+
+Legacy brace syntax remains admitted until the syntax cutover. Its field
+bindings are constant snapshots. The migration preserves those snapshots with
+local constants inside the generated callbacks.
 
 `match` is the only multi-way selection over one scrutinee:
 

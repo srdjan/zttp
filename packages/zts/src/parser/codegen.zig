@@ -1905,7 +1905,7 @@ pub const CodeGen = struct {
             } else if (pattern_tag == .array_pattern) {
                 try self.emitArrayPatternTest(arm.pattern, body_labels[i]);
             } else if (pattern_tag == .match_type_test) {
-                try self.emitTypeTestPattern(arm.pattern, body_labels[i]);
+                try self.emitTypeTestPattern(arm.pattern, match_expr.discriminant, body_labels[i]);
             } else {
                 try self.emitEqTest(arm.pattern, body_labels[i]);
             }
@@ -1930,14 +1930,24 @@ pub const CodeGen = struct {
             const arm_idx = self.ir.getListIndex(match_expr.arms_start, i);
             const arm = self.ir.getMatchArm(arm_idx) orelse continue;
 
-            // Spec 5.5 bindings read off the scrutinee, so they are stored
-            // while it is still on the stack - before the drop below, not
-            // after it.
-            try self.emitPatternBindings(arm.pattern);
-
-            try self.emit(.drop);
-            self.popStack(1);
-            try self.emitNode(arm.body);
+            switch (arm.kind) {
+                .value => {
+                    // Spec 5.5 bindings read off the scrutinee, so they are stored
+                    // while it is still on the stack - before the drop below, not
+                    // after it.
+                    try self.emitPatternBindings(arm.pattern);
+                    try self.emit(.drop);
+                    self.popStack(1);
+                    try self.emitNode(arm.body);
+                },
+                .callback => {
+                    try self.emitNode(arm.body);
+                    try self.emit(.swap);
+                    try self.emit(.call);
+                    try self.emitByte(1);
+                    self.popStack(1);
+                },
+            }
 
             if (i + 1 < match_expr.arms_count) {
                 try self.emitJump(.goto, end_label);
@@ -2316,9 +2326,46 @@ pub const CodeGen = struct {
     /// three scalars run `typeof`, the array runs `Array.isArray`. The
     /// scrutinee stays on the stack untouched; the predicate leaves one boolean
     /// that the branch consumes.
-    fn emitTypeTestPattern(self: *CodeGen, pattern_node: NodeIndex, label: u32) !void {
+    fn emitTypeTestPattern(
+        self: *CodeGen,
+        pattern_node: NodeIndex,
+        discriminant: NodeIndex,
+        label: u32,
+    ) !void {
         const test_node = self.ir.getMatchTypeTest(pattern_node) orelse return;
-        try self.emitNode(test_node.predicate);
+        switch (test_node.kind) {
+            .boolean, .number, .string => {
+                if (self.ir.getTag(test_node.predicate) != .binary_op) return error.InvalidMatchTypePredicate;
+                const binary = self.ir.getBinary(test_node.predicate) orelse return error.InvalidMatchTypePredicate;
+                if (binary.op != .strict_eq or self.ir.getTag(binary.left) != .unary_op) {
+                    return error.InvalidMatchTypePredicate;
+                }
+                const unary = self.ir.getUnary(binary.left) orelse return error.InvalidMatchTypePredicate;
+                if (unary.op != .typeof_op or unary.operand != discriminant) {
+                    return error.InvalidMatchTypePredicate;
+                }
+                try self.emit(.dup);
+                self.pushStack(1);
+                try self.emit(.typeof);
+                try self.emitNode(binary.right);
+                try self.emit(.strict_eq);
+                self.popStack(1);
+            },
+            .array, .dict, .bytes => {
+                if (self.ir.getTag(test_node.predicate) != .call) return error.InvalidMatchTypePredicate;
+                const call = self.ir.getCall(test_node.predicate) orelse return error.InvalidMatchTypePredicate;
+                if (call.args_count != 1 or self.ir.getListIndex(call.args_start, 0) != discriminant) {
+                    return error.InvalidMatchTypePredicate;
+                }
+                try self.emit(.dup);
+                self.pushStack(1);
+                try self.emitNode(call.callee);
+                try self.emit(.swap);
+                try self.emit(.call);
+                try self.emitByte(1);
+                self.popStack(1);
+            },
+        }
         try self.emitJump(.if_true, label);
         self.popStack(1);
     }

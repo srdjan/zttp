@@ -4,6 +4,9 @@ const std = @import("std");
 const engine = @import("zts-engine");
 const evaluator = @import("flow_interp.zig");
 const type_checker = @import("type_checker.zig");
+const intrinsic_lowering = @import("intrinsic_lowering.zig");
+const type_env_mod = @import("type_env.zig");
+const type_pool_mod = @import("type_pool.zig");
 const ir = engine.parser.ir;
 const atom_table = engine.atom_table;
 const counterexample = @import("counterexample.zig");
@@ -2093,6 +2096,77 @@ fn runNoSecretLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
     defer checker.deinit();
     _ = try checker.check(handler_fn);
     return checker.getProperties().no_secret_leakage;
+}
+
+/// Run the production intrinsic validation before the public flow analysis.
+fn runLoweredNoSecretLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
+    var parser = try engine.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+
+    var pool = type_pool_mod.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = type_env_mod.TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants),
+        .atoms = &atoms,
+        .module_path = "/app/fluent-match.ts",
+    } });
+    try intrinsic_lowering.validateSource(allocator, &parser, &atoms, &env);
+
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler = handler_function_mod.findHandlerFunction(view, root) orelse return error.HandlerNotFound;
+    var checker = FlowChecker.init(allocator, view, &atoms);
+    defer checker.deinit();
+    checker.scopes = &parser.scopes;
+    _ = try checker.check(handler);
+    return checker.getProperties().no_secret_leakage;
+}
+
+test "fluent match callbacks retain subject and captured secret labels" {
+    const subject =
+        \\import { match, P } from "zttp:core";
+        \\import { env } from "zttp:env";
+        \\function handler(req: Request): Response {
+        \\  const secret = env("API_SECRET");
+        \\  return match(secret)
+        \\    .with(P.string, (value: string): Response => Response.text(value))
+        \\    .otherwise((): Response => Response.text("absent"));
+        \\}
+    ;
+    try std.testing.expect(!try runLoweredNoSecretLeakage(std.testing.allocator, subject));
+
+    const captured =
+        \\import { match } from "zttp:core";
+        \\import { env } from "zttp:env";
+        \\function handler(req: Request): Response {
+        \\  const secret = env("API_SECRET") ?? "";
+        \\  return match(req.method)
+        \\    .with("GET", (): Response => Response.text(secret))
+        \\    .otherwise((): Response => Response.text("other"));
+        \\}
+    ;
+    try std.testing.expect(!try runLoweredNoSecretLeakage(std.testing.allocator, captured));
+}
+
+test "fluent match callback retains source exact declassification" {
+    const source =
+        \\import { match, P } from "zttp:core";
+        \\import { env } from "zttp:env";
+        \\import { mask } from "zttp:text";
+        \\function handler(req: Request): Response {
+        \\  const secret = env("API_SECRET");
+        \\  return match(secret)
+        \\    .with(P.string, (value: string): Response => Response.text(mask(value, 4)))
+        \\    .otherwise((): Response => Response.text("absent"));
+        \\}
+    ;
+    try std.testing.expect(try runLoweredNoSecretLeakage(std.testing.allocator, source));
 }
 
 /// Shared harness: parse `source`, run the FlowChecker on its handler, and

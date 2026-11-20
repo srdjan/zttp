@@ -4993,11 +4993,50 @@ pub const TypeChecker = struct {
         const me = self.ir_view.getMatchExpr(node) orelse return null_type_idx;
         if (me.arms_count == 0) return null_type_idx;
 
+        var callback_match = true;
+        for (0..me.arms_count) |i| {
+            const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
+            const arm = self.ir_view.getMatchArm(arm_idx) orelse return null_type_idx;
+            if (arm.kind != .callback) callback_match = false;
+        }
+        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, self.env.pool, self.env);
+        var remaining = if (callback_match) self.inferType(me.discriminant) else null_type_idx;
         var result: TypeIndex = null_type_idx;
         for (0..me.arms_count) |i| {
             const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
             const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-            const arm_type = self.inferType(arm.body);
+            if (callback_match) {
+                const narrowed = if (arm.pattern == null_node)
+                    remaining
+                else
+                    analysis.narrowTypeForPattern(remaining, arm.pattern) catch {
+                        @constCast(self).markAllocationFailure();
+                        return null_type_idx;
+                    };
+                const retained = if (narrowed == null_type_idx and remaining != self.env.pool.idx_never)
+                    remaining
+                else
+                    narrowed;
+                self.bindMatchCallbackParameter(arm.body, retained);
+            }
+            const arm_type = switch (arm.kind) {
+                .value => self.inferType(arm.body),
+                .callback => blk: {
+                    const function_type = self.functionExprType(arm.body);
+                    if (function_type == null_type_idx or
+                        self.env.pool.getTag(function_type) != .t_function)
+                    {
+                        break :blk null_type_idx;
+                    }
+                    break :blk self.env.pool.getFunctionInfo(function_type).ret;
+                },
+            };
+            if (callback_match) {
+                remaining = analysis.remainingTypeAfterPattern(remaining, arm.pattern) catch {
+                    @constCast(self).markAllocationFailure();
+                    return null_type_idx;
+                };
+            }
             if (result == null_type_idx) {
                 result = arm_type;
             } else if (arm_type != null_type_idx and arm_type != result) {
@@ -5020,6 +5059,23 @@ pub const TypeChecker = struct {
             result = self.env.pool.addUnion(self.allocator, &.{ result, self.env.pool.idx_undefined });
         }
         return result;
+    }
+
+    fn bindMatchCallbackParameter(self: *const TypeChecker, callback_node: NodeIndex, narrowed: TypeIndex) void {
+        if (self.ir_view.getTag(callback_node) != .arrow_function) return;
+        const callback = self.ir_view.getFunction(callback_node) orelse return;
+        if (callback.params_count != 1) return;
+        if (self.sourceFunctionSignature(callback_node)) |signature| {
+            if (signature.param_count == 1 and signature.param_types[0] != null_type_idx) {
+                _ = @constCast(self).bindCallbackParam(callback, 0, signature.param_types[0]);
+                return;
+            }
+        }
+        const parameter = self.ir_view.getListIndex(callback.params_start, 0);
+        const binding = self.ir_view.paramBinding(parameter) orelse return;
+        @constCast(self).binding_types.put(self.allocator, bindingKey(binding), narrowed) catch {
+            @constCast(self).markAllocationFailure();
+        };
     }
 
     // -------------------------------------------------------------------
@@ -5679,6 +5735,23 @@ pub const TypeChecker = struct {
             self.report_inference_diagnostics = previous;
         }
 
+        var callback_match = me.arms_count != 0;
+        for (0..me.arms_count) |i| {
+            const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
+            const arm = self.ir_view.getMatchArm(arm_idx) orelse {
+                callback_match = false;
+                break;
+            };
+            if (arm.kind != .callback) {
+                callback_match = false;
+                break;
+            }
+        }
+        if (callback_match) {
+            self.walkCallbackMatchArms(me, disc_type);
+            return;
+        }
+
         const pool = self.env.pool;
         // Over `T | undefined`, a `when undefined` arm sees `undefined` and
         // every other arm sees `T`, with its bindings typed from `T`.
@@ -5741,6 +5814,52 @@ pub const TypeChecker = struct {
             self.bindPatternBindings(arm.pattern, scrutinee);
             self.walkExpr(arm.body);
             join.merge(self.endNarrowScope(mark));
+        }
+        self.applyKills(join);
+    }
+
+    fn walkCallbackMatchArms(self: *TypeChecker, me: ir.Node.MatchExpr, disc_type: TypeIndex) void {
+        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, self.env.pool, self.env);
+        var remaining = disc_type;
+        var join: KillSet = .{};
+        for (0..me.arms_count) |i| {
+            const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
+            const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+            const narrowed = if (arm.pattern == ir.null_node)
+                remaining
+            else
+                analysis.narrowTypeForPattern(remaining, arm.pattern) catch blk: {
+                    self.markAllocationFailure();
+                    break :blk null_type_idx;
+                };
+            const retained = if (narrowed == null_type_idx and remaining != self.env.pool.idx_never)
+                remaining
+            else
+                narrowed;
+            const mark = self.beginNarrowScope();
+            if (self.ir_view.getTag(arm.body) == .arrow_function) {
+                if (self.ir_view.getFunction(arm.body)) |callback| {
+                    if (callback.params_count == 1) {
+                        const parameter = self.ir_view.getListIndex(callback.params_start, 0);
+                        if (self.sourceFunctionSignature(arm.body)) |signature| {
+                            if (signature.param_count == 1 and
+                                signature.param_types[0] != null_type_idx and
+                                retained != null_type_idx and
+                                !self.env.isAssignableTo(retained, signature.param_types[0]))
+                            {
+                                self.addArgTypeMismatch(parameter, signature.param_types[0], retained);
+                            }
+                        }
+                    }
+                }
+            }
+            self.bindMatchCallbackParameter(arm.body, retained);
+            self.walkExpr(arm.body);
+            join.merge(self.endNarrowScope(mark));
+            remaining = analysis.remainingTypeAfterPattern(remaining, arm.pattern) catch blk: {
+                self.markAllocationFailure();
+                break :blk null_type_idx;
+            };
         }
         self.applyKills(join);
     }

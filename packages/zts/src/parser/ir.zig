@@ -298,9 +298,15 @@ pub const Node = struct {
         arms_count: u8,
     };
 
+    pub const MatchArmKind = enum(u1) {
+        value,
+        callback,
+    };
+
     pub const MatchArm = struct {
         pattern: NodeIndex, // literal node, match_pattern, or null_node (default)
-        body: NodeIndex, // single expression
+        body: NodeIndex, // value expression, or direct arrow for callback
+        kind: MatchArmKind = .value,
     };
 
     pub const MatchPatternObj = struct {
@@ -821,6 +827,16 @@ pub const IRStore = struct {
         self.binding_name_atoms.items[statement] = 0;
     }
 
+    pub fn lowerCallToMatch(self: *IRStore, owner: NodeIndex, match: Node.MatchExpr) !void {
+        if (owner >= self.tags.items.len or self.tags.items[owner] != .call) {
+            return error.InvalidIntrinsicOwner;
+        }
+        const list_ref = try self.addListRef(match.arms_start, match.arms_count);
+        self.tags.items[owner] = .match_expr;
+        self.data.items[owner] = .{ .a = match.discriminant, .b = list_ref };
+        self.binding_name_atoms.items[owner] = 0;
+    }
+
     pub fn addTernary(self: *IRStore, loc: SourceLocation, t: Node.TernaryExpr) !NodeIndex {
         const extra_start = try self.addExtra(&.{ t.condition, t.then_branch, t.else_branch });
         return self.addNode(.ternary, loc, .{ .a = extra_start, .b = 0 });
@@ -967,10 +983,8 @@ pub const IRStore = struct {
     }
 
     pub fn addMatchArm(self: *IRStore, loc: SourceLocation, a: Node.MatchArm) !NodeIndex {
-        return self.addNode(.match_arm, loc, .{
-            .a = a.pattern,
-            .b = a.body,
-        });
+        const extra_start = try self.addExtra(&.{ a.pattern, a.body, @backingInt(a.kind) });
+        return self.addNode(.match_arm, loc, .{ .a = extra_start, .b = 0 });
     }
 
     pub fn addMatchPattern(self: *IRStore, loc: SourceLocation, p: Node.MatchPatternObj) !NodeIndex {
@@ -2071,11 +2085,19 @@ pub const IrView = struct {
     pub fn getMatchArm(self: IrView, idx: NodeIndex) ?Node.MatchArm {
         const ir = self.store;
         return blk: {
-            if (idx >= ir.data.items.len) break :blk null;
+            if (idx >= ir.data.items.len or ir.tags.items[idx] != .match_arm) break :blk null;
             const d = ir.data.items[idx];
+            const start: usize = d.a;
+            if (start >= ir.extra.items.len or ir.extra.items.len - start < 3) break :blk null;
+            const kind: Node.MatchArmKind = switch (ir.extra.items[start + 2]) {
+                0 => .value,
+                1 => .callback,
+                else => break :blk null,
+            };
             break :blk .{
-                .pattern = d.a,
-                .body = d.b,
+                .pattern = ir.extra.items[start],
+                .body = ir.extra.items[start + 1],
+                .kind = kind,
             };
         };
     }

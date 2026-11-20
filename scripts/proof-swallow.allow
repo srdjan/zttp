@@ -176,6 +176,14 @@ packages/zts/src/type_checker.zig reportArrayCall catch-block
 packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison
 packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison@2
 
+# Fluent callback inference records allocation failures with markAllocationFailure.
+# Every analysis owner calls ensureHealthy before it publishes types or proof facts.
+packages/zts/src/type_checker.zig bindMatchCallbackParameter catch-block
+packages/zts/src/type_checker.zig inferMatchType catch-block
+packages/zts/src/type_checker.zig inferMatchType catch-block@2
+packages/zts/src/type_checker.zig walkCallbackMatchArms catch-block
+packages/zts/src/type_checker.zig walkCallbackMatchArms catch-block@2
+
 # Invalid schema JSON yields no compiled type entry, so no schema shape can be
 # inferred from it. Contract extraction independently marks that surface
 # dynamic. OutOfMemory still propagates and poisons the checker.

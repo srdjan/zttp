@@ -20,6 +20,7 @@ const builtin_modules = @import("zts-engine").builtin_modules;
 const module_facts_mod = @import("module_facts.zig");
 const route_resolution = @import("route_resolution.zig");
 const effect_inference = @import("effect_inference.zig");
+const intrinsic_lowering = @import("intrinsic_lowering.zig");
 const mb = @import("zts-engine").module_binding;
 const type_pool_mod = @import("type_pool.zig");
 const type_env_mod = @import("type_env.zig");
@@ -296,7 +297,9 @@ fn dupePathIoCall(
 /// its cost envelope is probably too low and a behavior diff against it can read
 /// `equivalent` where a call changed. An imported function, an alias, and a
 /// function bound with `let` stay unexpanded.
-pub const path_analyzer_version: u32 = 6;
+/// Version 7 enters fluent-match callbacks and follows their return and
+/// fallthrough continuations without evaluating the match subject twice.
+pub const path_analyzer_version: u32 = 7;
 
 /// Methods tried in order for a path whose constraints name no method.
 const request_method_candidates = [_][]const u8{ "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };
@@ -341,6 +344,8 @@ pub const PathGenerator = struct {
     /// whose every reference is a `return` of the name (`onlyReturned`).
     /// `extractExprStatus` reads it for an identifier.
     bound_arms: std.AutoHashMapUnmanaged(u32, NodeIndex),
+    /// The match result that a return from the active fluent callback supplies.
+    callback_return: ?*const ReturnTarget,
 
     /// The same-file functions that a call can name, by binding name atom.
     /// Built once, on the first call that no module export answers
@@ -585,6 +590,7 @@ pub const PathGenerator = struct {
             .module_fn_bindings = .empty,
             .var_inits = .empty,
             .bound_arms = .empty,
+            .callback_return = null,
             .named_fns = .empty,
             .built_named_fns = false,
             .expanding = .empty,
@@ -1464,6 +1470,8 @@ pub const PathGenerator = struct {
                 const saved_io = self.io_seq.items.len;
                 if (self.ir_view.getOptValue(node)) |value| {
                     try self.walkReturnedValue(value);
+                } else if (self.callback_return != null) {
+                    try self.finishCallbackReturn(null);
                 } else {
                     // A bare `return;` hands the runtime a value that is not a
                     // `Response`, and the runtime answers 500, as for a bare
@@ -1520,7 +1528,11 @@ pub const PathGenerator = struct {
                     const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
                     const saved = self.constraints.items.len;
                     const saved_io = self.io_seq.items.len;
-                    try self.walkPaths(arm.body);
+                    if (arm.kind == .callback) {
+                        try self.trackInlineFunctionBody(arm.body);
+                    } else {
+                        try self.walkPaths(arm.body);
+                    }
                     self.constraints.shrinkRetainingCapacity(saved);
                     self.io_seq.shrinkRetainingCapacity(saved_io);
                 }
@@ -1620,12 +1632,16 @@ pub const PathGenerator = struct {
         for (0..cases.count()) |k| {
             if (k > 0 and self.path_count >= MAX_PATHS) break;
             try self.constraints.appendSlice(self.allocator, cases.slice(k));
-            var status: ResponseStatus = .{ .known = 500 };
-            if (has_error) {
-                try self.trackModuleCall(assert.error_expr, null);
-                status = self.extractExprStatus(assert.error_expr);
+            if (self.callback_return != null) {
+                try self.finishCallbackReturn(if (has_error) assert.error_expr else null);
+            } else {
+                var status: ResponseStatus = .{ .known = 500 };
+                if (has_error) {
+                    try self.trackModuleCall(assert.error_expr, null);
+                    status = self.extractExprStatus(assert.error_expr);
+                }
+                try self.emitTestCase(status);
             }
-            try self.emitTestCase(status);
             self.constraints.shrinkRetainingCapacity(saved_constraints);
             self.io_seq.shrinkRetainingCapacity(saved_io);
         }
@@ -1660,6 +1676,7 @@ pub const PathGenerator = struct {
                 return;
             }
         }
+        if (self.callback_return != null) return self.finishCallbackReturn(value);
         try self.trackModuleCall(value, null);
         try self.emitTestCase(self.extractExprStatus(value));
     }
@@ -1714,6 +1731,12 @@ pub const PathGenerator = struct {
         },
     };
 
+    const ReturnTarget = struct {
+        fork: ArmFork,
+        parent: ?*const ReturnTarget,
+        request_binding: ?u32,
+    };
+
     /// Walk arm `i` of `match_data` and, for each way its pattern is false,
     /// the arms after it. An arm holds the request constraints of its
     /// pattern, and every later arm holds the negation of each earlier
@@ -1741,7 +1764,7 @@ pub const PathGenerator = struct {
         const saved_io = self.io_seq.items.len;
 
         try self.constraints.appendSlice(self.allocator, positive.items);
-        try self.walkArm(arm, fork);
+        try self.walkArm(match_data.discriminant, arm, fork);
         self.constraints.shrinkRetainingCapacity(saved_constraints);
         self.io_seq.shrinkRetainingCapacity(saved_io);
 
@@ -1754,13 +1777,86 @@ pub const PathGenerator = struct {
         }
     }
 
-    fn walkArm(self: *PathGenerator, arm: Node.MatchArm, fork: ArmFork) error{OutOfMemory}!void {
+    fn walkArm(self: *PathGenerator, discriminant: NodeIndex, arm: Node.MatchArm, fork: ArmFork) error{OutOfMemory}!void {
+        if (arm.kind == .callback) return self.walkCallbackArm(discriminant, arm.body, fork);
+        try self.completeArmValue(arm.body, fork);
+    }
+
+    fn walkCallbackArm(self: *PathGenerator, discriminant: NodeIndex, callback_node: NodeIndex, fork: ArmFork) error{OutOfMemory}!void {
+        const callback = self.ir_view.getFunction(callback_node) orelse return;
+        const target = ReturnTarget{
+            .fork = fork,
+            .parent = self.callback_return,
+            .request_binding = self.req_binding_key,
+        };
+        const saved_target = self.callback_return;
+        self.callback_return = &target;
+        defer self.callback_return = saved_target;
+
+        const saved_request = self.req_binding_key;
+        defer self.req_binding_key = saved_request;
+        var callback_key: ?u32 = null;
+        defer {
+            if (callback_key) |key| _ = self.var_inits.remove(key);
+        }
+        if (callback.params_count == 1) {
+            const parameter = self.ir_view.getListIndex(callback.params_start, 0);
+            if (self.ir_view.paramBinding(parameter)) |binding| {
+                const key = packBindingKey(binding.scope_id, binding.slot);
+                callback_key = key;
+                if (self.isRequestParam(discriminant)) self.req_binding_key = key;
+                const subject = if (self.ir_view.getBinding(discriminant)) |subject_binding| blk: {
+                    const subject_key = packBindingKey(subject_binding.scope_id, subject_binding.slot);
+                    break :blk self.var_inits.get(subject_key) orelse discriminant;
+                } else discriminant;
+                try self.var_inits.put(self.allocator, key, subject);
+            }
+        }
+
+        if (self.ir_view.getTag(callback.body) == .block) {
+            const block = self.ir_view.getBlock(callback.body) orelse return;
+            const fallthrough = Cont{ .callback_fallthrough = &target };
+            try self.walkBlockFrom(block, 0, &fallthrough);
+            return;
+        }
+        try self.walkPaths(callback.body);
+    }
+
+    fn finishCallbackReturn(self: *PathGenerator, value: ?NodeIndex) error{OutOfMemory}!void {
+        const target = self.callback_return orelse return;
+        self.callback_return = target.parent;
+        defer self.callback_return = target;
+        const saved_request = self.req_binding_key;
+        self.req_binding_key = target.request_binding;
+        defer self.req_binding_key = saved_request;
+        if (value) |returned| {
+            try self.completeArmValue(returned, target.fork);
+        } else {
+            try self.completeArmFallthrough(target.fork);
+        }
+    }
+
+    fn completeArmValue(self: *PathGenerator, value: NodeIndex, fork: ArmFork) error{OutOfMemory}!void {
         switch (fork) {
-            .returned => try self.walkReturnedValue(arm.body),
+            .returned => try self.walkReturnedValue(value),
             .bound => |bound| {
-                try self.trackModuleCall(arm.body, bound.key);
+                try self.trackModuleCall(value, bound.key);
                 // A declaration is reached once on a path, so the key is free.
-                if (bound.resolvable) try self.bound_arms.put(self.allocator, bound.key, arm.body);
+                if (bound.resolvable) try self.bound_arms.put(self.allocator, bound.key, value);
+                defer _ = self.bound_arms.remove(bound.key);
+                try self.walkBlockFrom(bound.block, bound.next, bound.after);
+            },
+        }
+    }
+
+    fn completeArmFallthrough(self: *PathGenerator, fork: ArmFork) error{OutOfMemory}!void {
+        switch (fork) {
+            .returned => if (self.callback_return != null)
+                try self.finishCallbackReturn(null)
+            else
+                try self.emitTestCase(.{ .known = 500 }),
+            .bound => |bound| {
+                if (bound.resolvable) try self.bound_arms.put(self.allocator, bound.key, null_node);
                 defer _ = self.bound_arms.remove(bound.key);
                 try self.walkBlockFrom(bound.block, bound.next, bound.after);
             },
@@ -1867,6 +1963,7 @@ pub const PathGenerator = struct {
         while (i < match_data.arms_count) : (i += 1) {
             const arm_idx = self.ir_view.getListIndex(match_data.arms_start, i);
             const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+            if (arm.kind == .callback) return true;
             if (self.ir_view.getTag(arm.body)) |tag| {
                 if (tag == .call) {
                     if (self.ir_view.getCall(arm.body)) |call| {
@@ -1916,10 +2013,13 @@ pub const PathGenerator = struct {
 
     /// What a path runs after the branch of an `if` that does not return: the
     /// statements of `block` from `next`, and then `after`.
-    const Cont = struct {
-        block: Node.BlockData,
-        next: u16,
-        after: ?*const Cont,
+    const Cont = union(enum) {
+        block: struct {
+            data: Node.BlockData,
+            next: u16,
+            after: ?*const Cont,
+        },
+        callback_fallthrough: *const ReturnTarget,
     };
 
     fn resumeAfter(self: *PathGenerator, after: ?*const Cont) error{OutOfMemory}!void {
@@ -1929,7 +2029,15 @@ pub const PathGenerator = struct {
         // Walking more continuations would cost time exponential in the
         // number of forking `if`s and change no verdict.
         if (self.path_count >= MAX_PATHS) return;
-        try self.walkBlockFrom(cont.block, cont.next, cont.after);
+        switch (cont.*) {
+            .block => |block| try self.walkBlockFrom(block.data, block.next, block.after),
+            .callback_fallthrough => |target| {
+                const saved_target = self.callback_return;
+                self.callback_return = target;
+                defer self.callback_return = saved_target;
+                try self.finishCallbackReturn(null);
+            },
+        }
     }
 
     /// Walk `block` from statement `first`, then `after`. A caller that walks a
@@ -1962,7 +2070,7 @@ pub const PathGenerator = struct {
             if (stmt_tag == .if_stmt) {
                 // The statements after the `if` are its continuation, so a
                 // branch that does not return can run them on its own path.
-                const rest: Cont = .{ .block = block, .next = i + 1, .after = after };
+                const rest: Cont = .{ .block = .{ .data = block, .next = i + 1, .after = after } };
                 try self.walkIfThen(stmt_idx, &rest);
                 return;
             }
@@ -2898,6 +3006,7 @@ pub const PathGenerator = struct {
     ///   through any other binding, because the profile admits property
     ///   assignment and a later write would make the resolved value wrong.
     fn extractExprStatus(self: *PathGenerator, ret_val: NodeIndex) ResponseStatus {
+        if (ret_val == null_node) return .{ .known = 500 };
         const ret_tag = self.ir_view.getTag(ret_val) orelse return .unknown;
         if (ret_tag == .identifier) {
             // The one binding that resolves is a `const` declared from a
@@ -4227,7 +4336,11 @@ test "route roots stay internal to analysis outputs" {
 }
 
 fn generateFixture(allocator: std.mem.Allocator, source: []const u8) !PathGeneratorFixture {
-    return generateFixtureScanned(allocator, source, null);
+    return generateFixtureScannedInternal(allocator, source, null, false);
+}
+
+fn generateLoweredFixture(allocator: std.mem.Allocator, source: []const u8) !PathGeneratorFixture {
+    return generateFixtureScannedInternal(allocator, source, null, true);
 }
 
 /// One answer for the import records that name `specifier`.
@@ -4244,6 +4357,15 @@ fn generateFixtureScanned(
     source: []const u8,
     scans: ?[]const SpecifierScan,
 ) !PathGeneratorFixture {
+    return generateFixtureScannedInternal(allocator, source, scans, false);
+}
+
+fn generateFixtureScannedInternal(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    scans: ?[]const SpecifierScan,
+    lower_intrinsics: bool,
+) !PathGeneratorFixture {
     var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
     errdefer parser.deinit();
 
@@ -4252,6 +4374,19 @@ fn generateFixtureScanned(
     parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
+    if (lower_intrinsics) {
+        var pool = type_pool_mod.TypePool.init(allocator);
+        defer pool.deinit(allocator);
+        var env = type_env_mod.TypeEnv.init(allocator, &pool);
+        defer env.deinit();
+        try env.populateSourceTypes(.{ .direct = .{
+            .store = &parser.type_store,
+            .ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants),
+            .atoms = &atoms,
+            .module_path = "/app/fluent-match.ts",
+        } });
+        try intrinsic_lowering.validateSource(allocator, &parser, &atoms, &env);
+    }
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
 
@@ -6392,6 +6527,159 @@ test "a module call bound before the returned match is on every arm path and an 
         const expected: usize = if (t.expected_status.isKnown(405)) 1 else 2;
         try std.testing.expectEqual(expected, t.io_stubs.items.len);
     }
+}
+
+test "a fluent returned match keeps one bound subject call on every path" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\import { cacheGet } from "zttp:cache";
+        \\function handler(req: Request): Response {
+        \\  const subject = cacheGet("items", "key") ?? "";
+        \\  return match(subject)
+        \\    .with("hit", (): Response => Response.text("hit"))
+        \\    .otherwise((): Response => Response.text("miss", { status: 405 }));
+        \\}
+    ;
+    var fixture = try generateLoweredFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 200));
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 405));
+    try std.testing.expectEqual(@as(usize, 1), tests[0].io_stubs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), tests[1].io_stubs.items.len);
+}
+
+test "a bound fluent match follows callback returns and fallthrough" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\function handler(req: Request): Response {
+        \\  const response = match(req.method)
+        \\    .with("POST", (): Response | undefined => {
+        \\      if (req.url === "/created") { return Response.text("created", { status: 201 }); }
+        \\    })
+        \\    .otherwise((): Response => Response.text("method", { status: 405 }));
+        \\  return response;
+        \\}
+    ;
+    var fixture = try generateLoweredFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 201));
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 405));
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 500));
+}
+
+test "a callback request alias retains nested match constraints" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\function handler(req: Request): Response {
+        \\  return match(req)
+        \\    .with({ method: "POST" }, (selected: Request): Response =>
+        \\      match(selected.url)
+        \\        .with("/created", (): Response => Response.text("created", { status: 201 }))
+        \\        .otherwise((): Response => Response.text("post", { status: 202 })))
+        \\    .otherwise((): Response => Response.text("method", { status: 405 }));
+        \\}
+    ;
+    var fixture = try generateLoweredFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    try std.testing.expect(tests[0].expected_status.isKnown(201));
+    try std.testing.expectEqualStrings("POST", tests[0].method);
+    try std.testing.expectEqualStrings("/created", tests[0].url);
+}
+
+test "a callback result alias retains result constraints" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\import { decodeUtf8, encodeUtf8 } from "zttp:bytes";
+        \\function handler(req: Request): Response {
+        \\  const decoded = decodeUtf8(encodeUtf8(req.url));
+        \\  return match(decoded)
+        \\    .with({ ok: true }, (selected: Result<string, BytesError>): Response => {
+        \\      if (selected.ok) { return Response.text(selected.value); }
+        \\      return Response.text("bad", { status: 400 });
+        \\    })
+        \\    .otherwise((): Response => Response.text("invalid", { status: 422 }));
+        \\}
+    ;
+    var fixture = try generateLoweredFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_ok}));
+}
+
+test "a nested callback fallthrough resumes a bound outer match" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\function handler(req: Request): Response {
+        \\  const ignored = match(req.method)
+        \\    .with("POST", (): Response | undefined =>
+        \\      match(req.url)
+        \\        .with("/empty", (): undefined => {})
+        \\        .otherwise((): Response => Response.text("post", { status: 202 })))
+        \\    .otherwise((): Response => Response.text("method", { status: 405 }));
+        \\  return Response.text("done", { status: 299 });
+        \\}
+    ;
+    var fixture = try generateLoweredFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    try std.testing.expectEqual(@as(usize, 3), countStatus(tests, 299));
+}
+
+test "a callback assert result resumes a bound outer match" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\function handler(req: Request): Response {
+        \\  const ignored = match(req.url)
+        \\    .otherwise((selected: string): Response | undefined => {
+        \\      assert selected === "/ok";
+        \\    });
+        \\  return Response.text("done", { status: 299 });
+        \\}
+    ;
+    var fixture = try generateLoweredFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    try std.testing.expectEqual(@as(usize, 2), countStatus(tests, 299));
+}
+
+test "a bound callback restores outer request constraints" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\function handler(req: Request): Response {
+        \\  const ignored = match(req)
+        \\    .otherwise((selected: Request): undefined => {});
+        \\  if (req.url === "/after") { return Response.text("after", { status: 201 }); }
+        \\  return Response.text("other", { status: 404 });
+        \\}
+    ;
+    var fixture = try generateLoweredFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    try std.testing.expect(tests[0].expected_status.isKnown(201));
+    try std.testing.expectEqualStrings("/after", tests[0].url);
 }
 
 test "a helper's module call precedes the handler's later calls on the path" {

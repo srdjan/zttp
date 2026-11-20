@@ -247,6 +247,8 @@ pub const ResolveOptions = struct {
     /// Null off the compile path of such a build, and the checker then types no
     /// file import. The pointed-to table must outlive the resolved module.
     file_import_signatures: ?*const import_signatures_mod.FileImportSignatures = null,
+    /// Mandatory intrinsic refusals stop checks of the partially lowered tree.
+    intrinsic_issues: []const intrinsic_lowering.ValidationIssue = &.{},
 };
 
 pub const ResolvedModule = struct {
@@ -354,6 +356,9 @@ pub fn resolve(
     parsed: ParsedModule,
     opts: ResolveOptions,
 ) !ResolvedModule {
+    if (opts.intrinsic_issues.len != 0 and opts.type_env == null) {
+        return error.MissingIntrinsicTypeEnvironment;
+    }
     var type_checker_opt: ?TypeChecker = null;
     if (opts.type_env) |env| {
         var tc = TypeChecker.init(
@@ -369,7 +374,9 @@ pub fn resolve(
         // The strict checker reports a match that is not exhaustive as ZTS603,
         // so the type checker leaves its ZTS205 out when strict runs.
         tc.strict_checker_follows = opts.strict;
-        _ = try tc.check(parsed.root);
+        reportIntrinsicIssues(&tc, opts.intrinsic_issues);
+        if (opts.intrinsic_issues.len == 0) _ = try tc.check(parsed.root);
+        try tc.ensureHealthy();
         type_checker_opt = tc;
     }
     errdefer if (type_checker_opt) |*tc| tc.deinit();
@@ -379,14 +386,17 @@ pub fn resolve(
     bool_checker.authoritative_type_checker = if (type_checker_opt) |*tc| tc else null;
     bool_checker.refuse_untyped_operands = opts.strict;
     errdefer bool_checker.deinit();
-    const bool_errors = try bool_checker.check(parsed.root);
+    const bool_errors = if (opts.intrinsic_issues.len == 0)
+        try bool_checker.check(parsed.root)
+    else
+        0;
     // The pointer targets stack-local optional storage. Consumers use the
     // stored diagnostics and node types after this check, not this pointer.
     bool_checker.authoritative_type_checker = null;
 
     var strict_checker_opt: ?StrictChecker = null;
     var strict_errors: u32 = 0;
-    if (opts.strict) {
+    if (opts.strict and opts.intrinsic_issues.len == 0) {
         const env_ptr: ?*const TypeEnv = if (type_checker_opt) |*tc| tc.env else null;
         const tc_ptr: ?*TypeChecker = if (type_checker_opt) |*tc| tc else null;
         var sc = StrictChecker.init(
@@ -865,8 +875,9 @@ pub const GraphFrontendValidation = struct {
         checker.scopes = &parser.scopes;
         checker.file_imports = &file_imports;
         defer checker.deinit();
-        const type_errors = try checker.check(root);
         reportIntrinsicIssues(&checker, intrinsic_issues.items);
+        const type_errors = if (intrinsic_issues.items.len == 0) try checker.check(root) else 0;
+        try checker.ensureHealthy();
         if (intrinsic_issues.items.len > 0 or (self.check_types and type_errors != 0)) {
             if (self.failure_sink) |sink| {
                 try sink.report_type_diagnostics(
@@ -1699,10 +1710,8 @@ pub const ModuleAnalysisSession = struct {
             .policy_sections = self.policy_sections,
             .allow_raw_exported_boundary = self.allow_raw_exported_boundary,
             .file_import_signatures = self.file_import_signatures,
+            .intrinsic_issues = self.intrinsic_issues.items,
         });
-        if (self.resolved.?.type_checker) |*checker| {
-            reportIntrinsicIssues(checker, self.intrinsic_issues.items);
-        }
         if (self.resolved.?.type_checker) |*checker| try checker.ensureHealthy();
         self.resolution_state = .completed;
         if (self.resolved.?.type_checker != null) self.contract_type_state = .completed;
@@ -1745,10 +1754,8 @@ pub const ModuleAnalysisSession = struct {
             .module_facts = resolution_facts,
             .type_import_facts = resolution_facts,
             .file_import_signatures = self.file_import_signatures,
+            .intrinsic_issues = self.intrinsic_issues.items,
         });
-        if (self.resolved.?.type_checker) |*checker| {
-            reportIntrinsicIssues(checker, self.intrinsic_issues.items);
-        }
         self.resolution_state = .completed;
         const resolved = &self.resolved.?;
         if (resolved.bool_error_count > 0 or
@@ -1850,7 +1857,8 @@ pub const ModuleAnalysisSession = struct {
             facts_value
         else
             null;
-        _ = try checker.check(self.parsed.root);
+        reportIntrinsicIssues(checker, self.intrinsic_issues.items);
+        if (self.intrinsic_issues.items.len == 0) _ = try checker.check(self.parsed.root);
         try checker.ensureHealthy();
         self.contract_type_state = .completed;
     }

@@ -810,7 +810,10 @@ pub const BoolChecker = struct {
         for (0..me.arms_count) |i| {
             const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
             const arm = self.ir_view.getMatchArm(arm_idx) orelse return .unknown;
-            const arm_type = self.inferType(arm.body);
+            const arm_type = if (arm.kind == .callback)
+                self.inferFunctionReturnType(arm.body)
+            else
+                self.inferType(arm.body);
             result = mergeReturnType(result, arm_type) orelse return .unknown;
         }
         return result orelse .unknown;

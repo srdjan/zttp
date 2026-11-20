@@ -3609,7 +3609,7 @@ pub const FlowInterp = struct {
     }
 
     fn scheduleMatchArm(self: *FlowInterp, pending: *PendingMatch, frames: *std.ArrayList(EvalFrame), current: *NodeIndex, result: *?Value) Error!bool {
-        if (pending.index < pending.expression.arms_count) {
+        while (pending.index < pending.expression.arms_count) {
             const arm_node = self.ir_view.getListIndex(pending.expression.arms_start, pending.index);
             const arm = self.ir_view.getMatchArm(arm_node) orelse {
                 result.* = try self.missing(pending.node);
@@ -3619,6 +3619,17 @@ pub const FlowInterp = struct {
             if (arm.pattern == null_node) pending.has_default = true;
             pending.arm_state = try self.mem().create(State);
             pending.arm_state.* = try cloneState(self.mem(), pending.state.*);
+            if (arm.kind == .callback) {
+                const previous_call = self.current_call_node;
+                self.current_call_node = self.functionHandle(pending.node);
+                defer self.current_call_node = previous_call;
+                const summary = try self.invoke(arm.body, &.{pending.discriminant}, pending.arm_state);
+                pending.result = try joinOpt(self.mem(), pending.result, summary.value);
+                pending.arm_state.* = summary.state;
+                pending.joined = try joinStates(self.mem(), pending.joined, summary.state);
+                pending.index += 1;
+                continue;
+            }
             try self.bindPattern(arm.pattern, pending.discriminant, pending.arm_state);
             try frames.append(self.mem(), .{ .match_arm = pending });
             current.* = arm.body;

@@ -21,7 +21,8 @@ const LabelSet = mb.LabelSet;
 /// no version of its own: version 9 counts a network, SQL, filesystem, or
 /// stored-data read as a varying source (`module_binding.exportVaries`). Version 10 clears
 /// `deterministic` for a response that a control decision on a varying value reaches.
-pub const flow_analyzer_version: u32 = 10;
+/// Version 11 invokes fluent-match callbacks with the retained subject value.
+pub const flow_analyzer_version: u32 = 11;
 
 pub const RepairIntent = report_types.RepairIntent;
 pub const Severity = report_types.Severity;

@@ -2817,6 +2817,272 @@ test "CHECK keeps a same-local-name foreign import ordinary" {
     try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
 }
 
+test "CHECK lowers plain and aliased imported match chains" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        "import { match, P } from \"zttp:core\";\n" ++
+            "function choose(value: string | number): string {\n" ++
+            "  return match(value).with(P.string, (text) => text).otherwise(() => \"number\");\n" ++
+            "}\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(choose(req.method)); }\n",
+        "import { match as select, P as Pattern } from \"zttp:core\";\n" ++
+            "function choose(value: string | number): string {\n" ++
+            "  return select(value).with(Pattern.string, (text) => text).otherwise(() => \"number\");\n" ++
+            "}\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(choose(req.method)); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "function choose(value: \"a\" | \"b\"): \"left\" | \"right\" {\n" ++
+            "  return match(value).with(\"a\", (selected: \"a\"): \"left\" => \"left\").with(\"b\", (selected: \"b\"): \"right\" => \"right\").exhaustive();\n" ++
+            "}\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(choose(\"a\")); }\n",
+        "import { match, P } from \"zttp:core\";\n" ++
+            "function choose(value: string | number): string | number {\n" ++
+            "  return match(value).with(P.string, (text: string): string => text).otherwise((remaining: number): number => remaining + 1);\n" ++
+            "}\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(String(choose(1))); }\n",
+    };
+    for (cases) |source| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    }
+}
+
+test "CHECK refuses incomplete or unsupported imported match chains" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        "import { match } from \"zttp:core\";\n" ++
+            "function make(): string { return \"x\"; }\n" ++
+            "function choose(): string { return match(make()).otherwise((value) => value); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(choose()); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "function choose(values: string[]): string | undefined { return match(values[0]).otherwise((value) => value); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(String(choose([\"x\"]))); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "function choose(value: { text: string } | undefined): string | undefined { return match(value?.text).otherwise((text) => text); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(String(choose(undefined))); }\n",
+        "import { match, P } from \"zttp:core\";\n" ++
+            "function choose(value: { text: string }): { text: string } { return match(value).with({ text: P.string }, (selected) => selected).otherwise((selected) => selected); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(choose({ text: \"x\" }).text); }\n",
+        "import { match, P } from \"zttp:core\";\n" ++
+            "function selected(value: string): string { return value; }\n" ++
+            "function choose(value: string): string { return match(value).with(P.string, selected).exhaustive(); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(choose(\"x\")); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "function choose(value: string): string { const pending = match(value); return value; }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(choose(\"x\")); }\n",
+    };
+    for (cases) |source| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try std.testing.expectEqualStrings("ZTS001", result.json_diagnostics.items[0].code);
+    }
+}
+
+test "CHECK refuses escaped and dynamic imported match descriptors" {
+    const allocator = std.testing.allocator;
+    const source =
+        "import { match, P } from \"zttp:core\";\n" ++
+        "const descriptor = P.string;\n" ++
+        "function choose(value: string): string { return match(value).with(descriptor, (selected) => selected).otherwise(() => \"\"); }\n" ++
+        "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(choose(\"x\")); }\n";
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 2), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 2), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS001", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("ZTS001", result.json_diagnostics.items[1].code);
+}
+
+test "CHECK refuses a write through a fluent match callback capture" {
+    const allocator = std.testing.allocator;
+    const source =
+        "import { match, P } from \"zttp:core\";\n" ++
+        "function choose(value: string): string {\n" ++
+        "  let captured = \"\";\n" ++
+        "  return match(value).with(P.string, (selected) => { captured = selected; return selected; }).exhaustive();\n" ++
+        "}\n" ++
+        "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(choose(\"x\")); }\n";
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS073", result.json_diagnostics.items[0].code);
+}
+
+test "CHECK reports a duplicate fluent match arm as unreachable" {
+    const allocator = std.testing.allocator;
+    const source =
+        "import { match } from \"zttp:core\";\n" ++
+        "function choose(value: \"a\"): string { return match(value).with(\"a\", () => \"first\").with(\"a\", () => \"second\").exhaustive(); }\n" ++
+        "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(choose(\"a\")); }\n";
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS216", result.json_diagnostics.items[0].code);
+}
+
+test "CHECK lowers every imported fluent match pattern kind" {
+    const allocator = std.testing.allocator;
+    const source =
+        "import { match, P } from \"zttp:core\";\n" ++
+        "type Nested = { kind: \"pair\"; pair: [0, string] } | { kind: \"other\" };\n" ++
+        "type MaybeValue = { value: string | null | undefined };\n" ++
+        "function nested(value: Nested): string { return match(value).with({ kind: \"pair\", pair: [0, P.any] }, (selected) => selected.pair[1]).with({ kind: \"other\" }, () => \"other\").exhaustive(); }\n" ++
+        "function present(value: MaybeValue): string { return match(value).with({ value: P.present }, () => \"present\").otherwise(() => \"absent\"); }\n" ++
+        "function nullable(value: string | null): string { return match(value).with(null, () => \"null\").with(P.string, (text) => text).exhaustive(); }\n" ++
+        "function booleanKind(value: boolean): string { return match(value).with(P.boolean, () => \"boolean\").exhaustive(); }\n" ++
+        "function numberKind(value: number): string { return match(value).with(P.number, () => \"number\").exhaustive(); }\n" ++
+        "function arrayKind(value: number[]): string { return match(value).with(P.array, () => \"array\").exhaustive(); }\n" ++
+        "function dictKind(value: Dict<string, string>): string { return match(value).with(P.Dict, () => \"dict\").exhaustive(); }\n" ++
+        "function bytesKind(value: Bytes): string { return match(value).with(P.Bytes, () => \"bytes\").exhaustive(); }\n" ++
+        "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text([nested({ kind: \"other\" }), present({ value: undefined }), nullable(null), booleanKind(true), numberKind(1), arrayKind([1])].join(\"\")); }\n";
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+}
+
+test "CHECK fluent match callbacks preserve cost bounded proof" {
+    const allocator = std.testing.allocator;
+    const source =
+        "import { match, P } from \"zttp:core\";\n" ++
+        "function classify(value: unknown): string { return match(value).with(P.string, () => \"string\").otherwise(() => \"other\"); }\n" ++
+        "function handler(req: Request): Proof<Response, \"cost_bounded\"> { return Response.text(classify(req.method)); }\n";
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+}
+
+test "CHECK fluent match callbacks receive exact narrowed subjects" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        "import { match, P } from \"zttp:core\";\n" ++
+            "function render(value: unknown): string { return match(value).with(P.string, (text: string): string => text).otherwise((): string => \"other\"); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(render(req.method)); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "function onlyTrue(value: true): string { return String(value); }\n" ++
+            "function onlyFalse(value: false): string { return String(value); }\n" ++
+            "function render(value: boolean): string { return match(value).with(true, (selected: true): string => onlyTrue(selected)).otherwise((remaining: false): string => onlyFalse(remaining)); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(render(req.method === \"GET\")); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "type Command = { kind: \"echo\" | \"ping\"; text: string };\n" ++
+            "type Echo = { kind: \"echo\"; text: string };\n" ++
+            "type Ping = { kind: \"ping\"; text: string };\n" ++
+            "function onlyEcho(value: \"echo\"): string { return value; }\n" ++
+            "function onlyPing(value: \"ping\"): string { return value; }\n" ++
+            "function render(command: Command): string { return match(command).with({ kind: \"echo\" }, (echo: Echo): string => onlyEcho(echo.kind)).otherwise((ping: Ping): string => onlyPing(ping.kind)); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { const command: Command = { kind: \"echo\", text: req.method }; return Response.text(render(command)); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "type Pair = { left: \"x\" | \"y\"; right: \"m\" | \"n\" };\n" ++
+            "type Hit = { left: \"x\"; right: \"m\" };\n" ++
+            "type Miss = { left: \"y\"; right: \"m\" | \"n\" } | { left: \"x\"; right: \"n\" };\n" ++
+            "function hit(value: Hit): string { return value.left; }\n" ++
+            "function miss(value: Miss): string { return value.right; }\n" ++
+            "function render(value: Pair): string { return match(value).with({ left: \"x\", right: \"m\" }, (selected: Hit): string => hit(selected)).otherwise((remaining: Miss): string => miss(remaining)); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { const value: Pair = { left: \"x\", right: \"m\" }; return Response.text(render(value)); }\n",
+        "import { match, P } from \"zttp:core\";\n" ++
+            "type Echo = { kind: \"echo\" };\n" ++
+            "function record(value: unknown): string { return match(value).with({ kind: \"echo\" }, (selected: Echo): string => selected.kind).otherwise((): string => \"other\"); }\n" ++
+            "function pair(value: unknown): string { return match(value).with([P.any, P.any], (selected: [unknown, unknown]): string => String(selected.length)).otherwise((): string => \"other\"); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text([record(req), pair([req.method, req.url])].join(\"|\")); }\n",
+        "import { match, P } from \"zttp:core\";\n" ++
+            "type Base = { text: string };\n" ++
+            "type Echo = { text: string; kind: \"echo\" };\n" ++
+            "function record(value: Base): string { return match(value).with({ kind: \"echo\" }, (selected: Echo): string => selected.text).otherwise((): string => \"other\"); }\n" ++
+            "function pair(value: string[]): string { return match(value).with([P.any, P.any], (selected: [string, string]): string => selected[0]).otherwise((): string => \"other\"); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text([record({ text: req.method }), pair([req.method, req.url])].join(\"|\")); }\n",
+    };
+    for (cases) |source| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    }
+}
+
+test "CHECK fluent match callbacks refine intersection subjects" {
+    const allocator = std.testing.allocator;
+    const valid_source =
+        "import { match } from \"zttp:core\";\n" ++
+        "type Input = { kind: \"a\" } & { count: number };\n" ++
+        "function render(value: Input): string { return match(value).with({ kind: \"a\" }, (selected: Input): string => String(selected.count)).otherwise((): string => \"other\"); }\n" ++
+        "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(\"ok\"); }\n";
+    var valid = try runCheckOnlyFromSourceWithOptions(allocator, valid_source, "handler.ts", .{ .json_mode = true });
+    defer valid.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), valid.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), valid.json_diagnostics.items.len);
+
+    const invalid_source =
+        "import { match } from \"zttp:core\";\n" ++
+        "type Input = { kind: \"a\" } & { count: number };\n" ++
+        "function render(value: Input): string { return match(value).with({ kind: \"a\" }, (selected: string): string => selected).otherwise((): string => \"other\"); }\n" ++
+        "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(\"ok\"); }\n";
+    var invalid = try runCheckOnlyFromSourceWithOptions(allocator, invalid_source, "handler.ts", .{ .json_mode = true });
+    defer invalid.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), invalid.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), invalid.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS203", invalid.json_diagnostics.items[0].code);
+}
+
+test "CHECK fluent match callbacks refine generic subjects" {
+    const allocator = std.testing.allocator;
+    const inferred_source =
+        \\import { match, P } from "zttp:core";
+        \\function same<T>(value: T): T {
+        \\  return match(value).with(P.number, (selected) => selected).otherwise((remaining) => remaining);
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> { return Response.text(String(same<number>(1))); }
+    ;
+    var inferred = try runCheckOnlyFromSourceWithOptions(allocator, inferred_source, "handler.ts", .{ .json_mode = true });
+    defer inferred.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), inferred.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), inferred.json_diagnostics.items.len);
+
+    const valid_source =
+        "import { match } from \"zttp:core\";\n" ++
+        "function select<T>(value: T): string { return match(value).with({ kind: \"a\" }, (selected: unknown): string => \"matched\").otherwise((): string => \"other\"); }\n" ++
+        "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(select<{ kind: \"a\" }>({ kind: \"a\" })); }\n";
+    var valid = try runCheckOnlyFromSourceWithOptions(allocator, valid_source, "handler.ts", .{ .json_mode = true });
+    defer valid.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), valid.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), valid.json_diagnostics.items.len);
+
+    const invalid_source =
+        "import { match } from \"zttp:core\";\n" ++
+        "function select<T>(value: T): string { return match(value).with({ kind: \"a\" }, (selected: string): string => selected).otherwise((): string => \"other\"); }\n" ++
+        "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(select<{ kind: \"a\" }>({ kind: \"a\" })); }\n";
+    var invalid = try runCheckOnlyFromSourceWithOptions(allocator, invalid_source, "handler.ts", .{ .json_mode = true });
+    defer invalid.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), invalid.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), invalid.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS203", invalid.json_diagnostics.items[0].code);
+
+    const valid_number_source =
+        "import { match, P } from \"zttp:core\";\n" ++
+        "function select<T>(value: T): string { return match(value).with(P.number, (selected: number): string => String(selected)).otherwise((): string => \"other\"); }\n" ++
+        "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(select<number>(1)); }\n";
+    var valid_number = try runCheckOnlyFromSourceWithOptions(allocator, valid_number_source, "handler.ts", .{ .json_mode = true });
+    defer valid_number.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), valid_number.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), valid_number.json_diagnostics.items.len);
+
+    const invalid_number_source =
+        "import { match, P } from \"zttp:core\";\n" ++
+        "function select<T>(value: T): string { return match(value).with(P.number, (selected: string): string => selected).otherwise((): string => \"other\"); }\n" ++
+        "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(select<number>(1)); }\n";
+    var invalid_number = try runCheckOnlyFromSourceWithOptions(allocator, invalid_number_source, "handler.ts", .{ .json_mode = true });
+    defer invalid_number.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), invalid_number.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), invalid_number.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS203", invalid_number.json_diagnostics.items[0].code);
+}
+
 test "CHECK imported assertion conditions preserve labels and effects" {
     const allocator = std.testing.allocator;
     const secret_source =
@@ -2871,6 +3137,94 @@ test "CHECK imported assertion conditions preserve labels and effects" {
         "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:3 by `a branch on a value that varies between requests`)",
         varying.json_diagnostics.items[0].message,
     );
+}
+
+test "CHECK keeps optional record fields in tuple match remainders" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        \\import { match, P } from "zttp:core";
+        \\function render(value: [{ text?: string }]): string {
+        \\  return match(value)
+        \\    .with([{ text: P.present }], (): string => "present")
+        \\    .otherwise((remaining: never): string => "absent");
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> { return Response.text("ok"); }
+        ,
+        \\import { match } from "zttp:core";
+        \\function render(value: [{ text?: "yes" }]): string {
+        \\  return match(value)
+        \\    .with([{ text: "yes" }], (): string => "present")
+        \\    .otherwise((remaining: never): string => "absent");
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> { return Response.text("ok"); }
+        ,
+    };
+    for (cases) |source| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try std.testing.expectEqualStrings("ZTS203", result.json_diagnostics.items[0].code);
+    }
+}
+
+test "CHECK narrows float literal match callbacks to numbers" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\function render(value: unknown): string {
+        \\  return match(value)
+        \\    .with(1.5, (selected: number): string => String(selected))
+        \\    .otherwise((): string => "other");
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(render(1.5));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+}
+
+test "CHECK preserves nominal identity through literal match arms" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal, match } from "zttp:core";
+        \\declare const idBrand: unique symbol;
+        \\type Id = Nominal<string, typeof idBrand>;
+        \\function render(value: Id): Id {
+        \\  return match(value)
+        \\    .with("a", (selected: Id): Id => selected)
+        \\    .otherwise((remaining: Id): Id => remaining);
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  const value: Id = nominal<Id>("a");
+        \\  return Response.text(String(render(value)));
+        \\}
+        ,
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal, match } from "zttp:core";
+        \\declare const decisionBrand: unique symbol;
+        \\type Decision = Nominal<boolean, typeof decisionBrand>;
+        \\function render(value: Decision): Decision {
+        \\  return match(value)
+        \\    .with(true, (selected: Decision): Decision => selected)
+        \\    .otherwise((remaining: Decision): Decision => remaining);
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  const value: Decision = nominal<Decision>(true);
+        \\  return Response.text(String(render(value)));
+        \\}
+        ,
+    };
+    for (cases) |source| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    }
 }
 
 test "CHECK reports a missing file type export as ZTS207" {

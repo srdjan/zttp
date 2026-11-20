@@ -1930,23 +1930,32 @@ pub const ContractBuilder = struct {
 
     fn populateApiRouteFacts(self: *ContractBuilder, route: *ApiRouteInfo, fn_node: NodeIndex) !void {
         const func = self.ir_view.getFunction(fn_node) orelse return;
-        const request_binding_slot = self.findRequestBindingSlot(func);
-        try self.scanFunctionNodeForApiFacts(func.body, request_binding_slot, route);
+        if (self.findRequestBinding(func)) |binding| {
+            const request = RequestBinding{ .binding = binding };
+            try self.scanFunctionNodeForApiFacts(func.body, &request, route);
+        } else {
+            try self.scanFunctionNodeForApiFacts(func.body, null, route);
+        }
         try self.syncRouteRequestBodies(route);
     }
 
-    fn findRequestBindingSlot(self: *const ContractBuilder, func: Node.FunctionExpr) ?u16 {
+    const RequestBinding = struct {
+        binding: ir.BindingRef,
+        parent: ?*const RequestBinding = null,
+    };
+
+    fn findRequestBinding(self: *const ContractBuilder, func: Node.FunctionExpr) ?ir.BindingRef {
         if (func.params_count == 0) return null;
         const req_param = self.ir_view.getListIndex(func.params_start, 0);
         const req_tag = self.ir_view.getTag(req_param) orelse return null;
         if (req_tag == .identifier) {
             const binding = self.ir_view.getBinding(req_param) orelse return null;
-            if (binding.kind == .local or binding.kind == .argument) return binding.slot;
+            if (binding.kind == .local or binding.kind == .argument) return binding;
             return null;
         }
         if (req_tag == .pattern_element) {
             const elem = self.ir_view.getPatternElem(req_param) orelse return null;
-            if (elem.binding.kind == .local or elem.binding.kind == .argument) return elem.binding.slot;
+            if (elem.binding.kind == .local or elem.binding.kind == .argument) return elem.binding;
         }
         return null;
     }
@@ -1954,7 +1963,7 @@ pub const ContractBuilder = struct {
     fn scanFunctionNodeForApiFacts(
         self: *ContractBuilder,
         node_idx: NodeIndex,
-        request_binding_slot: ?u16,
+        request_bindings: ?*const RequestBinding,
         route: *ApiRouteInfo,
     ) !void {
         if (node_idx == null_node) return;
@@ -1965,82 +1974,82 @@ pub const ContractBuilder = struct {
                 const block = self.ir_view.getBlock(node_idx) orelse return;
                 var i: u16 = 0;
                 while (i < block.stmts_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(block.stmts_start, i), request_binding_slot, route);
+                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(block.stmts_start, i), request_bindings, route);
                 }
             },
             .expr_stmt => {
                 if (self.ir_view.getOptValue(node_idx)) |value_node| {
-                    try self.scanFunctionNodeForApiFacts(value_node, request_binding_slot, route);
+                    try self.scanFunctionNodeForApiFacts(value_node, request_bindings, route);
                 }
             },
             .return_stmt => {
                 if (self.ir_view.getOptValue(node_idx)) |value_node| {
                     try self.captureApiResponse(value_node, route);
-                    try self.scanFunctionNodeForApiFacts(value_node, request_binding_slot, route);
+                    try self.scanFunctionNodeForApiFacts(value_node, request_bindings, route);
                 }
             },
             .var_decl => {
                 const decl = self.ir_view.getVarDecl(node_idx) orelse return;
-                if (decl.init != null_node) try self.scanFunctionNodeForApiFacts(decl.init, request_binding_slot, route);
+                if (decl.init != null_node) try self.scanFunctionNodeForApiFacts(decl.init, request_bindings, route);
             },
             .if_stmt => {
                 const if_stmt = self.ir_view.getIfStmt(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(if_stmt.condition, request_binding_slot, route);
-                try self.scanFunctionNodeForApiFacts(if_stmt.then_branch, request_binding_slot, route);
-                try self.scanFunctionNodeForApiFacts(if_stmt.else_branch, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(if_stmt.condition, request_bindings, route);
+                try self.scanFunctionNodeForApiFacts(if_stmt.then_branch, request_bindings, route);
+                try self.scanFunctionNodeForApiFacts(if_stmt.else_branch, request_bindings, route);
             },
             .for_of_stmt => {
                 const for_iter = self.ir_view.getForIter(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(for_iter.iterable, request_binding_slot, route);
-                try self.scanFunctionNodeForApiFacts(for_iter.body, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(for_iter.iterable, request_bindings, route);
+                try self.scanFunctionNodeForApiFacts(for_iter.body, request_bindings, route);
             },
             .binary_op => {
                 const binary = self.ir_view.getBinary(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(binary.left, request_binding_slot, route);
-                try self.scanFunctionNodeForApiFacts(binary.right, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(binary.left, request_bindings, route);
+                try self.scanFunctionNodeForApiFacts(binary.right, request_bindings, route);
             },
             .unary_op => {
                 const unary = self.ir_view.getUnary(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(unary.operand, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(unary.operand, request_bindings, route);
             },
             .ternary => {
                 const ternary = self.ir_view.getTernary(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(ternary.condition, request_binding_slot, route);
-                try self.scanFunctionNodeForApiFacts(ternary.then_branch, request_binding_slot, route);
-                try self.scanFunctionNodeForApiFacts(ternary.else_branch, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(ternary.condition, request_bindings, route);
+                try self.scanFunctionNodeForApiFacts(ternary.then_branch, request_bindings, route);
+                try self.scanFunctionNodeForApiFacts(ternary.else_branch, request_bindings, route);
             },
             .assignment => {
                 const assignment = self.ir_view.getAssignment(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(assignment.target, request_binding_slot, route);
-                try self.scanFunctionNodeForApiFacts(assignment.value, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(assignment.target, request_bindings, route);
+                try self.scanFunctionNodeForApiFacts(assignment.value, request_bindings, route);
             },
             .array_literal => {
                 const array = self.ir_view.getArray(node_idx) orelse return;
                 var i: u16 = 0;
                 while (i < array.elements_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(array.elements_start, i), request_binding_slot, route);
+                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(array.elements_start, i), request_bindings, route);
                 }
             },
             .object_literal => {
                 const obj = self.ir_view.getObject(node_idx) orelse return;
                 var i: u16 = 0;
                 while (i < obj.properties_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(obj.properties_start, i), request_binding_slot, route);
+                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(obj.properties_start, i), request_bindings, route);
                 }
             },
             .object_property => {
                 const prop = self.ir_view.getProperty(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(prop.value, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(prop.value, request_bindings, route);
             },
             .member_access, .computed_access, .optional_chain => {
-                try self.captureApiRequestAccess(node_idx, request_binding_slot, route);
+                try self.captureApiRequestAccess(node_idx, request_bindings, route);
                 const member = self.ir_view.getMember(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(member.object, request_binding_slot, route);
-                try self.scanFunctionNodeForApiFacts(member.computed, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(member.object, request_bindings, route);
+                try self.scanFunctionNodeForApiFacts(member.computed, request_bindings, route);
             },
             .call => {
                 const call = self.ir_view.getCall(node_idx) orelse return;
-                try self.captureApiHeaderGetter(call, request_binding_slot, route);
+                try self.captureApiHeaderGetter(call, request_bindings, route);
                 const callee_tag = self.ir_view.getTag(call.callee) orelse return;
                 if (callee_tag == .identifier) {
                     const binding = self.ir_view.getBinding(call.callee) orelse return;
@@ -2068,23 +2077,37 @@ pub const ContractBuilder = struct {
                         }
                     }
                 }
-                try self.scanFunctionNodeForApiFacts(call.callee, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(call.callee, request_bindings, route);
                 var i: u8 = 0;
                 while (i < call.args_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(call.args_start, i), request_binding_slot, route);
+                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(call.args_start, i), request_bindings, route);
                 }
             },
             .match_expr => {
                 const match_expr = self.ir_view.getMatchExpr(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(match_expr.discriminant, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(match_expr.discriminant, request_bindings, route);
                 var i: u8 = 0;
                 while (i < match_expr.arms_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(match_expr.arms_start, i), request_binding_slot, route);
+                    const arm_node = self.ir_view.getListIndex(match_expr.arms_start, i);
+                    const arm = self.ir_view.getMatchArm(arm_node) orelse continue;
+                    if (arm.kind != .callback) {
+                        try self.scanFunctionNodeForApiFacts(arm.body, request_bindings, route);
+                        continue;
+                    }
+                    const callback = self.ir_view.getFunction(arm.body) orelse continue;
+                    if (callback.params_count == 1 and self.isRequestIdentifier(match_expr.discriminant, request_bindings)) {
+                        const parameter = self.ir_view.getListIndex(callback.params_start, 0);
+                        const binding = self.ir_view.paramBinding(parameter) orelse continue;
+                        const alias = RequestBinding{ .binding = binding, .parent = request_bindings };
+                        try self.scanFunctionNodeForApiFacts(callback.body, &alias, route);
+                    } else {
+                        try self.scanFunctionNodeForApiFacts(callback.body, request_bindings, route);
+                    }
                 }
             },
             .match_arm => {
                 const arm = self.ir_view.getMatchArm(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(arm.body, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(arm.body, request_bindings, route);
             },
             .break_stmt, .continue_stmt => {},
             .function_decl, .function_expr, .arrow_function => return,
@@ -2094,7 +2117,7 @@ pub const ContractBuilder = struct {
             // this scan does not model.
             else => {
                 var children = self.ir_view.expressionChildren(node_idx);
-                while (children.next()) |child| try self.scanFunctionNodeForApiFacts(child, request_binding_slot, route);
+                while (children.next()) |child| try self.scanFunctionNodeForApiFacts(child, request_bindings, route);
             },
         }
     }
@@ -2231,15 +2254,14 @@ pub const ContractBuilder = struct {
     fn captureApiRequestAccess(
         self: *ContractBuilder,
         node_idx: NodeIndex,
-        request_binding_slot: ?u16,
+        request_bindings: ?*const RequestBinding,
         route: *ApiRouteInfo,
     ) !void {
-        const request_slot = request_binding_slot orelse return;
         const tag = self.ir_view.getTag(node_idx) orelse return;
         if (tag != .member_access and tag != .computed_access and tag != .optional_chain) return;
 
         const member = self.ir_view.getMember(node_idx) orelse return;
-        const root_property = self.requestRootProperty(member.object, request_slot) orelse return;
+        const root_property = self.requestRootProperty(member.object, request_bindings) orelse return;
         const leaf_name = self.memberAccessName(member) orelse {
             if (std.mem.eql(u8, root_property, "query")) {
                 route.query_params_dynamic = true;
@@ -2261,10 +2283,9 @@ pub const ContractBuilder = struct {
     fn captureApiHeaderGetter(
         self: *ContractBuilder,
         call: Node.CallExpr,
-        request_binding_slot: ?u16,
+        request_bindings: ?*const RequestBinding,
         route: *ApiRouteInfo,
     ) !void {
-        const request_slot = request_binding_slot orelse return;
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
         if (callee_tag != .member_access and callee_tag != .computed_access and callee_tag != .optional_chain) return;
 
@@ -2272,7 +2293,7 @@ pub const ContractBuilder = struct {
         const method_name = self.memberAccessName(member) orelse return;
         if (!std.mem.eql(u8, method_name, "get")) return;
 
-        const root_property = self.requestRootProperty(member.object, request_slot) orelse return;
+        const root_property = self.requestRootProperty(member.object, request_bindings) orelse return;
         if (!std.mem.eql(u8, root_property, "headers")) return;
 
         if (call.args_count == 0) {
@@ -2291,20 +2312,24 @@ pub const ContractBuilder = struct {
     fn requestRootProperty(
         self: *const ContractBuilder,
         node_idx: NodeIndex,
-        request_binding_slot: u16,
+        request_bindings: ?*const RequestBinding,
     ) ?[]const u8 {
         const tag = self.ir_view.getTag(node_idx) orelse return null;
         if (tag != .member_access and tag != .computed_access and tag != .optional_chain) return null;
         const member = self.ir_view.getMember(node_idx) orelse return null;
-        if (!self.isRequestIdentifier(member.object, request_binding_slot)) return null;
+        if (!self.isRequestIdentifier(member.object, request_bindings)) return null;
         return self.memberAccessName(member);
     }
 
-    fn isRequestIdentifier(self: *const ContractBuilder, node_idx: NodeIndex, request_binding_slot: u16) bool {
+    fn isRequestIdentifier(self: *const ContractBuilder, node_idx: NodeIndex, request_bindings: ?*const RequestBinding) bool {
         const tag = self.ir_view.getTag(node_idx) orelse return false;
         if (tag != .identifier) return false;
         const binding = self.ir_view.getBinding(node_idx) orelse return false;
-        return binding.slot == request_binding_slot;
+        var current = request_bindings;
+        while (current) |request| : (current = request.parent) {
+            if (binding.scope_id == request.binding.scope_id and binding.slot == request.binding.slot) return true;
+        }
+        return false;
     }
 
     fn memberAccessName(self: *const ContractBuilder, member: Node.MemberExpr) ?[]const u8 {

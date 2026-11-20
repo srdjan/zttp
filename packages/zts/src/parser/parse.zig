@@ -2106,7 +2106,7 @@ pub const Parser = struct {
                 self.advance();
                 return error.ParseError;
             },
-            .kw_assert => if (self.assertKeywordHasBinding())
+            .kw_assert => if (self.keywordHasBinding("assert"))
                 self.parseExpressionStatement()
             else
                 self.parseAssertStatement(),
@@ -4900,7 +4900,7 @@ pub const Parser = struct {
             // import can also bind it as a value. Parsing only a real binding
             // here gives semantic lowering the identity without granting the
             // spelling intrinsic authority.
-            .kw_assert => if (self.assertKeywordHasBinding())
+            .kw_assert => if (self.keywordHasBinding("assert"))
                 self.parseIdentifier()
             else blk: {
                 self.errorAtCurrent("expected expression");
@@ -4937,7 +4937,10 @@ pub const Parser = struct {
             },
             // class keyword in expression context: const X = class { }
             // Catches class expressions after TypeScript preparation.
-            .kw_match => self.parseMatchExpression(),
+            .kw_match => if (self.keywordHasBinding("match"))
+                self.parseIdentifier()
+            else
+                self.parseMatchExpression(),
             .kw_class => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'class' is not supported; use plain objects and functions instead");
                 self.advance();
@@ -5639,12 +5642,12 @@ pub const Parser = struct {
         return node;
     }
 
-    fn assertKeywordHasBinding(self: *const Parser) bool {
+    fn keywordHasBinding(self: *const Parser, name: []const u8) bool {
         var scope_id = self.scopes.current_scope;
         while (true) {
             const scope = &self.scopes.scopes.items[scope_id];
             for (scope.bindings.items) |binding| {
-                if (std.mem.eql(u8, binding.name, "assert")) return true;
+                if (std.mem.eql(u8, binding.name, name)) return true;
             }
             scope_id = scope.parent orelse return false;
         }

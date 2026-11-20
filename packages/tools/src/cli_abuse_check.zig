@@ -41,6 +41,8 @@ const chain_length: usize = 2000;
 /// Terms in the addition chain input: the longest chain the parser admits (512 is refused).
 const add_chain_terms: usize = 511;
 const deep_expression_depth: usize = 300;
+/// The legacy profile admits this depth; fluent lowering must retain it.
+const deep_match_pattern_depth: usize = 33;
 /// Per-invocation deadline. The slowest case reads 10 MiB and finishes in well
 /// under a second; the deadline only has to separate "slow" from "hung".
 const deadline_seconds: i64 = 30;
@@ -58,6 +60,9 @@ const Input = enum {
     unmapped_type,
     malformed_nominal,
     malformed_nominal_graph,
+    lowercase_dict_descriptor,
+    lowercase_bytes_descriptor,
+    deep_match_pattern,
     readonly_file,
     admission_refusal,
     deep_clean,
@@ -79,6 +84,8 @@ const Case = struct {
     /// For a JSON case that reports diagnostics: the code the first one carries.
     /// Null when the case reports no diagnostic.
     diagnostic_code: ?[]const u8 = null,
+    diagnostic_count: ?usize = null,
+    diagnostic_location: ?struct { line: i64, column: i64 } = null,
     /// For a JSON case: the value of the top-level `success` field.
     success: bool = false,
     /// Text that standard error must contain, or null for no requirement.
@@ -112,6 +119,9 @@ const cases = [_]Case{
     .{ .name = "unmapped type failure, json", .input = .unmapped_type, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
     .{ .name = "nominal declaration refusal names its code, text", .input = .malformed_nominal, .mode = .text, .exit_code = 1, .stderr_contains = "malformed-nominal.ts:3:20: ZTS048 a nominal declaration carries scalar identity only" },
     .{ .name = "imported nominal refusal names its code, text", .input = .malformed_nominal_graph, .mode = .text, .exit_code = 1, .stderr_contains = "bad-type.ts:3:27: ZTS048 a nominal declaration carries scalar identity only" },
+    .{ .name = "lowercase Dict descriptor is refused, json", .input = .lowercase_dict_descriptor, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS001", .diagnostic_count = 1, .diagnostic_location = .{ .line = 3, .column = 29 } },
+    .{ .name = "lowercase Bytes descriptor is refused, json", .input = .lowercase_bytes_descriptor, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS001", .diagnostic_count = 1, .diagnostic_location = .{ .line = 3, .column = 29 } },
+    .{ .name = "nested match patterns retain admission, json", .input = .deep_match_pattern, .mode = .json, .exit_code = 0, .success = true },
     .{ .name = "canonicalize analyzer failure, json", .command = "canonicalize", .input = .unmapped_type, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
     .{ .name = "normalize analyzer failure, json", .command = "normalize", .input = .unmapped_type, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
     .{ .name = "normalize analyzer failure, text", .command = "normalize", .input = .unmapped_type, .mode = .text, .exit_code = 1, .stderr_contains = "ZTS000", .stderr_excludes = " in assignableIn" },
@@ -298,6 +308,28 @@ fn populate(gpa: std.mem.Allocator, io: Io, work: []const u8) !void {
         \\import type { Bad } from "./bad-type.ts";
         \\export function handler(req: Request): Response { return Response.text("x"); }
     );
+    try writeInput(gpa, io, work, "lowercase-dict.ts",
+        \\import { match, P } from "zttp:core";
+        \\function render(value: unknown): string {
+        \\  return match(value).with(P.dict, (): string => "dict").otherwise((): string => "other");
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> { return Response.text(render(req)); }
+    );
+    try writeInput(gpa, io, work, "lowercase-bytes.ts",
+        \\import { match, P } from "zttp:core";
+        \\function render(value: unknown): string {
+        \\  return match(value).with(P.bytes, (): string => "bytes").otherwise((): string => "other");
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> { return Response.text(render(req)); }
+    );
+    var deep_match: std.ArrayList(u8) = .empty;
+    defer deep_match.deinit(gpa);
+    try deep_match.appendSlice(gpa, "import { match } from \"zttp:core\";\nfunction classify(value: unknown): string { return match(value).with(");
+    for (0..deep_match_pattern_depth) |_| try deep_match.appendSlice(gpa, "{ a: ");
+    try deep_match.appendSlice(gpa, "1");
+    for (0..deep_match_pattern_depth) |_| try deep_match.appendSlice(gpa, " }");
+    try deep_match.appendSlice(gpa, ", (): string => \"hit\").otherwise((): string => \"other\"); }\nfunction handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(classify(req)); }\n");
+    try writeInput(gpa, io, work, "deep-match.ts", deep_match.items);
     for ([_]bool{ false, true }) |leaks| {
         var deep: std.ArrayList(u8) = .empty;
         defer deep.deinit(gpa);
@@ -331,6 +363,9 @@ fn fileFor(input: Input) []const u8 {
         .unmapped_type => "unmapped.ts",
         .malformed_nominal => "malformed-nominal.ts",
         .malformed_nominal_graph => "malformed-nominal-graph.ts",
+        .lowercase_dict_descriptor => "lowercase-dict.ts",
+        .lowercase_bytes_descriptor => "lowercase-bytes.ts",
+        .deep_match_pattern => "deep-match.ts",
         .readonly_file => "readonly/handler.ts",
         .admission_refusal => "admission.ts",
         .deep_clean => "deep-clean.ts",
@@ -505,6 +540,9 @@ fn describeMismatch(value: std.json.Value, case: Case) ?[]const u8 {
         .array => |array| array,
         else => return "`diagnostics` is not an array",
     };
+    if (case.diagnostic_count) |expected_count| {
+        if (diagnostics.items.len != expected_count) return "the diagnostic count has the wrong value";
+    }
     if (diagnostics.items.len == 0) return "`diagnostics` is empty";
     const first = switch (diagnostics.items[0]) {
         .object => |object| object,
@@ -515,6 +553,12 @@ fn describeMismatch(value: std.json.Value, case: Case) ?[]const u8 {
         else => return "the first diagnostic `code` is not a string",
     };
     if (!std.mem.eql(u8, code, expected_code)) return "the first diagnostic carries a different code than expected";
+    if (case.diagnostic_location) |expected| {
+        const line = first.get("line") orelse return "the first diagnostic has no `line`";
+        const column = first.get("column") orelse return "the first diagnostic has no `column`";
+        if (line != .integer or line.integer != expected.line) return "the diagnostic line has the wrong value";
+        if (column != .integer or column.integer != expected.column) return "the diagnostic column has the wrong value";
+    }
     return null;
 }
 

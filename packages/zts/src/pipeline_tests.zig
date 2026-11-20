@@ -1427,6 +1427,96 @@ test "extractContract validates an admitted nominal constructor" {
     try testing.expectEqualStrings("handler.ts", contract.handler.path);
 }
 
+test "fluent match callback results keep boolean and effect facts" {
+    const source =
+        \\import { match } from "zttp:core";
+        \\import { ulid } from "zttp:id";
+        \\function handler(req: Request): Response {
+        \\  if (match(req.method).with("GET", (): boolean => true).otherwise((): boolean => false)) {
+        \\    return match(req.url)
+        \\      .with("/id", (): Response => Response.text(ulid()))
+        \\      .otherwise((): Response => Response.text("ok"));
+        \\  }
+        \\  return Response.text("other");
+        \\}
+    ;
+
+    var contract = try extractContract(testing.allocator, source, "handler.ts", .{
+        .strict = false,
+    });
+    defer contract.deinit(testing.allocator);
+
+    const properties = contract.properties orelse return error.PropertiesMissing;
+    try testing.expect(!properties.deterministic);
+}
+
+test "fluent callback analysis propagates allocation failures" {
+    const source =
+        \\import { match } from "zttp:core";
+        \\type Input = { kind: "a" | "b"; value: number };
+        \\function render(value: Input): string {
+        \\  return match(value)
+        \\    .with({ kind: "a" }, (selected: Input): string => String(selected.value))
+        \\    .otherwise((remaining: Input): string => String(remaining.value));
+        \\}
+    ;
+    const Run = struct {
+        fn analyze(allocator: std.mem.Allocator, text: []const u8) !void {
+            var atoms = AtomTable.init(testing.allocator);
+            defer atoms.deinit();
+            var parser = try parser_mod.JsParser.initAdmission(testing.allocator, testing.allocator, text, .compile);
+            defer parser.deinit();
+            parser.setAtomTable(&atoms);
+            const root = try parser.parse();
+            const parsed = ParsedModule.fromAdmittedParser(&parser, root, &atoms, "/app/allocation-match.ts");
+            var analysis: ModuleAnalysisSession = .{};
+            try analysis.initSoundExtraction(allocator, parsed, .{
+                .source_types = .{ .direct = "/app/allocation-match.ts" },
+                .strict = false,
+            });
+            defer analysis.deinit();
+            try analysis.complete();
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Run.analyze, .{source});
+}
+
+test "fluent match callback retains routed request and schema facts" {
+    const source =
+        \\import { match } from "zttp:core";
+        \\import { routerMatch } from "zttp:router";
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\schemaCompile("Input", "{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{}}");
+        \\function create(req: Request): Response {
+        \\  return match(req)
+        \\    .with({ method: "POST" }, (selected: Request): Response => {
+        \\      const id = selected.query.id;
+        \\      const body = validateJson("Input", selected.body ?? "");
+        \\      return Response.json({ id: id, ok: body.ok });
+        \\    })
+        \\    .otherwise((): Response => Response.text("method", { status: 405 }));
+        \\}
+        \\const routes = { "POST /items": create };
+        \\function handler(req: Request): Response {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
+        \\  return found.handler(req);
+        \\}
+    ;
+
+    var contract = try extractContract(testing.allocator, source, "handler.ts", .{
+        .strict = false,
+    });
+    defer contract.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), contract.api.routes.items.len);
+    const route = contract.api.routes.items[0];
+    try testing.expectEqual(@as(usize, 1), route.query_params.items.len);
+    try testing.expectEqualStrings("id", route.query_params.items[0].name);
+    try testing.expectEqual(@as(usize, 1), route.request_schema_refs.items.len);
+    try testing.expectEqualStrings("Input", route.request_schema_refs.items[0]);
+}
+
 test "extractContract preserves single-file custom callback output" {
     const allocator = testing.allocator;
     const source =
@@ -3305,7 +3395,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "isDict",
         "boolean",
         3291,
-        "1343bc65eecad8d9f8be7daa65189e1fb5795e883b24532c779b35267a82605b",
+        "f7aaceae5c224902ca830e15c2c119b98abbfe6b80ae92692bafad60f8dcf779",
     );
 
     const helper_source =
@@ -3323,7 +3413,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "helper",
         "unknown",
         3295,
-        "29952726b0fad99e6b2cf3a47d3977eccd7aa9b1235926bdc108e052cec99853",
+        "df21a7e5a599dd4603514b18b052125e0e85ea6dd9284092dce705969a2d50c9",
     );
 }
 

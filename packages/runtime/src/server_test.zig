@@ -262,6 +262,56 @@ test "a failed imported assert keeps the legacy invariant response" {
     );
 }
 
+test "fluent match preserves descriptors and selected callback execution" {
+    const allocator = std.heap.c_allocator;
+    const source =
+        \\import { assert, match, P } from "zttp:core";
+        \\import { dictEmpty } from "zttp:collections";
+        \\function kind(value: unknown): string {
+        \\  return match(value)
+        \\    .with(P.boolean, (): string => "boolean")
+        \\    .with(P.number, (): string => "number")
+        \\    .with(P.string, (): string => "string")
+        \\    .with(P.array, (): string => "array")
+        \\    .with(P.Dict, (): string => "Dict")
+        \\    .with(P.Bytes, (): string => "Bytes")
+        \\    .otherwise((): string => "other");
+        \\}
+        \\function presence(value: unknown): string {
+        \\  return match(value).with({ value: P.present }, (): string => "present").otherwise((): string => "absent");
+        \\}
+        \\function pair(value: unknown): string {
+        \\  return match(value).with([P.any, P.any], (): string => "pair").otherwise((): string => "other");
+        \\}
+        \\function fail(): string {
+        \\  assert(false);
+        \\  return "failed";
+        \\}
+        \\function selected(value: string): string {
+        \\  return match(value).with("GET", (): string => "selected").otherwise((): string => fail());
+        \\}
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  const empty = dictEmpty();
+        \\  const bytes = requestBody(req);
+        \\  const kinds = [kind(true), kind(3), kind("x"), kind([1]), kind(empty), kind(bytes), kind(undefined), kind(null)].join(",");
+        \\  const fields = [presence({ value: null }), presence({ value: undefined }), presence({})].join(",");
+        \\  const arrays = [pair([1, 2]), pair([1]), pair([1, 2, 3])].join(",");
+        \\  return Response.text([kinds, fields, arrays, selected(req.method)].join("|"));
+        \\}
+    ;
+    var pool = try HandlerPool.init(allocator, .{}, source, "<server-test>", 1, 0);
+    defer pool.deinit();
+    var req = try getRequest(allocator, "/");
+    defer req.deinit(allocator);
+    var resp = try pool.executeHandler(req.asView());
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expectEqualStrings(
+        "boolean,number,string,array,Dict,Bytes,other,other|present,absent,absent|pair,other,other|selected",
+        resp.body,
+    );
+}
+
 test "a closure that escapes a block keeps its binding, not a reused slot" {
     // A closed block gave its slots to later bindings even when a closure
     // still held an open upvalue on one, so the closure read the later value.
