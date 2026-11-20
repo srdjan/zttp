@@ -10,7 +10,7 @@ import { schemaCompile, validateJson } from "zttp:validate";
 
 schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
 
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"

@@ -29,7 +29,7 @@ function digest(s: string): string {
 // purpose: a handler that declares nothing must prove the entire default
 // profile, and this one holds neither `pure` (it calls a virtual module) nor
 // `fault_covered` (it has no failable I/O site to cover).
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"

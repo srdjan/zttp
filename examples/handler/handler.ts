@@ -4,19 +4,19 @@
 // type and discharges against the inferred
 // HandlerProperties. The compiler emits ZTS500 if a declared spec does not hold.
 
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "injection_safe"
     | "state_isolated"
     | "retry_safe"
     | "no_secret_leakage"
 >;
 
-structural RequestData = {
+type RequestData = {
     name: string;
     count: number;
 };
 
-structural ResponseData = {
+type ResponseData = {
     message: string;
     timestamp: number;
 };

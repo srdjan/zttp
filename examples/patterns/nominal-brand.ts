@@ -1,28 +1,30 @@
 // Nominal brands: a scalar identity the checker enforces and the runtime does
 // not pay for.
 //
-// `nominal` mints a type that is structurally its base and incompatible with
-// every other type, including another brand over the same base. Two functions
-// taking `string` are one fact to a caller; two taking `UserId` and `OrderRef`
-// are two.
+// `Nominal<Base, Identity>` adds a unique scalar identity that the runtime
+// erases. Each `unique symbol` keeps its brand separate from every other brand.
+// Two brands over the same base remain incompatible.
 //
-// Construction is the annotated declaration, and only that:
+// Create a branded value only with the recognized `nominal<T>(value)` helper:
 //
-//     const id: UserId = "u-1";        // brands
-//     const id = UserId("u-1");        // refused, ZTS214
+//     const id: UserId = nominal<UserId>("u-1"); // brands
+//     const id: UserId = "u-1";                    // refused
 //
-// The call form is not a constructor. It used to check clean and then fault at
-// runtime with NotCallable, because nothing lowered it. Branding at the
-// declaration keeps one visible site where a raw value becomes a branded one,
-// and keeps a raw value from being accepted anywhere a brand is declared -
-// `takesUserId("u-1")` stays refused.
+// The helper checks the base value and preserves the value at runtime. A raw
+// value cannot be passed where a brand is required.
 //
 // The brand is erased at comptime. Below the checker a `UserId` is a `string`,
 // which is what `typeof` reports in the response.
 
-nominal UserId = string;
-nominal OrderRef = string;
-nominal Port = number;
+import { nominal } from "zttp:core";
+import type { Nominal } from "zttp:core";
+
+declare const userIdBrand: unique symbol;
+type UserId = Nominal<string, typeof userIdBrand>;
+declare const orderRefBrand: unique symbol;
+type OrderRef = Nominal<string, typeof orderRefBrand>;
+declare const portBrand: unique symbol;
+type Port = Nominal<number, typeof portBrand>;
 
 function describeUser(id: UserId): string {
   return ["user:", id].join("");
@@ -43,7 +45,7 @@ function isRuntimeString(value: unknown): boolean {
   return typeof value === "string";
 }
 
-structural Branded<T> = Proof<T,
+type Branded<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -63,9 +65,9 @@ structural Branded<T> = Proof<T,
 >;
 
 function handler(req: Request): Branded<Response> {
-  const id: UserId = "u-1";
-  const ref: OrderRef = "o-9";
-  const port: Port = 8080;
+  const id: UserId = nominal<UserId>("u-1");
+  const ref: OrderRef = nominal<OrderRef>("o-9");
+  const port: Port = nominal<Port>(8080);
 
   return Response.json({
     user: describeUser(id),

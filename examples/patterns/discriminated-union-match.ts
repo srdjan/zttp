@@ -6,13 +6,14 @@
 // covered member by member needs no `default`, and the spec forbids one
 // there. No `assertNever(x: never)` helper is needed to get that guarantee.
 //
-// An arm reads a field by binding it in the pattern (`text` below), not by
-// reading it back off the scrutinee.
+// An arm callback receives the selected value. The callback binds
+// `text` before it evaluates the arm result.
 
+import { match } from "zttp:core";
 
-structural Command = { kind: "echo"; text: string } | { kind: "ping"; text: string };
+type Command = { kind: "echo"; text: string } | { kind: "ping"; text: string };
 
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -24,10 +25,13 @@ structural Guardrails<T> = Proof<T,
 >;
 
 function run(cmd: Command): string {
-  return match (cmd) {
-    when { kind: "echo", text }: text
-    when { kind: "ping" }: "pong"
-  };
+  return match(cmd)
+    .with({ kind: "echo" }, (selected) => {
+      const text = selected.text;
+      return text;
+    })
+    .with({ kind: "ping" }, () => "pong")
+    .exhaustive();
 }
 
 function handler(req: Request): Guardrails<Response> {

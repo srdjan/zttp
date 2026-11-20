@@ -26,11 +26,12 @@
 // on: the module's public surface owes its callers a ceiling whether or not
 // this handler is one of them.
 
+import { match, P } from "zttp:core";
 import { env } from "zttp:env";
 import { bytesLength, decodeUtf8, encodeUtf8 } from "zttp:bytes";
 import { parseJsonBytes } from "zttp:json";
 
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "read_only"
     | "retry_safe"
     | "state_isolated"
@@ -48,15 +49,14 @@ structural Guardrails<T> = Proof<T,
 // The six type tests, one arm each. `Bytes` is among them, which is what makes
 // an octet value dispatchable rather than opaque.
 function kindOf(value: unknown): string {
-  return match (value) {
-    when boolean: "boolean"
-    when number: "number"
-    when string: "string"
-    when array: "array"
-    when Dict: "dict"
-    when Bytes: "bytes"
-    default: "other"
-  };
+  return match(value)
+    .with(P.boolean, () => "boolean")
+    .with(P.number, () => "number")
+    .with(P.string, () => "string")
+    .with(P.array, () => "array")
+    .with(P.Dict, () => "dict")
+    .with(P.Bytes, () => "bytes")
+    .otherwise(() => "other");
 }
 
 // Absence is explicit: the parameter type names it, and the body resolves it.

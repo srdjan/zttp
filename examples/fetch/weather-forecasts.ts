@@ -10,7 +10,7 @@
 
 import { fetch } from "zttp:fetch";
 
-structural WeatherProof<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
+type WeatherProof<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
 
 function handler(req: Request): WeatherProof<Response> {
   if (req.method !== "GET") {

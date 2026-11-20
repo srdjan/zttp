@@ -19,7 +19,7 @@
 
 import { fetch } from "zttp:fetch";
 
-structural WebhookProof<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
+type WebhookProof<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
 
 function handler(req: Request): WebhookProof<Response> {
   if (req.path !== "/charge") {

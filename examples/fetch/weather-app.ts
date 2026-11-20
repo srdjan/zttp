@@ -21,7 +21,7 @@
 
 import { fetch } from "zttp:fetch";
 
-structural WeatherProof<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
+type WeatherProof<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
 
 // The frontend UI. A static page: the form posts nothing - its submit handler
 // fetches /forecast and renders the result. (Browser-side script only; the

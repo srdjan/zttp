@@ -28,8 +28,8 @@ function rangeProbe() {
   return Response.json({ seen: seen, total: total });
 }
 
-structural UserEntry = { profile: { name: string } | undefined };
-structural Users = { active: UserEntry; empty: UserEntry; absent: UserEntry | undefined };
+type UserEntry = { profile: { name: string } | undefined };
+type Users = { active: UserEntry; empty: UserEntry; absent: UserEntry | undefined };
 
 function optionalProbe() {
   const users: Users = {

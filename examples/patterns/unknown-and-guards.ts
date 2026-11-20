@@ -7,7 +7,7 @@
 // and 8 (narrowing an unknown value before use).
 
 
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"

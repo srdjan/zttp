@@ -18,7 +18,7 @@
 import { parseJson, stringifyJson } from "zttp:json";
 import { dictGet, dictEntries } from "zttp:collections";
 
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"

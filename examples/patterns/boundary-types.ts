@@ -2,10 +2,15 @@
 // a module, while public parameters and returns use a declared type, a fixed
 // application ABI type, or a closed literal union.
 
-nominal UserId = string;
-nominal FeatureEnabled = boolean;
+import { nominal } from "zttp:core";
+import type { Nominal } from "zttp:core";
 
-structural PureBoundary<T> = Proof<T,
+declare const userIdBrand: unique symbol;
+type UserId = Nominal<string, typeof userIdBrand>;
+declare const featureEnabledBrand: unique symbol;
+type FeatureEnabled = Nominal<boolean, typeof featureEnabledBrand>;
+
+type PureBoundary<T> = Proof<T,
     | "total"
     | "pure"
     | "read_only"
@@ -32,7 +37,7 @@ export function sameMethod(method: "GET" | "POST"): PureBoundary<"GET" | "POST">
   return method;
 }
 
-structural BoundaryProof<T> = Proof<T,
+type BoundaryProof<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -52,8 +57,8 @@ structural BoundaryProof<T> = Proof<T,
 >;
 
 export function handler(req: Request): BoundaryProof<Response> {
-  const id: UserId = "u-1";
-  const enabled: FeatureEnabled = true;
+  const id: UserId = nominal<UserId>("u-1");
+  const enabled: FeatureEnabled = nominal<FeatureEnabled>(true);
   const ids: readonly UserId[] = [id];
   const method: "GET" | "POST" = "GET";
   sameRequest(req);

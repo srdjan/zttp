@@ -20,7 +20,7 @@ import { sql, sqlExec, sqlMany } from "zttp:sql";
 // held. Nothing here is known to leak - the honest report is that a handler
 // returning rows out of a database cannot prove the database holds no secret,
 // and it never could.
-structural CrudGuarantees<T> = Proof<T,
+type CrudGuarantees<T> = Proof<T,
     | "state_isolated"
     | "fault_covered"
     | "result_safe"

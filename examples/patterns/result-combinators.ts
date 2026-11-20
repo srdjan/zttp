@@ -26,7 +26,7 @@ import {
   unwrapOr,
 } from "zttp:result";
 
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"

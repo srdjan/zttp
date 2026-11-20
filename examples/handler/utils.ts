@@ -2,10 +2,10 @@
 
 import { stringifyJson } from "zttp:json";
 
-export structural GreetingName = string;
-export structural GreetingText = string;
-export structural JsonData = { greeting: GreetingText; status: string };
-export structural JsonText = string;
+export type GreetingName = string;
+export type GreetingText = string;
+export type JsonData = { greeting: GreetingText; status: string };
+export type JsonText = string;
 
 export function greet(name: GreetingName): GreetingText {
   return ["Hello, ", name, "!"].join("");

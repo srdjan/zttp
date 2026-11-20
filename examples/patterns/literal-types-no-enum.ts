@@ -7,10 +7,10 @@
 // pattern, here any path under `/api/`.
 
 
-structural Method = "GET" | "POST" | "DELETE";
-structural ApiRoute = `/api/${string}`;
+type Method = "GET" | "POST" | "DELETE";
+type ApiRoute = `/api/${string}`;
 
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"

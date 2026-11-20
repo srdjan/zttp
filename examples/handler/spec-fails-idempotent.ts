@@ -4,7 +4,7 @@
 // with the per-property suggestion attached to the failure.
 
 
-structural Guardrails<T> = Proof<T, "idempotent" | "deterministic">;
+type Guardrails<T> = Proof<T, "idempotent" | "deterministic">;
 
 function handler(req: Request): Guardrails<Response> {
   return Response.json({ now: Date.now() });

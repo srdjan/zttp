@@ -8,9 +8,9 @@
 // alias is the single source of truth and the value is checked against it.
 
 
-structural Config = { port: number; host: string; readonly version: string };
+type Config = { port: number; host: string; readonly version: string };
 
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"

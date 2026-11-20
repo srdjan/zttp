@@ -20,15 +20,16 @@
 // helper yet, so a handler that declares a `Spec` cannot call one. The
 // recursive fold is pinned as a type-checker test instead.
 
+import { match, P } from "zttp:core";
 
-structural JsonValue =
+type JsonValue =
     | null
     | boolean
     | number
     | string
     | readonly JsonValue[];
 
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -40,13 +41,13 @@ structural Guardrails<T> = Proof<T,
 >;
 
 function kindOf(value: JsonValue): string {
-  return match (value) {
-    when null: "null"
-    when boolean: "boolean"
-    when number: "number"
-    when string: "string"
-    when array: "array"
-  };
+  return match(value)
+    .with(null, () => "null")
+    .with(P.boolean, () => "boolean")
+    .with(P.number, () => "number")
+    .with(P.string, () => "string")
+    .with(P.array, () => "array")
+    .exhaustive();
 }
 
 function handler(req: Request): Guardrails<Response> {

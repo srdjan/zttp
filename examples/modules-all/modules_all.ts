@@ -8,7 +8,7 @@ import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
 import { sha256 } from "zttp:crypto";
 import { stringifyJson } from "zttp:json";
 
-structural RequestBody = {
+type RequestBody = {
     name: string;
     age: number;
 };

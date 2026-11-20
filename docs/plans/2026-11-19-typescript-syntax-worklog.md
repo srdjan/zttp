@@ -41,8 +41,10 @@ Five independent simplification reviews complete. The test reviewer finds no def
 The unfiltered owning checks pass 6,043 tests and skip one test.
 The proof gate passes after the required `exhaustive` directive is restored.
 This closes the normalizer phase. It does not close executable source migration or admission cutover.
-Three Sol workers migrate examples, parser and checker corpus files, and tool fixtures.
-The main agent owns integration review, remaining embedded source cohorts, admission cutover, and local commits.
+The normalizer phase is committed as `2f30ccc8`.
+The main agent repeats all 61 example checks and both smoke steps after reviewing all 26 migrated files.
+Tool fixtures retain their analyzer output. Corpus migration and the remaining embedded source cohorts continue.
+The main agent owns integration review, admission cutover, and local commits.
 
 Remaining implementation follows U6 and U7 (align authoring surfaces and website claims), in that order.
 U8 (close evidence for the migrated profile) then requires the owner recording before the main agent publishes fresh evidence.
@@ -763,3 +765,8 @@ The route example loses its legacy ZTS626 advisory while its proof properties re
 Seventeen normalization checks report whole-file formatting differences. These results do not establish canonical layout for every example.
 The smoke flows supply runtime evidence. They do not establish runtime parity for every example.
 The remaining Pi and runtime source fixtures have a separate bounded migration owner.
+
+The main verification repeats all 61 example checks and both CLI smoke flows successfully.
+The logs are `/tmp/zttp-syntax-u6-examples-main.log` and `/tmp/zttp-syntax-u6-smokes-main.log`.
+The main agent also reviews the corrected teaching comments and the SQL example diff.
+This closes the active example cohort. Whole-file formatting remains outside that cohort.

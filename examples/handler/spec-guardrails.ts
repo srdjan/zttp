@@ -11,7 +11,7 @@
 // member of the active spec set holds.
 
 
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "idempotent"
     | "deterministic"
     | "no_secret_leakage"
