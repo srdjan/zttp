@@ -116,7 +116,7 @@ pub fn testRepairJson(
 pub const let_handler =
     \\
     \\
-    \\structural Guardrails<T> = Proof<T, "state_isolated">;
+    \\type Guardrails<T> = Proof<T, "state_isolated">;
     \\
     \\export function handler(req: Request): Guardrails<Response> {
     \\    let name = "world";

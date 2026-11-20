@@ -27,12 +27,24 @@ Its owning behavior checks pass. The aggregate remains held on empirical replay 
 
 U4 (lower imported invariant assertions) is committed as `079e845e` after its owning checks pass.
 The main agent owns the specification, verification, this log, and local commits.
-U5 (lower complete fluent match chains) passes its owning suites after main review and integration repairs.
-The aggregate remains held on empirical replay and policy drift. The main agent now owns its local commit.
-U6 (complete normalization and source cutover) has a prepared validator design and an ignored fixture inventory.
-Its implementation waits for the match commit because both units own parser and lowering files.
+U5 (lower complete fluent match chains) is committed as `cf6b07ba` after its owning suites pass.
+The aggregate remains held on empirical replay and policy drift.
+U6 (complete normalization and source cutover) remains in its first phase. Legacy admission stays enabled.
+The normalizer now validates parser records, typed nominal evidence, and resolved candidate bindings independently.
+Public runtime comparisons preserve missing bindings, wildcard behavior, and field snapshots. Second normalization passes are unchanged.
+Independent reviews find no remaining confirmed migration-law defect.
+The main agent fixes numeric equivalence and generic constraint precision after public failing tests.
+The frozen integration run reports 11,791 passed, seven skipped, and 46 failed tests.
+Integration repairs cover parser publication, stale checkpoints, recovery triggers, stand-in drafts, formatting, and SQL propagation.
+The main allocation sweep passes all 142 selected tests after the parser repair.
+Five independent simplification reviews complete. The test reviewer finds no defect.
+The unfiltered owning checks pass 6,043 tests and skip one test.
+The proof gate passes after the required `exhaustive` directive is restored.
+This closes the normalizer phase. It does not close executable source migration or admission cutover.
+Three Sol workers migrate examples, parser and checker corpus files, and tool fixtures.
+The main agent owns integration review, remaining embedded source cohorts, admission cutover, and local commits.
 
-Remaining implementation follows U5, U6, and U7 (align authoring surfaces and website claims), in that order.
+Remaining implementation follows U6 and U7 (align authoring surfaces and website claims), in that order.
 U8 (close evidence for the migrated profile) then requires the owner recording before the main agent publishes fresh evidence.
 The baseline inventory covers packages, examples, corpus files, shell fixtures, documentation, and embedded skills.
 
@@ -468,3 +480,286 @@ The bytecode gate matches 62 inputs, including 58 successfully digested inputs.
 Formatting, diff, proof-swallow, layering, module-boundary, documentation, and spine checks pass.
 These results do not establish a passing aggregate or a completed migration.
 Normalization, source cutover, authoring updates, performance measurement, boundary mutations, and the owner recording remain.
+
+## Normalization execution
+
+The main agent commits the match unit as `cf6b07ba` on 2026-11-20.
+The normalization worker receives an eighteen-turn execution budget for migration and its four specific M4 validators.
+Its ownership covers the canonicalizer, repair intents and validators, retained parser records, source frontend, and necessary diagnostic integration.
+The main agent owns the worklog, metadata cutover, integration review, unfiltered checks, and local commits.
+The first phase keeps legacy admission enabled. No executable source can bypass ordinary admission.
+After normalization passes, separate workers migrate the executable fixtures and embedded source.
+The final phase refuses legacy syntax and removes implicit legacy construction.
+
+The authoring inventory is complete under `demos/typescript-syntax-u7/authoring-inventory.md`.
+It separates active documentation and discovery output from historical plans, receipts, solutions, and recordings.
+No authoring file changes during this preparation.
+The main agent traces two advisory rules that cannot survive cutover.
+Final patterns contain no identifier bindings, so ZTS625 has no producer.
+Every final arm body is an arrow, and the ZTS626 search stops at arrow scopes.
+The cutover therefore retires both rules instead of advertising unreachable diagnostics or adding replacement style rules.
+
+The first normalization unit reaches its eighteen-turn budget and stops.
+Its candidate builder covers the requested forms, but its proposed validators accept caller booleans and compare a replacement with itself.
+The normalizer passes literal `true` facts. The actual M4 dispatch still returns `no_validator` for all four new rows.
+The main agent rejects those validators and the census bypass that counts their names as implementations.
+The worker removes those helpers, restores the honest seven-row census, and leaves all four new rows planned.
+Automatic migration stays disabled. No rejected validator code is committed.
+
+The next bounded unit owns `legacy_migration.zig` in the compiler tier and narrow context integration through existing validation calls.
+The tools package cannot provide a builder to the compiler without reversing the dependency direction.
+The new module therefore supplies one location for source facts and four specific law checks.
+The validator must independently constrain every changed span, preserve body bytes and snapshot paths, and check final resolved core bindings.
+Compiler-produced nominal evidence must identify the exact scalar, brand, annotation, initializer, and source bytes.
+Original legacy records must remain usable after refusal, without an admitted executable root.
+Every present law in a mixed batch must pass before the dispatch returns `equivalent`.
+An implemented law with missing context returns an explicit undecided result. It does not claim that no validator exists.
+
+## Match and identity follow-up
+
+The earlier readonly probe covers an explicit parameter annotation only.
+A new public CLI probe confirms that an inferred array-pattern callback loses the source readonly flag and permits a write.
+The added CHECK regression fails before repair with zero diagnostics instead of one ZTS215.
+The refinement now uses the existing readonly tuple constructor when the source array or tuple is readonly.
+The selected regression covers arrays, tuples, and nested array fields. It passes with three tests in the selection.
+Unfiltered integration remains pending while the normalizer changes shared source.
+The isolated readonly patch is `/tmp/zttp-syntax-readonly-followup.patch`.
+
+The first eager-execution mutation also bypasses pattern selection and returns the last result.
+The main agent rejects that result as evidence for eager execution alone.
+The corrected mutation invokes all callbacks, drops every extra result, and then uses the unchanged selection path.
+The existing census still passes, so it does not establish that unselected callbacks stay unexecuted.
+A new public probe changes a request header inside the unselected callback.
+The baseline returns status 200 and `selected|clean`; the correct mutant returns `selected|dirty` while selection still returns `selected`.
+The corresponding server regression is added. Its selected execution passes; unfiltered integration remains pending.
+The isolated coverage patch is `/tmp/zttp-syntax-eager-followup.patch`.
+
+The final-grammar brand probe also exposes a linker refusal for equal local unique-symbol names in two runtime modules.
+Both CHECK controls reproduce ZTS063 before repair. One must succeed; the cross-brand assignment must report only ZTS200.
+The graph worker excludes only parser-recorded type-only brands from the runtime name census.
+The parser records only top-level brand declarations. Ordinary runtime bindings still enter the existing checks.
+The CHECK and real HandlerPool controls pass after repair, with response body `local|foreign`.
+The existing binding controls pass 25 selected tests. The worker also reports 366 passing and two skipped unfiltered server tests.
+The unfiltered analyzer run does not compile during concurrent normalization edits and supplies no verdict.
+
+## Boundary mutation evidence
+
+The mutation clone stays on local `main` at `cf6b07ba`; primary source and Git state remain separate.
+Its ledger is `demos/typescript-syntax-mutants/repo/demos/mutant-probes/EVIDENCE.md`.
+The main agent reviews each patch and starts independent baseline and mutant checks.
+The baseline nominal probe reports one ZTS200. Merging origin identities removes that refusal and returns no diagnostics.
+The baseline flow probe reports ZTS400 and ZTS500, with `no_secret_leakage=false`.
+Dropping the callback argument labels removes both diagnostics and changes that property to true.
+Both mutant builds exit zero in the main agent's repetition.
+The main agent will repeat the corrected eager probe and restore the isolated source before closing this unit.
+The SDK authority mutants remain recorded in the metadata unit. The vacuous restriction-census mutant waits for the final cutover.
+
+The ternary preparation confirms one implemented M3 row: `replace_chained_ternary_with_match`.
+The effectful ternary and leading-spread rows remain planned and must stay planned.
+The fluent repaired side needs ordinary full-source admission and production lowering before the kernel can compare its selected expression.
+Raw calls, same-spelled foreign bindings, unsupported callbacks, and missing context cannot establish equivalence.
+The adaptation is separate work in the canonicalizer, validator, and existing kernel. It adds no new validator method.
+
+## Normalization review repair
+
+The independent reviewer finishes six public probes against a newly built CLI.
+The main agent repeats all six outcomes.
+Nested matches abort with ZTS000 because edits overlap.
+Multiline initializers and multiple same-line statements remain legacy while the command reports `fullyCanonical=true`.
+A multiline relative import bypasses the dependency-first check.
+A single-quoted core alias is ignored. A local collision then causes silent unchanged output.
+A brand name inside a string causes the same false collision.
+The validator receives a fresh parsed store and checks only whether intrinsic validation is required.
+It does not retain completed intrinsic validation or exact nominal facts.
+The repair must use parser binding and import records, retained initializer spans, and final lowered authority.
+The repair must also compose nested edits and preserve record-binding semantics.
+The complete review and probes live under `demos/typescript-syntax-u6/m4-review/`.
+
+The main agent repeats all three accepted boundary mutations against the frozen match commit.
+Nominal-origin merging admits the refused assignment. Dropped callback labels admit the secret response.
+Eager callbacks change `selected|clean` to `selected|dirty` while the selected return value stays unchanged.
+The isolated clone is restored and its final build exits zero. Its tracked tree is clean.
+These mutations cover that frozen commit. Final-source baseline checks remain necessary after cutover.
+
+The main agent starts unfiltered analyzer, precompile, server, runtime, proof-swallow, and spine checks for the follow-up repairs.
+The proof-swallow script refuses the new normalization diagnostic helper because its catch block discards an error.
+The normalization worker owns that repair. The complete behavior verdict is still pending.
+
+The complete run exits one with 3900 passing tests and three skipped tests.
+Its only failed step is the proof-swallow script for the normalization helper.
+The main agent isolates the behavior verdict with the same unfiltered steps and the spine check, excluding that script.
+That confirmation exits zero. Its log is `/tmp/zttp-syntax-followup-owning-confirm.log`.
+The first run is `/tmp/zttp-syntax-followup-owning.log`.
+The readonly repair is committed as `7086ec22`.
+The module-local brand repair is committed as `09db52d2`.
+The observable callback coverage is committed as `71c1812a`.
+The normalizer remains uncommitted. No complete aggregate verdict is claimed.
+
+The existing benchmark harness runs the standard-syntax case with 100 iterations and one warmup.
+The command exits zero. `/tmp/zttp-syntax-bench-preflight.log` records the pipeline check.
+This concurrent run supplies no comparative performance claim.
+The legacy and standard benchmark inputs live under ignored `demos/typescript-syntax-study/`.
+An archive of baseline compiler `8b154522` is ready there for later measurement without changing Git history.
+
+The cutover preparation is complete under `demos/typescript-syntax-u6/cutover-prep.md`.
+Its source trace identifies final refusal selection after `parseProgram`, which preserves all parser repair records.
+The main agent accepts that seam and the retirement trace for ZTS625 and ZTS626.
+The note proposes regenerating policy and empirical artifacts during cutover. That proposal is rejected.
+The accepted recording order still holds `policy-hash.txt`, empirical recordings, convergence, and coverage until the owner recording.
+Current-output discovery artifacts can change with checked source behavior. They do not replace the empirical baseline.
+
+The twenty-four-turn repair unit stops with a compiling producer and retained evidence.
+It adds initializer spans, structured match records, nominal origin evidence, and callback-local production analysis observers.
+The producer now uses parsed imports and scopes. It composes nested match edits and uses structured patterns.
+The compiler build and proof-swallow gate exit zero. The public multiline regression remains red because validation still refuses the candidate.
+The saved logs use `/tmp/zttp-syntax-u6-m4-` as their prefix.
+No normalization completion or commit is claimed.
+A fresh twenty-four-turn unit owns the independent validator, live candidate authority, refusal diagnostics, and green public regressions.
+Its files remain the normalizer, legacy migration validator, and narrow existing integration surfaces.
+
+The restriction baseline passes at the frozen match commit with 220 rows and 793 probes.
+Replacing the production refusal table with an empty table makes the unfiltered gate exit one with 304 failures.
+That mutation leaves the gate's unit tests passing and is killed by its real production census.
+The isolated clone is restored. The final restored gate exits zero with its original counts.
+The patch and logs live beside the other mutations under `demos/mutant-probes/` in the ignored clone.
+
+The observer review confirms one additional integration defect.
+CHECK starts its file graph only when the entry declares a handler.
+A library that imports a nominal type therefore reports ZTS200 without the initializer repair intent.
+The main agent repeats that public CHECK result.
+The existing compiler, graph validator, and contract extractor already support entries without handlers.
+The repair will widen the existing file-import route and check both library and handler controls.
+The reviewer finds no additional lifetime, allocation, rollback, or declaration-identity defect in the reviewed seams.
+The ignored probes live under `demos/typescript-syntax-u6/observer-review/`.
+
+The producer review identifies an imported-alias spelling defect.
+Type transport retains the exported nominal name, but source can import that type under another name.
+The wrapper must use the retained annotation spelling, with the resolved nominal identity as evidence.
+The validator worker also owns that correction.
+The main agent requires each generated intrinsic callee to retain resolved core authority, including when a local binding shadows an imported alias.
+
+The pure-expression comparison proceeds as an independent ten-turn unit in `packages/zts/src/kernel_identity.zig`.
+It will accept retained lowered IR for the fluent repaired expression and compare only the existing bounded pure kernel.
+It will support two selected callbacks with no parameters and one expression return each.
+The caller will own complete source admission and resolved binding authority.
+Public kernel checks must accept the exact conditional and refuse swapped bodies, wrong conditions, blocks, calls, and raw unlowered chains.
+The normalizer builder and public validator integration wait for the migration validator handback because those files share ownership.
+
+Three pre-cutover public runtime controls pass through `zttp test`.
+The absent-field binding control returns `undefined|undefined|given`.
+The wildcard control returns `absent|absent|present|present`, including its explicit null case.
+The snapshot control returns `old||old` after the body mutates the matched object.
+The binary SHA-256 is `4e4163fccd829112bccb8c0862b2cc36fc182a3e6631b345fca5b072820e629e`.
+The controls and logs live under `demos/typescript-syntax-u6/runtime-parity/` and `demos/typescript-syntax-u6/snapshot-study/`.
+The main agent will repeat those exact expectations on actual normalizer output before cutover.
+
+The kernel worker adds a partial test that temporarily blocks the shared compiler build.
+The main agent redirects the worker to preserve its draft and finish in the authorized ignored source archive.
+The primary kernel must stay compiling until that coherent change returns.
+
+The kernel foundation returns with a coherent primary file.
+The main agent reviews every changed line and repeats the focused kernel check, which passes 25 tests.
+The semantic red reports `unsupported` instead of `identical` before callback encoding is enabled.
+The logs are `/tmp/zttp-syntax-u6-m3-kernel-red.log` and `/tmp/zttp-syntax-u6-m3-kernel-main.log`.
+An eighteen-turn integration unit now owns only the ternary builder, source-aware span validation, and their callers.
+The four migration laws remain separate from that integration.
+
+The main agent repeats the reviewed migration probes through the newly built CLI.
+Nested matches, multiline initializers, same-line initializers, quoted aliases, and false brand collisions now migrate.
+An importer with a legacy dependency stays unchanged and reports ZTS001 with `fullyCanonical=false`.
+The final migration review is read-only and has an eight-turn budget.
+
+Actual normalizer output passes the wildcard runtime control and the snapshot runtime control.
+Both outputs also pass a second normalization check without changes.
+The binding-only unknown control still refuses migration.
+Its equivalent standard source reports ZTS201 when the callback creates a local snapshot from an unspecified field.
+The earlier direct `String(selected.text)` probe did not establish this snapshot case.
+That earlier conclusion about complete support for unspecified fields was too broad.
+The unknown-record worker owns a twenty-turn correction unit in record refinement, type metadata, identity, transport, and public CHECK tests.
+The accepted design marks only records inferred from unknown patterns as carrying unknown fields.
+Closed records and explicit callback annotations must retain their existing field checks.
+The type-key encoding must distinguish marked and closed records. The recording and policy pins remain held.
+
+The independent migration review reports no additional confirmed defect.
+Its public shadowed-pattern-alias probe leaves the complete source unchanged with ZTS001.
+The review excludes the open record correction, ternary integration, runtime parity, and full gates.
+
+The ternary integration exposes a numeric representation mismatch in the new kernel entry.
+The nonexecuting expression parser stores numeric literals as f64. Ordinary admission first uses an exact i32 when it can.
+The old kernel hashes those representations differently, so an equivalent numeric repair returns `differs`.
+The main agent adds a numeric regression. It fails with `differs` instead of `identical` before repair.
+A public runtime control confirms identical string conversion, division, and overflow observations for both literal forms.
+The kernel now encodes exact i32 values through the existing f64 number representation.
+All 26 focused kernel tests pass after repair. A changed-number control remains distinct.
+The saved logs use `/tmp/zttp-syntax-u6-m3-numeric-` as their prefix.
+
+The unknown-record review confirms loss of a known field in a generic constraint.
+A new public CHECK case fails before repair because the inferred field becomes `unknown` instead of the declared `string`.
+The field collector now reads the active function signatures and follows each declared constraint through the existing bounded walk.
+All five focused unknown-record checks pass afterward, including the new constrained case.
+The logs are `/tmp/zttp-syntax-u6-unknown-constraint-red.log` and `/tmp/zttp-syntax-u6-unknown-constraint-green.log`.
+
+The structural gates expose a direct internal diagnostic type and an unlisted allocation handler.
+The tools observer now uses the curated `TypeDiagnostic` alias.
+The allowlist names the field collector because allocation failure poisons the checker and `ensureHealthy` refuses its result.
+The unfiltered layering, module-boundary, proof-swallow, and spine gates exit zero afterward.
+Their log is `/tmp/zttp-syntax-u6-structural-main-green.log`.
+
+All three actual normalized runtime controls pass. All three second normalization checks exit zero without another rewrite.
+The main agent starts the complete unfiltered unit graph for phase-one integration with recording credentials disabled.
+The log is `/tmp/zttp-syntax-u6-phase-one-unfiltered.log`; the run exits one.
+It reports 11,791 passed, seven skipped, and 46 failed tests across repeated test roots.
+The standalone Debug build exits zero at `/tmp/zttp-syntax-u6-phase-one-build.log`.
+Source stayed frozen for that run. Simplification starts with read-only review.
+
+The integration review confirms missing SQL schema propagation inside the migration checks.
+A public normalizer regression fails with `MissingSqlSchema` before repair.
+Both internal checks now receive the supplied schema. The regression and SQLite approval-card check pass afterward.
+The logs use `/tmp/zttp-syntax-u6-schema-` and `/tmp/zttp-syntax-u6-repl-sql-green.log`.
+
+The printer now treats `.with` as a property call. Its focused reproducer passes after repair.
+Long fluent chains retain the existing line-width rules. Two canonical-source expectations now include the measured line breaks.
+The public metadata expectation now names type serialization version three.
+The fixed-point fixture now uses a standard alias and retains its single `let` repair pass.
+
+The corrected type-import scanner admits valid block comments with semicolons.
+The CHECK recovery worker replaces obsolete valid-import triggers with malformed imports at the same recovery frontier.
+All existing nested batch, stage, diagnostic, and location assertions remain.
+The three focused CHECK tests and their format check pass. Main review accepts each changed line.
+These development checks do not establish a passing unfiltered suite.
+
+The parser worker identifies an actual allocation rollback defect in new initializer-record publication.
+The worker restores the defect temporarily after correcting stale checkpoints. The admission allocation test fails before repair.
+The main agent reviews the publication repair and every checkpoint change.
+The main allocation sweep then passes all 142 selected tests at `/tmp/zttp-syntax-u6-parser-allocation-main.log`.
+The unfiltered analyzer run remains required.
+The worker accidentally stops a concurrent stand-in compile. Its interrupted result cannot establish a verdict.
+The stand-in worker receives the interruption report and repeats the affected check.
+
+Active stand-in drafts now use final syntax. Route generation and all retry arms pass their current checks.
+ZTS625 and ZTS626 remain planned retirements at admission cutover. Their legacy seed rows still block the complete seed census.
+Generated range identity and documentation will refresh from their existing emitter after those rows retire.
+No empirical recording, policy pin, convergence artifact, or coverage artifact changes.
+
+The main agent assigns the 26 active examples to one bounded migration worker.
+A second worker owns the 60 check-corpus rows and eight parser-corpus rows.
+Each worker preserves the fixture purpose and leaves the two retiring advisory cases for admission cutover.
+The five simplification reviews complete independently. The test review finds no defect and preserves every proof test.
+The main agent applies one reuse group and five quality groups after all outcomes arrive.
+The main agent skips the duplicate record fields, two interface regroupings, and an unmeasured lazy cache.
+The frozen unfiltered verification starts at `/tmp/zttp-syntax-u6-phase-one-reviewed-unfiltered.log`.
+Its proof gate rejects removal of an `exhaustive` directive. The comment review misclassifies that directive as ordinary prose.
+The main agent restores the directive after the frozen run. The proof gate and spine check then pass.
+The other comment deletion remains. No proof test changes during simplification.
+
+The reviewed unfiltered run passes `test-canonicalize`, `test-agent-protocol`, `test-zts`, and `test-precompile`.
+It also passes module-boundary, layering, and spine checks.
+Its only failed step is the removed directive. The corrected rerun passes `test-proof-swallow` and `check-spine`.
+The logs are `/tmp/zttp-syntax-u6-phase-one-reviewed-unfiltered.log` and `/tmp/zttp-syntax-u6-reviewed-proof-green.log`.
+
+The example worker migrates all 26 owned files. The main agent reviews each changed code line.
+All 61 example checks and both CLI smoke steps pass. All 26 public CHECK exit statuses remain the same.
+The route example loses its legacy ZTS626 advisory while its proof properties remain the same.
+Seventeen normalization checks report whole-file formatting differences. These results do not establish canonical layout for every example.
+The smoke flows supply runtime evidence. They do not establish runtime parity for every example.
+The remaining Pi and runtime source fixtures have a separate bounded migration owner.

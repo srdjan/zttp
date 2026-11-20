@@ -360,6 +360,7 @@ pub const TypeEnv = type_env.TypeEnv;
 pub const ExportedSignatures = compiler.import_signatures.ExportedSignatures;
 pub const FileImportSignatures = compiler.import_signatures.FileImportSignatures;
 pub const TypeChecker = type_checker.TypeChecker;
+pub const TypeDiagnostic = type_checker.Diagnostic;
 pub const StrictChecker = strict_checker.StrictChecker;
 pub const EffectAnalyzer = effect_inference.Analyzer;
 pub const EffectRow = effect_inference.EffectRow;
@@ -886,6 +887,10 @@ pub const RepairIntent = repair_intent.RepairIntent;
 pub const RepairPolicy = struct {
     pub const Validator = repair_validator.Row;
     pub const Discharge = repair_validator.Discharge;
+    pub const MigrationSourceInput = repair_validator.MigrationSourceInput;
+    pub const MigrationTypedDiagnosticEvidence = repair_validator.MigrationTypedDiagnosticEvidence;
+    pub const CandidateAuthority = repair_validator.CandidateAuthority;
+    pub const migrationSourceDigest = repair_validator.migrationSourceDigest;
 
     pub fn validators() []const Validator {
         return &repair_validator.rows;
@@ -911,6 +916,16 @@ pub const RepairPolicy = struct {
         return repair_validator.validateApplication(allocator, intent, original, repaired, line);
     }
 
+    pub fn validateMigrationApplication(
+        allocator: std.mem.Allocator,
+        intent: RepairIntent,
+        original: []const u8,
+        repaired: []const u8,
+        input: MigrationSourceInput,
+    ) error{OutOfMemory}!Discharge {
+        return repair_validator.validateMigrationApplication(allocator, intent, original, repaired, input);
+    }
+
     pub fn validateSpanApplication(
         allocator: std.mem.Allocator,
         intent: RepairIntent,
@@ -934,6 +949,34 @@ pub const RepairPolicy = struct {
             original_snapshot,
             replacement,
             line,
+        );
+    }
+
+    pub fn validateSpanApplicationWithSource(
+        allocator: std.mem.Allocator,
+        intent: RepairIntent,
+        diagnostic_code: []const u8,
+        original_source: []const u8,
+        repaired_source: []const u8,
+        start_offset: usize,
+        end_offset: usize,
+        original_snapshot: []const u8,
+        replacement: []const u8,
+        line: u32,
+        candidate: CandidateAuthority,
+    ) error{OutOfMemory}!Discharge {
+        return repair_validator.validateSpanApplicationWithSource(
+            allocator,
+            intent,
+            diagnostic_code,
+            original_source,
+            repaired_source,
+            start_offset,
+            end_offset,
+            original_snapshot,
+            replacement,
+            line,
+            candidate,
         );
     }
 };

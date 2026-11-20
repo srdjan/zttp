@@ -144,6 +144,7 @@ pub const AcceptedDirectCapabilities = struct {
     root: parser.NodeIndex,
     atoms: *atom_table.AtomTable,
     type_store: *const parser.type_syntax.Store,
+    scopes: *const parser.ScopeAnalyzer,
 };
 
 /// Refuse each type name of an accepted program that resolves to nothing
@@ -366,6 +367,27 @@ pub const DirectCheckSource = struct {
             .root = root,
             .atoms = &self.atoms,
             .type_store = &self.parser.type_store,
+            .scopes = &self.parser.scopes,
+        };
+    }
+
+    pub const LegacyRepairRecords = struct {
+        declarations: []const parser.type_syntax.Declaration,
+        asserts: []const parser.type_syntax.LegacyAssertRepair,
+        matches: []const parser.type_syntax.LegacyMatchRepair,
+        match_arms: []const parser.type_syntax.LegacyMatchArmRepair,
+        nominal_initializers: []const parser.type_syntax.LegacyNominalInitializer,
+    };
+
+    /// Parser-owned source spans for mechanical migration. These records do
+    /// not expose an executable root, accepted capabilities, or lowered IR.
+    pub fn legacyRepairRecords(self: *const DirectCheckSource) LegacyRepairRecords {
+        return .{
+            .declarations = self.parser.type_store.declarations.items,
+            .asserts = self.parser.type_store.legacy_assert_repairs.items,
+            .matches = self.parser.type_store.legacy_match_repairs.items,
+            .match_arms = self.parser.type_store.legacy_match_arm_repairs.items,
+            .nominal_initializers = self.parser.type_store.legacy_nominal_initializers.items,
         };
     }
 
@@ -426,6 +448,28 @@ test "direct source owns authored TypeScript and classifies virtual JavaScript" 
     try std.testing.expectEqual(@as(usize, 1), typed.parser.type_store.annotations.items.len);
     try std.testing.expectEqualStrings(source, typed.sourceView().text);
     try std.testing.expectEqual(SourceKind.virtual_javascript, classifyPath("<eval>"));
+}
+
+test "direct source retains legacy migration spans without executable access" {
+    const source =
+        "function choose(value: { kind: string; text: string }): string {\n" ++
+        "  assert value.text !== \"\";\n" ++
+        "  return match (value) { when { kind: \"echo\", text }: text, default: \"none\" };\n" ++
+        "}\n";
+    var owner: DirectCheckSource = undefined;
+    try owner.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "handler.ts");
+    defer owner.deinit();
+
+    const records = owner.legacyRepairRecords();
+    try std.testing.expectEqual(@as(usize, 1), records.asserts.len);
+    try std.testing.expectEqualStrings("assert value.text !== \"\";", records.asserts[0].full_span.text(source));
+    try std.testing.expectEqualStrings("value.text !== \"\"", records.asserts[0].predicate_span.text(source));
+    try std.testing.expectEqual(@as(usize, 1), records.matches.len);
+    try std.testing.expectEqualStrings("value", records.matches[0].subject_span.text(source));
+    try std.testing.expectEqual(@as(u32, 2), records.matches[0].arms.count);
+    try std.testing.expectEqualStrings("{ kind: \"echo\", text }", records.match_arms[0].pattern_span.?.text(source));
+    try std.testing.expectEqualStrings("text", records.match_arms[0].body_span.text(source));
+    try std.testing.expect(records.match_arms[1].pattern_span == null);
 }
 
 test "direct source closes every initialization allocation failure" {

@@ -260,9 +260,12 @@ pub const Copier = struct {
                 .readonly = field.readonly,
             };
         }
-        const record = self.dst.addRecord(self.allocator, copied);
+        var record = self.dst.addRecord(self.allocator, copied);
         if (record != null_type_idx and self.src.isResultRecord(idx)) {
-            return self.dst.markResultRecord(self.allocator, record);
+            record = self.dst.markResultRecord(self.allocator, record);
+        }
+        if (record != null_type_idx and self.src.hasUnknownFields(idx)) {
+            record = self.dst.markUnknownFieldRecord(self.allocator, record);
         }
         return record;
     }

@@ -1073,6 +1073,10 @@ fn seedCheckpoint() TypeSyntax.Store.Checkpoint {
         .decoded_module_specifiers = 0,
         .brand_declarations = 0,
         .nominal_constructors = 0,
+        .legacy_assert_repairs = 0,
+        .legacy_match_repairs = 0,
+        .legacy_match_arm_repairs = 0,
+        .legacy_nominal_initializers = 1,
         .requires_intrinsic_validation = false,
         .intrinsics_validated = false,
     };
@@ -1100,6 +1104,10 @@ fn nominalGenericSeedCheckpoint() TypeSyntax.Store.Checkpoint {
         .decoded_module_specifiers = 0,
         .brand_declarations = 0,
         .nominal_constructors = 0,
+        .legacy_assert_repairs = 0,
+        .legacy_match_repairs = 0,
+        .legacy_match_arm_repairs = 0,
+        .legacy_nominal_initializers = 0,
         .requires_intrinsic_validation = false,
         .intrinsics_validated = false,
     };
@@ -1109,6 +1117,7 @@ fn twoAnnotationCheckpoint() TypeSyntax.Store.Checkpoint {
     var checkpoint = seedCheckpoint();
     checkpoint.nodes = 2;
     checkpoint.annotations = 2;
+    checkpoint.legacy_nominal_initializers = 2;
     return checkpoint;
 }
 
@@ -1150,7 +1159,8 @@ fn runHeaderTypeAllocation(
         }
         observed_failures.* += 1;
         try std.testing.expectEqual(@as(u16, 0), parser.scopes.current_scope);
-        if (parser.current.start >= guard_offset) {
+        const seed_published: ?NodeIndex = runtimeNodeAt(&parser, .var_decl, 0) catch null;
+        if (parser.current.start >= guard_offset and seed_published != null) {
             try expectStoreCheckpoint(&parser.type_store, seedCheckpoint());
             observed_post_seed_rollbacks.* += 1;
             try parser.type_store.validate();
@@ -1218,7 +1228,8 @@ fn runNamedFunctionCommentTypeAllocation(
         }
         observations.failures += 1;
         try std.testing.expectEqual(@as(u16, 0), parser.scopes.current_scope);
-        if (parser.current.start >= function_offset) {
+        const seed_published: ?NodeIndex = runtimeNodeAt(&parser, .var_decl, 0) catch null;
+        if (parser.current.start >= function_offset and seed_published != null) {
             try expectStoreCheckpoint(&parser.type_store, seedCheckpoint());
             observations.post_seed_rollbacks += 1;
         } else {
@@ -1365,9 +1376,8 @@ test "type-only module matrix preserves public runtime admission and exact recor
         .{
             .source = "import type { A } /* ; */ from \"./a\";\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-            .modules = &.{.{ .kind = .import_type, .raw = "import type { A } /* ;" }},
-            .runtime_success = false,
-            .rejected_at = "*/",
+            .modules = &.{.{ .kind = .import_type, .raw = "import type { A } /* ; */ from \"./a\";" }},
+            .runtime_success = true,
         },
         .{
             .source = "import /* gap */ type { A } from \"./a\";\n" ++
@@ -1386,10 +1396,10 @@ test "type-only module matrix preserves public runtime admission and exact recor
             .runtime_success = true,
         },
         .{
-            .source = "export type { A }   \n" ++
+            .source = "export type { A }   ;\n" ++
                 "const live: number = 1;\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-            .modules = &.{.{ .kind = .export_type, .raw = "export type { A }   " }},
+            .modules = &.{.{ .kind = .export_type, .raw = "export type { A }   ;" }},
             .runtime_success = true,
         },
         .{
@@ -1560,14 +1570,14 @@ test "type-only module matrix retains import-only zttp refusal locations" {
 test "type-only module rich source retains declarations and live binding" {
     const source =
         "import type { A } from \"./a\";\n" ++
-        "export type { B }\n" ++
+        "export type { B };\n" ++
         "export structural Shape = { value: string };\n" ++
         "export nominal Id = string;\n" ++
         "const live: number = 1;\n" ++
         "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
     try expectTypeOnlyModuleCase(source, &.{
         .{ .kind = .import_type, .raw = "import type { A } from \"./a\";" },
-        .{ .kind = .export_type, .raw = "export type { B }" },
+        .{ .kind = .export_type, .raw = "export type { B };" },
     }, true);
 
     var atoms = AtomTable.init(std.testing.allocator);
@@ -1648,27 +1658,23 @@ test "type-only module matrix preserves module-only and leading erasures" {
         true,
     );
     try expectTypeOnlyModuleCase(
-        "export type { A }\nconst live: number = 1;",
-        &.{.{ .kind = .export_type, .raw = "export type { A }" }},
+        "export type { A };\nconst live: number = 1;",
+        &.{.{ .kind = .export_type, .raw = "export type { A };" }},
         true,
     );
 }
 
-test "type-only module scanner leaves the comment semicolon survivor location exact" {
+test "type-only module scanner skips a comment semicolon and retains the exact import" {
     const source =
         "import type { A } /* ; */ from \"./a\";\n" ++
         "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
-    _ = parser.parse() catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => 0,
-    };
-    try std.testing.expect(parser.errors.getErrors().len > 0);
-    try std.testing.expectEqual(@as(u32, 1), parser.errors.getErrors()[0].location.line);
-    try std.testing.expectEqual(@as(u32, 24), parser.errors.getErrors()[0].location.column);
+    _ = try parser.parse();
+    try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.type_only_modules.items.len);
     try std.testing.expectEqualStrings(
-        "import type { A } /* ;",
+        "import type { A } /* ; */ from \"./a\";",
         parser.type_store.type_only_modules.items[0].raw_span.text(source),
     );
 }
@@ -2399,17 +2405,18 @@ test "function signature type allocation failures preserve published seed syntax
                 }
                 observed_type_failures.* += 1;
                 try std.testing.expectEqual(@as(u16, 0), parser.scopes.current_scope);
-                if (parser.current.start < function_start) {
-                    try expectStoreCheckpoint(
-                        &parser.type_store,
-                        std.mem.zeroes(TypeSyntax.Store.Checkpoint),
-                    );
-                } else {
+                const seed_published: ?NodeIndex = runtimeNodeAt(&parser, .var_decl, 0) catch null;
+                if (parser.current.start >= function_start and seed_published != null) {
                     try expectStoreCheckpoint(&parser.type_store, seedCheckpoint());
                     observed_seed_rollbacks.* += 1;
                     try parser.type_store.validateRuntimeOwners(
                         std.testing.allocator,
                         parserIrView(&parser),
+                    );
+                } else {
+                    try expectStoreCheckpoint(
+                        &parser.type_store,
+                        std.mem.zeroes(TypeSyntax.Store.Checkpoint),
                     );
                 }
                 return err;

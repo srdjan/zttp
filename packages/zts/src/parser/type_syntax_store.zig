@@ -601,6 +601,36 @@ pub const NominalConstructor = struct {
     operand: ir.NodeIndex,
 };
 
+pub const LegacyAssertRepair = struct {
+    full_span: Span,
+    predicate_span: Span,
+};
+
+pub const LegacyMatchArmRepair = struct {
+    full_span: Span,
+    pattern_span: ?Span,
+    body_span: Span,
+    pattern_node: ir.NodeIndex,
+    body_node: ir.NodeIndex,
+};
+
+pub const LegacyMatchRepair = struct {
+    full_span: Span,
+    subject_span: Span,
+    arms: Range,
+    match_node: ir.NodeIndex,
+};
+
+/// Parser-owned spans for an annotated variable initializer. The type checker
+/// selects one of these records when it emits the implicit-nominal migration.
+pub const LegacyNominalInitializer = struct {
+    declaration: ir.NodeIndex,
+    declaration_span: Span,
+    binding_span: Span,
+    annotation_span: Span,
+    initializer_span: Span,
+};
+
 pub const TypeOnlyModuleRefusalReason = enum {
     zttp_types,
 };
@@ -804,6 +834,10 @@ pub const Store = struct {
     decoded_module_specifiers: std.ArrayListUnmanaged(u8) = .empty,
     brand_declarations: std.ArrayListUnmanaged(BrandDeclaration) = .empty,
     nominal_constructors: std.ArrayListUnmanaged(NominalConstructor) = .empty,
+    legacy_assert_repairs: std.ArrayListUnmanaged(LegacyAssertRepair) = .empty,
+    legacy_match_repairs: std.ArrayListUnmanaged(LegacyMatchRepair) = .empty,
+    legacy_match_arm_repairs: std.ArrayListUnmanaged(LegacyMatchArmRepair) = .empty,
+    legacy_nominal_initializers: std.ArrayListUnmanaged(LegacyNominalInitializer) = .empty,
     requires_intrinsic_validation: bool = false,
     intrinsics_validated: bool = false,
 
@@ -835,6 +869,10 @@ pub const Store = struct {
         self.decoded_module_specifiers.deinit(self.allocator);
         self.brand_declarations.deinit(self.allocator);
         self.nominal_constructors.deinit(self.allocator);
+        self.legacy_assert_repairs.deinit(self.allocator);
+        self.legacy_match_repairs.deinit(self.allocator);
+        self.legacy_match_arm_repairs.deinit(self.allocator);
+        self.legacy_nominal_initializers.deinit(self.allocator);
     }
 
     pub const Checkpoint = struct {
@@ -858,6 +896,10 @@ pub const Store = struct {
         decoded_module_specifiers: usize,
         brand_declarations: usize,
         nominal_constructors: usize,
+        legacy_assert_repairs: usize,
+        legacy_match_repairs: usize,
+        legacy_match_arm_repairs: usize,
+        legacy_nominal_initializers: usize,
         requires_intrinsic_validation: bool,
         intrinsics_validated: bool,
     };
@@ -895,6 +937,10 @@ pub const Store = struct {
             .decoded_module_specifiers = self.decoded_module_specifiers.items.len,
             .brand_declarations = self.brand_declarations.items.len,
             .nominal_constructors = self.nominal_constructors.items.len,
+            .legacy_assert_repairs = self.legacy_assert_repairs.items.len,
+            .legacy_match_repairs = self.legacy_match_repairs.items.len,
+            .legacy_match_arm_repairs = self.legacy_match_arm_repairs.items.len,
+            .legacy_nominal_initializers = self.legacy_nominal_initializers.items.len,
             .requires_intrinsic_validation = self.requires_intrinsic_validation,
             .intrinsics_validated = self.intrinsics_validated,
         };
@@ -921,6 +967,10 @@ pub const Store = struct {
         self.decoded_module_specifiers.items.len = value.decoded_module_specifiers;
         self.brand_declarations.items.len = value.brand_declarations;
         self.nominal_constructors.items.len = value.nominal_constructors;
+        self.legacy_assert_repairs.items.len = value.legacy_assert_repairs;
+        self.legacy_match_repairs.items.len = value.legacy_match_repairs;
+        self.legacy_match_arm_repairs.items.len = value.legacy_match_arm_repairs;
+        self.legacy_nominal_initializers.items.len = value.legacy_nominal_initializers;
         self.requires_intrinsic_validation = value.requires_intrinsic_validation;
         self.intrinsics_validated = value.intrinsics_validated;
     }
@@ -936,6 +986,40 @@ pub const Store = struct {
             if (record.owner == owner) return record;
         }
         return null;
+    }
+
+    pub fn appendLegacyAssertRepair(self: *Store, value: LegacyAssertRepair) !void {
+        try self.legacy_assert_repairs.append(self.allocator, value);
+    }
+
+    pub fn appendLegacyMatchRepair(
+        self: *Store,
+        full_span: Span,
+        subject_span: Span,
+        arms: []const LegacyMatchArmRepair,
+        match_node: ir.NodeIndex,
+    ) !void {
+        const arm_range = try appendRange(
+            LegacyMatchArmRepair,
+            self.allocator,
+            &self.legacy_match_arm_repairs,
+            arms,
+        );
+        errdefer self.legacy_match_arm_repairs.items.len = arm_range.start;
+        try self.legacy_match_repairs.append(self.allocator, .{
+            .full_span = full_span,
+            .subject_span = subject_span,
+            .arms = arm_range,
+            .match_node = match_node,
+        });
+    }
+
+    pub fn legacyMatchArms(self: *const Store, value: LegacyMatchRepair) []const LegacyMatchArmRepair {
+        return rangeSlice(LegacyMatchArmRepair, self.legacy_match_arm_repairs.items, value.arms) orelse &.{};
+    }
+
+    pub fn appendLegacyNominalInitializer(self: *Store, value: LegacyNominalInitializer) !void {
+        try self.legacy_nominal_initializers.append(self.allocator, value);
     }
 
     pub fn appendMembers(self: *Store, values: []const Child) !Range {

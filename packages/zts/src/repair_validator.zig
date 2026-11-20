@@ -47,8 +47,17 @@ const std = @import("std");
 const repair_intent = @import("repair_intent.zig");
 const ir_identity = @import("ir_identity.zig");
 const kernel_identity = @import("kernel_identity.zig");
+const legacy_migration = @import("legacy_migration.zig");
+
+test {
+    _ = legacy_migration;
+}
 
 pub const RepairIntent = repair_intent.RepairIntent;
+pub const MigrationSourceInput = legacy_migration.SourceInput;
+pub const MigrationTypedDiagnosticEvidence = legacy_migration.TypedDiagnosticEvidence;
+pub const CandidateAuthority = legacy_migration.CandidateAuthority;
+pub const migrationSourceDigest = legacy_migration.sourceDigest;
 
 /// D3 section 4's validator catalog, strongest to weakest.
 pub const Method = enum {
@@ -204,6 +213,30 @@ pub const rows = [_]Row{
         .status = .planned,
         .precondition = "advisory only: the rewrite needs file-level scope analysis",
     },
+    .{
+        .intent = .replace_legacy_declaration,
+        .method = .declared_law,
+        .status = .implemented,
+        .precondition = "parser-owned declaration spans and resolved core bindings determine the exact replacement",
+    },
+    .{
+        .intent = .wrap_implicit_nominal_initializer,
+        .method = .declared_law,
+        .status = .implemented,
+        .precondition = "ZTS200 names one exact nominal identity and scalar base, and the value is not already branded",
+    },
+    .{
+        .intent = .replace_legacy_match,
+        .method = .declared_law,
+        .status = .implemented,
+        .precondition = "parser-owned arm spans and binding paths determine one fluent callback replacement",
+    },
+    .{
+        .intent = .replace_legacy_assert,
+        .method = .declared_law,
+        .status = .implemented,
+        .precondition = "the parser-owned predicate span and resolved core assert binding determine the replacement",
+    },
 
     // ---- Repairs: no equivalence is claimed, and none should be ----
     .{
@@ -301,7 +334,19 @@ pub fn validateApplication(
 ) error{OutOfMemory}!Discharge {
     const row = find(intent) orelse return .no_validator;
     if (row.status != .implemented) return .no_validator;
-    return dischargeByMethod(allocator, row.method, intent, original, repaired, line);
+    return dischargeByMethodWithSource(allocator, row.method, intent, original, repaired, line, null);
+}
+
+pub fn validateMigrationApplication(
+    allocator: std.mem.Allocator,
+    intent: RepairIntent,
+    original: []const u8,
+    repaired: []const u8,
+    input: MigrationSourceInput,
+) error{OutOfMemory}!Discharge {
+    const row = find(intent) orelse return .no_validator;
+    if (row.status != .implemented) return .no_validator;
+    return dischargeByMethodWithSource(allocator, row.method, intent, original, repaired, 0, input);
 }
 
 /// Validate a concrete span repair against the exact diagnostic instance that
@@ -346,9 +391,69 @@ pub fn validateSpanApplication(
         if (!diagnosticMatchesKernelIntent(diagnostic_code, intent)) {
             return .{ .not_law_shape = "the diagnostic does not authorize this kernel repair intent" };
         }
+        if (intent == .replace_chained_ternary_with_match) {
+            return .{ .undecided = "the fluent M3 repair needs admitted lowered source context" };
+        }
         return dischargeKernelIdentity(allocator, intent, original_snapshot, replacement);
     }
     return validateApplication(allocator, intent, original_source, repaired_source, line);
+}
+
+pub fn validateSpanApplicationWithSource(
+    allocator: std.mem.Allocator,
+    intent: RepairIntent,
+    diagnostic_code: []const u8,
+    original_source: []const u8,
+    repaired_source: []const u8,
+    start_offset: usize,
+    end_offset: usize,
+    original_snapshot: []const u8,
+    replacement: []const u8,
+    line: u32,
+    candidate: CandidateAuthority,
+) error{OutOfMemory}!Discharge {
+    const splice = try validateSpanApplication(
+        allocator,
+        intent,
+        diagnostic_code,
+        original_source,
+        repaired_source,
+        start_offset,
+        end_offset,
+        original_snapshot,
+        replacement,
+        line,
+    );
+    if (intent != .replace_chained_ternary_with_match) return splice;
+    switch (splice) {
+        .undecided => {},
+        else => return splice,
+    }
+    if (!std.mem.eql(u8, candidate.source, repaired_source) or
+        !std.mem.eql(u8, candidate.type_store.source, repaired_source))
+    {
+        return .{ .not_law_shape = "the retained candidate source does not match the repaired source" };
+    }
+    if (!candidate.type_store.requires_intrinsic_validation or
+        !candidate.type_store.intrinsics_validated)
+    {
+        return .{ .not_law_shape = "the candidate did not complete intrinsic validation" };
+    }
+    const split = switch (splitBoundTernary(original_snapshot, replacement, start_offset)) {
+        .refused => |why| return .{ .not_law_shape = why },
+        .split => |value| value,
+    };
+    const match_root = exactLoweredMatch(candidate, split) orelse
+        return .{ .not_law_shape = "the repair does not name one exact lowered core match" };
+    const verdict = try kernel_identity.compareLoweredExpression(
+        allocator,
+        split.original_expression,
+        candidate.ir_view,
+        match_root,
+        candidate.atoms,
+        .{ .binding = split.binding },
+    );
+    return kernelDischarge(verdict);
 }
 
 fn diagnosticMatchesKernelIntent(code: []const u8, intent: RepairIntent) bool {
@@ -370,7 +475,7 @@ pub fn dischargeByMethod(
     line: u32,
 ) error{OutOfMemory}!Discharge {
     return switch (method) {
-        .declared_law => dischargeDeclaredLaw(intent, original, repaired, line),
+        .declared_law => dischargeDeclaredLaw(allocator, intent, original, repaired, line, null),
         .parse_identity => dischargeParseIdentity(allocator, original, repaired),
         .kernel_identity => dischargeKernelIdentity(allocator, intent, original, repaired),
         // M1 was built, ran, and discharged no row, so it went out with the
@@ -382,6 +487,19 @@ pub fn dischargeByMethod(
     };
 }
 
+fn dischargeByMethodWithSource(
+    allocator: std.mem.Allocator,
+    method: Method,
+    intent: RepairIntent,
+    original: []const u8,
+    repaired: []const u8,
+    line: u32,
+    migration_input: ?MigrationSourceInput,
+) error{OutOfMemory}!Discharge {
+    if (method != .declared_law) return dischargeByMethod(allocator, method, intent, original, repaired, line);
+    return dischargeDeclaredLaw(allocator, intent, original, repaired, line, migration_input);
+}
+
 fn dischargeKernelIdentity(
     allocator: std.mem.Allocator,
     intent: RepairIntent,
@@ -389,15 +507,7 @@ fn dischargeKernelIdentity(
     repaired: []const u8,
 ) error{OutOfMemory}!Discharge {
     return switch (intent) {
-        .replace_chained_ternary_with_match => switch (splitBoundTernary(original, repaired)) {
-            .refused => |why| .{ .not_law_shape = why },
-            .split => |split| kernelDischarge(try kernel_identity.compareExpressions(
-                allocator,
-                split.original_expression,
-                split.repaired_expression,
-                .{ .binding = split.binding },
-            )),
-        },
+        .replace_chained_ternary_with_match => .{ .undecided = "the fluent M3 repair needs admitted lowered source context" },
         .lead_with_spread => kernelDischarge(try kernel_identity.compareExpressions(allocator, original, repaired, .{})),
         else => .no_validator,
     };
@@ -422,7 +532,9 @@ fn kernelDischarge(verdict: kernel_identity.Verdict) Discharge {
 const BoundTernarySplit = struct {
     binding: kernel_identity.Binding,
     original_expression: []const u8,
-    repaired_expression: []const u8,
+    binding_declaration_offset: usize,
+    match_reference_offset: usize,
+    match_root_offset: usize,
 };
 
 const BoundTernary = union(enum) {
@@ -430,46 +542,138 @@ const BoundTernary = union(enum) {
     refused: []const u8,
 };
 
-fn splitBoundTernary(original: []const u8, replacement: []const u8) BoundTernary {
+fn splitBoundTernary(original: []const u8, replacement: []const u8, splice_start: usize) BoundTernary {
     const shape = "the replacement is not a condition binding followed by the rewritten statement";
+    const import_start = "import { match as ";
+    const import_end = " } from \"zttp:core\";\n";
+    var body = replacement;
+    var imported_alias: ?[]const u8 = null;
+    if (std.mem.startsWith(u8, replacement, import_start)) {
+        const alias_end = std.mem.indexOfPos(u8, replacement, import_start.len, import_end) orelse
+            return .{ .refused = shape };
+        const alias = replacement[import_start.len..alias_end];
+        if (!isIdentifier(alias)) return .{ .refused = shape };
+        imported_alias = alias;
+        body = replacement[alias_end + import_end.len ..];
+    }
+    var prefix_len: usize = 0;
+    if (imported_alias != null) {
+        if (splice_start != 0) return .{ .refused = "a generated import must be part of one splice from byte zero" };
+        const limit = @min(original.len, body.len);
+        while (prefix_len < limit and original[prefix_len] == body[prefix_len]) : (prefix_len += 1) {}
+        while (prefix_len > 0 and
+            (!std.mem.startsWith(u8, body[prefix_len..], "const ") or
+                !startsBindableStatement(original[prefix_len..])))
+        {
+            prefix_len -= 1;
+        }
+        if (!std.mem.startsWith(u8, body[prefix_len..], "const ")) return .{ .refused = shape };
+        if (!std.mem.eql(u8, original[0..prefix_len], body[0..prefix_len])) {
+            return .{ .refused = "the generated import splice changes the preserved source prefix" };
+        }
+    }
+    const target_original = original[prefix_len..];
+    const target_replacement = body[prefix_len..];
     const declaration = "const ";
-    if (!std.mem.startsWith(u8, replacement, declaration)) return .{ .refused = shape };
-    const name_end = std.mem.indexOfPos(u8, replacement, declaration.len, " = ") orelse return .{ .refused = shape };
-    const name = replacement[declaration.len..name_end];
+    if (!std.mem.startsWith(u8, target_replacement, declaration)) return .{ .refused = shape };
+    const name_end = std.mem.indexOfPos(u8, target_replacement, declaration.len, " = ") orelse return .{ .refused = shape };
+    const name = target_replacement[declaration.len..name_end];
     if (!isIdentifier(name)) return .{ .refused = shape };
     const initializer_start = name_end + " = ".len;
     // The binding ends at the first `;`, and a space or a line break follows it.
     // A `;` inside the condition's own text can end it early; the initializer
     // then fails to parse and the repair is refused, never accepted.
-    const initializer_end = std.mem.indexOfScalarPos(u8, replacement, initializer_start, ';') orelse
+    const initializer_end = std.mem.indexOfScalarPos(u8, target_replacement, initializer_start, ';') orelse
         return .{ .refused = shape };
     const after_semicolon = initializer_end + 1;
-    if (after_semicolon >= replacement.len or
-        (replacement[after_semicolon] != '\n' and replacement[after_semicolon] != ' '))
+    if (after_semicolon >= target_replacement.len or
+        (target_replacement[after_semicolon] != '\n' and target_replacement[after_semicolon] != ' '))
     {
         return .{ .refused = shape };
     }
-    const initializer = replacement[initializer_start..initializer_end];
-    const statement = std.mem.trimStart(u8, replacement[after_semicolon..], " \t\n");
-
-    const scrutinee = std.mem.indexOf(u8, statement, "match (") orelse return .{ .refused = shape };
-    const head = statement[0..scrutinee];
-    const rewritten = statement[scrutinee..];
-    const scrutinee_text = rewritten["match (".len..];
-    if (!std.mem.startsWith(u8, scrutinee_text, name) or
-        !std.mem.startsWith(u8, scrutinee_text[name.len..], ")"))
-    {
-        return .{ .refused = shape };
+    const initializer = target_replacement[initializer_start..initializer_end];
+    const statement_raw = target_replacement[after_semicolon..];
+    const statement = std.mem.trimStart(u8, statement_raw, " \t\n");
+    const marker = ").with(true, () => ";
+    const marker_at = std.mem.indexOf(u8, statement, marker) orelse return .{ .refused = shape };
+    const open_paren = std.mem.lastIndexOfScalar(u8, statement[0..marker_at], '(') orelse return .{ .refused = shape };
+    if (!std.mem.eql(u8, statement[open_paren + 1 .. marker_at], name)) return .{ .refused = shape };
+    var alias_start = open_paren;
+    while (alias_start > 0 and isIdentContinue(statement[alias_start - 1])) alias_start -= 1;
+    const match_alias = statement[alias_start..open_paren];
+    if (!isIdentifier(match_alias)) return .{ .refused = shape };
+    if (imported_alias) |alias| {
+        if (!std.mem.eql(u8, alias, match_alias)) return .{ .refused = shape };
     }
+    const head = statement[0..alias_start];
     if (!bindableHead(head)) return .{ .refused = "the statement head is not a const initializer or a return" };
-    if (!std.mem.startsWith(u8, original, head)) {
+    if (!std.mem.startsWith(u8, target_original, head)) {
         return .{ .refused = "the original statement does not begin with the rewritten statement head" };
     }
+    const body_offset = replacement.len - body.len;
+    const target_offset = body_offset + prefix_len;
+    const statement_offset = target_offset + after_semicolon + (statement.ptr - statement_raw.ptr);
+    const otherwise_at = std.mem.indexOfPos(u8, statement, marker_at + marker.len, ".otherwise(") orelse
+        return .{ .refused = shape };
     return .{ .split = .{
         .binding = .{ .name = name, .initializer = initializer },
-        .original_expression = original[head.len..],
-        .repaired_expression = rewritten,
+        .original_expression = target_original[head.len..],
+        .binding_declaration_offset = splice_start + target_offset,
+        .match_reference_offset = splice_start + statement_offset + alias_start,
+        .match_root_offset = splice_start + statement_offset + otherwise_at + ".otherwise".len,
     } };
+}
+
+fn startsBindableStatement(text: []const u8) bool {
+    return std.mem.startsWith(u8, text, "return ") or
+        std.mem.startsWith(u8, text, "const ") or
+        std.mem.startsWith(u8, text, "export const ");
+}
+
+fn bindingEqual(a: @import("zts-engine").parser.ir.BindingRef, b: @import("zts-engine").parser.ir.BindingRef) bool {
+    return a.scope_id == b.scope_id and a.slot == b.slot and a.name_atom == b.name_atom and a.kind == b.kind;
+}
+
+fn exactLoweredMatch(candidate: CandidateAuthority, split: BoundTernarySplit) ?@import("zts-engine").parser.NodeIndex {
+    const engine = @import("zts-engine");
+    var declaration_binding: ?engine.parser.ir.BindingRef = null;
+    var core_match_binding: ?engine.parser.ir.BindingRef = null;
+    var match_root: ?engine.parser.NodeIndex = null;
+    for (0..candidate.ir_view.nodeCount()) |raw| {
+        const node: engine.parser.NodeIndex = @intCast(raw);
+        const location = candidate.ir_view.getLoc(node) orelse continue;
+        switch (candidate.ir_view.getTag(node) orelse continue) {
+            .var_decl => {
+                if (location.offset != split.binding_declaration_offset) continue;
+                const declaration = candidate.ir_view.getVarDecl(node) orelse return null;
+                if (declaration.kind != .@"const") return null;
+                if (declaration_binding != null) return null;
+                declaration_binding = declaration.binding;
+            },
+            .identifier => {
+                if (location.offset != split.match_reference_offset) continue;
+                const reference = candidate.ir_view.getBinding(node) orelse return null;
+                const imported = candidate.module_facts.importForReference(reference, .module_reference, .builtin) orelse return null;
+                if (!std.mem.eql(u8, imported.module_specifier, "zttp:core") or
+                    !std.mem.eql(u8, imported.imported_name, "match")) return null;
+                if (core_match_binding != null) return null;
+                core_match_binding = reference;
+            },
+            .match_expr => {
+                if (location.offset != split.match_root_offset) continue;
+                if (match_root != null) return null;
+                match_root = node;
+            },
+            else => {},
+        }
+    }
+    _ = core_match_binding orelse return null;
+    const binding = declaration_binding orelse return null;
+    const root = match_root orelse return null;
+    const match = candidate.ir_view.getMatchExpr(root) orelse return null;
+    const discriminant = candidate.ir_view.getBinding(match.discriminant) orelse return null;
+    if (!bindingEqual(binding, discriminant)) return null;
+    return root;
 }
 
 /// The text before a ternary that makes it the whole value of a statement:
@@ -526,12 +730,28 @@ fn dischargeParseIdentity(
 /// M4, declared law: re-derive the rewrite from the original and require the
 /// edit to be exactly it.
 fn dischargeDeclaredLaw(
+    allocator: std.mem.Allocator,
     intent: RepairIntent,
     original: []const u8,
     repaired: []const u8,
     line: u32,
-) Discharge {
+    migration_input: ?MigrationSourceInput,
+) error{OutOfMemory}!Discharge {
     if (lawFor(intent)) |law| return dischargeLineLocal(law, original, repaired, line);
+    switch (intent) {
+        .replace_legacy_declaration,
+        .wrap_implicit_nominal_initializer,
+        .replace_legacy_match,
+        .replace_legacy_assert,
+        => {
+            const input = migration_input orelse return .{ .undecided = "use zts normalize for this whole-source migration" };
+            return switch (legacy_migration.validateAll(allocator, intent, original, repaired, input) catch return error.OutOfMemory) {
+                .equivalent => .equivalent,
+                .refused => |why| .{ .not_law_shape = why },
+            };
+        },
+        else => {},
+    }
     return .no_validator;
 }
 
@@ -1072,7 +1292,18 @@ test "every gradable row has a law, and every law has a gradable row" {
             // `.no_validator` there, so a row naming one and claiming
             // `implemented` advertises a repair no caller can discharge.
             const dischargeable = switch (row.method) {
-                .declared_law => has_law,
+                .declared_law => if (has_law)
+                    true
+                else switch (try validateApplication(
+                    std.testing.allocator,
+                    row.intent,
+                    "const value = 1;\n",
+                    "const value = 1;\n",
+                    1,
+                )) {
+                    .undecided => |why| std.mem.eql(u8, why, "use zts normalize for this whole-source migration"),
+                    else => false,
+                },
                 // M2 needs no law: it compares whole trees, so there is
                 // nothing per-row to re-derive. `dischargeByMethod` reaches
                 // `ir_identity.compare` for it.
@@ -1091,9 +1322,9 @@ test "every gradable row has a law, and every law has a gradable row" {
             return error.TestFailed;
         }
     }
-    // Six M4 rows and one bounded M3 row. The M2 row is `.planned` while its
+    // Ten M4 rows and one bounded M3 row. The M2 row is `.planned` while its
     // pipeline is withdrawn, so it is not gradable and advertises nothing.
-    try std.testing.expectEqual(@as(usize, 7), gradable_count);
+    try std.testing.expectEqual(@as(usize, 11), gradable_count);
 }
 
 test "the withdrawn semicolon row advertises nothing" {
@@ -1364,27 +1595,25 @@ fn validateTernaryReplacement(
     );
 }
 
-test "M3 discharges only the exact chained ternary diagnostic splice" {
+test "M3 without source context keeps an exact chained ternary splice undecided" {
     const original = "const x = ready ? 1 : fallback ? 2 : 3;\n";
     const snapshot = "const x = ready ? 1 : fallback ? 2 : 3";
     const replacement = "const cond = !!(ready);\nconst x = match (cond) { when true: 1, default: fallback ? 2 : 3 }";
     const repaired = "const cond = !!(ready);\nconst x = match (cond) { when true: 1, default: fallback ? 2 : 3 };\n";
     const start = std.mem.indexOf(u8, original, snapshot).?;
-    try std.testing.expectEqual(
-        Discharge.equivalent,
-        try validateSpanApplication(
-            std.testing.allocator,
-            .replace_chained_ternary_with_match,
-            "ZTS621",
-            original,
-            repaired,
-            start,
-            start + snapshot.len,
-            snapshot,
-            replacement,
-            1,
-        ),
+    const undecided = try validateSpanApplication(
+        std.testing.allocator,
+        .replace_chained_ternary_with_match,
+        "ZTS621",
+        original,
+        repaired,
+        start,
+        start + snapshot.len,
+        snapshot,
+        replacement,
+        1,
     );
+    try std.testing.expect(undecided == .undecided);
 
     const wrong_code = try validateSpanApplication(
         std.testing.allocator,
@@ -1416,37 +1645,28 @@ test "M3 discharges only the exact chained ternary diagnostic splice" {
     try std.testing.expect(widened == .not_law_shape);
 }
 
-test "M3 discharges a bound return, a one-line body, and an export const" {
-    try std.testing.expectEqual(
-        Discharge.equivalent,
-        try validateTernaryReplacement(
-            "function f(x: number): number { return ready ? 1 : 2; }\n",
-            "return ready ? 1 : 2",
-            "const cond = !!(ready); return match (cond) { when true: 1, default: 2 }",
-            "ZTS621",
-        ),
-    );
-    try std.testing.expectEqual(
-        Discharge.equivalent,
-        try validateTernaryReplacement(
-            "  return ready ? 1 : 2;\n",
-            "return ready ? 1 : 2",
-            "const cond = !!(ready);\n  return match (cond) { when true: 1, default: 2 }",
-            "ZTS621",
-        ),
-    );
-    try std.testing.expectEqual(
-        Discharge.equivalent,
-        try validateTernaryReplacement(
-            "export const x: number = ready ? 1 : 2;\n",
-            "export const x: number = ready ? 1 : 2",
-            "const cond = !!(ready);\nexport const x: number = match (cond) { when true: 1, default: 2 }",
-            "ZTS621",
-        ),
-    );
+test "M3 without source context keeps every statement head undecided" {
+    try std.testing.expect((try validateTernaryReplacement(
+        "function f(x: number): number { return ready ? 1 : 2; }\n",
+        "return ready ? 1 : 2",
+        "const cond = !!(ready); return match (cond) { when true: 1, default: 2 }",
+        "ZTS621",
+    )) == .undecided);
+    try std.testing.expect((try validateTernaryReplacement(
+        "  return ready ? 1 : 2;\n",
+        "return ready ? 1 : 2",
+        "const cond = !!(ready);\n  return match (cond) { when true: 1, default: 2 }",
+        "ZTS621",
+    )) == .undecided);
+    try std.testing.expect((try validateTernaryReplacement(
+        "export const x: number = ready ? 1 : 2;\n",
+        "export const x: number = ready ? 1 : 2",
+        "const cond = !!(ready);\nexport const x: number = match (cond) { when true: 1, default: 2 }",
+        "ZTS621",
+    )) == .undecided);
 }
 
-test "M3 refuses a replacement that moves the condition away from the statement" {
+test "M3 without source context does not certify repaired expression shapes" {
     // The head of the rewritten statement differs from the original's.
     const head_differs = try validateTernaryReplacement(
         "const x = ready ? 1 : 2;\n",
@@ -1454,7 +1674,7 @@ test "M3 refuses a replacement that moves the condition away from the statement"
         "const cond = !!(ready);\nconst y = match (cond) { when true: 1, default: 2 }",
         "ZTS621",
     );
-    try std.testing.expect(head_differs == .not_law_shape);
+    try std.testing.expect(head_differs == .undecided);
 
     // The head is an argument position: the binding would run before `f(a)`.
     const argument = try validateTernaryReplacement(
@@ -1463,7 +1683,7 @@ test "M3 refuses a replacement that moves the condition away from the statement"
         "const cond = !!(ready);\nconst x = f(a, b = match (cond) { when true: 1, default: 2 }",
         "ZTS621",
     );
-    try std.testing.expect(argument == .not_law_shape);
+    try std.testing.expect(argument == .undecided);
 
     // A bare condition without the binding is not the repair.
     const no_binding = try validateTernaryReplacement(
@@ -1472,7 +1692,7 @@ test "M3 refuses a replacement that moves the condition away from the statement"
         "const x = match (!!(ready)) { when true: 1, default: 2 }",
         "ZTS621",
     );
-    try std.testing.expect(no_binding == .not_law_shape);
+    try std.testing.expect(no_binding == .undecided);
 }
 
 test "M3 does not advertise spread moves while object order is observable" {

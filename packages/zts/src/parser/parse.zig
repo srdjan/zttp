@@ -2288,8 +2288,11 @@ pub const Parser = struct {
 
         // Parse initializer
         var init_node: NodeIndex = null_node;
+        var initializer_span: ?type_syntax.Span = null;
         if (self.match(.assign)) {
+            const initializer_start = self.current.start;
             init_node = try self.parseExpression(.assignment);
+            initializer_span = .{ .start = initializer_start, .end = self.current.start };
         } else if (kind == .@"const") {
             self.errors.addErrorAt(.const_without_initializer, self.current, "const declarations must have an initializer");
         } else {
@@ -2304,11 +2307,23 @@ pub const Parser = struct {
 
         try self.expectSemicolon();
 
-        const declaration = try self.nodes.addVarDecl(.var_decl, loc, .{
+        const declaration: NodeIndex = @intCast(self.nodes.tags.items.len);
+        if (annotation_index) |index| if (initializer_span) |initializer| {
+            try self.type_store.appendLegacyNominalInitializer(.{
+                .declaration = declaration,
+                .declaration_span = .{ .start = loc.offset, .end = self.previous.start + self.previous.len },
+                .binding_span = .{ .start = name.start, .end = name.start + name.len },
+                .annotation_span = self.type_store.annotations.items[index].raw_span,
+                .initializer_span = initializer,
+            });
+        };
+
+        const added_declaration = try self.nodes.addVarDecl(.var_decl, loc, .{
             .binding = binding,
             .init = init_node,
             .kind = kind,
         });
+        std.debug.assert(added_declaration == declaration);
         if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) return declaration;
         if (annotation_index) |index| {
             try self.type_store.finishAnnotationOwner(index, .{
@@ -3992,9 +4007,12 @@ pub const Parser = struct {
 
     fn parseAssertStatement(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
+        const full_start = self.current.start;
         self.advance(); // consume 'assert'
 
+        const predicate_start = self.current.start;
         const condition = try self.parseExpression(.none);
+        const predicate_end = self.current.start;
 
         if (self.check(.comma)) {
             self.errorAtCurrent("fallback `assert` is not supported; use `if` plus `return`");
@@ -4002,6 +4020,11 @@ pub const Parser = struct {
         }
 
         try self.expectSemicolon();
+        const full_end = self.previous.start + self.previous.len;
+        try self.type_store.appendLegacyAssertRepair(.{
+            .full_span = .{ .start = full_start, .end = full_end },
+            .predicate_span = .{ .start = predicate_start, .end = predicate_end },
+        });
         return try self.nodes.addAssert(loc, .{
             .condition = condition,
             .error_expr = null_node,
@@ -4010,11 +4033,13 @@ pub const Parser = struct {
 
     fn parseMatchExpression(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
+        const full_start = self.current.start;
         self.advance(); // consume 'match'
 
         try self.expect(.lparen, "'('");
         const scrutinee_tok = self.current;
         const discriminant = try self.parseExpression(.none);
+        const subject_end = self.current.start;
         if (!self.isNamePath(discriminant)) {
             self.errors.addErrorAt(.unsupported_feature, scrutinee_tok, "a match scrutinee is a name or a member path; bind the value to a const first and match on that");
             return error.ParseError;
@@ -4028,6 +4053,7 @@ pub const Parser = struct {
 
         var arms: [255]NodeIndex = undefined;
         var arms_len: u8 = 0;
+        var repair_arms: [255]type_syntax.LegacyMatchArmRepair = undefined;
         // The `default` arm seen so far. Spec 5.5 grammar is
         // `MatchArm+ [DefaultArm]`: nothing may follow it.
         var default_arm: ?Token = null;
@@ -4046,7 +4072,9 @@ pub const Parser = struct {
                 }
             }
             const arm_loc = self.current.location();
+            const arm_start = self.current.start;
             var pattern: NodeIndex = null_node;
+            var pattern_span: ?type_syntax.Span = null;
 
             // One scope per arm, opened before the pattern so a binding it
             // declares is live for this arm's body and dead for the next one.
@@ -4059,7 +4087,9 @@ pub const Parser = struct {
                     self.advance();
                     return error.ParseError;
                 }
+                const pattern_start = self.current.start;
                 pattern = try self.parseMatchPattern(false);
+                pattern_span = .{ .start = pattern_start, .end = self.current.start };
             } else if (self.check(.kw_default)) {
                 // default arm - pattern stays null_node
                 default_arm = self.current;
@@ -4071,7 +4101,9 @@ pub const Parser = struct {
             }
             try self.expect(.colon, "':'");
 
+            const body_start = self.current.start;
             const body = try self.parseExpression(.none);
+            const body_end = self.current.start;
             self.scopes.popScope();
 
             const arm_node = try self.nodes.addMatchArm(arm_loc, .{
@@ -4083,6 +4115,13 @@ pub const Parser = struct {
                 return error.ParseError;
             }
             arms[arms_len] = arm_node;
+            repair_arms[arms_len] = .{
+                .full_span = .{ .start = arm_start, .end = body_end },
+                .pattern_span = pattern_span,
+                .body_span = .{ .start = body_start, .end = body_end },
+                .pattern_node = pattern,
+                .body_node = body,
+            };
             arms_len += 1;
 
             if (!self.check(.rbrace)) {
@@ -4091,6 +4130,7 @@ pub const Parser = struct {
         }
 
         try self.expect(.rbrace, "'}'");
+        const full_end = self.previous.start + self.previous.len;
 
         if (arms_len == 0) {
             self.errorAt(loc, "match expression must have at least one arm");
@@ -4099,11 +4139,18 @@ pub const Parser = struct {
 
         const arms_start = try self.addNodeList(arms[0..arms_len]);
 
-        return try self.nodes.addMatch(loc, .{
+        const match_node = try self.nodes.addMatch(loc, .{
             .discriminant = discriminant,
             .arms_start = arms_start,
             .arms_count = arms_len,
         });
+        try self.type_store.appendLegacyMatchRepair(
+            .{ .start = full_start, .end = full_end },
+            .{ .start = scrutinee_tok.start, .end = subject_end },
+            repair_arms[0..arms_len],
+            match_node,
+        );
+        return match_node;
     }
 
     /// `nested` is true below the arm's top-level pattern. A type test reads the
@@ -7918,6 +7965,7 @@ test "admission type allocation failures preserve a published seed" {
                         var expected = std.mem.zeroes(type_syntax.Store.Checkpoint);
                         expected.nodes = 1;
                         expected.annotations = 1;
+                        expected.legacy_nominal_initializers = 1;
                         try std.testing.expect(std.meta.eql(
                             expected,
                             parser.type_store.checkpoint(),
@@ -7949,6 +7997,7 @@ test "admission type allocation failures preserve a published seed" {
             var expected = std.mem.zeroes(type_syntax.Store.Checkpoint);
             expected.nodes = 1;
             expected.annotations = 1;
+            expected.legacy_nominal_initializers = 1;
             try std.testing.expect(std.meta.eql(expected, parser.type_store.checkpoint()));
         }
     };
@@ -11914,7 +11963,7 @@ test "spaced function allocation failures preserve the prior declaration" {
 test "recovery allocation failures retain native errors after observation and erasure" {
     const source =
         "function f() {\n" ++
-        "import type { A } /* ; */ from \"./a\";\n" ++
+        "import type { A }    ; */ from \"./a\";\n" ++
         "const live: \"const\" = 1;\n" ++
         "const later: any = 1;\n" ++
         "structural Box = string;\n" ++

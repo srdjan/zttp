@@ -26,7 +26,6 @@ const AtomTable = engine.atom_table.AtomTable;
 const IrView = parser_mod.ir.IrView;
 const NodeIndex = parser_mod.ir.NodeIndex;
 const NodeTag = parser_mod.ir.NodeTag;
-const ConstantPool = parser_mod.ir.ConstantPool;
 
 pub const Side = enum { original, repaired };
 
@@ -73,21 +72,64 @@ pub fn compareExpressions(
     };
     defer right.deinit();
 
+    return compareParsedToLowered(
+        allocator,
+        &left,
+        right.view(),
+        right.root,
+        &atoms,
+        options,
+    );
+}
+
+/// Compare one source expression with an already admitted and lowered IR node.
+/// The caller owns admission, intrinsic resolution, and the node identity.
+pub fn compareLoweredExpression(
+    allocator: std.mem.Allocator,
+    original: []const u8,
+    repaired_view: IrView,
+    repaired_root: NodeIndex,
+    atoms: *AtomTable,
+    options: Options,
+) error{OutOfMemory}!Verdict {
+    var left = Parsed.init(allocator, original, atoms) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NoExpression => return .{ .unparsable = .original },
+    };
+    defer left.deinit();
+
+    return compareParsedToLowered(
+        allocator,
+        &left,
+        repaired_view,
+        repaired_root,
+        atoms,
+        options,
+    );
+}
+
+fn compareParsedToLowered(
+    allocator: std.mem.Allocator,
+    left: *Parsed,
+    repaired_view: IrView,
+    repaired_root: NodeIndex,
+    atoms: *AtomTable,
+    options: Options,
+) error{OutOfMemory}!Verdict {
     var init_parsed: ?Parsed = null;
     defer if (init_parsed) |*parsed| parsed.deinit();
     var init_lowerer: Lowerer = undefined;
     var bound: Bound = undefined;
     const forbidden: ?[]const u8 = if (options.binding) |binding| binding.name else null;
     if (options.binding) |binding| {
-        init_parsed = Parsed.init(allocator, binding.initializer, &atoms) catch |err| switch (err) {
+        init_parsed = Parsed.init(allocator, binding.initializer, atoms) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NoExpression => return .{ .unparsable = .repaired },
         };
         init_lowerer = .{
             .allocator = allocator,
             .view = init_parsed.?.view(),
-            .constants = &init_parsed.?.parser.constants,
-            .atoms = &atoms,
+            .atoms = atoms,
             .max_depth = options.max_depth,
             .forbidden = forbidden,
         };
@@ -105,8 +147,7 @@ pub fn compareExpressions(
     var left_lowerer = Lowerer{
         .allocator = allocator,
         .view = left.view(),
-        .constants = &left.parser.constants,
-        .atoms = &atoms,
+        .atoms = atoms,
         .max_depth = options.max_depth,
         .forbidden = forbidden,
     };
@@ -117,14 +158,13 @@ pub fn compareExpressions(
 
     var right_lowerer = Lowerer{
         .allocator = allocator,
-        .view = right.view(),
-        .constants = &right.parser.constants,
-        .atoms = &atoms,
+        .view = repaired_view,
+        .atoms = atoms,
         .max_depth = options.max_depth,
         .forbidden = forbidden,
         .bound = if (options.binding != null) &bound else null,
     };
-    const right_digest = right_lowerer.digest(right.root) catch |err| switch (err) {
+    const right_digest = right_lowerer.digest(repaired_root) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Unsupported => return .{ .unsupported = .repaired },
     };
@@ -182,7 +222,6 @@ const Bound = struct {
 const Lowerer = struct {
     allocator: std.mem.Allocator,
     view: IrView,
-    constants: *const ConstantPool,
     atoms: *AtomTable,
     max_depth: u32,
     /// An identifier with this name is refused wherever it is read as an
@@ -210,17 +249,14 @@ const Lowerer = struct {
         // Exhaustive with no `else`: a new IR tag must be classified instead
         // of silently entering the equivalence kernel.
         switch (tag) {
-            .lit_int => {
-                frame(hasher, "int");
-                const value = self.view.getIntValue(node) orelse return error.Unsupported;
-                var bytes: [8]u8 = undefined;
-                std.mem.writeInt(i64, &bytes, @as(i64, value), .big);
-                frame(hasher, &bytes);
-            },
-            .lit_float => {
+            .lit_int, .lit_float => {
+                // The expression parser stores every number as f64. Program
+                // admission can use an exact i32 for the same number value.
+                const value: f64 = if (tag == .lit_int)
+                    @floatFromInt(self.view.getIntValue(node) orelse return error.Unsupported)
+                else
+                    self.view.ir_constants.getFloat(self.view.getFloatIdx(node) orelse return error.Unsupported) orelse return error.Unsupported;
                 frame(hasher, "float");
-                const index = self.view.getFloatIdx(node) orelse return error.Unsupported;
-                const value = self.constants.getFloat(index) orelse return error.Unsupported;
                 var bytes: [8]u8 = undefined;
                 std.mem.writeInt(u64, &bytes, @bitCast(value), .big);
                 frame(hasher, &bytes);
@@ -228,7 +264,7 @@ const Lowerer = struct {
             .lit_string => {
                 frame(hasher, "string");
                 const index = self.view.getStringIdx(node) orelse return error.Unsupported;
-                frame(hasher, self.constants.getString(index) orelse return error.Unsupported);
+                frame(hasher, self.view.ir_constants.getString(index) orelse return error.Unsupported);
             },
             .lit_bool => {
                 frame(hasher, "bool");
@@ -375,12 +411,29 @@ const Lowerer = struct {
         {
             return error.Unsupported;
         }
+        if (first.kind != second.kind) return error.Unsupported;
+
+        const then_branch, const else_branch = switch (first.kind) {
+            .value => .{ first.body, second.body },
+            .callback => .{
+                try self.callbackReturnExpression(first.body),
+                try self.callbackReturnExpression(second.body),
+            },
+        };
         // The scrutinee is the bound name and nothing else.
         const bound = self.bound orelse return error.Unsupported;
         const name = self.identifierName(match.discriminant) orelse return error.Unsupported;
         if (!std.mem.eql(u8, name, bound.name)) return error.Unsupported;
         bound.uses += 1;
-        try self.encodeSelect(hasher, bound.lowerer, bound.condition, first.body, second.body, depth);
+        try self.encodeSelect(hasher, bound.lowerer, bound.condition, then_branch, else_branch, depth);
+    }
+
+    fn callbackReturnExpression(self: *Lowerer, node: NodeIndex) LowerError!NodeIndex {
+        if (self.view.getTag(node) != .arrow_function) return error.Unsupported;
+        const function = self.view.getFunction(node) orelse return error.Unsupported;
+        if (function.params_count != 0) return error.Unsupported;
+        if (self.view.getTag(function.body) != .return_stmt) return error.Unsupported;
+        return self.view.getOptValue(function.body) orelse error.Unsupported;
     }
 
     fn unwrapDoubleNot(self: *Lowerer, node: NodeIndex) ?NodeIndex {
@@ -438,7 +491,7 @@ const Lowerer = struct {
 
             const property = self.view.getProperty(child) orelse return error.Unsupported;
             const key_index = self.view.getStringIdx(property.key) orelse return error.Unsupported;
-            const key = self.constants.getString(key_index) orelse return error.Unsupported;
+            const key = self.view.ir_constants.getString(key_index) orelse return error.Unsupported;
             try fields.append(self.allocator, .{
                 .key = key,
                 .value = try self.digestAtDepth(property.value, depth + 1),
@@ -620,4 +673,187 @@ test "calls stay outside the M3 slice even when both sides spell one" {
         .{ .binding = ready_binding },
     );
     try testing.expectEqual(Verdict{ .unsupported = .original }, answer);
+}
+
+fn returnedExpression(view: IrView, program: NodeIndex) !NodeIndex {
+    const program_block = view.getBlock(program) orelse return error.ProgramMissing;
+    if (program_block.stmts_count != 2) return error.UnexpectedProgram;
+    const function_node = view.getListIndex(program_block.stmts_start, 1);
+    const function = view.getFunctionOfDecl(function_node) orelse return error.FunctionMissing;
+    const body = view.getBlock(function.body) orelse return error.FunctionBodyMissing;
+    if (body.stmts_count != 1) return error.UnexpectedFunctionBody;
+    const return_node = view.getListIndex(body.stmts_start, 0);
+    if (view.getTag(return_node) != .return_stmt) return error.ReturnMissing;
+    return view.getOptValue(return_node) orelse error.ReturnValueMissing;
+}
+
+fn compareLoweredSource(
+    source: []const u8,
+    original: []const u8,
+    binding: Binding,
+) !Verdict {
+    const pipeline = @import("pipeline.zig");
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(testing.allocator, testing.allocator, source, "/app/kernel.ts");
+    defer frontend.deinit();
+    const program = switch (frontend.parse_outcome) {
+        .accepted => |root| root,
+        else => return error.SourceAdmissionRefused,
+    };
+    var parsed = pipeline.ParsedModule.fromAdmittedParser(
+        &frontend.parser,
+        program,
+        &frontend.atoms,
+        "/app/kernel.ts",
+    );
+    parsed.scopes = &frontend.parser.scopes;
+    var analysis: pipeline.ModuleAnalysisSession = .{};
+    try analysis.initFull(testing.allocator, parsed, .{
+        .source_types = .{ .direct = "/app/kernel.ts" },
+        .strict = false,
+    });
+    defer analysis.deinit();
+    try analysis.complete();
+
+    const view = IrView.fromIRStore(&frontend.parser.nodes, &frontend.parser.constants);
+    const lowered = try returnedExpression(view, program);
+    return compareLoweredExpression(
+        testing.allocator,
+        original,
+        view,
+        lowered,
+        &frontend.atoms,
+        .{ .binding = binding },
+    );
+}
+
+test "lowered fluent callbacks preserve a pure conditional kernel term" {
+    const source =
+        \\import { match } from "zttp:core";
+        \\function choose(c: boolean): string {
+        \\  return match(c).with(true, (): string => "yes").otherwise((): string => "no");
+        \\}
+    ;
+    try testing.expectEqual(
+        Verdict.identical,
+        try compareLoweredSource(
+            source,
+            "ready ? \"yes\" : \"no\"",
+            .{ .name = "c", .initializer = "!!(ready)" },
+        ),
+    );
+}
+
+test "lowered numeric callbacks preserve a chained conditional kernel term" {
+    const source =
+        \\import { match } from "zttp:core";
+        \\function choose(c: boolean, fallback: boolean): number {
+        \\  return match(c).with(true, (): number => 200).otherwise((): number => fallback ? 201 : 500);
+        \\}
+    ;
+    try testing.expectEqual(
+        Verdict.identical,
+        try compareLoweredSource(
+            source,
+            "ready ? 200 : fallback ? 201 : 500",
+            .{ .name = "c", .initializer = "!!(ready)" },
+        ),
+    );
+    const changed_number = try compareLoweredSource(
+        source,
+        "ready ? 201 : fallback ? 201 : 500",
+        .{ .name = "c", .initializer = "!!(ready)" },
+    );
+    try testing.expect(changed_number == .differs);
+}
+
+test "lowered fluent callback near misses differ" {
+    const swapped =
+        \\import { match } from "zttp:core";
+        \\function choose(c: boolean): string {
+        \\  return match(c).with(true, (): string => "no").otherwise((): string => "yes");
+        \\}
+    ;
+    const swapped_verdict = try compareLoweredSource(
+        swapped,
+        "ready ? \"yes\" : \"no\"",
+        .{ .name = "c", .initializer = "!!(ready)" },
+    );
+    try testing.expect(swapped_verdict == .differs);
+
+    const matching =
+        \\import { match } from "zttp:core";
+        \\function choose(c: boolean): string {
+        \\  return match(c).with(true, (): string => "yes").otherwise((): string => "no");
+        \\}
+    ;
+    const wrong_condition = try compareLoweredSource(
+        matching,
+        "ready ? \"yes\" : \"no\"",
+        .{ .name = "c", .initializer = "!!(other)" },
+    );
+    try testing.expect(wrong_condition == .differs);
+}
+
+test "lowered fluent callbacks with parameters blocks or calls stay unsupported" {
+    const parameter =
+        \\import { match } from "zttp:core";
+        \\function choose(c: boolean): string {
+        \\  return match(c).with(true, (selected: boolean): string => "yes").otherwise((): string => "no");
+        \\}
+    ;
+    try testing.expectEqual(
+        Verdict{ .unsupported = .repaired },
+        try compareLoweredSource(parameter, "ready ? \"yes\" : \"no\"", ready_binding),
+    );
+
+    const block =
+        \\import { match } from "zttp:core";
+        \\function choose(c: boolean): string {
+        \\  return match(c).with(true, (): string => { return "yes"; }).otherwise((): string => "no");
+        \\}
+    ;
+    try testing.expectEqual(
+        Verdict{ .unsupported = .repaired },
+        try compareLoweredSource(block, "ready ? \"yes\" : \"no\"", ready_binding),
+    );
+
+    const call =
+        \\import { match } from "zttp:core";
+        \\function choose(c: boolean): string {
+        \\  return match(c).with(true, (): string => String(c)).otherwise((): string => "no");
+        \\}
+    ;
+    try testing.expectEqual(
+        Verdict{ .unsupported = .repaired },
+        try compareLoweredSource(call, "ready ? \"yes\" : \"no\"", ready_binding),
+    );
+}
+
+test "raw fluent calls stay outside the lowered expression entry point" {
+    const source =
+        \\import { match } from "zttp:core";
+        \\function choose(c: boolean): string {
+        \\  return match(c).with(true, (): string => "yes").otherwise((): string => "no");
+        \\}
+    ;
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(testing.allocator, testing.allocator, source, "/app/raw-kernel.ts");
+    defer frontend.deinit();
+    const program = switch (frontend.parse_outcome) {
+        .accepted => |root| root,
+        else => return error.SourceAdmissionRefused,
+    };
+    const view = IrView.fromIRStore(&frontend.parser.nodes, &frontend.parser.constants);
+    try testing.expectEqual(
+        Verdict{ .unsupported = .repaired },
+        try compareLoweredExpression(
+            testing.allocator,
+            "ready ? \"yes\" : \"no\"",
+            view,
+            try returnedExpression(view, program),
+            &frontend.atoms,
+            .{ .binding = ready_binding },
+        ),
+    );
 }

@@ -542,6 +542,7 @@ fn nameOnlyAfterDot(t: TokenType) bool {
         .kw_default,
         .kw_static,
         .kw_when,
+        .kw_with,
         => true,
         else => false,
     };
@@ -1841,6 +1842,13 @@ test "a keyword is not glued to the bracket after it" {
 
 test "a keyword used as a property name still binds to its call" {
     try expectPrints("const x = a.of(1);\n", "const x = a.of(1);\n");
+}
+
+test "a fluent match arm binds to its call" {
+    try expectPrints(
+        "import { match as m } from \"zttp:core\";\nconst x = m(v).with(true, () => 1).otherwise(() => 0);\n",
+        "import { match as m } from \"zttp:core\";\nconst x = m(v).with(true, () => 1).otherwise(() => 0);\n",
+    );
 }
 
 test "a blank line between record fields is kept" {

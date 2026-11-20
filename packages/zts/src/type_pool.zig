@@ -181,6 +181,10 @@ pub const TypePool = struct {
     /// `Result`. Membership is by type index, set where the record is created,
     /// never by shape: a record a handler declares never enters this set.
     result_records: std.AutoHashMapUnmanaged(TypeIndex, void) = .empty,
+    /// Records inferred by narrowing an `unknown` value with a record pattern.
+    /// Their declared fields stay precise. Any other field reads as `unknown`.
+    /// Source record declarations never enter this set.
+    unknown_field_records: std.AutoHashMapUnmanaged(TypeIndex, void) = .empty,
     /// Operational failure is separate from `null_type_idx`, which remains a
     /// semantic absence sentinel. Once poisoned, the pool must be discarded.
     failure: ?TypePoolError = null,
@@ -245,6 +249,7 @@ pub const TypePool = struct {
         self.key_memo.deinit(allocator);
         self.literal_memo.deinit(allocator);
         self.result_records.deinit(allocator);
+        self.unknown_field_records.deinit(allocator);
     }
 
     /// Mark `idx` as a Result record that the checker built. The returned
@@ -257,6 +262,25 @@ pub const TypePool = struct {
 
     pub fn isResultRecord(self: *const TypePool, idx: TypeIndex) bool {
         return self.result_records.contains(idx);
+    }
+
+    /// Mark one inferred record as retaining unknown fields from its source.
+    pub fn markUnknownFieldRecord(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex) TypeIndex {
+        if (idx == null_type_idx) return idx;
+        if (self.key_memo.fetchRemove(idx)) |entry| allocator.free(entry.value);
+        self.unknown_field_records.put(allocator, idx, {}) catch self.recordFailure(error.OutOfMemory);
+        return idx;
+    }
+
+    /// Whether an absent declared field on this record reads as `unknown`.
+    pub fn hasUnknownFields(self: *const TypePool, idx: TypeIndex) bool {
+        return self.unknown_field_records.contains(idx);
+    }
+
+    /// Preserve unknown fields when a derived record copies a source record.
+    pub fn copyUnknownFieldMetadata(self: *TypePool, allocator: std.mem.Allocator, source: TypeIndex, target: TypeIndex) TypeIndex {
+        if (!self.hasUnknownFields(source)) return target;
+        return self.markUnknownFieldRecord(allocator, target);
     }
 
     /// The marked Result record `{ ok: boolean; value?: V; error?: E; errors?: S }`.
@@ -1018,11 +1042,11 @@ pub const TypePool = struct {
                 for (0..new_fields.len) |i| {
                     new_fields[i].type_idx = self.instantiate(allocator, new_fields[i].type_idx, param_names, param_types, depth + 1);
                 }
-                const instantiated = self.addRecord(allocator, new_fields);
+                var instantiated = self.addRecord(allocator, new_fields);
                 // The instance of a marked Result record is a Result too: the
                 // mark is the identity that every Result consumer tests.
-                if (self.isResultRecord(idx)) return self.markResultRecord(allocator, instantiated);
-                return instantiated;
+                if (self.isResultRecord(idx)) instantiated = self.markResultRecord(allocator, instantiated);
+                return self.copyUnknownFieldMetadata(allocator, idx, instantiated);
             },
             .t_array => {
                 const elem = self.getArrayElement(idx);
@@ -1224,7 +1248,7 @@ pub const TypePool = struct {
         for (ro_fields) |*field| {
             field.readonly = true;
         }
-        return self.addRecord(allocator, ro_fields);
+        return self.copyUnknownFieldMetadata(allocator, idx, self.addRecord(allocator, ro_fields));
     }
 
     /// Create a new record type with all fields optional (Partial<T> utility).
@@ -1240,7 +1264,7 @@ pub const TypePool = struct {
         for (out) |*field| {
             field.optional = true;
         }
-        return self.addRecord(allocator, out);
+        return self.copyUnknownFieldMetadata(allocator, idx, self.addRecord(allocator, out));
     }
 
     /// Create a new record type with all fields required (Required<T> utility).
@@ -1256,7 +1280,7 @@ pub const TypePool = struct {
         for (out) |*field| {
             field.optional = false;
         }
-        return self.addRecord(allocator, out);
+        return self.copyUnknownFieldMetadata(allocator, idx, self.addRecord(allocator, out));
     }
 
     /// Create a new record type with only the named fields (Pick<T, Keys>).
@@ -1266,7 +1290,11 @@ pub const TypePool = struct {
     pub fn pickFields(self: *TypePool, allocator: std.mem.Allocator, record_idx: TypeIndex, keys_idx: TypeIndex) TypeIndex {
         if (self.isPoisoned()) return null_type_idx;
         const fields = self.getRecordFields(record_idx);
-        if (fields.len == 0) return record_idx;
+        if (fields.len == 0) {
+            var saw_literal_key = false;
+            _ = self.stringKeySetContains(keys_idx, "", &saw_literal_key);
+            return if (saw_literal_key) self.addRecord(allocator, &.{}) else record_idx;
+        }
 
         var out: std.ArrayListUnmanaged(RecordField) = .empty;
         defer out.deinit(allocator);
@@ -1280,6 +1308,8 @@ pub const TypePool = struct {
         }
 
         if (!saw_literal_key) return record_idx;
+        // Pick names a finite output key set. It closes an inferred unknown
+        // record to those selected fields instead of retaining other fields.
         return self.addRecord(allocator, out.items);
     }
 
@@ -1304,7 +1334,7 @@ pub const TypePool = struct {
         }
 
         if (!saw_literal_key) return record_idx;
-        return self.addRecord(allocator, out.items);
+        return self.copyUnknownFieldMetadata(allocator, record_idx, self.addRecord(allocator, out.items));
     }
 
     /// Check whether a Pick/Omit key argument contains a field name. Literal
@@ -2015,6 +2045,8 @@ pub const TypePool = struct {
                     break;
                 }
             }
+            if (!found and self.hasUnknownFields(source) and
+                !self.assignableIn(ctx, self.idx_unknown, tgt_f.type_idx)) return false;
             if (!found and !tgt_f.optional) return false;
         }
         return true;
@@ -2033,9 +2065,25 @@ pub const TypePool = struct {
                     break;
                 }
             }
+            if (!found and self.typeHasUnknownFields(ctx, source, 0) and
+                !self.assignableIn(ctx, self.idx_unknown, tgt_f.type_idx)) return false;
             if (!found and !tgt_f.optional) return false;
         }
         return true;
+    }
+
+    fn typeHasUnknownFields(self: *const TypePool, ctx: *const AssignCtx, source: TypeIndex, depth: u8) bool {
+        if (source == null_type_idx or depth > 16) return false;
+        const resolved = if (self.getTag(source) == .t_ref and ctx.resolver != null)
+            ctx.resolver.?.apply(source)
+        else
+            source;
+        if (self.hasUnknownFields(resolved)) return true;
+        if (self.getTag(resolved) != .t_intersection) return false;
+        for (self.getIntersectionMembers(resolved)) |member| {
+            if (self.typeHasUnknownFields(ctx, member, depth + 1)) return true;
+        }
+        return false;
     }
 
     fn findAssignableFieldInType(

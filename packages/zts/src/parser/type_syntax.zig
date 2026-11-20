@@ -59,6 +59,10 @@ pub const TypeOnlyModule = type_syntax_store_mod.TypeOnlyModule;
 pub const TypeOnlyBinding = type_syntax_store_mod.TypeOnlyBinding;
 pub const BrandDeclaration = type_syntax_store_mod.BrandDeclaration;
 pub const NominalConstructor = type_syntax_store_mod.NominalConstructor;
+pub const LegacyAssertRepair = type_syntax_store_mod.LegacyAssertRepair;
+pub const LegacyMatchRepair = type_syntax_store_mod.LegacyMatchRepair;
+pub const LegacyMatchArmRepair = type_syntax_store_mod.LegacyMatchArmRepair;
+pub const LegacyNominalInitializer = type_syntax_store_mod.LegacyNominalInitializer;
 pub const decodeStringLiteralContent = type_syntax_scan_mod.decodeStringLiteralContent;
 pub const TypeOnlyModuleRefusalReason = type_syntax_store_mod.TypeOnlyModuleRefusalReason;
 pub const TypeOnlyModuleRefusal = type_syntax_store_mod.TypeOnlyModuleRefusal;
@@ -1132,6 +1136,10 @@ test "generic application admission rejects a missing closing angle before synta
         .decoded_module_specifiers = 0,
         .brand_declarations = 0,
         .nominal_constructors = 0,
+        .legacy_assert_repairs = 0,
+        .legacy_match_repairs = 0,
+        .legacy_match_arm_repairs = 0,
+        .legacy_nominal_initializers = 0,
         .requires_intrinsic_validation = false,
         .intrinsics_validated = false,
     }));

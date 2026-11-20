@@ -2383,6 +2383,21 @@ pub const TypeEnv = struct {
         return self.brand_origins.get(name);
     }
 
+    /// Return the resolved unique-symbol brand for one nominal type.
+    pub fn nominalBrandName(self: *const TypeEnv, nominal: TypeIndex) ?[]const u8 {
+        const origin = self.pool.nominalOrigin(nominal) orelse return null;
+        var entries = self.brand_origins.iterator();
+        while (entries.next()) |entry| {
+            const candidate = entry.value_ptr.*;
+            if (candidate.declaration_start == origin.declaration_start and
+                std.mem.eql(u8, candidate.module_path, origin.module_path))
+            {
+                return entry.key_ptr.*;
+            }
+        }
+        return null;
+    }
+
     pub fn putImportedBrand(self: *TypeEnv, name: []const u8, origin: type_pool_mod.NominalOrigin) !void {
         if (self.brand_origins.contains(name)) return error.DuplicateTypeBinding;
         const owned_name = self.internName(name);

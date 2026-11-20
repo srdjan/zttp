@@ -65,8 +65,9 @@ pub const max_depth: usize = 64;
 /// identities. The version is what lets a client tell the two cases apart, so it
 /// moves whenever a byte of the encoding moves: a new tag, a changed prefix, a
 /// changed field order. Version 2 adds the source origin and construction
-/// policy to keys of source-defined nominal types.
-pub const serialization_version: u32 = 2;
+/// policy to keys of source-defined nominal types. Version 3 distinguishes
+/// inferred records that retain unknown fields from closed source records.
+pub const serialization_version: u32 = 3;
 
 /// The hash `typeDigest` applies to the canonical string. Published beside the
 /// version because a client that recomputes a digest needs both, and neither is
@@ -246,7 +247,8 @@ const Encoder = struct {
     /// encoder reads for wire order.
     fn writeRecord(self: *Encoder, idx: TypeIndex, w: *std.Io.Writer) KeyError!void {
         const fields = self.pool.getRecordFields(idx);
-        try w.print("R{d}", .{fields.len});
+        try w.writeAll(if (self.pool.hasUnknownFields(idx)) "Q" else "R");
+        try w.print("{d}", .{fields.len});
 
         const order = try self.allocator.alloc(usize, fields.len);
         defer self.allocator.free(order);

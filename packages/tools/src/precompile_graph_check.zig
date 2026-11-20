@@ -34,6 +34,7 @@ const ReadFileError = zts.modules.module_graph.ReadFileError;
 
 const FrontendFailureAdapter = struct {
     sink: *precompile.GraphSink,
+    analysis_observer: ?check_run_mod.AnalysisObserver,
 
     fn reportTypeDiagnostics(
         raw_context: *anyopaque,
@@ -41,8 +42,25 @@ const FrontendFailureAdapter = struct {
         source: []const u8,
         view: zts.IrView,
         checker: *const zts.TypeChecker,
+        type_store: *const zts.parser.type_syntax.Store,
+        scopes: *const zts.parser.ScopeAnalyzer,
+        atoms: *zts.AtomTable,
+        facts: *const zts.pipeline.ModuleFacts,
     ) anyerror!void {
         const self: *FrontendFailureAdapter = @ptrCast(@alignCast(raw_context));
+        if (self.analysis_observer) |observer| {
+            try observer.on_analysis(observer.context, .{
+                .module_path = module_path,
+                .source = source,
+                .ir_view = view,
+                .atoms = atoms,
+                .scopes = scopes,
+                .type_store = type_store,
+                .module_facts = facts,
+                .type_env = checker.migrationTypeEnvironment(),
+                .type_diagnostics = checker.getDiagnostics(),
+            });
+        }
         for (checker.getDiagnostics()) |diagnostic| {
             try self.sink.appendChecker(.type, diagnostic, view, module_path, source);
             self.sink.type_errors += 1;
@@ -141,6 +159,7 @@ pub const RunOptions = struct {
     json_mode: bool,
     policy: ?zts.HandlerPolicy,
     sql_schema_path: ?[]const u8,
+    analysis_observer: ?check_run_mod.AnalysisObserver,
 };
 
 pub const Outcome = enum {
@@ -245,7 +264,10 @@ pub const GraphCheck = struct {
             .json_mode = opts.json_mode,
         };
         defer applySink(result, &sink);
-        var failure_adapter: FrontendFailureAdapter = .{ .sink = &sink };
+        var failure_adapter: FrontendFailureAdapter = .{
+            .sink = &sink,
+            .analysis_observer = opts.analysis_observer,
+        };
         var frontend_validation = zts.pipeline.GraphFrontendValidation.init(allocator, &self.atoms, true);
         defer frontend_validation.deinit();
         frontend_validation.failure_sink = failure_adapter.hook();
@@ -411,6 +433,10 @@ pub const GraphCheck = struct {
 
     fn entryModule(self: *const GraphCheck) *const zts.modules.module_graph.Module {
         return &self.graph.module_list.items[self.graph.execution_order[self.graph.execution_order.len - 1]];
+    }
+
+    pub fn entrySource(self: *const GraphCheck) []const u8 {
+        return self.entryModule().source;
     }
 
     /// The signature table of the file imports of the entry: what each checked

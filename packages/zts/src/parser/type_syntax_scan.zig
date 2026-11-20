@@ -305,12 +305,37 @@ const RawModuleScanner = struct {
 
     fn scanStatementEnd(self: *RawModuleScanner, start: usize) !usize {
         var pos = start;
+        var brace_depth: u16 = 0;
+        var saw_bindings = false;
+        var saw_specifier = false;
         while (pos < self.source.len) {
             switch (self.source[pos]) {
                 ';' => return pos + 1,
-                '\n' => return pos,
-                '\'', '"' => pos = try self.scanOrdinaryString(pos, self.source[pos]),
+                '\n' => if (brace_depth == 0 and (!saw_bindings or saw_specifier)) return pos else {
+                    pos += 1;
+                },
+                '{' => {
+                    saw_bindings = true;
+                    brace_depth +|= 1;
+                    pos += 1;
+                },
+                '}' => {
+                    brace_depth -|= 1;
+                    pos += 1;
+                },
+                '\'', '"' => {
+                    pos = try self.scanOrdinaryString(pos, self.source[pos]);
+                    if (brace_depth == 0) saw_specifier = true;
+                },
                 '`' => pos = try self.scanTemplate(pos),
+                '/' => if (pos + 1 < self.source.len and self.source[pos + 1] == '/') {
+                    pos = std.mem.indexOfScalarPos(u8, self.source, pos + 2, '\n') orelse self.source.len;
+                } else if (pos + 1 < self.source.len and self.source[pos + 1] == '*') {
+                    const close = std.mem.indexOfPos(u8, self.source, pos + 2, "*/") orelse return self.source.len;
+                    pos = close + 2;
+                } else {
+                    pos += 1;
+                },
                 else => pos += 1,
             }
         }

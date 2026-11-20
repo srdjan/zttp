@@ -56,6 +56,11 @@ pub const RepairIntent = enum {
     /// domain name is authorial, so no automatic rewrite is advertised.
     declare_boundary_type,
 
+    replace_legacy_declaration,
+    wrap_implicit_nominal_initializer,
+    replace_legacy_match,
+    replace_legacy_assert,
+
     pub fn asString(self: RepairIntent) []const u8 {
         return @tagName(self);
     }

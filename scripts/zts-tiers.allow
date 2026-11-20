@@ -133,6 +133,7 @@ zts-compiler analysis_fuzz.zig
 zts-compiler ambient_names.zig
 zts-compiler api_schema.zig
 zts-compiler compiler_root.zig
+zts-compiler legacy_migration.zig
 zts-compiler binding_key.zig
 zts-compiler behavior_canonical.zig
 zts-compiler bool_checker.zig

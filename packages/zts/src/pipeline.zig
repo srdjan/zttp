@@ -758,6 +758,10 @@ pub const GraphFrontendValidation = struct {
             source: []const u8,
             view: IrView,
             checker: *const TypeChecker,
+            type_store: *const parser_mod.type_syntax.Store,
+            scopes: *const parser_mod.ScopeAnalyzer,
+            atoms: *context_mod.AtomTable,
+            facts: *const ModuleFacts,
         ) anyerror!void,
         report_unexported_type: *const fn (
             context: *anyopaque,
@@ -886,6 +890,10 @@ pub const GraphFrontendValidation = struct {
                     module.source,
                     IrView.fromIRStore(&parser.nodes, &parser.constants),
                     &checker,
+                    &parser.type_store,
+                    &parser.scopes,
+                    self.atoms,
+                    &facts,
                 );
             }
             return error.TypeCheckFailed;

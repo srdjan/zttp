@@ -3061,6 +3061,95 @@ test "CHECK fluent match callbacks receive exact narrowed subjects" {
     }
 }
 
+test "CHECK inferred unknown record callbacks retain unknown fields" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        "import { match } from \"zttp:core\";\n" ++
+            "function read(value: unknown): string { return match(value).with({}, (selected) => { const text = selected.text; return String(text); }).otherwise(() => \"other\"); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(read({})); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "function read(value: unknown): string { return match(value).with({ kind: \"echo\" }, (selected) => { const text = selected.text; return String(text); }).otherwise(() => \"other\"); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(read({ kind: \"echo\", text: \"given\" })); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "function read(value: unknown): string { return match(value).with({ box: { kind: \"echo\" }, items: [{ kind: \"item\" }] }, (selected) => { const boxText = selected.box.text; const itemText = selected.items[0].text; return [String(boxText), String(itemText)].join(\"|\"); }).otherwise(() => \"other\"); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(read({ box: { kind: \"echo\", text: \"box\" }, items: [{ kind: \"item\", text: \"item\" }] })); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "function identity<T>(value: T): T { return value; }\n" ++
+            "function read(value: unknown): string { return match(value).with({}, (selected) => { const snapshot = identity(selected); const text = snapshot.text; return String(text); }).otherwise(() => \"other\"); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(read({ text: \"given\" })); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "function read<T>(value: T): string { return match(value).with({ kind: \"echo\" }, (selected) => { const text = selected.text; return String(text); }).otherwise(() => \"other\"); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(read<{ kind: \"echo\"; text: string }>({ kind: \"echo\", text: \"given\" })); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "function read<T extends { kind: string; text: string }>(value: T): string { return match(value).with({ kind: \"echo\" }, (selected) => { const text: string = selected.text; return text; }).otherwise(() => \"other\"); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(read<{ kind: \"echo\"; text: string }>({ kind: \"echo\", text: \"given\" })); }\n",
+        "import { match } from \"zttp:core\";\n" ++
+            "function read(value: unknown): string { const selected = match(value).with(\"skip\", () => ({ kind: \"echo\" })).with({ kind: \"echo\" }, (candidate) => candidate).otherwise(() => ({ kind: \"echo\" })); const text = selected.text; return String(text); }\n" ++
+            "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(read({ kind: \"echo\", text: \"given\" })); }\n",
+    };
+    for (cases) |source| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    }
+}
+
+test "CHECK inferred unknown record reads preserve callback labels" {
+    const allocator = std.testing.allocator;
+    const source =
+        "import { match } from \"zttp:core\";\n" ++
+        "function read(value: unknown): string { return match(value).with({}, (selected) => { const text = selected.text; return String(text); }).otherwise(() => \"other\"); }\n" ++
+        "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(read(req)); }\n";
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS401", result.json_diagnostics.items[0].code);
+}
+
+test "CHECK unknown record fields grant no concrete or closed record authority" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        source: []const u8,
+        code: []const u8,
+    }{
+        .{
+            .source = "import { match } from \"zttp:core\";\n" ++
+                "function read(value: unknown): string { return match(value).with({}, (selected) => { const text: string = selected.text; return text; }).otherwise(() => \"other\"); }\n" ++
+                "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(read(req)); }\n",
+            .code = "ZTS200",
+        },
+        .{
+            .source = "import { match } from \"zttp:core\";\n" ++
+                "function read(value: unknown): string { return match(value).with({}, (selected) => { const narrowed: { text?: string } = selected; return String(narrowed.text); }).otherwise(() => \"other\"); }\n" ++
+                "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(read(req)); }\n",
+            .code = "ZTS200",
+        },
+        .{
+            .source = "import { match } from \"zttp:core\";\n" ++
+                "type Known = { kind: \"echo\" };\n" ++
+                "function read(value: Known): string { return match(value).with({ kind: \"echo\" }, (selected) => { const text = selected.text; return String(text); }).exhaustive(); }\n" ++
+                "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(read({ kind: \"echo\" })); }\n",
+            .code = "ZTS201",
+        },
+        .{
+            .source = "import { match } from \"zttp:core\";\n" ++
+                "type Selected = { kind: \"echo\" };\n" ++
+                "function read(value: unknown): string { return match(value).with({ kind: \"echo\" }, (selected: Selected) => { const text = selected.text; return String(text); }).otherwise(() => \"other\"); }\n" ++
+                "function handler(req: Request): Proof<Response, \"read_only\"> { return Response.text(read(req)); }\n",
+            .code = "ZTS201",
+        },
+    };
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try std.testing.expectEqualStrings(case.code, result.json_diagnostics.items[0].code);
+    }
+}
+
 test "CHECK fluent match callbacks refine intersection subjects" {
     const allocator = std.testing.allocator;
     const valid_source =
@@ -7255,7 +7344,7 @@ test "CHECK preserves type-only module admission and refusal diagnostics" {
         .{ .source = "function helper(): number { export type { A }; return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 29, .suggestion = null } },
         .{ .source = "function helper(): number { if (true) { import type { A } from \"./a\"; const live = 1; } return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 41, .suggestion = null } },
         .{ .source = "import type { A } from \"./a;b\";\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 3, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
-        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
         .{ .source = "import /* gap */ type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import type X from' is not supported; write 'import type { X } from \"module\"'", .line = 1, .column = 1, .suggestion = null } },
         .{ .source = "import type { Spec } from \"zttp:types\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 1, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" } },
         .{ .source = "import type { A } /* \"zttp:types\" */ from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 1, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" } },
@@ -8466,26 +8555,26 @@ test "CHECK preserves absent structural aliases at comment boundaries" {
 
 test "CHECK preserves raw module recovery and the complete nested parser batch" {
     const cases = [_]struct { source: []const u8, parser_stage: bool, diagnostics: []const CompoundDiagnostic }{
-        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .parser_stage = true, .diagnostics = &.{
+        .{ .source = "import type { A }    ; */ from \"./a\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .parser_stage = true, .diagnostics = &.{
             .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null },
         } },
-        .{ .source = "import type { A } /* ; */ from \"./a\";\nconst later = \"open\n", .parser_stage = false, .diagnostics = &.{
+        .{ .source = "import type { A }    ; */ from \"./a\";\nconst later = \"open\n", .parser_stage = false, .diagnostics = &.{
             .{ .code = "ZTS008", .message = "unterminated string literal", .line = 2, .column = 20, .suggestion = "close the quote, or write the newline as \\n" },
         } },
-        .{ .source = "import type { A } /* ; */ from \"./a\";\nconst later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
+        .{ .source = "import type { A }    ; */ from \"./a\";\nconst later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
             .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 14, .suggestion = "use specific types (string, number, a record type) or union types instead" },
         } },
-        .{ .source = "function f() {\nimport type { A } /* ; */ from \"./a\";\nconst live = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
+        .{ .source = "function f() {\nimport type { A }    ; */ from \"./a\";\nconst live = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
             .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null },
             .{ .code = "ZTS002", .message = "expected expression", .line = 2, .column = 24, .suggestion = null },
             .{ .code = "ZTS003", .message = "unexpected token", .line = 5, .column = 1, .suggestion = "'}'" },
         } },
-        .{ .source = "function f() {\nimport type { A } /* ; */ from \"./a\";\nconst live: \"const\" = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
+        .{ .source = "function f() {\nimport type { A }    ; */ from \"./a\";\nconst live: \"const\" = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
             .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null },
             .{ .code = "ZTS002", .message = "expected expression", .line = 2, .column = 24, .suggestion = null },
             .{ .code = "ZTS003", .message = "unexpected token", .line = 5, .column = 1, .suggestion = "'}'" },
         } },
-        .{ .source = "function f() {\nimport type { A } /* ; */ from \"./a\";\nconst live: \"return\" = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
+        .{ .source = "function f() {\nimport type { A }    ; */ from \"./a\";\nconst live: \"return\" = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
             .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null },
             .{ .code = "ZTS002", .message = "expected expression", .line = 2, .column = 24, .suggestion = null },
             .{ .code = "ZTS003", .message = "unexpected token", .line = 5, .column = 1, .suggestion = "'}'" },
@@ -8606,10 +8695,10 @@ test "CHECK observes every admission kind after the measured recovery divergence
 
 test "CHECK preserves raw recovery header comments" {
     const cases = [_]struct { source: []const u8, parser_stage: bool, diagnostic: CompoundDiagnostic }{
-        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(/* x = 1 */) { return 1; }\n", .parser_stage = false, .diagnostic = .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 2, .column = 17, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" } },
-        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(/* ) */) { return 1; }\n", .parser_stage = true, .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null } },
-        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(/* unfinished\n", .parser_stage = true, .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null } },
-        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(x: number, /* x = 1 */) { return 1; }\n", .parser_stage = false, .diagnostic = .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 2, .column = 28, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" } },
+        .{ .source = "import type { A }    ; */ from \"./a\";\nfunction f(/* x = 1 */) { return 1; }\n", .parser_stage = false, .diagnostic = .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 2, .column = 17, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" } },
+        .{ .source = "import type { A }    ; */ from \"./a\";\nfunction f(/* ) */) { return 1; }\n", .parser_stage = true, .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null } },
+        .{ .source = "import type { A }    ; */ from \"./a\";\nfunction f(/* unfinished\n", .parser_stage = true, .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null } },
+        .{ .source = "import type { A }    ; */ from \"./a\";\nfunction f(x: number, /* x = 1 */) { return 1; }\n", .parser_stage = false, .diagnostic = .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 2, .column = 28, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" } },
     };
     try std.testing.expectEqual(@as(usize, 4), cases.len);
     for (cases) |case| {

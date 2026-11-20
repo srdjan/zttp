@@ -54,6 +54,25 @@ pub const CheckedObserver = struct {
     on_checked: *const fn (context: *anyopaque, checked: CheckedView) error{OutOfMemory}!void,
 };
 
+/// Borrowed authority from the production analysis session. The callback runs
+/// while the parser, resolved imports, lowered IR, and type checker are live.
+pub const AnalysisView = struct {
+    module_path: []const u8,
+    source: []const u8,
+    ir_view: zts.IrView,
+    atoms: *zts.AtomTable,
+    scopes: *const zts.parser.ScopeAnalyzer,
+    type_store: *const zts.parser.type_syntax.Store,
+    module_facts: *const zts.pipeline.ModuleFacts,
+    type_env: *const zts.TypeEnv,
+    type_diagnostics: []const zts.TypeDiagnostic,
+};
+
+pub const AnalysisObserver = struct {
+    context: *anyopaque,
+    on_analysis: *const fn (context: *anyopaque, analysis: AnalysisView) error{OutOfMemory}!void,
+};
+
 /// Run the full analysis pipeline without generating bytecode.
 /// Returns a CheckResult with all verification, contract, and coverage data.
 pub const CheckOptions = struct {
@@ -76,6 +95,9 @@ pub const CheckOptions = struct {
     /// handler and the earlier stages passed. Observes only: the check's
     /// output does not change.
     observer: ?CheckedObserver = null,
+    /// Observe resolved imports, completed intrinsic lowering, and typing.
+    /// All pointers are callback-local.
+    analysis_observer: ?AnalysisObserver = null,
 };
 
 pub fn runCheckOnlyWithOptions(
@@ -898,15 +920,12 @@ fn runCheckOnParsedSource(
     defer if (live_policy) |*policy| policy.deinit(allocator);
     const env_public: []const []const u8 = if (live_policy) |*policy| policy.envPublic() else &.{};
 
-    // A handler with a file import gets every check that the build runs on each
-    // module. The graph keeps the parsers that code generation walked, so the
-    // entry is analyzed over the parser of the graph, with typed file imports.
     var graph_check: ?*GraphCheck = null;
     defer if (graph_check) |graph| graph.destroy();
     var entry_imports: ?*const zts.FileImportSignatures = null;
     var analysis_path = handler_path;
     if (comptime builtin.target.os.tag != .freestanding) {
-        if (handler_fn != null and precompile_mod.hasFileImports(ir_view, &js_parser.type_store)) {
+        if (precompile_mod.hasFileImports(ir_view, &js_parser.type_store)) {
             const graph = try GraphCheck.create(allocator);
             graph_check = graph;
             const graph_opts: graph_check_mod.RunOptions = .{
@@ -917,6 +936,7 @@ fn runCheckOnParsedSource(
                 .json_mode = json_mode,
                 .policy = live_policy,
                 .sql_schema_path = sql_schema_path,
+                .analysis_observer = opts.analysis_observer,
             };
             const outcome = try graph.run(&result, graph_opts);
             // `remapDiagnosticsToSource` reads each later diagnostic against
@@ -991,6 +1011,20 @@ fn runCheckOnParsedSource(
         return err;
     };
     const resolved = try analysis.resolvedForReport();
+    if (opts.analysis_observer) |observer| {
+        const checker = if (resolved.type_checker) |*value| value else return error.AnalysisPassIncomplete;
+        try observer.on_analysis(observer.context, .{
+            .module_path = analysis_path,
+            .source = if (graph_check) |graph| graph.entrySource() else source,
+            .ir_view = ir_view,
+            .atoms = atoms,
+            .scopes = parsed.scopes orelse return error.AnalysisPassIncomplete,
+            .type_store = parsed.type_store orelse return error.AnalysisPassIncomplete,
+            .module_facts = try analysis.facts(),
+            .type_env = checker.migrationTypeEnvironment(),
+            .type_diagnostics = checker.getDiagnostics(),
+        });
+    }
     // A file import with no type that crosses a module would hand the later
     // checks a value they cannot read, as the build refuses it.
     if (graph_check != null) {
@@ -1264,6 +1298,7 @@ fn runCheckOnParsedSource(
             .json_mode = json_mode,
             .policy = live_policy,
             .sql_schema_path = sql_schema_path,
+            .analysis_observer = opts.analysis_observer,
         });
         entry_effects = try gc.entryImportedEffects(try analysis.facts());
     }

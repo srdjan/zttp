@@ -630,6 +630,28 @@ test "an intent with no implemented validator publishes a null equivalence" {
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"equivalence\":null") != null);
 }
 
+test "whole-source migration intent refuses the per-span Pi path" {
+    var text = registry_mod.helpers.TextBuffer.init(testing.allocator);
+    defer text.deinit();
+    const intent: RepairIntent = .{
+        .plan_id = "rp_migration",
+        .intent_kind = "replace_legacy_assert",
+        .line = 1,
+        .template = "assert(true);",
+    };
+    try writeEquivalenceJson(
+        testing.allocator,
+        text.writer(),
+        intent,
+        "assert true;\n",
+        "assert(true);\n",
+    );
+    const output = try text.toOwnedSlice();
+    defer testing.allocator.free(output);
+    try testing.expect(std.mem.indexOf(u8, output, "\"discharged\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "use zts normalize for this whole-source migration") != null);
+}
+
 test "execute returns typed failure for unsupported intent" {
     const input =
         \\{"path":"handler.ts","source":"function handler() {}","plan":{"id":"rp_003","edit_intent":{"kind":"replace_sink_expression","line":1,"column":1,"template":"replace"}}}

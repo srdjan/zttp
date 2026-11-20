@@ -122,8 +122,8 @@ fn projectResultSubject(comptime source: Source, diagnostic: anytype) ?[]const u
 
 fn projectRepairIntent(comptime source: Source, diagnostic: anytype) ?RepairIntent {
     return switch (source) {
-        .flow, .verifier, .strict => diagnostic.repair_intent,
-        .boolean, .type => null,
+        .flow, .verifier, .strict, .type => diagnostic.repair_intent,
+        .boolean => null,
     };
 }
 

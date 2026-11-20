@@ -432,7 +432,7 @@ pub const MatchAnalysis = struct {
             fields.items[field_index].type_idx = narrowed;
             fields.items[field_index].optional = false;
         }
-        return self.pool.addRecord(self.allocator, fields.items);
+        return self.pool.copyUnknownFieldMetadata(self.allocator, source_type, self.pool.addRecord(self.allocator, fields.items));
     }
 
     fn matchedUnknownRecordType(self: *const MatchAnalysis, pattern: NodeIndex, depth: u16) std.mem.Allocator.Error!TypeIndex {
@@ -445,7 +445,10 @@ pub const MatchAnalysis = struct {
             const name = self.patternPropertyName(property.key) orelse return null_type_idx;
             try fields.append(self.allocator, try self.fieldForUnknownPattern(name, property.value, depth + 1));
         }
-        return self.pool.addRecord(self.allocator, fields.items);
+        return self.pool.markUnknownFieldRecord(
+            self.allocator,
+            self.pool.addRecord(self.allocator, fields.items),
+        );
     }
 
     fn fieldForUnknownPattern(
@@ -532,7 +535,8 @@ pub const MatchAnalysis = struct {
                 defer self.allocator.free(failed_fields);
                 failed_fields[field_index].type_idx = field_type;
                 failed_fields[field_index].optional = original.optional;
-                try self.appendUnique(out, self.pool.addRecord(self.allocator, failed_fields));
+                const failed = self.pool.copyUnknownFieldMetadata(self.allocator, source_type, self.pool.addRecord(self.allocator, failed_fields));
+                try self.appendUnique(out, failed);
             }
             if (matched == null_type_idx or matched == self.pool.idx_never) return;
             prefix[field_index].type_idx = matched;

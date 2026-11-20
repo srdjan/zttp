@@ -119,6 +119,17 @@ pub const DiagnosticKind = enum {
     unsupported_intrinsic_reference, // a compiler intrinsic used outside its admitted call form
 };
 
+pub const NominalBase = enum { string, number, boolean };
+
+pub const NominalMigrationEvidence = struct {
+    declaration: NodeIndex,
+    nominal_name: []const u8,
+    brand_name: ?[]const u8,
+    module_path: []const u8,
+    nominal_declaration_start: u32,
+    base: NominalBase,
+};
+
 pub const Diagnostic = struct {
     severity: Severity,
     kind: DiagnosticKind,
@@ -133,6 +144,8 @@ pub const Diagnostic = struct {
     /// Result shape and borrowed subject name, set when the subject is a Result.
     result_shape: ?handler_verifier.ResultShape = null,
     result_subject: ?[]const u8 = null,
+    repair_intent: ?@import("repair_intent.zig").RepairIntent = null,
+    nominal_migration: ?NominalMigrationEvidence = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -1135,6 +1148,11 @@ pub const TypeChecker = struct {
         return self.diagnostics.items;
     }
 
+    /// Borrow the completed type environment during a production analysis callback.
+    pub fn migrationTypeEnvironment(self: *const TypeChecker) *const TypeEnv {
+        return self.env;
+    }
+
     // -------------------------------------------------------------------
     // Diagnostic formatting
     // -------------------------------------------------------------------
@@ -1598,7 +1616,17 @@ pub const TypeChecker = struct {
                         if (!self.env.isAssignableTo(inferred, declared) and
                             !self.brandsAtDeclaration(declared, inferred))
                         {
-                            self.addTypeMismatch(node, declared, inferred);
+                            const migration = self.implicitNominalMigrationEvidence(node, declared, inferred);
+                            self.addTypeMismatchWithIntent(
+                                node,
+                                declared,
+                                inferred,
+                                if (migration != null)
+                                    .wrap_implicit_nominal_initializer
+                                else
+                                    null,
+                                migration,
+                            );
                         }
                     }
 
@@ -4089,6 +4117,83 @@ pub const TypeChecker = struct {
         return self.env.pool.getTag(resolved) == .t_record;
     }
 
+    fn unknownRecordIntersectionField(
+        self: *const TypeChecker,
+        intersection: TypeIndex,
+        field_name: []const u8,
+    ) ?TypeIndex {
+        var field_types: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer field_types.deinit(self.allocator);
+        var has_unknown_fields = false;
+        self.collectUnknownRecordIntersectionFields(
+            intersection,
+            field_name,
+            &field_types,
+            &has_unknown_fields,
+            0,
+        );
+        if (!has_unknown_fields) return null;
+        return switch (field_types.items.len) {
+            0 => self.env.pool.idx_unknown,
+            1 => field_types.items[0],
+            else => self.env.pool.addIntersection(self.allocator, field_types.items),
+        };
+    }
+
+    fn collectUnknownRecordIntersectionFields(
+        self: *const TypeChecker,
+        raw: TypeIndex,
+        field_name: []const u8,
+        field_types: *std.ArrayListUnmanaged(TypeIndex),
+        has_unknown_fields: *bool,
+        depth: u8,
+    ) void {
+        if (raw == null_type_idx or depth > 16) return;
+        const pool = self.env.pool;
+        const resolved = pool.unwrapNominal(self.env.resolveRef(raw));
+        const tag = pool.getTag(resolved) orelse return;
+        if (tag == .t_generic_param or tag == .t_ref) {
+            const name = pool.getRefName(resolved);
+            var level = @min(self.function_depth, max_function_stack);
+            while (level > 0) {
+                level -= 1;
+                const signature = self.sourceFunctionSignature(self.function_stack[level]) orelse continue;
+                for (signature.typeParams()) |parameter| {
+                    if (!std.mem.eql(u8, parameter.name, name)) continue;
+                    if (parameter.constraint != null_type_idx) {
+                        self.collectUnknownRecordIntersectionFields(
+                            parameter.constraint,
+                            field_name,
+                            field_types,
+                            has_unknown_fields,
+                            depth + 1,
+                        );
+                    }
+                    return;
+                }
+            }
+            return;
+        }
+        if (tag == .t_intersection) {
+            for (pool.getIntersectionMembers(resolved)) |member| {
+                self.collectUnknownRecordIntersectionFields(
+                    member,
+                    field_name,
+                    field_types,
+                    has_unknown_fields,
+                    depth + 1,
+                );
+            }
+            return;
+        }
+        if (tag != .t_record) return;
+        if (pool.hasUnknownFields(resolved)) has_unknown_fields.* = true;
+        const field = pool.lookupRecordField(resolved, field_name) orelse return;
+        field_types.append(self.allocator, self.recordFieldReadType(resolved, field)) catch {
+            @constCast(self).markAllocationFailure();
+        };
+    }
+
     fn functionsCompatible(self: *const TypeChecker, field_type: TypeIndex, first_info: anytype) bool {
         if (self.env.pool.getTag(field_type) != .t_function) return false;
         const info = self.env.pool.getFunctionInfo(field_type);
@@ -4114,7 +4219,8 @@ pub const TypeChecker = struct {
         const tag = pool.getTag(obj) orelse return null_type_idx;
         if (tag == .t_record and member.computed != null_node) {
             const key = self.getLiteralString(member.computed) orelse return null_type_idx;
-            const field = pool.lookupRecordField(obj, key) orelse return null_type_idx;
+            const field = pool.lookupRecordField(obj, key) orelse
+                return if (pool.hasUnknownFields(obj)) pool.idx_unknown else null_type_idx;
             return self.recordFieldReadType(obj, field);
         }
         if (tag == .t_union) {
@@ -4167,7 +4273,8 @@ pub const TypeChecker = struct {
         const obj = pool.unwrapNominal(self.env.resolveRef(pool.getNullableInner(t)));
         if (pool.getTag(obj) != .t_record) return null_type_idx;
         const prop_name = self.resolveAtomName(member.property) orelse return null_type_idx;
-        const field = pool.lookupRecordField(obj, prop_name) orelse return null_type_idx;
+        const field = pool.lookupRecordField(obj, prop_name) orelse
+            return if (pool.hasUnknownFields(obj)) pool.idx_unknown else null_type_idx;
         const ft = self.recordFieldReadType(obj, field);
         if (ft == null_type_idx or self.admitsUndefined(ft)) return ft;
         return pool.addNullable(self.allocator, ft);
@@ -4192,6 +4299,7 @@ pub const TypeChecker = struct {
             if (self.env.pool.lookupRecordField(obj_type, prop_name)) |field| {
                 return self.recordFieldReadType(obj_type, field);
             }
+            if (self.env.pool.hasUnknownFields(obj_type)) return self.env.pool.idx_unknown;
             const result_subject = if (self.env.pool.isResultRecord(obj_type)) self.identifierName(member.object) else null;
             self.addInferenceDiagnostic(.{
                 .severity = .err,
@@ -4203,6 +4311,10 @@ pub const TypeChecker = struct {
                 .result_subject = result_subject,
             });
             return null_type_idx;
+        }
+
+        if (tag == .t_intersection) {
+            if (self.unknownRecordIntersectionField(obj_type, prop_name)) |field| return field;
         }
 
         if (tag == .t_union) {
@@ -4221,6 +4333,9 @@ pub const TypeChecker = struct {
                 const resolved_member = self.env.pool.unwrapNominal(self.env.resolveRef(member_type));
                 if (self.env.pool.lookupRecordField(resolved_member, prop_name)) |field| {
                     field_types[count] = self.fieldReadType(field);
+                    any_field = true;
+                } else if (self.env.pool.hasUnknownFields(resolved_member)) {
+                    field_types[count] = self.env.pool.idx_unknown;
                     any_field = true;
                 } else if (self.unionMemberIsRecord(member_type)) {
                     // A member of the union has no such field: reading it
@@ -9131,7 +9246,7 @@ pub const TypeChecker = struct {
                 for (widened[0..fields.len]) |*field| {
                     field.type_idx = self.widenWriteSlot(field.type_idx, depth + 1);
                 }
-                return pool.addRecord(self.allocator, widened[0..fields.len]);
+                return pool.copyUnknownFieldMetadata(self.allocator, slot, pool.addRecord(self.allocator, widened[0..fields.len]));
             },
             .t_union => {
                 var stack: [MAX_UNION_MEMBERS]TypeIndex = undefined;
@@ -9452,6 +9567,40 @@ pub const TypeChecker = struct {
         return self.env.isAssignableTo(inferred, base);
     }
 
+    fn isImplicitNominalMigrationMismatch(self: *TypeChecker, declared: TypeIndex, inferred: TypeIndex) bool {
+        if (!self.env.pool.isNominal(declared)) return false;
+        if (self.env.pool.nominalConstruction(declared) != .explicit_only) return false;
+        if (self.env.pool.isNominal(inferred)) return false;
+        const base = self.env.pool.unwrapNominal(declared);
+        return base != declared and self.env.isAssignableTo(inferred, base);
+    }
+
+    fn implicitNominalMigrationEvidence(
+        self: *TypeChecker,
+        declaration: NodeIndex,
+        declared: TypeIndex,
+        inferred: TypeIndex,
+    ) ?NominalMigrationEvidence {
+        if (!self.isImplicitNominalMigrationMismatch(declared, inferred)) return null;
+        const origin = self.env.pool.nominalOrigin(declared) orelse return null;
+        const brand = self.env.nominalBrandName(declared);
+        const base: NominalBase = switch (self.env.pool.getTag(self.env.pool.unwrapNominal(declared)) orelse return null) {
+            .t_string => .string,
+            .t_number => .number,
+            .t_boolean => .boolean,
+            // exhaustive: every other type tag is outside the three admitted legacy nominal bases.
+            else => return null,
+        };
+        return .{
+            .declaration = declaration,
+            .nominal_name = self.env.pool.nominalName(declared),
+            .brand_name = brand,
+            .module_path = origin.module_path,
+            .nominal_declaration_start = origin.declaration_start,
+            .base = base,
+        };
+    }
+
     /// Whether `raw` names `undefined` itself: `undefined`, `void`, `T | undefined`,
     /// or a union with such a member. `unknown` and a generic parameter do not
     /// count: the help below is advice for a value that has an absent case.
@@ -9483,19 +9632,25 @@ pub const TypeChecker = struct {
     }
 
     fn addTypeMismatch(self: *TypeChecker, node: NodeIndex, expected: TypeIndex, got: TypeIndex) void {
+        self.addTypeMismatchWithIntent(node, expected, got, null, null);
+    }
+
+    fn addTypeMismatchWithIntent(
+        self: *TypeChecker,
+        node: NodeIndex,
+        expected: TypeIndex,
+        got: TypeIndex,
+        repair_intent: ?@import("repair_intent.zig").RepairIntent,
+        nominal_migration: ?NominalMigrationEvidence,
+    ) void {
         const help = self.undefinedSourceHelp(expected, got) orelse mismatch_help_text;
         var buf: [256]u8 = undefined;
         const expected_str = self.env.pool.formatType(expected, buf[0..128]);
         const got_str = self.env.pool.formatType(got, buf[128..256]);
 
-        const msg = self.allocator.print("type '{s}' is not assignable to type '{s}'", .{ got_str, expected_str }) catch {
-            self.addDiagnostic(.{
-                .severity = .err,
-                .kind = .type_mismatch,
-                .node = node,
-                .message = "type mismatch",
-                .help = help,
-            });
+        const message = self.allocator.print("type '{s}' is not assignable to type '{s}'", .{ got_str, expected_str });
+        const msg = if (message) |value| value else |_| {
+            self.markAllocationFailure();
             return;
         };
 
@@ -9506,6 +9661,8 @@ pub const TypeChecker = struct {
             .message = msg,
             .help = help,
             .allocated = true,
+            .repair_intent = repair_intent,
+            .nominal_migration = nominal_migration,
         });
     }
 

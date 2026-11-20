@@ -121,6 +121,8 @@ pub const reportSpecErrors = precompile_contract_mod.reportSpecErrors;
 pub const main = precompile_cli_mod.main;
 pub const runCompileWithArgs = precompile_cli_mod.runCompileWithArgs;
 pub const CheckOptions = precompile_check_run_mod.CheckOptions;
+pub const AnalysisView = precompile_check_run_mod.AnalysisView;
+pub const AnalysisObserver = precompile_check_run_mod.AnalysisObserver;
 pub const CheckedObserver = precompile_check_run_mod.CheckedObserver;
 pub const CheckedView = precompile_check_run_mod.CheckedView;
 pub const readFailureReason = precompile_stderr_mod.readFailureReason;
@@ -1512,10 +1514,7 @@ pub fn moduleProofEvidence(
         debugPrint("{s}: translation evidence is incomplete ({s}); refusing to emit a proof certificate\n", .{ module_path, @errorName(err) });
         return error.TranslationWitnessIncomplete;
     };
-    const handler_source: ?ir.NodeIndex = if (is_entry)
-        findHandlerFunction(view, root) orelse return error.HandlerNotFound
-    else
-        null;
+    const handler_source: ?ir.NodeIndex = if (is_entry) findHandlerFunction(view, root) else null;
     var guard_resolver = GuardResolver{
         .checker = strict_checker,
         .view = view,

@@ -197,6 +197,10 @@ packages/zts/src/type_checker.zig schemaJsonToType catch-switch
 packages/zts/src/type_checker.zig matchCoverage catch-block
 packages/zts/src/type_checker.zig reportMatchCoverage catch-block
 
+# Allocation failure poisons the checker. TypeChecker.ensureHealthy refuses
+# every type or proof result before a partial field intersection can be used.
+packages/zts/src/type_checker.zig collectUnknownRecordIntersectionFields catch-block
+
 # These catches change only the text of an error diagnostic. The same kind,
 # error severity, source node, and error count are recorded.
 packages/zts/src/type_checker.zig addArgCountMismatch catch-value
@@ -204,7 +208,6 @@ packages/zts/src/type_checker.zig addArgTypeMismatch catch-value
 packages/zts/src/type_checker.zig addGenericDiagnostic catch-value
 packages/zts/src/type_checker.zig addNominalConstructorCall catch-block
 packages/zts/src/type_checker.zig addReadonlyMutation catch-block
-packages/zts/src/type_checker.zig addTypeMismatch catch-block
 packages/zts/src/type_checker.zig checkModuleEncodableArgs catch-value
 packages/zts/src/type_checker.zig checkModuleResultArgs catch-value
 packages/zts/src/type_checker.zig reportIfNonContractive catch-block
