@@ -489,7 +489,11 @@ pub const MatchAnalysis = struct {
                 try self.matchedType(source_element, element_pattern, depth + 1);
             if (elements[i] == null_type_idx or elements[i] == self.pool.idx_never) return null_type_idx;
         }
-        return self.pool.addTuple(self.allocator, elements);
+        const tuple = self.pool.addTuple(self.allocator, elements);
+        return if (self.pool.isReadonlyArray(source_type) or self.pool.isReadonlyTuple(source_type))
+            self.pool.addReadonlyTuple(self.allocator, tuple)
+        else
+            tuple;
     }
 
     fn appendRemainingRecordTypes(

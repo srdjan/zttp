@@ -1782,6 +1782,7 @@ pub const TypePool = struct {
         // Heterogeneous array literals infer as tuples. They are assignable
         // to T[] when every element is assignable to T.
         if (src_tag == .t_tuple and tgt_tag == .t_array) {
+            if (self.isReadonlyTuple(source) and !self.isReadonlyArray(target)) return false;
             const target_element = self.getArrayElement(target);
             for (self.getTupleElements(source)) |element| {
                 if (!self.assignableIn(ctx, element, target_element)) return false;

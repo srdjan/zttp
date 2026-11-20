@@ -3139,6 +3139,66 @@ test "CHECK imported assertion conditions preserve labels and effects" {
     );
 }
 
+test "CHECK preserves readonly arrays in inferred match callbacks" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        \\import { match, P } from "zttp:core";
+        \\function render(value: readonly number[]): string {
+        \\  return match(value).with([P.any, P.any], (selected) => { selected[0] = 9; return "changed"; }).otherwise(() => "other");
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> { return Response.text("ok"); }
+        ,
+        \\import { match, P } from "zttp:core";
+        \\function render(value: readonly [number, number]): string {
+        \\  return match(value).with([P.any, P.any], (selected) => { selected[0] = 9; return "changed"; }).exhaustive();
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> { return Response.text("ok"); }
+        ,
+        \\import { match, P } from "zttp:core";
+        \\type Box = { items: readonly number[] };
+        \\function render(value: Box): string {
+        \\  return match(value).with({ items: [P.any, P.any] }, (selected) => { selected.items[0] = 9; return "changed"; }).otherwise(() => "other");
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> { return Response.text("ok"); }
+        ,
+    };
+    for (cases) |source| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try std.testing.expectEqualStrings("ZTS215", result.json_diagnostics.items[0].code);
+    }
+}
+
+test "CHECK refuses a mutable callback for a readonly match input" {
+    const allocator = std.testing.allocator;
+    const invalid_source =
+        \\import { match, P } from "zttp:core";
+        \\function render(value: readonly number[]): string {
+        \\  return match(value).with([P.any, P.any], (selected: number[]): string => { selected[0] = 9; return "changed"; }).otherwise((): string => "other");
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> { return Response.text("ok"); }
+    ;
+    var invalid = try runCheckOnlyFromSourceWithOptions(allocator, invalid_source, "handler.ts", .{ .json_mode = true });
+    defer invalid.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), invalid.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), invalid.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS203", invalid.json_diagnostics.items[0].code);
+
+    const valid_source =
+        \\import { match, P } from "zttp:core";
+        \\function render(value: readonly number[]): string {
+        \\  return match(value).with([P.any, P.any], (selected: readonly number[]): string => String(selected.length)).otherwise((): string => "other");
+        \\}
+        \\function handler(req: Request): Proof<Response, "read_only"> { return Response.text("ok"); }
+    ;
+    var valid = try runCheckOnlyFromSourceWithOptions(allocator, valid_source, "handler.ts", .{ .json_mode = true });
+    defer valid.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), valid.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), valid.json_diagnostics.items.len);
+}
+
 test "CHECK keeps optional record fields in tuple match remainders" {
     const allocator = std.testing.allocator;
     const cases = [_][]const u8{
