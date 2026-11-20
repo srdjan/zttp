@@ -56,6 +56,10 @@ pub const FunctionSignature = type_syntax_store_mod.FunctionSignature;
 pub const PendingFunctionSignature = type_syntax_store_mod.PendingFunctionSignature;
 pub const TypeOnlyModuleKind = type_syntax_store_mod.TypeOnlyModuleKind;
 pub const TypeOnlyModule = type_syntax_store_mod.TypeOnlyModule;
+pub const TypeOnlyBinding = type_syntax_store_mod.TypeOnlyBinding;
+pub const BrandDeclaration = type_syntax_store_mod.BrandDeclaration;
+pub const NominalConstructor = type_syntax_store_mod.NominalConstructor;
+pub const decodeStringLiteralContent = type_syntax_scan_mod.decodeStringLiteralContent;
 pub const TypeOnlyModuleRefusalReason = type_syntax_store_mod.TypeOnlyModuleRefusalReason;
 pub const TypeOnlyModuleRefusal = type_syntax_store_mod.TypeOnlyModuleRefusal;
 pub const TypeOnlyModuleDiagnosticKind = type_syntax_store_mod.TypeOnlyModuleDiagnosticKind;
@@ -1124,6 +1128,12 @@ test "generic application admission rejects a missing closing angle before synta
         .parameter_annotations = 0,
         .function_signatures = 0,
         .type_only_modules = 0,
+        .type_only_bindings = 0,
+        .decoded_module_specifiers = 0,
+        .brand_declarations = 0,
+        .nominal_constructors = 0,
+        .requires_intrinsic_validation = false,
+        .intrinsics_validated = false,
     }));
 }
 

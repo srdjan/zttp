@@ -681,6 +681,15 @@ pub const HandlerInstance = struct {
             }
         }
 
+        for (p.js_parser.type_store.type_only_modules.items) |module| {
+            if (module.kind != .import_type) continue;
+            const specifier = p.js_parser.type_store.typeOnlySpecifier(module) orelse continue;
+            switch (zq.modules.resolve(specifier)) {
+                .file => has_file_imports = true,
+                .virtual, .unknown => {},
+            }
+        }
+
         return has_file_imports;
     }
 
@@ -714,7 +723,7 @@ pub const HandlerInstance = struct {
             return err;
         };
 
-        if (graph.dependencyCount() == 0) {
+        if (graph.analysisDependencyCount() == 0) {
             // No actual file dependencies found; run entry normally
             // This shouldn't happen since resolveModuleImports said there were file imports,
             // but handle gracefully.
@@ -730,14 +739,26 @@ pub const HandlerInstance = struct {
             &self.ctx.atoms,
             self.strings,
         );
+        var frontend = zq.pipeline.GraphFrontendValidation.init(self.allocator, &self.ctx.atoms, !prepared_eval);
+        defer frontend.deinit();
+        frontend.check_booleans = true;
+        module_compiler.frontend_validation = frontend.hook();
         var compile_result = module_compiler.compileAll(&graph) catch |err| {
-            std.log.err("Multi-module compilation failed: {}", .{err});
+            if (!builtin.is_test) std.log.err("Multi-module compilation failed: {}", .{err});
             return err;
         };
         defer compile_result.deinit();
+        // Analysis-only constants never acquire a runtime owner.
+        defer for (graph.analysis_order) |graph_index| {
+            if (graph.runtimePosition(graph_index) != null) continue;
+            const position = compile_result.positionOfModule(graph_index) orelse continue;
+            compile_result.codegens[position].freeOwnedConstantPayloads();
+        };
 
         // Run each module in execution order
-        for (compile_result.modules) |*compiled_mod| {
+        for (graph.execution_order) |graph_index| {
+            const position = compile_result.positionOfModule(graph_index) orelse return error.AnalysisPassIncomplete;
+            const compiled_mod = &compile_result.modules[position];
             // Materialize shapes
             if (compiled_mod.shapes.len > 0) {
                 try self.ctx.materializeShapes(compiled_mod.shapes);
@@ -871,8 +892,11 @@ pub const HandlerInstance = struct {
             },
             .recovered_admission_refused => unreachable,
         }
-        if (!typed_file) bytecode_data = try p.generateParsed(self.allocator);
-
+        const has_file_imports = try self.resolveModuleImports(&p);
+        if (has_file_imports) {
+            try self.compileAndRunFileImports(code, filename, refresh_handler, prepared_eval);
+            return null;
+        }
         {
             const ir_view = zq.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
             var parsed = if (typed_file)
@@ -883,12 +907,17 @@ pub const HandlerInstance = struct {
 
             var type_env_storage: zq.pipeline.TypeEnvStorage = .{};
             defer type_env_storage.deinit(self.allocator);
-            if (typed_file) {
+            if (typed_file or p.js_parser.type_store.requires_intrinsic_validation) {
                 try type_env_storage.initWithSource(self.allocator, .{ .direct = .{
+                    .module_path = filename,
                     .store = &p.js_parser.type_store,
                     .ir_view = ir_view,
                     .atoms = &self.ctx.atoms,
                 } });
+            }
+            if (p.js_parser.type_store.requires_intrinsic_validation) {
+                const env = type_env_storage.envPtr() orelse return error.TypeEnvironmentUnavailable;
+                try zq.pipeline.validateSourceIntrinsics(self.allocator, &p.js_parser, &self.ctx.atoms, env);
             }
 
             var resolved = try zq.pipeline.resolve(
@@ -897,7 +926,7 @@ pub const HandlerInstance = struct {
                 // The runtime parse path only surfaces bool diagnostics; strict
                 // ZTS6xx is a build-time concern that precompile already ran.
                 // Skip it here to keep the runtime loop free of redundant work.
-                .{ .type_env = type_env_storage.envPtr(), .strict = false },
+                .{ .type_env = if (typed_file) type_env_storage.envPtr() else null, .strict = false },
             );
             defer resolved.deinit();
 
@@ -936,16 +965,7 @@ pub const HandlerInstance = struct {
             }
         }
 
-        if (typed_file) bytecode_data = try p.generateParsed(self.allocator);
-
-        // Resolve module imports and register virtual module native functions
-        const has_file_imports = try self.resolveModuleImports(&p);
-
-        // If file imports are present, build module graph and compile dependencies
-        if (has_file_imports) {
-            try self.compileAndRunFileImports(code, filename, refresh_handler, prepared_eval);
-            return null; // Disable caching for multi-module handlers
-        }
+        bytecode_data = try p.generateParsed(self.allocator);
 
         // Materialize object literal shapes before execution
         const shapes = p.getShapes();

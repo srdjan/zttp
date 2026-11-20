@@ -16,6 +16,7 @@ const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;
 const TypeEnv = type_env_mod.TypeEnv;
 const FunctionSig = type_env_mod.FunctionSig;
+const GenericAlias = type_env_mod.GenericAlias;
 const RecordField = type_pool_mod.RecordField;
 const FuncParam = type_pool_mod.FuncParam;
 const null_type_idx = type_pool_mod.null_type_idx;
@@ -38,6 +39,9 @@ pub const Copier = struct {
     /// the same name, so `Response` stays one type.
     dst_env: ?*const TypeEnv,
     memo: std.AutoHashMapUnmanaged(TypeIndex, TypeIndex) = .empty,
+    recursive_source_name: ?[]const u8 = null,
+    recursive_destination_name: ?[]const u8 = null,
+    generic_param_names: []const []const u8 = &.{},
 
     pub fn deinit(self: *Copier) void {
         self.memo.deinit(self.allocator);
@@ -51,6 +55,19 @@ pub const Copier = struct {
 
     fn copyAt(self: *Copier, original: TypeIndex, depth: u8) TypeIndex {
         if (original == null_type_idx or depth >= max_copy_depth) return null_type_idx;
+        if (self.src.getTag(original) == .t_ref) {
+            const name = self.src.getRefName(original);
+            for (self.generic_param_names) |param_name| {
+                if (std.mem.eql(u8, name, param_name)) {
+                    return self.dst.addGenericParam(self.allocator, name);
+                }
+            }
+            if (self.recursive_source_name) |source_name| {
+                if (std.mem.eql(u8, name, source_name)) {
+                    return self.dst.addRef(self.allocator, self.recursive_destination_name orelse source_name);
+                }
+            }
+        }
         const idx = if (self.src_env) |env| env.resolveRef(original) else original;
         if (self.memo.get(idx)) |found| return if (found == in_progress) null_type_idx else found;
         self.memo.put(self.allocator, idx, in_progress) catch return null_type_idx;
@@ -74,7 +91,15 @@ pub const Copier = struct {
             // unknown, which grants nothing.
             else => return null_type_idx,
         }
-        return self.dst.addNominalAlias(self.allocator, base, src.nominalName(idx));
+        const origin = src.nominalOrigin(idx) orelse return null_type_idx;
+        const construction = src.nominalConstruction(idx) orelse return null_type_idx;
+        return self.dst.addNominalAliasWithOrigin(
+            self.allocator,
+            base,
+            src.nominalName(idx),
+            origin,
+            construction,
+        );
     }
 
     fn sharedNominal(self: *const Copier, idx: TypeIndex, tag: type_pool_mod.TypeTag) ?TypeIndex {
@@ -83,7 +108,12 @@ pub const Copier = struct {
         if (name.len == 0) return null;
         const existing = env.getTypeAlias(name) orelse return null;
         if (!self.dst.isNominal(existing)) return null;
-        if (!std.mem.eql(u8, self.dst.nominalName(existing), name)) return null;
+        const source_origin = self.src.nominalOrigin(idx) orelse return null;
+        const existing_origin = self.dst.nominalOrigin(existing) orelse return null;
+        if (source_origin.module_path.len != 0 or existing_origin.module_path.len != 0) {
+            if (source_origin.declaration_start != existing_origin.declaration_start or
+                !std.mem.eql(u8, source_origin.module_path, existing_origin.module_path)) return null;
+        } else if (!std.mem.eql(u8, self.dst.nominalName(existing), name)) return null;
         if (self.dst.getTag(existing) != tag) return null;
         return existing;
     }
@@ -122,6 +152,19 @@ pub const Copier = struct {
                 if (!std.mem.eql(u8, src.getRefName(idx), "object")) return null_type_idx;
                 return dst.addRef(allocator, "object");
             },
+            .t_generic_param => return dst.addGenericParam(allocator, src.getRefName(idx)),
+            .t_generic_app => {
+                const info = src.getGenericAppInfo(idx);
+                const base = self.copyAt(info.base, depth + 1);
+                if (base == null_type_idx) return null_type_idx;
+                const copied = allocator.alloc(TypeIndex, info.args.len) catch return null_type_idx;
+                defer allocator.free(copied);
+                for (info.args, 0..) |arg, i| {
+                    copied[i] = self.copyAt(arg, depth + 1);
+                    if (copied[i] == null_type_idx) return null_type_idx;
+                }
+                return dst.addGenericApp(allocator, base, copied);
+            },
             .t_array => {
                 const element = self.copyAt(src.getArrayElement(idx), depth + 1);
                 if (element == null_type_idx) return null_type_idx;
@@ -146,11 +189,43 @@ pub const Copier = struct {
             .t_intersection => return self.copyList(src.getIntersectionMembers(idx), .intersection, depth),
             .t_record => return self.copyRecord(idx, depth),
             .t_function => return self.copyFunction(idx, depth),
-            // exhaustive: a type variable, a generic application, a template
-            // literal, and the refused-expression type have no copy. Each stays
-            // unknown, which grants nothing.
-            .t_generic_param, .t_generic_app, .t_template_literal, .t_error => return null_type_idx,
+            // exhaustive: a template literal and the refused-expression type
+            // have no copy. Each stays unknown, which grants nothing.
+            .t_template_literal, .t_error => return null_type_idx,
         }
+    }
+
+    /// Copy one exported alias. A recursive self-reference keeps its identity
+    /// and adopts the import's local name.
+    pub fn copyAlias(self: *Copier, idx: TypeIndex, source_name: []const u8, destination_name: []const u8) TypeIndex {
+        self.recursive_source_name = source_name;
+        self.recursive_destination_name = destination_name;
+        return self.copy(idx);
+    }
+
+    /// Copy a generic alias and its parameter constraints.
+    pub fn copyGenericAlias(
+        self: *Copier,
+        alias: GenericAlias,
+        source_name: []const u8,
+        destination_name: []const u8,
+    ) ?GenericAlias {
+        self.recursive_source_name = source_name;
+        self.recursive_destination_name = destination_name;
+        self.generic_param_names = alias.param_names[0..alias.param_count];
+        var copied: GenericAlias = .{};
+        copied.param_count = alias.param_count;
+        for (0..alias.param_count) |i| {
+            const stored = self.dst.addName(self.allocator, alias.param_names[i]);
+            copied.param_names[i] = self.dst.getName(stored.start, stored.len);
+            if (alias.param_constraints[i] != null_type_idx) {
+                copied.param_constraints[i] = self.copy(alias.param_constraints[i]);
+                if (copied.param_constraints[i] == null_type_idx) return null;
+            }
+        }
+        copied.body = self.copy(alias.body);
+        if (copied.body == null_type_idx) return null;
+        return copied;
     }
 
     const ListKind = enum { tuple, union_type, intersection };
@@ -240,13 +315,20 @@ pub const Copier = struct {
 /// value export, or both. A row with neither is an export that has no type
 /// which crosses a module.
 pub const ExportedSignatures = struct {
+    pub const TypeAlias = union(enum) {
+        direct: TypeIndex,
+        generic: GenericAlias,
+    };
+
     pub const Row = struct {
-        /// The module's index in the graph's module list.
-        module: u16,
+        /// The normalized path that identifies the exporting module.
+        module_path: []u8,
         name: []u8,
         sig: ?FunctionSig,
         /// The type of a value export, in `pool`, or `null_type_idx`.
         value_type: TypeIndex = null_type_idx,
+        type_alias: ?TypeAlias = null,
+        brand_origin: ?type_pool_mod.NominalOrigin = null,
     };
 
     allocator: std.mem.Allocator,
@@ -258,7 +340,10 @@ pub const ExportedSignatures = struct {
     }
 
     pub fn deinit(self: *ExportedSignatures) void {
-        for (self.rows.items) |row| self.allocator.free(row.name);
+        for (self.rows.items) |row| {
+            self.allocator.free(row.module_path);
+            self.allocator.free(row.name);
+        }
         self.rows.deinit(self.allocator);
         self.pool.deinit(self.allocator);
     }
@@ -277,19 +362,85 @@ pub const ExportedSignatures = struct {
 
     pub fn add(
         self: *ExportedSignatures,
-        module: u16,
+        module_path: []const u8,
         name: []const u8,
         sig: ?FunctionSig,
         value_type: TypeIndex,
     ) !void {
+        for (self.rows.items) |*row| {
+            if (row.type_alias != null or row.brand_origin != null) continue;
+            if (!std.mem.eql(u8, row.module_path, module_path) or !std.mem.eql(u8, row.name, name)) continue;
+            row.sig = sig;
+            row.value_type = value_type;
+            return;
+        }
+        const owned_module_path = try self.allocator.dupe(u8, module_path);
+        errdefer self.allocator.free(owned_module_path);
         const owned = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(owned);
-        try self.rows.append(self.allocator, .{ .module = module, .name = owned, .sig = sig, .value_type = value_type });
+        try self.rows.append(self.allocator, .{
+            .module_path = owned_module_path,
+            .name = owned,
+            .sig = sig,
+            .value_type = value_type,
+        });
     }
 
-    pub fn find(self: *const ExportedSignatures, module: u16, name: []const u8) ?*const Row {
+    pub fn addTypeAlias(
+        self: *ExportedSignatures,
+        module_path: []const u8,
+        name: []const u8,
+        type_alias: TypeAlias,
+    ) !void {
+        const owned_module_path = try self.allocator.dupe(u8, module_path);
+        errdefer self.allocator.free(owned_module_path);
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+        try self.rows.append(self.allocator, .{
+            .module_path = owned_module_path,
+            .name = owned_name,
+            .sig = null,
+            .type_alias = type_alias,
+        });
+    }
+
+    pub fn addBrand(
+        self: *ExportedSignatures,
+        module_path: []const u8,
+        name: []const u8,
+        declaration_start: u32,
+    ) !void {
+        const owned_module_path = try self.allocator.dupe(u8, module_path);
+        errdefer self.allocator.free(owned_module_path);
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+        try self.rows.append(self.allocator, .{
+            .module_path = owned_module_path,
+            .name = owned_name,
+            .sig = null,
+            .brand_origin = .{
+                .module_path = owned_module_path,
+                .declaration_start = declaration_start,
+            },
+        });
+    }
+
+    pub fn find(self: *const ExportedSignatures, module_path: []const u8, name: []const u8) ?*const Row {
+        return self.findValue(module_path, name) orelse self.findType(module_path, name);
+    }
+
+    pub fn findValue(self: *const ExportedSignatures, module_path: []const u8, name: []const u8) ?*const Row {
         for (self.rows.items) |*row| {
-            if (row.module == module and std.mem.eql(u8, row.name, name)) return row;
+            if (row.sig == null and row.value_type == null_type_idx) continue;
+            if (std.mem.eql(u8, row.module_path, module_path) and std.mem.eql(u8, row.name, name)) return row;
+        }
+        return null;
+    }
+
+    pub fn findType(self: *const ExportedSignatures, module_path: []const u8, name: []const u8) ?*const Row {
+        for (self.rows.items) |*row| {
+            if (row.type_alias == null and row.brand_origin == null) continue;
+            if (std.mem.eql(u8, row.module_path, module_path) and std.mem.eql(u8, row.name, name)) return row;
         }
         return null;
     }
@@ -305,9 +456,13 @@ pub const FileImportSignatures = struct {
         specifier: []const u8,
         /// The name of the export.
         imported: []const u8,
+        /// The local type-namespace name. Empty for runtime imports.
+        local: []const u8 = "",
         sig: ?FunctionSig,
         /// The type of a value export, or `null_type_idx`.
         value_type: TypeIndex = null_type_idx,
+        type_alias: ?ExportedSignatures.TypeAlias = null,
+        brand_origin: ?type_pool_mod.NominalOrigin = null,
     };
 
     /// The pool that holds the types of every row.
@@ -319,5 +474,39 @@ pub const FileImportSignatures = struct {
             if (std.mem.eql(u8, row.specifier, specifier) and std.mem.eql(u8, row.imported, imported)) return row;
         }
         return null;
+    }
+
+    /// Install erased type-only imports before local declarations are lowered.
+    pub fn installTypeImports(self: *const FileImportSignatures, env: *TypeEnv) !void {
+        for (self.rows) |row| {
+            if (row.local.len == 0) continue;
+            if (row.brand_origin) |origin| {
+                try env.putImportedBrand(row.local, origin);
+                continue;
+            }
+            const exported = row.type_alias orelse return error.UntypedTypeImport;
+            var copier: Copier = .{
+                .allocator = env.allocator,
+                .src = self.source,
+                .src_env = null,
+                .dst = env.pool,
+                .dst_env = env,
+            };
+            defer copier.deinit();
+            switch (exported) {
+                .direct => |source_type| {
+                    const copied = copier.copyAlias(source_type, row.imported, row.local);
+                    if (copied == null_type_idx) return error.UntypedTypeImport;
+                    try env.putImportedTypeAlias(row.local, copied);
+                },
+                .generic => |source_alias| {
+                    const copied = copier.copyGenericAlias(source_alias, row.imported, row.local) orelse
+                        return error.UntypedTypeImport;
+                    try env.putImportedGenericAlias(row.local, copied);
+                },
+            }
+        }
+        try env.pool.ensureHealthy();
+        try env.ensureHealthy();
     }
 };

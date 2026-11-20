@@ -33,6 +33,7 @@ pub const import_signatures = @import("import_signatures.zig");
 pub const type_key = @import("type_key.zig");
 pub const type_syntax_lowering = @import("type_syntax_lowering.zig");
 pub const type_env = @import("type_env.zig");
+pub const intrinsic_lowering = @import("intrinsic_lowering.zig");
 pub const effect_inference = @import("effect_inference.zig");
 pub const function_specs = @import("function_specs.zig");
 

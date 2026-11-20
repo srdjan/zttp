@@ -1769,6 +1769,24 @@ const SyntaxParser = struct {
                         .semantic_present = false,
                     });
                 }
+                if (std.mem.eql(u8, ident.text(self.source), "typeof")) {
+                    self.skipWhitespace();
+                    const brand = self.scanIdentifier();
+                    if (brand.start == brand.end) {
+                        self.flag(.typeof_query, ident.start);
+                        return self.complete(.{
+                            .child = .absent,
+                            .start = frame.start,
+                            .end = frame.start,
+                            .semantic_present = false,
+                        });
+                    }
+                    frame.base = try self.makeNode(frame.start, brand.end, .named_reference, .{
+                        .named_reference = brand,
+                    });
+                    frame.state = .suffix;
+                    return;
+                }
                 self.flagKeyword(ident);
                 if (std.mem.eql(u8, ident.text(self.source), "readonly")) {
                     const ident_end = self.pos;

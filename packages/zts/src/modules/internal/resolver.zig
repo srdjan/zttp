@@ -195,6 +195,14 @@ pub fn validateImports(binding: *const mb.ModuleBinding, specifier_names: []cons
                 break;
             }
         }
+        if (!found) {
+            for (binding.intrinsic_exports) |intrinsic| {
+                if (std.mem.eql(u8, intrinsic.name, name)) {
+                    found = true;
+                    break;
+                }
+            }
+        }
         if (!found) return name;
     }
     return null;
@@ -211,6 +219,13 @@ test "validateImports reports first missing export" {
     const names = [_][]const u8{ "env", "missing" };
     const missing = validateImports(binding, &names) orelse return error.ExpectedMissingExport;
     try std.testing.expectEqualStrings("missing", missing);
+}
+
+test "validateImports accepts intrinsics but not type exports as values" {
+    const binding = builtin_modules.fromSpecifier("zttp:core") orelse return error.ExpectedBinding;
+    try std.testing.expect(validateImports(binding, &.{"nominal"}) == null);
+    const missing = validateImports(binding, &.{"Nominal"}) orelse return error.ExpectedMissingExport;
+    try std.testing.expectEqualStrings("Nominal", missing);
 }
 
 // ---------------------------------------------------------------------------

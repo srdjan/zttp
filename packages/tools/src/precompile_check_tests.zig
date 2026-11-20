@@ -2623,6 +2623,115 @@ const SiblingFixture = struct {
     }
 };
 
+test "CHECK resolves a file imported only for exported types" {
+    var fixture = try SiblingFixture.init(
+        \\import type { Box, Chain as List, Id as UserId } from "./types.ts";
+        \\import { nominal } from "zttp:core";
+        \\function handler(req: Request): Response {
+        \\  const id: UserId = nominal<UserId>("u1");
+        \\  const box: Box<string> = { value: String(id) };
+        \\  const list: List<string> = { value: box.value, next: null };
+        \\  return Response.text(list.value);
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("types.ts",
+        \\import type { Nominal } from "zttp:core";
+        \\export declare const idBrand: unique symbol;
+        \\export type Id = Nominal<string, typeof idBrand>;
+        \\export type Box<T> = { value: T };
+        \\export type Chain<T> = { value: T; next: Chain<T> | null };
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expect(result.contract != null);
+}
+
+test "CHECK validates ordinary member calls in a type-import graph" {
+    var fixture = try SiblingFixture.init(
+        \\import type { Message } from "./types.ts";
+        \\function handler(req: Request): Response {
+        \\  const message: Message = { text: "member" };
+        \\  return Response.text(message.text.toUpperCase());
+        \\}
+    );
+    defer fixture.deinit();
+    try fixture.add("types.ts", "export type Message = { text: string };\n");
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+}
+
+test "CHECK reports a missing file type export as ZTS207" {
+    var fixture = try SiblingFixture.init(
+        \\import type { Hidden } from "./types.ts";
+        \\function handler(req: Request): Response {
+        \\  return Response.text("ok");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("types.ts", "export type Public = string;\n");
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS207", diagnostic.code);
+    try std.testing.expectEqualStrings("module './types.ts' does not export type 'Hidden'", diagnostic.message);
+    try std.testing.expectEqualStrings(fixture.handler_path, diagnostic.file);
+    try std.testing.expectEqual(@as(u32, 1), diagnostic.line);
+    try std.testing.expectEqual(@as(u32, 15), diagnostic.column);
+    try std.testing.expectEqualStrings(
+        "import a type that the module exports",
+        diagnostic.suggestion orelse "",
+    );
+    try std.testing.expect(result.contract == null);
+}
+
+test "CHECK reports an imported nominal base mismatch as ZTS203" {
+    var fixture = try SiblingFixture.init(
+        \\import type { Id as UserId } from "./types.ts";
+        \\import { nominal } from "zttp:core";
+        \\function handler(req: Request): Response {
+        \\  const id: UserId = nominal<UserId>(1);
+        \\  return Response.text(String(id));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("types.ts",
+        \\import type { Nominal } from "zttp:core";
+        \\export declare const idBrand: unique symbol;
+        \\export type Id = Nominal<string, typeof idBrand>;
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS203", diagnostic.code);
+    try std.testing.expectEqualStrings(
+        "argument type does not match parameter type: expected string, got 1",
+        diagnostic.message,
+    );
+    try std.testing.expectEqualStrings(fixture.handler_path, diagnostic.file);
+    try std.testing.expectEqual(@as(u32, 4), diagnostic.line);
+    try std.testing.expectEqual(@as(u32, 38), diagnostic.column);
+    try std.testing.expectEqualStrings(
+        "Pass a value of the parameter type, or change the parameter type.",
+        diagnostic.suggestion orelse "",
+    );
+    try std.testing.expect(result.contract == null);
+}
+
 /// The check refused the handler: no contract, one error counted, and the first
 /// finding has `code` under `file_name` in the directory of the fixture.
 fn expectRefusedAt(fixture: *const SiblingFixture, result: *const CheckResult, code: []const u8, file_name: []const u8) !void {
@@ -4519,6 +4628,7 @@ test "ordinary calls and explicit HTML rendering remain accepted" {
 const CompoundDiagnostic = struct {
     code: []const u8,
     message: []const u8,
+    file: []const u8 = "handler.ts",
     line: u32,
     column: u32,
     suggestion: ?[]const u8 = null,
@@ -4538,7 +4648,7 @@ fn expectCompoundDiagnostic(
     try std.testing.expectEqualStrings(expected.code, actual.code);
     try std.testing.expectEqualStrings("error", actual.severity);
     try std.testing.expectEqualStrings(expected.message, actual.message);
-    try std.testing.expectEqualStrings("handler.ts", actual.file);
+    try std.testing.expectEqualStrings(expected.file, actual.file);
     try std.testing.expectEqual(expected.line, actual.line);
     try std.testing.expectEqual(expected.column, actual.column);
     // A row that names no suggestion expects the fixed help of its code.
@@ -5589,6 +5699,252 @@ test "CHECK preserves nominal refusals and keyword alias names" {
     try std.testing.expectEqual(cases.len, observed);
 }
 
+test "CHECK reports a nominal constructor base mismatch as ZTS203" {
+    const source =
+        "import type { Nominal } from \"zttp:core\";\n" ++
+        "import { nominal } from \"zttp:core\";\n" ++
+        "declare const idBrand: unique symbol;\n" ++
+        "type Id = Nominal<string, typeof idBrand>;\n" ++
+        "function g(): Id { return nominal<Id>(1); }\n" ++
+        "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+    var result = try runCheckOnlyFromSourceWithOptions(
+        std.testing.allocator,
+        source,
+        "handler.ts",
+        .{ .json_mode = true },
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
+        .code = "ZTS203",
+        .message = "argument type does not match parameter type: expected string, got 1",
+        .line = 5,
+        .column = 39,
+        .suggestion = "Pass a value of the parameter type, or change the parameter type.",
+    });
+}
+
+test "CHECK reports nominal target and escape refusals without ZTS000" {
+    const cases = [_]struct {
+        source: []const u8,
+        diagnostic: CompoundDiagnostic,
+    }{
+        .{
+            .source = "import { nominal } from \"zttp:core\";\n" ++
+                "function handler(req: Request): Response {\n" ++
+                "  return Response.text(nominal<string>(\"x\"));\n" ++
+                "}\n",
+            .diagnostic = .{
+                .code = "ZTS209",
+                .message = "type argument string for 'T' does not satisfy constraint Nominal",
+                .line = 3,
+                .column = 39,
+            },
+        },
+        .{
+            .source = "import { nominal } from \"zttp:core\";\n" ++
+                "type Text = string;\n" ++
+                "function handler(req: Request): Response {\n" ++
+                "  return Response.text(nominal<Text>(\"x\"));\n" ++
+                "}\n",
+            .diagnostic = .{
+                .code = "ZTS209",
+                .message = "type argument string for 'T' does not satisfy constraint Nominal",
+                .line = 4,
+                .column = 37,
+            },
+        },
+        .{
+            .source = "import { nominal } from \"zttp:core\";\n" ++
+                "const make = nominal;\n" ++
+                "function handler(req: Request): Response { return Response.text(\"x\"); }\n",
+            .diagnostic = .{
+                .code = "ZTS001",
+                .message = "a compiler intrinsic cannot be used as a value",
+                .line = 2,
+                .column = 14,
+                .suggestion = "Call the compiler intrinsic directly in its admitted form.",
+            },
+        },
+        .{
+            .source = "import { nominal } from \"zttp:core\";\n" ++
+                "function consume(value: unknown): number { return 1; }\n" ++
+                "function handler(req: Request): Response {\n" ++
+                "  consume(nominal);\n" ++
+                "  return Response.text(\"x\");\n" ++
+                "}\n",
+            .diagnostic = .{
+                .code = "ZTS001",
+                .message = "a compiler intrinsic cannot be used as a value",
+                .line = 4,
+                .column = 11,
+                .suggestion = "Call the compiler intrinsic directly in its admitted form.",
+            },
+        },
+    };
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(
+            std.testing.allocator,
+            case.source,
+            "handler.ts",
+            .{ .json_mode = true },
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try std.testing.expect(result.contract == null);
+    }
+}
+
+test "CHECK reports malformed Nominal declarations without ZTS000" {
+    const cases = [_]struct {
+        source: []const u8,
+        diagnostic: CompoundDiagnostic,
+    }{
+        .{
+            .source = "import type { Nominal } from \"zttp:core\";\n" ++
+                "declare const firstBrand: unique symbol;\n" ++
+                "declare const secondBrand: unique symbol;\n" ++
+                "type First = Nominal<string, typeof firstBrand>;\n" ++
+                "type Second = Nominal<First, typeof secondBrand>;\n" ++
+                "function handler(req: Request): Response { return Response.text(\"x\"); }\n",
+            .diagnostic = .{
+                .code = "ZTS048",
+                .message = "a nominal declaration carries scalar identity only",
+                .line = 5,
+                .column = 23,
+                .suggestion = "its base must be `string`, `number`, or `boolean`",
+            },
+        },
+        .{
+            .source = "import type { Nominal } from \"zttp:core\";\n" ++
+                "declare const brand: unique symbol;\n" ++
+                "type Bad = Nominal<{ value: string }, typeof brand>;\n" ++
+                "function handler(req: Request): Response { return Response.text(\"x\"); }\n",
+            .diagnostic = .{
+                .code = "ZTS048",
+                .message = "a nominal declaration carries scalar identity only",
+                .line = 3,
+                .column = 20,
+                .suggestion = "its base must be `string`, `number`, or `boolean`",
+            },
+        },
+        .{
+            .source = "import type { Nominal } from \"zttp:core\";\n" ++
+                "declare const brand: unique symbol;\n" ++
+                "type Bad = Nominal<string | number, typeof brand>;\n" ++
+                "function handler(req: Request): Response { return Response.text(\"x\"); }\n",
+            .diagnostic = .{
+                .code = "ZTS048",
+                .message = "a nominal declaration carries scalar identity only",
+                .line = 3,
+                .column = 20,
+                .suggestion = "its base must be `string`, `number`, or `boolean`",
+            },
+        },
+        .{
+            .source = "import type { Nominal } from \"zttp:core\";\n" ++
+                "type Bad = Nominal<string>;\n" ++
+                "function handler(req: Request): Response { return Response.text(\"x\"); }\n",
+            .diagnostic = .{
+                .code = "ZTS210",
+                .message = "wrong number of type arguments: expected 2, got 1",
+                .line = 2,
+                .column = 12,
+                .suggestion = "Give exactly two type arguments to Nominal.",
+            },
+        },
+        .{
+            .source = "import type { Nominal } from \"zttp:core\";\n" ++
+                "type Bad = Nominal;\n" ++
+                "function handler(req: Request): Response { return Response.text(\"x\"); }\n",
+            .diagnostic = .{
+                .code = "ZTS210",
+                .message = "wrong number of type arguments: expected 2, got 0",
+                .line = 2,
+                .column = 12,
+                .suggestion = "Give exactly two type arguments to Nominal.",
+            },
+        },
+        .{
+            .source = "import type { Nominal } from \"zttp:core\";\n" ++
+                "type Bad = Nominal<string, string>;\n" ++
+                "function handler(req: Request): Response { return Response.text(\"x\"); }\n",
+            .diagnostic = .{
+                .code = "ZTS001",
+                .message = "the second Nominal type argument must be a resolved unique-symbol brand query",
+                .line = 2,
+                .column = 28,
+                .suggestion = "Use `typeof brand` after an admitted unique-symbol brand declaration.",
+            },
+        },
+    };
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(
+            std.testing.allocator,
+            case.source,
+            "handler.ts",
+            .{ .json_mode = true },
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try std.testing.expect(result.contract == null);
+    }
+}
+
+test "CHECK reports an imported non-brand Nominal identity without ZTS000" {
+    var fixture = try SiblingFixture.init(
+        "import type { Nominal } from \"zttp:core\";\n" ++
+            "import type { NotBrand as importedBrand } from \"./types.ts\";\n" ++
+            "type Bad = Nominal<string, typeof importedBrand>;\n" ++
+            "function handler(req: Request): Response { return Response.text(\"x\"); }\n",
+    );
+    defer fixture.deinit();
+    try fixture.add("types.ts", "export type NotBrand = string;\n");
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings(
+        "the second Nominal type argument must be a resolved unique-symbol brand query",
+        diagnostic.message,
+    );
+    try std.testing.expectEqualStrings(fixture.handler_path, diagnostic.file);
+    try std.testing.expectEqual(@as(u32, 3), diagnostic.line);
+    try std.testing.expectEqual(@as(u32, 28), diagnostic.column);
+    try std.testing.expectEqualStrings(
+        "Use `typeof brand` after an admitted unique-symbol brand declaration.",
+        diagnostic.suggestion orelse "",
+    );
+    try std.testing.expect(result.contract == null);
+}
+
+test "CHECK accepts a nominal constructor without a runtime import gap" {
+    const source =
+        "import type { Nominal } from \"zttp:core\";\n" ++
+        "import { nominal } from \"zttp:core\";\n" ++
+        "declare const idBrand: unique symbol;\n" ++
+        "type Id = Nominal<string, typeof idBrand>;\n" ++
+        "function g(): string { const x: Id = nominal<Id>(\"a\"); return x; }\n" ++
+        "export function handler(req: Request): Proof<Response, \"no_secret_leakage\"> { return Response.text(\"ok\"); }\n";
+    var result = try runCheckOnlyFromSourceWithOptions(
+        std.testing.allocator,
+        source,
+        "handler.ts",
+        .{ .json_mode = true },
+    );
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+}
+
 test "CHECK retains distinct nominal any and scalar refusal positions" {
     const allocator = std.testing.allocator;
     const source =
@@ -6250,11 +6606,17 @@ test "CHECK preserves type-only module admission and refusal diagnostics" {
     var observed: usize = 0;
     for (cases) |case| {
         errdefer std.debug.print("module baseline failed for source:\n{s}\n", .{case.source});
-        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{ .json_mode = true });
+        var fixture = try SiblingFixture.init(case.source);
+        defer fixture.deinit();
+        try fixture.add("a.ts", "export type A = string;\n");
+        try fixture.add("a;b.ts", "export type A = string;\n");
+        var result = try fixture.check();
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        var expected_diagnostic = case.diagnostic;
+        expected_diagnostic.file = fixture.handler_path;
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], expected_diagnostic);
         const expected_stages = switch (case.stage) {
             .strip => StageSet.initMany(&.{.strip}),
             .parse => StageSet.initMany(&.{ .strip, .parse }),
@@ -6591,13 +6953,6 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
     const any_message = "'any' type is not supported";
     const any_suggestion = "use specific types (string, number, a record type) or union types instead";
     const namespace_message = "'import * as X' namespace imports are not supported; use named imports: import { x } from \"module\"";
-    const type_diagnostic: CompoundDiagnostic = .{
-        .code = "ZTS050",
-        .message = "`type` is not a declaration form in this profile",
-        .line = 1,
-        .column = 1,
-        .suggestion = "write `structural Name = ...;`",
-    };
     const interface_diagnostic: CompoundDiagnostic = .{
         .code = "ZTS049",
         .message = "`interface` is not a declaration form in this profile",
@@ -6687,16 +7042,6 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .diagnostics = &.{.{ .code = "ZTS001", .message = "mutable exports are not supported", .line = 1, .column = 12, .suggestion = "use `export const` for module values and keep reassignment inside a function activation" }},
         },
         .{
-            .source = "type Alias/* c */ = any;\n",
-            .parser_stage = false,
-            .diagnostics = &.{type_diagnostic},
-        },
-        .{
-            .source = "type Alias<T>/* c */ = any;\n",
-            .parser_stage = false,
-            .diagnostics = &.{type_diagnostic},
-        },
-        .{
             .source = "interface Shape;\n",
             .parser_stage = false,
             .diagnostics = &.{interface_diagnostic},
@@ -6710,34 +7055,6 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "nominal Bad = T\n;type Alias = number;\n",
             .parser_stage = false,
             .diagnostics = &.{.{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" }},
-        },
-        .{
-            .source = "type Alias /* open",
-            .parser_stage = false,
-            .diagnostics = &.{type_diagnostic},
-        },
-        .{
-            .source = "type Alias<T> /* open",
-            .parser_stage = false,
-            .diagnostics = &.{type_diagnostic},
-        },
-        .{
-            .source = "interface A {} ;type B = number;\n",
-            .parser_stage = false,
-            .diagnostics = &.{interface_diagnostic},
-        },
-        .{
-            .source = "type A = number\n;type B = number;\n",
-            .parser_stage = false,
-            .diagnostics = &.{type_diagnostic},
-        },
-        .{
-            .source = "interface A {} ;\ntype B = number;\n",
-            .parser_stage = false,
-            .diagnostics = &.{
-                interface_diagnostic,
-                .{ .code = "ZTS050", .message = "`type` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "write `structural Name = ...;`" },
-            },
         },
         .{
             .source = "function f(x = function () {}, y: any) { return 1; }\n",
@@ -7416,7 +7733,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 49, .suggestion = "use specific types (string, number, a record type) or union types instead" },
         } },
     };
-    try std.testing.expectEqual(@as(usize, 121), cases.len);
+    try std.testing.expectEqual(@as(usize, 114), cases.len);
     for (cases) |case| {
         errdefer std.debug.print("CHECK recovery context failed: {s}\n", .{case.source});
         var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{
@@ -7552,9 +7869,6 @@ test "CHECK observes every admission kind after the measured recovery divergence
         .{ .source = "import type { A } /* ; */ from \"./a\";\ninterface Box { value: string }\n", .kind = .interface_declaration, .diagnostics = &.{
             .{ .code = "ZTS049", .message = "`interface` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "write `structural Name = { ... };`" },
         } },
-        .{ .source = "import type { A } /* ; */ from \"./a\";\ntype Box = string;\n", .kind = .type_alias_declaration, .diagnostics = &.{
-            .{ .code = "ZTS050", .message = "`type` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "write `structural Name = ...;`" },
-        } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\ndistinct type Box = string;\n", .kind = .distinct_type_declaration, .diagnostics = &.{
             .{ .code = "ZTS051", .message = "`distinct type` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "write `nominal Name = string;`" },
         } },
@@ -7587,7 +7901,7 @@ test "CHECK observes every admission kind after the measured recovery divergence
         } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\n/* unfinished\n", .kind = null, .diagnostics = &.{} },
     };
-    try std.testing.expectEqual(@as(usize, 18), cases.len);
+    try std.testing.expectEqual(@as(usize, 17), cases.len);
     try std.testing.expectEqual(@typeInfo(Kind).@"enum".field_names.len + 1, cases.len);
     var seen = std.EnumSet(Kind).empty;
     var location_free: usize = 0;
@@ -7993,6 +8307,60 @@ test "CHECK mask declassifies only a literal bound of 4 or less on an unmodified
         try std.testing.expectEqual(case.holds, result.contract.?.properties.?.no_secret_leakage);
         try std.testing.expectEqual(!case.holds, hasDiagnosticCode(&result, "ZTS400"));
     }
+}
+
+test "CHECK nominal construction preserves a secret label" {
+    const source =
+        "import { nominal } from \"zttp:core\";\n" ++
+        "import type { Nominal } from \"zttp:core\";\n" ++
+        "import { env } from \"zttp:env\";\n" ++
+        "declare const secretBrand: unique symbol;\n" ++
+        "type Secret = Nominal<string, typeof secretBrand>;\n" ++
+        "function handler(req: Request): Proof<Response, \"no_secret_leakage\"> {\n" ++
+        "  const secret: Secret = nominal<Secret>(env(\"API_SECRET\") ?? \"\");\n" ++
+        "  return Response.text(secret);\n" ++
+        "}\n";
+    var result = try runCheckOnlyFromSourceWithOptions(
+        std.testing.allocator,
+        source,
+        "handler.ts",
+        .{ .json_mode = true },
+    );
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 1), result.flow_errors);
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const properties = contract.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!properties.no_secret_leakage);
+    try std.testing.expectEqualStrings("ZTS400", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("secret data flows into response body", result.json_diagnostics.items[0].message);
+    try std.testing.expectEqual(@as(u32, 8), result.json_diagnostics.items[0].line);
+    try std.testing.expectEqual(@as(u32, 23), result.json_diagnostics.items[0].column);
+}
+
+test "CHECK nominal construction preserves source exactness for mask" {
+    const source =
+        "import { nominal } from \"zttp:core\";\n" ++
+        "import type { Nominal } from \"zttp:core\";\n" ++
+        "import { env } from \"zttp:env\";\n" ++
+        "import { mask } from \"zttp:text\";\n" ++
+        "declare const secretBrand: unique symbol;\n" ++
+        "type Secret = Nominal<string, typeof secretBrand>;\n" ++
+        "function handler(req: Request): Proof<Response, \"no_secret_leakage\"> {\n" ++
+        "  const secret: Secret = nominal<Secret>(env(\"API_SECRET\") ?? \"\");\n" ++
+        "  return Response.text(mask(secret, 4));\n" ++
+        "}\n";
+    var result = try runCheckOnlyFromSourceWithOptions(
+        std.testing.allocator,
+        source,
+        "handler.ts",
+        .{ .json_mode = true },
+    );
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const properties = contract.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(properties.no_secret_leakage);
 }
 
 test "CHECK import path selection preserves explicit names and normalized cycle identity" {

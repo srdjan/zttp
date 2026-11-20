@@ -253,6 +253,7 @@ const Lowerer = struct {
             },
             .unary_op => {
                 const unary = self.view.getUnary(node) orelse return error.Unsupported;
+                if (unary.op == .transparent) return self.encodeNode(hasher, unary.operand, depth);
                 frame(hasher, "unary");
                 frame(hasher, @tagName(unary.op));
                 try self.encodeNode(hasher, unary.operand, depth + 1);

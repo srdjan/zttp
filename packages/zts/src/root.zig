@@ -237,11 +237,11 @@ pub fn parsedModuleFromDirectCheck(
     source_owner: *DirectCheckSource,
 ) ?compiler.pipeline.ParsedModule {
     const capabilities = source_owner.acceptedCapabilities() orelse return null;
-    var parsed = compiler.pipeline.ParsedModule.fromTypedExisting(
-        capabilities.ir_view,
+    var parsed = compiler.pipeline.ParsedModule.fromAdmittedParser(
+        &source_owner.parser,
         capabilities.root,
         capabilities.atoms,
-        capabilities.type_store,
+        source_owner.path,
     );
     parsed.scopes = &source_owner.parser.scopes;
     return parsed;

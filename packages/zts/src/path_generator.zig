@@ -2121,11 +2121,12 @@ pub const PathGenerator = struct {
     /// Push all extractable constraints from a condition into the constraint
     /// list: the constraints that hold on the path where the condition is true.
     fn extractAllConstraints(self: *PathGenerator, cond: NodeIndex) error{OutOfMemory}!void {
-        const tag = self.ir_view.getTag(cond) orelse return;
+        const subject = self.ir_view.unwrapTransparent(cond);
+        const tag = self.ir_view.getTag(subject) orelse return;
 
         // AND chains: extract from both sides
         if (tag == .binary_op) {
-            const bin = self.ir_view.getBinary(cond) orelse return;
+            const bin = self.ir_view.getBinary(subject) orelse return;
             if (bin.op == .and_op) {
                 try self.extractAllConstraints(bin.left);
                 try self.extractAllConstraints(bin.right);
@@ -2134,7 +2135,7 @@ pub const PathGenerator = struct {
         }
 
         // Extract single constraint from this node
-        if (self.extractConditionConstraint(cond)) |c| try self.constraints.append(self.allocator, c);
+        if (self.extractConditionConstraint(subject)) |c| try self.constraints.append(self.allocator, c);
     }
 
     /// The ways a condition can be false, each as the constraints that hold on
@@ -2230,9 +2231,10 @@ pub const PathGenerator = struct {
         cond: NodeIndex,
         out: *std.ArrayList(NodeIndex),
     ) error{OutOfMemory}!void {
-        if (self.ir_view.getTag(cond)) |tag| {
+        const subject = self.ir_view.unwrapTransparent(cond);
+        if (self.ir_view.getTag(subject)) |tag| {
             if (tag == .binary_op) {
-                if (self.ir_view.getBinary(cond)) |bin| {
+                if (self.ir_view.getBinary(subject)) |bin| {
                     if (bin.op == .and_op) {
                         try self.collectConjuncts(bin.left, out);
                         try self.collectConjuncts(bin.right, out);
@@ -2241,15 +2243,16 @@ pub const PathGenerator = struct {
                 }
             }
         }
-        try out.append(self.allocator, cond);
+        try out.append(self.allocator, subject);
     }
 
     fn extractConditionConstraint(self: *PathGenerator, cond: NodeIndex) ?Constraint {
-        const tag = self.ir_view.getTag(cond) orelse return null;
+        const subject = self.ir_view.unwrapTransparent(cond);
+        const tag = self.ir_view.getTag(subject) orelse return null;
 
         switch (tag) {
             .binary_op => {
-                const bin = self.ir_view.getBinary(cond) orelse return null;
+                const bin = self.ir_view.getBinary(subject) orelse return null;
 
                 if (self.extractStatusComparison(bin)) |c| return c;
 
@@ -2276,7 +2279,7 @@ pub const PathGenerator = struct {
 
             .unary_op => {
                 // !expr -> negate
-                const unary = self.ir_view.getUnary(cond) orelse return null;
+                const unary = self.ir_view.getUnary(subject) orelse return null;
                 if (unary.op == .not) {
                     if (self.extractConditionConstraint(unary.operand)) |c| {
                         return self.negateConstraint(c);
@@ -2287,16 +2290,16 @@ pub const PathGenerator = struct {
             .identifier => {
                 // Only a boolean-returning module value is a legal direct
                 // condition in the boolean-only profile.
-                return self.extractBooleanConstraint(cond);
+                return self.extractBooleanConstraint(subject);
             },
 
             .member_access => {
                 // if (result.ok) pattern
-                return self.extractResultOkConstraint(cond);
+                return self.extractResultOkConstraint(subject);
             },
 
             .call => {
-                return self.extractBooleanCallConstraint(cond);
+                return self.extractBooleanCallConstraint(subject);
             },
 
             // exhaustive: an unrecognized condition adds no constraint and both branches stay walked, so no path is dropped.

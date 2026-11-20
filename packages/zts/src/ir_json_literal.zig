@@ -74,9 +74,14 @@ fn writeNode(
         },
         .unary_op => {
             const unary = ir_view.getUnary(node_idx) orelse return false;
-            if (unary.op != .neg) return false;
-            try writer.writeByte('-');
-            return writeNode(ir_view, unary.operand, resolve_atom, resolver_ctx, writer);
+            switch (unary.op) {
+                .transparent => return writeNode(ir_view, unary.operand, resolve_atom, resolver_ctx, writer),
+                .neg => {
+                    try writer.writeByte('-');
+                    return writeNode(ir_view, unary.operand, resolve_atom, resolver_ctx, writer);
+                },
+                else => return false,
+            }
         },
         .array_literal => {
             const array = ir_view.getArray(node_idx) orelse return false;
@@ -196,6 +201,33 @@ test "serialize writes the supported literal language exactly" {
         "{\"integer\": 1, \"float\": 2.5, \"negativeInteger\": -3, \"negativeFloat\": -4.25, \"string\": \"line\\nquote:\\\" slash:\\\\ tab:\\t\", \"boolean\": true, \"nothing\": null, \"nested\": [false, {\"key\": \"value\"}], \"sibling\": {\"key\": \"again\"}}",
         json,
     );
+}
+
+test "serialize forwards a transparent literal wrapper" {
+    const allocator = std.testing.allocator;
+    var store = ir.IRStore.init(allocator);
+    defer store.deinit();
+    var constants = ir.ConstantPool.init(allocator);
+    defer constants.deinit();
+    const loc: ir.SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+    const operand = try store.addInt(loc, 42);
+    const wrapped = try store.addUnary(loc, .{ .op = .transparent, .operand = operand });
+    const Fixture = struct {
+        fn resolve(_: u16, _: *const anyopaque) ?[]const u8 {
+            return null;
+        }
+    };
+    const context: u8 = 0;
+    const json = (try serialize(
+        allocator,
+        IrView.fromIRStore(&store, &constants),
+        wrapped,
+        Fixture.resolve,
+        &context,
+    )) orelse return error.ExpectedLiteral;
+    defer allocator.free(json);
+
+    try std.testing.expectEqualStrings("42", json);
 }
 
 test "serialize refuses unsupported roots and partial literals without publishing bytes" {

@@ -56,6 +56,8 @@ const Input = enum {
     call_chain,
     add_chain,
     unmapped_type,
+    malformed_nominal,
+    malformed_nominal_graph,
     readonly_file,
     admission_refusal,
     deep_clean,
@@ -108,6 +110,8 @@ const cases = [_]Case{
     .{ .name = "511-term addition chain, text", .input = .add_chain, .mode = .text, .exit_code = 1 },
     .{ .name = "511-term addition chain, json", .input = .add_chain, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS500" },
     .{ .name = "unmapped type failure, json", .input = .unmapped_type, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
+    .{ .name = "nominal declaration refusal names its code, text", .input = .malformed_nominal, .mode = .text, .exit_code = 1, .stderr_contains = "malformed-nominal.ts:3:20: ZTS048 a nominal declaration carries scalar identity only" },
+    .{ .name = "imported nominal refusal names its code, text", .input = .malformed_nominal_graph, .mode = .text, .exit_code = 1, .stderr_contains = "bad-type.ts:3:27: ZTS048 a nominal declaration carries scalar identity only" },
     .{ .name = "canonicalize analyzer failure, json", .command = "canonicalize", .input = .unmapped_type, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
     .{ .name = "normalize analyzer failure, json", .command = "normalize", .input = .unmapped_type, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
     .{ .name = "normalize analyzer failure, text", .command = "normalize", .input = .unmapped_type, .mode = .text, .exit_code = 1, .stderr_contains = "ZTS000", .stderr_excludes = " in assignableIn" },
@@ -279,6 +283,21 @@ fn populate(gpa: std.mem.Allocator, io: Io, work: []const u8) !void {
     try cwd.createDirPath(io, readonly_path);
     try writeInput(gpa, io, work, "readonly/handler.ts", "function handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n");
     try writeInput(gpa, io, work, "admission.ts", "const value: any = 1;\n");
+    try writeInput(gpa, io, work, "malformed-nominal.ts",
+        \\import type { Nominal } from "zttp:core";
+        \\declare const brand: unique symbol;
+        \\type Bad = Nominal<{ value: string }, typeof brand>;
+        \\export function handler(req: Request): Response { return Response.text("x"); }
+    );
+    try writeInput(gpa, io, work, "bad-type.ts",
+        \\import type { Nominal } from "zttp:core";
+        \\declare const brand: unique symbol;
+        \\export type Bad = Nominal<{ value: string }, typeof brand>;
+    );
+    try writeInput(gpa, io, work, "malformed-nominal-graph.ts",
+        \\import type { Bad } from "./bad-type.ts";
+        \\export function handler(req: Request): Response { return Response.text("x"); }
+    );
     for ([_]bool{ false, true }) |leaks| {
         var deep: std.ArrayList(u8) = .empty;
         defer deep.deinit(gpa);
@@ -310,6 +329,8 @@ fn fileFor(input: Input) []const u8 {
         .call_chain => "chain.ts",
         .add_chain => "add-chain.ts",
         .unmapped_type => "unmapped.ts",
+        .malformed_nominal => "malformed-nominal.ts",
+        .malformed_nominal_graph => "malformed-nominal-graph.ts",
         .readonly_file => "readonly/handler.ts",
         .admission_refusal => "admission.ts",
         .deep_clean => "deep-clean.ts",

@@ -775,11 +775,11 @@ pub const Parser = struct {
                 if (collector.shouldStop()) return error.AdmissionRefused;
             }
             if (try self.tryConsumeTypeOnlyModule()) continue;
-            if (try self.tryConsumeAdmissionDeclaration()) {
+            if (try self.tryConsumeTypeDeclaration()) {
                 self.declaration_seen = true;
                 continue;
             }
-            if (try self.tryConsumeTypeDeclaration()) {
+            if (try self.tryConsumeAdmissionDeclaration()) {
                 self.declaration_seen = true;
                 continue;
             }
@@ -831,6 +831,7 @@ pub const Parser = struct {
         }
 
         self.bindLaterModuleDeclarations();
+        try self.refuseBrandRuntimeReads();
         try self.refuseRemovedPipeGlobals();
 
         // Create program node
@@ -861,6 +862,29 @@ pub const Parser = struct {
                 .variable, .function => self.nodes.rebindUndeclaredToGlobal(node),
                 // An import is declared before any statement, so no reference precedes it.
                 .parameter, .catch_param, .import => {},
+            }
+        }
+    }
+
+    fn refuseBrandRuntimeReads(self: *Parser) !void {
+        for (self.nodes.tags.items, 0..) |tag, raw| {
+            if (tag != .identifier) continue;
+            const node: NodeIndex = @intCast(raw);
+            const location = self.nodes.getLoc(node);
+            const start: usize = location.offset;
+            if (start >= self.source.len or
+                !(std.ascii.isAlphabetic(self.source[start]) or self.source[start] == '_' or self.source[start] == '$')) continue;
+            var end = start + 1;
+            while (end < self.source.len and
+                (std.ascii.isAlphanumeric(self.source[end]) or self.source[end] == '_' or self.source[end] == '$')) end += 1;
+            for (self.type_store.brand_declarations.items) |brand| {
+                if (!std.mem.eql(u8, self.source[start..end], brand.name_span.text(self.source))) continue;
+                self.errors.addError(
+                    .unexpected_token,
+                    location,
+                    "a unique-symbol brand is type-only and cannot be read at runtime",
+                );
+                return error.ParseError;
             }
         }
     }
@@ -1533,7 +1557,56 @@ pub const Parser = struct {
             cursor.advance();
         }
         if (keyword.type != .identifier) return false;
-        const kind: type_syntax.DeclarationKind = if (std.mem.eql(u8, keyword.text(self.source), "structural"))
+        if (std.mem.eql(u8, keyword.text(self.source), "declare")) {
+            if (cursor.current.type != .kw_const) return false;
+            cursor.advance();
+            const brand_name = cursor.current;
+            if (!type_syntax.tokenIsDeclarationName(brand_name, self.source)) return false;
+            cursor.advance();
+            if (cursor.current.type != .colon) return false;
+            cursor.advance();
+            if (cursor.current.type != .identifier or
+                !std.mem.eql(u8, cursor.current.text(self.source), "unique")) return false;
+            cursor.advance();
+            if (cursor.current.type != .identifier or
+                !std.mem.eql(u8, cursor.current.text(self.source), "symbol")) return false;
+            cursor.advance();
+            if (cursor.current.type != .semicolon) {
+                self.errors.addErrorAt(.missing_semicolon, cursor.current, "expected ';' after the brand declaration");
+                return error.MissingSemicolon;
+            }
+            const erased_end = cursor.current.start + cursor.current.len;
+            const name_atom = try self.addAtom(brand_name.text(self.source));
+            _ = self.scopes.declareBinding(
+                brand_name.text(self.source),
+                name_atom,
+                .variable,
+                true,
+            ) catch |err| {
+                if (isNameFailure(err)) return self.bindingFailure(err, brand_name.location(), .duplicate_binding);
+                return err;
+            };
+            if (!self.source_only) try self.type_store.brand_declarations.append(
+                self.type_store.allocator,
+                .{
+                    .name_span = .{ .start = brand_name.start, .end = brand_name.start + brand_name.len },
+                    .declaration_start = if (export_span) |span| span.start else keyword.start,
+                    .full_span = .{
+                        .start = if (export_span) |span| span.start else keyword.start,
+                        .end = erased_end,
+                    },
+                    .exported = export_span != null,
+                },
+            );
+            try self.resumeAfterRawErasureObserved(erased_end, saved_previous);
+            self.last_erased_type_span = .{
+                .start = if (export_span) |span| span.start else keyword.start,
+                .end = erased_end,
+            };
+            return true;
+        }
+        const kind: type_syntax.DeclarationKind = if (std.mem.eql(u8, keyword.text(self.source), "structural") or
+            std.mem.eql(u8, keyword.text(self.source), "type"))
             .structural
         else if (std.mem.eql(u8, keyword.text(self.source), "nominal"))
             .nominal
@@ -1799,7 +1872,7 @@ pub const Parser = struct {
         if (std.mem.eql(u8, keyword_text, "interface")) {
             kind = .interface_declaration;
         } else if (std.mem.eql(u8, keyword_text, "type")) {
-            kind = .type_alias_declaration;
+            return false;
         } else if (std.mem.eql(u8, keyword_text, "distinct")) {
             distinct_keyword = keyword;
             const type_keyword = cursor.current;
@@ -4366,8 +4439,8 @@ pub const Parser = struct {
             if (self.check(.eof)) break;
             progress.iteration(self);
             if (try self.tryConsumeTypeOnlyModule()) continue;
-            if (try self.tryConsumeAdmissionDeclaration()) continue;
             if (try self.tryConsumeTypeDeclaration()) continue;
+            if (try self.tryConsumeAdmissionDeclaration()) continue;
             const failed_statement_start = self.current.location().offset;
             if (self.parseStatement()) |stmt| {
                 try stmts.append(stmt);
@@ -4529,8 +4602,13 @@ pub const Parser = struct {
         // Get the string content without quotes
         const raw = module_token.text(self.source);
         const module_str = if (raw.len >= 2) raw[1 .. raw.len - 1] else raw;
-        const module_idx = try self.addString(module_str);
-        for (candidates[0..candidate_count]) |candidate| self.recordRegistration(module_str, candidate.name, candidate.atom);
+        const module_idx = try self.unescapedStringOrDiagnostic(
+            module_str,
+            module_token.location(),
+            module_token.has_escape,
+        );
+        const canonical_module = self.constants.getString(module_idx) orelse return error.InvalidConstant;
+        for (candidates[0..candidate_count]) |candidate| self.recordRegistration(canonical_module, candidate.name, candidate.atom);
 
         try self.expectSemicolon();
 
@@ -6935,79 +7013,7 @@ pub const Parser = struct {
     /// Called only for tokens the scanner marked as escaped. The returned
     /// allocation is exact-sized so the constant pool can own and free it.
     fn unescape(self: *Parser, input: []const u8) ![]u8 {
-        // The decoded form is never longer than the input: every escape emits
-        // at most as many bytes as its backslash sequence occupies.
-        var result = try self.allocator.alloc(u8, input.len);
-        errdefer self.allocator.free(result);
-        var out_pos: usize = 0;
-        var i: usize = 0;
-
-        while (i < input.len) {
-            if (input[i] != '\\' or i + 1 >= input.len) {
-                // A trailing backslash escapes the closing quote in every
-                // reading, so the literal it appears in is malformed.
-                if (input[i] == '\\') return error.InvalidEscapeSequence;
-                result[out_pos] = input[i];
-                out_pos += 1;
-                i += 1;
-                continue;
-            }
-
-            const escaped = input[i + 1];
-            switch (escaped) {
-                'x' => {
-                    const decoded: ?u8 = if (i + 3 < input.len)
-                        std.fmt.parseInt(u8, input[i + 2 .. i + 4], 16) catch null
-                    else
-                        null;
-                    if (decoded) |byte| {
-                        result[out_pos] = byte;
-                        out_pos += 1;
-                        i += 4;
-                        continue;
-                    }
-                    return error.InvalidEscapeSequence;
-                },
-                'u' => {
-                    if (decodeUnicodeEscape(input, i)) |decoded| {
-                        if (std.unicode.utf8Encode(decoded.codepoint, result[out_pos..])) |len| {
-                            out_pos += len;
-                            i = decoded.next;
-                            continue;
-                        } else |_| {}
-                    } else |_| {}
-                    return error.InvalidEscapeSequence;
-                },
-                // A backslash before a real newline. JavaScript reads it as a
-                // line continuation and emits nothing; D3 section 1 refuses it,
-                // because a string that spans a line reads as two strings to
-                // everyone but the compiler. Both profiles refuse it.
-                '\n', '\r' => return error.StringLineContinuation,
-                else => {
-                    result[out_pos] = switch (escaped) {
-                        'n' => '\n',
-                        'r' => '\r',
-                        't' => '\t',
-                        'b' => 0x08, // backspace
-                        'f' => 0x0C, // form feed
-                        'v' => 0x0B, // vertical tab
-                        '0' => 0,
-                        // The rest of the closed set: an escaped delimiter or
-                        // backslash stands for itself.
-                        '\\', '\'', '"', '`', '$' => escaped,
-                        // Every other byte closes the set rather than copying
-                        // through. `\q` emitted `q`, so a mistyped escape
-                        // produced a string the author did not write and no
-                        // diagnostic said so.
-                        else => return error.InvalidEscapeSequence,
-                    };
-                    out_pos += 1;
-                    i += 2;
-                },
-            }
-        }
-
-        return self.allocator.realloc(result, out_pos);
+        return type_syntax.decodeStringLiteralContent(self.allocator, input);
     }
 
     fn addAtom(self: *Parser, name: []const u8) !u16 {
@@ -7098,7 +7104,6 @@ test "admission parser reaches each syntax-owned refusal producer" {
         .{ .source = "const value = \"open\nconst after = 1;\n", .kind = .unterminated_string },
         .{ .source = "nominal Box = T;\n", .kind = .nominal_base_not_scalar },
         .{ .source = "interface Box { value: string }\n", .kind = .interface_declaration },
-        .{ .source = "type Box = string;\n", .kind = .type_alias_declaration },
         .{ .source = "distinct type Box = string;\n", .kind = .distinct_type_declaration },
         .{ .source = "import type { Value } from \"" ++ retired_types_module ++ "\";\n", .kind = .retired_types_import },
         .{ .source = "function f(value = 1) { return value; }\n", .kind = .default_parameter },
@@ -7109,7 +7114,7 @@ test "admission parser reaches each syntax-owned refusal producer" {
         .{ .source = "structural Box = ReadonlyArray<string>;\n", .kind = .readonly_array_type_alias },
         .{ .source = "structural Box = void;\n", .kind = .void_type },
     };
-    try std.testing.expectEqual(@as(usize, 16), cases.len);
+    try std.testing.expectEqual(@as(usize, 15), cases.len);
     var seen = std.EnumSet(type_syntax.AdmissionKind).empty;
     for (cases) |case| try expectAdmissionKindFromSource(case.source, case.kind, &seen);
 
@@ -7258,21 +7263,24 @@ test "admission declaration recognition rejects comment gaps and still refuses a
         }
         try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
     }
+}
 
-    var missing_equals = try Parser.initAdmission(
+test "standard type alias enters the structural declaration store" {
+    const source = "type Label = string;\nconst value: Label = \"ok\";\n";
+    var parser = try Parser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
-        "type Alias any;\n",
-        .collect,
+        source,
+        .compile,
     );
-    defer missing_equals.deinit();
-    switch (try missing_equals.parseAdmission()) {
-        .recovered_admission_refused => {},
-        else => return error.TestUnexpectedResult,
-    }
-    const diagnostics = missing_equals.getAdmissionDiagnostics();
-    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
-    try std.testing.expectEqual(type_syntax.AdmissionKind.type_alias_declaration, diagnostics[0].kind);
+    defer parser.deinit();
+
+    const root = try parser.parse();
+    try std.testing.expectEqual(NodeTag.program, parser.nodes.getTag(root));
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
+    const declaration = parser.type_store.declarations.items[0];
+    try std.testing.expectEqual(type_syntax.DeclarationKind.structural, declaration.kind);
+    try std.testing.expectEqualStrings("Label", declaration.name_span.text(source));
 }
 
 test "admission block recovery preserves a later typed declaration after a template failure" {

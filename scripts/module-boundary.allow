@@ -103,4 +103,6 @@ pi flow_checker
 # family that is enabled with no seed the compiler rejects.
 pi guard_catalog
 pi parser
+# Intrinsic source validation precedes effect inference in the expert tool.
+pi pipeline
 pi repair_plan

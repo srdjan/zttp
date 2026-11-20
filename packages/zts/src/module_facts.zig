@@ -140,11 +140,8 @@ pub const ModuleFacts = struct {
             const import_decl = ir_view.getImportDecl(idx) orelse continue;
             const module_str = ir_view.getString(import_decl.module_idx) orelse continue;
 
-            // Classify rather than skip. The four collections below still see
-            // only virtual modules - built-in or partner-registered - exactly as
-            // before, so `ContractBuilder`'s output and the contract goldens are
-            // unaffected. `imports` sees everything, because two analyzers need
-            // the unresolved ones.
+            // Keep every import for binding resolution. Contract collections
+            // contain runtime modules, without compiler-owned intrinsics.
             const resolution: ImportRecord.Resolution = blk: {
                 if (builtin_modules.fromSpecifier(module_str) != null) break :blk .builtin;
                 if (registry) |reg| {
@@ -152,7 +149,11 @@ pub const ModuleFacts = struct {
                 }
                 break :blk .unresolved;
             };
-            const resolved = resolution != .unresolved;
+            const runtime_module = if (builtin_modules.fromSpecifier(module_str)) |binding|
+                binding.intrinsic_exports.len == 0
+            else
+                true;
+            const resolved = resolution != .unresolved and runtime_module;
 
             // Add module to list (deduplicated, duped)
             if (resolved and !containsString(self.modules.items, module_str)) {
@@ -480,6 +481,22 @@ fn resolveAtomName(ir_view: IrView, atoms: ?*context.AtomTable, atom_idx: u16) ?
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "contract modules exclude compiler intrinsic imports" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var harness = try Harness.init(allocator, "import { nominal as make } from \"zttp:core\";\n");
+    defer harness.deinit(allocator);
+    var facts = try ModuleFacts.build(allocator, harness.view(), &harness.atoms, null);
+    defer facts.deinit();
+    var modules = try facts.cloneModules(allocator);
+    defer modules.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), modules.items.len);
+    var functions = try facts.cloneFunctions(allocator);
+    defer functions.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), functions.items.len);
+}
 
 /// Parse `source` and build the index over it. The caller owns the returned
 /// facts; `Harness.deinit` frees the parser and atom table that the facts

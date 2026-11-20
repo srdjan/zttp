@@ -59,6 +59,11 @@ pub const ModuleRecord = struct {
     imports: []ImportRecord,
 };
 
+const PendingImport = struct {
+    specifier: []const u8,
+    offset: u32,
+};
+
 pub const Rejection = struct {
     specifier: []const u8,
     /// Canonical root-relative path of the module that wrote the import.
@@ -282,6 +287,8 @@ fn collectImports(
     };
 
     const view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    var pending: std.ArrayList(PendingImport) = .empty;
+    defer pending.deinit(allocator);
     const node_count = js_parser.getRetainedImportNodeCount();
     var idx: usize = 0;
     while (idx < node_count) : (idx += 1) {
@@ -290,7 +297,17 @@ fn collectImports(
         if (tag != .import_decl) continue;
         const decl = view.getImportDecl(node) orelse continue;
         const specifier = view.getString(decl.module_idx) orelse continue;
+        const location = view.getLoc(node) orelse continue;
+        try pending.append(allocator, .{ .specifier = specifier, .offset = location.offset });
+    }
+    for (js_parser.type_store.type_only_modules.items) |type_module| {
+        const specifier = js_parser.type_store.typeOnlySpecifier(type_module) orelse continue;
+        try pending.append(allocator, .{ .specifier = specifier, .offset = type_module.raw_span.start });
+    }
+    std.mem.sort(PendingImport, pending.items, {}, lessPendingImport);
 
+    for (pending.items) |found| {
+        const specifier = found.specifier;
         switch (resolver.resolve(specifier)) {
             .virtual => try imports.append(allocator, .{
                 .specifier = try allocator.dupe(u8, specifier),
@@ -370,6 +387,10 @@ fn collectImports(
             },
         }
     }
+}
+
+fn lessPendingImport(_: void, a: PendingImport, b: PendingImport) bool {
+    return a.offset < b.offset;
 }
 
 fn lessModule(_: void, a: ModuleRecord, b: ModuleRecord) bool {
@@ -531,6 +552,34 @@ test "graph hash changes when a source byte changes" {
     defer after.deinit(a);
 
     try testing.expect(!std.mem.eql(u8, &first, &after.hash));
+}
+
+test "graph hash includes a dependency reached only through import type" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "handler.ts",
+        .data = "import type { Label } from \"./types.ts\";\nexport const label: Label = \"ready\";\n",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "types.ts",
+        .data = "export structural Label = string;\n",
+    });
+    const root = try tmpRoot(&tmp, a);
+    defer a.free(root);
+
+    var before = try build(a, std.testing.io, root, "handler.ts");
+    defer before.deinit(a);
+    try testing.expectEqual(@as(usize, 2), before.modules.len);
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "types.ts",
+        .data = "export structural Label = number;\n",
+    });
+    var after = try build(a, std.testing.io, root, "handler.ts");
+    defer after.deinit(a);
+    try testing.expect(!std.mem.eql(u8, &before.hash, &after.hash));
 }
 
 test "entry source override recomputes the graph without writing" {

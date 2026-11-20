@@ -791,10 +791,11 @@ pub const BoolChecker = struct {
         };
     }
 
-    fn inferUnaryType(self: *const BoolChecker, node: NodeIndex) ExprType {
+    fn inferUnaryType(self: *BoolChecker, node: NodeIndex) ExprType {
         const un = self.ir_view.getUnary(node) orelse return .unknown;
 
         return switch (un.op) {
+            .transparent => self.inferType(un.operand),
             .not => .boolean,
             .neg, .bit_not => .number,
             .typeof_op => .string,
@@ -1515,10 +1516,11 @@ pub const BoolChecker = struct {
     /// `x === undefined`, `x !== undefined` (and reversed operand forms).
     /// Returns null if the node does not match any guard pattern.
     fn extractTypeofGuard(self: *BoolChecker, node: NodeIndex) ?TypeofGuard {
-        const tag = self.ir_view.getTag(node) orelse return null;
+        const subject = self.ir_view.unwrapTransparent(node);
+        const tag = self.ir_view.getTag(subject) orelse return null;
         if (tag != .binary_op) return null;
 
-        const bin = self.ir_view.getBinary(node) orelse return null;
+        const bin = self.ir_view.getBinary(subject) orelse return null;
         if (bin.op != .strict_eq and bin.op != .strict_neq) return null;
 
         const left_tag = self.ir_view.getTag(bin.left) orelse return null;
@@ -1625,18 +1627,19 @@ pub const BoolChecker = struct {
         is_negated: *bool,
     ) usize {
         is_negated.* = false;
+        const subject = self.ir_view.unwrapTransparent(node);
 
         // Try single typeof/equality guard first
-        if (self.extractTypeofGuard(node)) |guard| {
+        if (self.extractTypeofGuard(subject)) |guard| {
             guards[0] = guard;
             is_negated.* = (guard.op == .strict_neq);
             return 1;
         }
 
         // Try && chain of typeof guards
-        const tag = self.ir_view.getTag(node) orelse return 0;
+        const tag = self.ir_view.getTag(subject) orelse return 0;
         if (tag == .binary_op) {
-            const bin = self.ir_view.getBinary(node) orelse return 0;
+            const bin = self.ir_view.getBinary(subject) orelse return 0;
             if (bin.op == .and_op) {
                 var count: usize = 0;
                 self.collectAndGuards(bin.left, guards, &count);
@@ -1656,9 +1659,10 @@ pub const BoolChecker = struct {
         count: *usize,
     ) void {
         if (count.* >= MAX_NARROWINGS) return;
+        const subject = self.ir_view.unwrapTransparent(node);
 
         // Check if this node is itself a typeof === guard
-        if (self.extractTypeofGuard(node)) |guard| {
+        if (self.extractTypeofGuard(subject)) |guard| {
             if (guard.op == .strict_eq) {
                 guards[count.*] = guard;
                 count.* += 1;
@@ -1667,9 +1671,9 @@ pub const BoolChecker = struct {
         }
 
         // Check if this is another && to recurse into
-        const tag = self.ir_view.getTag(node) orelse return;
+        const tag = self.ir_view.getTag(subject) orelse return;
         if (tag != .binary_op) return;
-        const bin = self.ir_view.getBinary(node) orelse return;
+        const bin = self.ir_view.getBinary(subject) orelse return;
         if (bin.op != .and_op) return;
 
         self.collectAndGuards(bin.left, guards, count);

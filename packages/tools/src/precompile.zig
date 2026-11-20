@@ -285,6 +285,7 @@ pub fn compileHandler(
         printParseErrors(allocator, diag_view, js_parser.getProjectedErrors());
         return error.ParseError;
     }
+    try zts.parser.markIntrinsicValidationRequirement(allocator, &js_parser, &atoms);
 
     try validateVirtualModuleImports(
         zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
@@ -294,7 +295,10 @@ pub fn compileHandler(
     );
 
     // Check for file imports before proceeding with single-module compilation
-    const has_file_imports = hasFileImports(zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants));
+    const has_file_imports = hasFileImports(
+        zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
+        &js_parser.type_store,
+    );
 
     if (has_file_imports) {
         if (!builtin.is_test) debugPrint("File imports detected, building module graph...\n", .{});
@@ -314,7 +318,7 @@ pub fn compileHandler(
 
     const ir_view_check = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     try js_parser.type_store.validateRuntimeOwners(allocator, ir_view_check);
-    var parsed = zts.pipeline.ParsedModule.fromTypedExisting(ir_view_check, root, &atoms, &js_parser.type_store);
+    var parsed = zts.pipeline.ParsedModule.fromAdmittedParser(&js_parser, root, &atoms, filename);
     parsed.scopes = &js_parser.scopes;
 
     var analysis: zts.pipeline.ModuleAnalysisSession = .{};
@@ -322,7 +326,7 @@ pub fn compileHandler(
         allocator,
         parsed,
         .{
-            .source_types = .direct,
+            .source_types = .{ .direct = filename },
             .strict = opts.strict,
             .manifest_registry = manifest_registry,
             // Which sections the author wrote, not what is in them: the
@@ -843,24 +847,11 @@ pub fn compileHandler(
 
 /// True when the parsed IR has a file import declaration. The build and the
 /// check share this predicate, so that both read the same graph.
-pub fn hasFileImports(view: zts.IrView) bool {
-    const node_count = view.nodeCount();
-
-    for (0..node_count) |idx| {
-        const tag = view.getTag(@intCast(idx)) orelse continue;
-        if (tag != .import_decl) continue;
-
-        const import_decl = view.getImportDecl(@intCast(idx)) orelse continue;
-        const module_str = view.getString(import_decl.module_idx) orelse continue;
-
-        const result = zts.modules.resolver.resolve(module_str);
-        switch (result) {
-            .file => return true,
-            .virtual, .unknown => {},
-        }
-    }
-
-    return false;
+pub fn hasFileImports(
+    view: zts.IrView,
+    type_store: ?*const zts.parser.type_syntax.Store,
+) bool {
+    return zts.pipeline.hasFileImports(view, type_store);
 }
 
 /// Compile a handler with file imports as a multi-module bundle
@@ -926,14 +917,19 @@ fn compileMultiModule(
 
     if (!builtin.is_test) debugPrint("Module graph: {d} modules ({d} dependencies)\n", .{
         graph.module_list.items.len,
-        graph.dependencyCount(),
+        graph.runtimeDependencyCount(),
     });
 
     // Compile all modules with shared atoms
+    // The later graph check owns ordinary type refusals and their error order.
+    var frontend_validation = zts.pipeline.GraphFrontendValidation.init(allocator, atoms, false);
+    defer frontend_validation.deinit();
     var module_compiler = zts.modules.ModuleCompiler.init(allocator, atoms, strings);
     module_compiler.record_witnesses = opts.emit_proof_evidence;
+    module_compiler.frontend_validation = frontend_validation.hook();
     var compile_result = module_compiler.compileAll(&graph) catch |err| {
         debugPrint("Multi-module compilation error: {}\n", .{err});
+        if (err == error.TypeCheckFailed) return error.SoundModeViolation;
         return err;
     };
     defer compile_result.deinit();
@@ -941,10 +937,8 @@ fn compileMultiModule(
         for (compile_result.codegens) |*cg| cg.freeOwnedConstantPayloads();
     }
 
-    // Each checked dependency leaves the signatures of its exports here, for
-    // the modules that import it.
-    var exports = zts.ExportedSignatures.init(allocator);
-    defer exports.deinit();
+    // The frontend callback publishes each dependency before its importers run.
+    const exports = &frontend_validation.exports;
     // Check every module, dependencies first and the entry last. Code
     // generation above already ran on the kept parsers, so no bytecode moves.
     // The module state facts fold over the whole graph for the contract.
@@ -953,25 +947,29 @@ fn compileMultiModule(
     // position in execution order plus one, because the entry is module 0.
     var reported_writes: std.ArrayList(precompile_check_run_mod.WriteSite) = .empty;
     defer reported_writes.deinit(allocator);
-    var evidences: std.ArrayList(zts.ProofEvidence) = .empty;
+    const runtime_module_count = graph.execution_order.len;
+    const evidence_by_runtime = try allocator.alloc(?zts.ProofEvidence, runtime_module_count);
+    @memset(evidence_by_runtime, null);
     defer {
-        for (evidences.items) |*evidence| evidence.deinit();
-        evidences.deinit(allocator);
+        for (evidence_by_runtime) |*maybe_evidence| {
+            if (maybe_evidence.*) |*evidence| evidence.deinit();
+        }
+        allocator.free(evidence_by_runtime);
     }
-    for (0..compile_result.modules.len) |module_index| {
-        var checks = try checkGraphModule(allocator, &graph, &compile_result, module_index, atoms, &exports, opts, null);
+    for (graph.analysis_order) |graph_index| {
+        var checks = try checkGraphModule(allocator, &graph, &compile_result, graph_index, atoms, exports, opts, null);
         defer checks.deinit(allocator);
         if (checks.evidence) |*evidence| {
-            evidences.append(allocator, evidence.*) catch |err| {
-                evidence.deinit();
-                return err;
-            };
+            const runtime_position = graph.runtimePosition(graph_index) orelse return error.AnalysisPassIncomplete;
+            evidence_by_runtime[runtime_position] = evidence.*;
         }
         if (checks.verify_failed) return .{ .verify_failed = true };
-        for (checks.mutation_nodes) |node| {
-            try reported_writes.append(allocator, .{ .module = @intCast(module_index + 1), .node = node });
+        if (graph.runtimePosition(graph_index)) |runtime_position| {
+            for (checks.mutation_nodes) |node| {
+                try reported_writes.append(allocator, .{ .module = @intCast(runtime_position + 1), .node = node });
+            }
+            if (checks.has_module_mutation or checks.unresolved_route_dispatch) shares_state = true;
         }
-        if (checks.has_module_mutation or checks.unresolved_route_dispatch) shares_state = true;
     }
 
     // The evidence of each module folds into one program. A graph that the fold
@@ -979,11 +977,16 @@ fn compileMultiModule(
     var proof_evidence: ?zts.ProofEvidence = null;
     errdefer if (proof_evidence) |*evidence| evidence.deinit();
     if (opts.emit_proof_evidence) {
-        const entry_position = evidences.items.len - 1;
+        const evidences = try allocator.alloc(zts.ProofEvidence, runtime_module_count);
+        defer allocator.free(evidences);
+        for (evidence_by_runtime, 0..) |maybe_evidence, position| {
+            evidences[position] = maybe_evidence orelse return error.AnalysisPassIncomplete;
+        }
+        const entry_position = evidences.len - 1;
         proof_evidence = zts.foldProofEvidence(
             allocator,
-            &evidences.items[entry_position],
-            evidences.items[0..entry_position],
+            &evidences[entry_position],
+            evidences[0..entry_position],
         ) catch |err| {
             if (!builtin.is_test) {
                 var message_buffer: [256]u8 = undefined;
@@ -994,7 +997,7 @@ fn compileMultiModule(
     }
 
     // Serialize each module and collect dependency bytecodes
-    const mod_count = compile_result.modules.len;
+    const mod_count = graph.execution_order.len;
     var dep_bytecodes = try allocator.alloc([]const u8, mod_count - 1);
     // `alloc` returns uninitialized slices; freeing garbage pointers would
     // crash. Walk only the populated prefix on the unwind path (same idiom
@@ -1006,7 +1009,9 @@ fn compileMultiModule(
     }
 
     // Serialize dependency modules (all except last, which is the entry)
-    for (compile_result.modules[0 .. mod_count - 1], 0..) |*compiled_mod, i| {
+    for (graph.execution_order[0 .. mod_count - 1], 0..) |graph_index, i| {
+        const position = compile_result.positionOfModule(graph_index) orelse return error.AnalysisPassIncomplete;
+        const compiled_mod = &compile_result.modules[position];
         var buffer: [256 * 1024]u8 = undefined;
         var writer = zts.bytecode_cache.SliceWriter{ .buffer = &buffer };
 
@@ -1026,7 +1031,9 @@ fn compileMultiModule(
     }
 
     // Serialize entry module (last in execution order)
-    const entry_mod = &compile_result.modules[mod_count - 1];
+    const entry_graph_index = graph.execution_order[mod_count - 1];
+    const entry_position = compile_result.positionOfModule(entry_graph_index) orelse return error.AnalysisPassIncomplete;
+    const entry_mod = &compile_result.modules[entry_position];
     var entry_buffer: [256 * 1024]u8 = undefined;
     var entry_writer = zts.bytecode_cache.SliceWriter{ .buffer = &entry_buffer };
 
@@ -1046,7 +1053,7 @@ fn compileMultiModule(
 
     if (!builtin.is_test) debugPrint("Multi-module bundle: {d} dependency modules + entry\n", .{dep_bytecodes.len});
 
-    const contract = try buildMultiModuleContract(allocator, &graph, &compile_result, atoms, &exports, .{
+    const contract = try buildMultiModuleContract(allocator, &graph, &compile_result, atoms, exports, .{
         .filename = filename,
         .emit_contract = emit_contract,
         .emit_verify = opts.emit_verify,
@@ -1152,6 +1159,47 @@ pub const GraphSink = struct {
         try self.diagnostics.append(self.allocator, projected);
     }
 
+    pub fn appendUnexportedType(
+        self: *GraphSink,
+        path: []const u8,
+        text: []const u8,
+        specifier: []const u8,
+        imported: []const u8,
+        offset: u32,
+    ) !void {
+        const token = zts.parser.type_syntax.tokenAtOffset(text, offset);
+        const location = token.location();
+        const message = try self.allocator.print(
+            "module '{s}' does not export type '{s}'",
+            .{ specifier, imported },
+        );
+        var projected: json_diag.JsonDiagnostic = .{
+            .code = diagnostic_catalog.parserCode(.unexported_type_import),
+            .severity = "error",
+            .message = message,
+            .message_owned = true,
+            .file = path,
+            .line = location.line,
+            .column = location.column,
+            .start_offset = location.offset,
+            .end_offset = location.end_offset,
+            .suggestion = "import a type that the module exports",
+        };
+        errdefer projected.deinit(self.allocator);
+        try self.place(&projected, path, text);
+        try self.diagnostics.append(self.allocator, projected);
+        self.type_errors += 1;
+        if (!self.json_mode and !builtin.is_test) {
+            debugPrint("{s}:{d}:{d}: {s} {s}\n", .{
+                path,
+                projected.line,
+                projected.column,
+                projected.code,
+                projected.message,
+            });
+        }
+    }
+
     /// Give a diagnostic its own copy of the path, and read its position
     /// against the source text.
     fn place(self: *GraphSink, projected: *json_diag.JsonDiagnostic, path: []const u8, text: []const u8) !void {
@@ -1187,8 +1235,8 @@ pub const GraphSink = struct {
 
 /// Run on one module of a loaded graph the checks that the single-module path
 /// runs on its only module: virtual import validation, the boolean, type, and
-/// strict checks, the verifier, and the bytecode verifier. `module_index`
-/// counts in execution order, so dependencies come first and the entry last.
+/// strict checks, the verifier, and the bytecode verifier. `graph_index`
+/// identifies the module in the graph. Analysis-only modules skip runtime checks.
 ///
 /// A dependency has no handler, so it gets the module verifier. It is exempt
 /// from ZTS061 alone, because a dependency exports functions by nature, and it
@@ -1203,16 +1251,18 @@ pub fn checkGraphModule(
     allocator: std.mem.Allocator,
     graph: *const zts.modules.ModuleGraph,
     compile_result: *const zts.modules.CompileResult,
-    module_index: usize,
+    graph_index: zts.modules.module_graph.ModuleIndex,
     atoms: *zts.AtomTable,
     exports: *zts.ExportedSignatures,
     opts: CompileOptions,
     sink: ?*GraphSink,
 ) !GraphModuleChecks {
-    const is_entry = module_index == compile_result.modules.len - 1;
-    const module = &graph.module_list.items[graph.execution_order[module_index]];
-    const parser = &compile_result.parsers[module_index];
-    const compiled = &compile_result.modules[module_index];
+    const runtime_position = graph.runtimePosition(graph_index);
+    const is_entry = runtime_position == graph.execution_order.len - 1;
+    const module = &graph.module_list.items[graph_index];
+    const compile_position = compile_result.positionOfModule(graph_index) orelse return error.AnalysisPassIncomplete;
+    const parser = &compile_result.parsers[compile_position];
+    const compiled = &compile_result.modules[compile_position];
     const root = compiled.root;
     const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
     var diag_view = zts.SourceView.of(module.source);
@@ -1237,17 +1287,25 @@ pub fn checkGraphModule(
     // that the checked target module exports under the imported name, or none.
     var link_arena = std.heap.ArenaAllocator.init(allocator);
     defer link_arena.deinit();
-    const file_imports = try precompile_contract_mod.fileImportSignatures(link_arena.allocator(), graph, module.path, view, atoms, exports);
+    const file_imports = try precompile_contract_mod.fileImportSignaturesWithTypes(
+        link_arena.allocator(),
+        graph,
+        module.path,
+        view,
+        atoms,
+        exports,
+        &parser.type_store,
+    );
 
     var parsed = zts.pipeline.ParsedModule.fromTypedExisting(view, root, atoms, &parser.type_store);
     parsed.scopes = &parser.scopes;
     var analysis: zts.pipeline.ModuleAnalysisSession = .{};
     try analysis.initFull(allocator, parsed, .{
-        .source_types = .direct,
+        .source_types = .{ .direct = module.path },
         .strict = opts.strict,
         .manifest_registry = opts.manifest_registry,
         .policy_sections = if (opts.policy) |*configured| configured.declaredSections() else .{},
-        .select_verifier = opts.emit_verify,
+        .select_verifier = opts.emit_verify and runtime_position != null,
         .select_flow = false,
         .allow_raw_exported_boundary = !is_entry,
         .file_import_signatures = &file_imports,
@@ -1351,12 +1409,12 @@ pub fn checkGraphModule(
 
     if (!is_entry) {
         const checker = if (resolved.type_checker) |*checker| checker else return error.AnalysisPassIncomplete;
-        try checker.recordExportedSignatures(root, graph.execution_order[module_index], exports);
+        try checker.recordExportedSignatures(root, module.path, exports);
     }
 
     var checks: GraphModuleChecks = .{};
     errdefer checks.deinit(allocator);
-    if (opts.emit_verify) {
+    if (opts.emit_verify and runtime_position != null) {
         const handler_fn = if (is_entry) findHandlerFunction(view, root) else null;
         const facts = try analysis.facts();
         var error_count: u32 = 0;
@@ -1412,7 +1470,7 @@ pub fn checkGraphModule(
             allocator,
             view,
             root,
-            &compile_result.recorders[module_index],
+            &compile_result.recorders[compile_position],
             if (resolved.strict_checker) |*checker| checker else null,
             atoms,
             module.path,
@@ -2284,7 +2342,10 @@ const LoadedFlowGraph = struct {
         errdefer self.strings.deinit();
         self.atoms = zts.AtomTable.init(allocator);
         errdefer self.atoms.deinit();
+        var frontend_validation = zts.pipeline.GraphFrontendValidation.init(allocator, &self.atoms, true);
+        defer frontend_validation.deinit();
         var module_compiler = zts.modules.ModuleCompiler.init(allocator, &self.atoms, &self.strings);
+        module_compiler.frontend_validation = frontend_validation.hook();
         self.compile_result = try module_compiler.compileAll(&self.graph);
         errdefer self.compile_result.deinit();
         self.flow = try imports_mod.flowModulesForGraph(allocator, &self.graph, &self.compile_result, &self.atoms);

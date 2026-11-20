@@ -419,7 +419,7 @@ fn compileOnce(backing: std.mem.Allocator, source: []const u8, profile: Profile)
                 var parsed = zq.pipeline.ParsedModule.fromTypedExisting(view, p.root_node, &atoms, &p.js_parser.type_store);
                 parsed.scopes = &p.js_parser.scopes;
                 try analysis.initFull(parser_alloc, parsed, .{
-                    .source_types = .direct,
+                    .source_types = .{ .direct = "benchmark.ts" },
                     .select_verifier = true,
                     .select_flow = true,
                 });

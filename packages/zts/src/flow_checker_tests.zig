@@ -1821,6 +1821,7 @@ fn runWithImportedFunctionPublic(
     var type_env_storage: pipeline.TypeEnvStorage = .{};
     defer type_env_storage.deinit(allocator);
     try type_env_storage.initWithSource(allocator, .{ .direct = .{
+        .module_path = "imported.ts",
         .store = &imported_parser.type_store,
         .ir_view = imported_view,
         .atoms = &imported_atoms,

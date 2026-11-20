@@ -682,6 +682,7 @@ pub const FlowInterp = struct {
                         var k: u8 = 0;
                         while (k < declaration.specifiers_count) : (k += 1) {
                             const spec = self.ir_view.getImportSpec(self.ir_view.getListIndex(declaration.specifiers_start, k)) orelse continue;
+                            if (self.importedIntrinsic(name, spec.imported_atom)) continue;
                             const resolved = self.importedExport(name, spec.imported_atom) orelse {
                                 try self.record(node, .import_decl, .module_graph_gap);
                                 continue;
@@ -1578,6 +1579,17 @@ pub const FlowInterp = struct {
     /// A standalone parser uses string-pool indexes for dynamic names. The
     /// imported module's finite export roster can disambiguate such an index
     /// from a predefined atom; two different matching exports remain unknown.
+    fn importedIntrinsic(self: *const FlowInterp, specifier: []const u8, atom: u16) bool {
+        var imported_name = self.nameOfAtom(atom);
+        if (self.atoms == null) if (self.ir_view.getString(atom)) |string_name| {
+            if (imported_name) |name| {
+                if (!std.mem.eql(u8, name, string_name)) return false;
+            } else imported_name = string_name;
+        };
+        const name = imported_name orelse return false;
+        return engine.builtin_modules.findIntrinsic(specifier, name) != null;
+    }
+
     fn importedExport(self: *const FlowInterp, specifier: []const u8, atom: u16) ?ModuleExport {
         var found: ?ModuleExport = null;
         if (self.nameOfAtom(atom)) |name| if (engine.builtin_modules.findExport(specifier, name)) |resolved| {
@@ -3185,7 +3197,7 @@ pub const FlowInterp = struct {
     // --- expressions ---
 
     const EvalFrame = union(enum) {
-        unary,
+        unary: ir.UnaryOp,
         binary_left: ir.Node.BinaryExpr,
         binary_right: Value,
         short_left: struct { node: NodeIndex, binary: ir.Node.BinaryExpr, state: *State },
@@ -3281,7 +3293,7 @@ pub const FlowInterp = struct {
                     },
                     .unary_op => {
                         const unary = self.ir_view.getUnary(current) orelse return self.missing(current);
-                        try frames.append(self.mem(), .unary);
+                        try frames.append(self.mem(), .{ .unary = unary.op });
                         current = unary.operand;
                     },
                     .ternary => {
@@ -3331,7 +3343,10 @@ pub const FlowInterp = struct {
             const frame = frames.pop() orelse return value;
             result = null;
             switch (frame) {
-                .unary => result = Value.flowing(value.flow()),
+                .unary => |op| result = switch (op) {
+                    .transparent => value,
+                    else => Value.flowing(value.flow()),
+                },
                 .binary_left => |binary| {
                     try frames.append(self.mem(), .{ .binary_right = value });
                     current = binary.right;
@@ -4662,6 +4677,42 @@ test "a local read with no declaration behind it is unresolved" {
     const seen = try interp.eval(node, &declared);
     try testing.expect(seen.labels.isEmpty());
     try testing.expectEqual(@as(usize, 0), interp.unresolved_list.items.len);
+}
+
+test "compiler intrinsic imports require no runtime flow binding" {
+    const harness = try Harness.create(
+        testing.allocator,
+        "import { nominal } from \"zttp\\x3acore\"; function handler() { return \"ok\"; }",
+    );
+    defer harness.destroy();
+    const result = try harness.interp.analyzeHandler(try harness.find("handler"));
+
+    try testing.expect(!result.cleared);
+    try testing.expect((result.returned orelse return error.MissingReturn).labels.isEmpty());
+}
+
+test "unknown and same-name foreign imports remain unresolved flow bindings" {
+    const unknown = try Harness.create(
+        testing.allocator,
+        "import { missing } from \"zttp:core\"; function handler() { return \"ok\"; }",
+    );
+    defer unknown.destroy();
+    try expectUnresolved(
+        try unknown.interp.analyzeHandler(try unknown.find("handler")),
+        .import_decl,
+        .module_graph_gap,
+    );
+
+    const foreign = try Harness.create(
+        testing.allocator,
+        "import { nominal } from \"zttp:auth\"; function handler() { return \"ok\"; }",
+    );
+    defer foreign.destroy();
+    try expectUnresolved(
+        try foreign.interp.analyzeHandler(try foreign.find("handler")),
+        .import_decl,
+        .module_graph_gap,
+    );
 }
 
 fn expectUnresolved(result: FunctionResult, tag: NodeTag, owner: Owner) !void {

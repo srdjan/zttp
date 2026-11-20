@@ -75,7 +75,17 @@ pub const productions = [_]Production{
     },
     .{
         .name = "TopDecl",
-        .rhs = "[\"export\"] StructuralDecl | [\"export\"] NominalDecl | [\"export\"] FunctionDecl | [\"export\"] TopBindingDecl | RegistrationCall",
+        .rhs = "[\"export\"] TypeAliasDecl | [\"export\"] UniqueSymbolDecl | [\"export\"] StructuralDecl | [\"export\"] NominalDecl | [\"export\"] FunctionDecl | [\"export\"] TopBindingDecl | RegistrationCall",
+    },
+    .{
+        .name = "TypeAliasDecl",
+        .rhs = "\"type\" Ident TypeParams? \"=\" Type \";\"",
+        .enforcement = .check_time,
+        .note = "ZTS212, the type-checker band, which is outside the policy-hashed registry: a recursive type alias must be contractive and the grammar admits one that is not",
+    },
+    .{
+        .name = "UniqueSymbolDecl",
+        .rhs = "\"declare\" \"const\" Ident \":\" \"unique\" \"symbol\" \";\"",
     },
     .{
         .name = "StructuralDecl",
@@ -317,7 +327,13 @@ pub const productions = [_]Production{
     },
     .{
         .name = "NonTuplePrimaryType",
-        .rhs = "Primitive | LiteralType | Ident TypeArgs? | RecordType | FunctionType | TemplateLiteralType | \"(\" Type \")\"",
+        .rhs = "Primitive | LiteralType | Ident TypeArgs? | BrandQuery | RecordType | FunctionType | TemplateLiteralType | \"(\" Type \")\"",
+    },
+    .{
+        .name = "BrandQuery",
+        .rhs = "\"typeof\" Ident",
+        .enforcement = .check_time,
+        .note = "ZTS001, the parser band, admits this query only for a resolved unique-symbol brand used as the identity argument of imported Nominal",
     },
     .{
         .name = "Primitive",
@@ -468,21 +484,29 @@ test "every noted row names a code the projection really emits" {
     // the projection here so a renamed code fails the build rather than
     // leaving a client chasing a code nothing emits.
     //
-    // Two rows carry a note today. A note that names some other code needs its
+    // Four rows carry a note today. A note that names some other code needs its
     // own binding added here; the count assertion is what makes that a build
     // failure rather than an unchecked sentence.
     const type_code = diagnostic_projection.code(.type, .non_contractive_alias);
     try testing.expectEqualStrings("ZTS212", type_code);
     const parser_code = diagnostic_catalog.parserCode(.top_level_statement);
     try testing.expectEqualStrings("ZTS074", parser_code);
+    const query_code = diagnostic_catalog.parserCode(.unsupported_feature);
+    try testing.expectEqualStrings("ZTS001", query_code);
 
     var noted: usize = 0;
     for (&productions) |p| {
         if (p.note != null) noted += 1;
     }
-    try testing.expectEqual(@as(usize, 2), noted);
+    try testing.expectEqual(@as(usize, 4), noted);
     try testing.expect(std.mem.indexOf(u8, findByName("StructuralDecl").?.note.?, type_code) != null);
     try testing.expect(std.mem.indexOf(u8, findByName("RegistrationCall").?.note.?, parser_code) != null);
+    const alias = findByName("TypeAliasDecl") orelse return error.TestExpectedEqual;
+    const alias_note = alias.note orelse return error.TestExpectedEqual;
+    try testing.expect(std.mem.indexOf(u8, alias_note, type_code) != null);
+    const query = findByName("BrandQuery") orelse return error.TestExpectedEqual;
+    const query_note = query.note orelse return error.TestExpectedEqual;
+    try testing.expect(std.mem.indexOf(u8, query_note, query_code) != null);
 }
 
 test "the production names are unique, so a client can key on them" {
@@ -539,5 +563,8 @@ test "the grammar derives no form that the compiler refuses" {
     // The registration call is the one top-level statement (ZTS074), and
     // `nominal` admits `boolean` (Decision 6).
     try testing.expect(has("TopDecl", "RegistrationCall"));
+    try testing.expect(has("TopDecl", "TypeAliasDecl"));
+    try testing.expect(has("TopDecl", "UniqueSymbolDecl"));
+    try testing.expect(has("NonTuplePrimaryType", "BrandQuery"));
     try testing.expect(has("ScalarType", "\"boolean\""));
 }

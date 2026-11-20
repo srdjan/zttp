@@ -116,6 +116,7 @@ pub const DiagnosticKind = enum {
     readonly_mutation, // a mutating array method called on a readonly receiver, or a write to a readonly field, array element, or tuple element
     function_value_binding, // a `const` or `let` whose type is a function type
     non_iterable_loop, // a `for...of` over a value that is not an array, a tuple, or `range(n)`
+    unsupported_intrinsic_reference, // a compiler intrinsic used outside its admitted call form
 };
 
 pub const Diagnostic = struct {
@@ -213,6 +214,7 @@ pub const TypeChecker = struct {
     /// the compile path of a multi-module build, where it is off by default.
     /// With it set, a file import is typed from the signature of its export.
     file_imports: ?*const import_signatures_mod.FileImportSignatures = null,
+    file_imports_prepared: bool = false,
     /// The callable behind each file import, keyed by slot and binding kind.
     /// Filled once at the start of `check`.
     file_import_callables: std.AutoHashMapUnmanaged(u32, CallableMetadata) = .empty,
@@ -374,16 +376,7 @@ pub const TypeChecker = struct {
     /// Run the checker on the given root node. Returns the number of errors.
     pub fn check(self: *TypeChecker, root: NodeIndex) !u32 {
         try self.ensureHealthy();
-        if (self.import_facts == null and self.owned_import_facts == null) {
-            errdefer self.markAllocationFailure();
-            self.owned_import_facts = try module_facts_mod.ModuleFacts.build(
-                self.allocator,
-                self.ir_view,
-                self.atoms,
-                null,
-            );
-        }
-        self.materializeFileImports();
+        try self.ensureFileImportsPrepared();
         // Before the main walk, so a call to a predicate declared later in the
         // file still narrows. A predicate whose body is not an admitted test is
         // rejected here and installs nothing anywhere.
@@ -411,6 +404,36 @@ pub const TypeChecker = struct {
         // `check` still runs the strict stage and reports ZTS603 beside it.
         if (self.strict_checker_follows and blocking_error_count == 0) self.dropDiagnosticsOfKind(.non_exhaustive_match);
         return error_count;
+    }
+
+    /// Select and materialize file-import types before focused inference.
+    pub fn prepareFileImports(
+        self: *TypeChecker,
+        imports: *const import_signatures_mod.FileImportSignatures,
+    ) !void {
+        if (self.file_imports_prepared) {
+            if (self.file_imports != imports) return error.FileImportsAlreadyPrepared;
+            return;
+        }
+        self.file_imports = imports;
+        try self.ensureFileImportsPrepared();
+    }
+
+    fn ensureFileImportsPrepared(self: *TypeChecker) !void {
+        if (self.file_imports_prepared) return;
+        try self.ensureHealthy();
+        if (self.import_facts == null and self.owned_import_facts == null) {
+            errdefer self.markAllocationFailure();
+            self.owned_import_facts = try module_facts_mod.ModuleFacts.build(
+                self.allocator,
+                self.ir_view,
+                self.atoms,
+                null,
+            );
+        }
+        self.materializeFileImports();
+        self.file_imports_prepared = true;
+        try self.ensureHealthy();
     }
 
     fn dropDiagnosticsOfKind(self: *TypeChecker, kind: DiagnosticKind) void {
@@ -3574,6 +3597,7 @@ pub const TypeChecker = struct {
             .not => pool.idx_boolean,
             .neg, .bit_not => pool.idx_number,
             .typeof_op => pool.idx_string,
+            .transparent => self.env.nominalConstructorType(node) orelse self.inferType(un.operand),
         };
     }
 
@@ -5130,8 +5154,9 @@ pub const TypeChecker = struct {
     }
 
     fn importsVirtualModule(facts: *const module_facts_mod.ModuleFacts, specifier: []const u8) bool {
-        for (facts.modules.items) |module| {
-            if (std.mem.eql(u8, module, specifier)) return true;
+        for (facts.imports.items) |record| {
+            if (!std.mem.eql(u8, record.module_specifier, specifier)) continue;
+            if (record.resolution != .unresolved) return true;
         }
         return false;
     }
@@ -5201,7 +5226,7 @@ pub const TypeChecker = struct {
     pub fn recordExportedSignatures(
         self: *TypeChecker,
         root: NodeIndex,
-        module: u16,
+        module_path: []const u8,
         table: *import_signatures_mod.ExportedSignatures,
     ) !void {
         try self.ensureHealthy();
@@ -5240,7 +5265,7 @@ pub const TypeChecker = struct {
                 const declared_type = self.typeOfDeclaration(decl.binding);
                 if (declared_type != null_type_idx) value_type = copier.copy(declared_type);
             }
-            try table.add(module, name, sig, value_type);
+            try table.add(module_path, name, sig, value_type);
         }
         try table.pool.ensureHealthy();
     }
@@ -9301,6 +9326,7 @@ pub const TypeChecker = struct {
     /// different nominal is not assignable to it.
     fn brandsAtDeclaration(self: *TypeChecker, declared: TypeIndex, inferred: TypeIndex) bool {
         if (!self.env.pool.isNominal(declared)) return false;
+        if (self.env.pool.nominalConstruction(declared) != .legacy_implicit) return false;
         if (self.env.pool.isNominal(inferred)) return false;
         const base = self.env.pool.unwrapNominal(declared);
         if (base == declared) return false;
@@ -9401,6 +9427,65 @@ pub const TypeChecker = struct {
             .help = self.undefinedSourceHelp(expected, got) orelse arg_type_help_text,
             .allocated = !std.mem.eql(u8, msg, "argument type does not match parameter type"),
         });
+    }
+
+    pub fn reportIntrinsicValueArgumentCount(
+        self: *TypeChecker,
+        node: NodeIndex,
+        got: usize,
+    ) void {
+        self.addArgCountMismatch(node, 1, got);
+    }
+
+    pub fn reportIntrinsicTypeArgumentCount(
+        self: *TypeChecker,
+        node: NodeIndex,
+        got: usize,
+    ) void {
+        self.addGenericDiagnostic(
+            .type_argument_count_mismatch,
+            node,
+            "wrong number of type arguments: expected {d}, got {d}",
+            .{ 1, got },
+            "wrong number of type arguments",
+            "Give exactly one nominal type argument.",
+        );
+    }
+
+    pub fn reportIntrinsicTargetConstraint(
+        self: *TypeChecker,
+        node: NodeIndex,
+        target: TypeIndex,
+    ) void {
+        var target_buf: [128]u8 = undefined;
+        self.addGenericDiagnostic(
+            .type_constraint_violation,
+            node,
+            "type argument {s} for 'T' does not satisfy constraint Nominal",
+            .{self.env.pool.formatType(target, &target_buf)},
+            "a type argument does not satisfy its constraint",
+            "Pass a type argument that satisfies the constraint, or relax the constraint.",
+        );
+    }
+
+    pub fn reportUnsupportedIntrinsicReference(self: *TypeChecker, node: NodeIndex) void {
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .unsupported_intrinsic_reference,
+            .node = node,
+            .message = "a compiler intrinsic cannot be used as a value",
+            .help = "Call the compiler intrinsic directly in its admitted form.",
+        });
+    }
+
+    pub fn reportIntrinsicBaseMismatch(
+        self: *TypeChecker,
+        operand: NodeIndex,
+        nominal: TypeIndex,
+    ) void {
+        const expected = self.env.pool.unwrapNominal(nominal);
+        const got = self.inferTypeWithoutDiagnostics(operand);
+        self.addArgTypeMismatch(operand, expected, got);
     }
 
     fn resolveAtomName(self: *const TypeChecker, atom_idx: u16) ?[]const u8 {
@@ -9579,6 +9664,7 @@ fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u3
         .store = &parser.type_store,
         .ir_view = ir_view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     checker.scopes = &parser.scopes;
@@ -9625,6 +9711,7 @@ fn checkTypedSourceHelping(source: []const u8, expect_errors: u32, needle: []con
         .store = &parser.type_store,
         .ir_view = ir_view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
 
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
@@ -9671,6 +9758,7 @@ fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
         .store = &parser.type_store,
         .ir_view = ir_view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
 
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
@@ -10378,6 +10466,7 @@ fn typedDiagnosticsImpl(
         .store = &parser.type_store,
         .ir_view = ir_view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
 
     var import_facts: ?module_facts_mod.ModuleFacts = if (borrow_imports)
@@ -11640,6 +11729,7 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
         .store = &parser.type_store,
         .ir_view = ir_view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
 
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
@@ -11794,6 +11884,7 @@ fn formatCallType(source: []const u8, callee: []const u8, buf: []u8) ![]const u8
         .store = &parser.type_store,
         .ir_view = ir_view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
 
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
@@ -12974,6 +13065,7 @@ test "a call that merely carries a callback keeps its mismatch at the outer retu
         .store = &parser.type_store,
         .ir_view = ir_view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
 
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
@@ -13626,6 +13718,7 @@ fn checkTypedSourceNodes(source: []const u8, nodes: *usize) !u32 {
         .store = &parser.type_store,
         .ir_view = ir_view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     checker.scopes = &parser.scopes;
@@ -13723,6 +13816,7 @@ test "field names that differ after byte 255 are distinct types" {
         .store = &parser.type_store,
         .ir_view = ir_view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } })) |_| {} else |err| try std.testing.expectEqual(error.TypePoolCapacityExceeded, err);
     try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
 }

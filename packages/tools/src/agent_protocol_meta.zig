@@ -2158,7 +2158,7 @@ test "meta publishes the type serialization version a cached digest is valid und
     defer parsed.deinit();
 
     const section = parsed.value.object.get("payload").?.object.get("type_serialization").?.object;
-    try testing.expectEqual(@as(i64, zts.TypeSerialization.version), section.get("version").?.integer);
+    try testing.expectEqual(@as(i64, 2), section.get("version").?.integer);
     try testing.expectEqualStrings("sha256", section.get("digest_algorithm").?.string);
     try testing.expectEqual(@as(i64, zts.TypeSerialization.max_depth), section.get("max_depth").?.integer);
 }

@@ -16,7 +16,6 @@ pub const StripError = error{
     UnsupportedSatisfiesAssertion,
     NominalBaseNotScalar,
     InterfaceDeclaration,
-    TypeAliasDeclaration,
     DistinctTypeDeclaration,
     LegacyTypesImport,
     DefaultParameter,
@@ -36,7 +35,6 @@ pub const StripDiagnosticKind = enum {
     unterminated_string,
     nominal_base_not_scalar,
     interface_declaration,
-    type_alias_declaration,
     distinct_type_declaration,
     retired_types_import,
     default_parameter,
@@ -56,7 +54,6 @@ pub const StripDiagnosticKind = enum {
             .unterminated_string => "unterminated string literal; close the quote, or write the newline as \\n",
             .nominal_base_not_scalar => "a nominal declaration carries scalar identity only; its base must be `string`, `number`, or `boolean`",
             .interface_declaration => "`interface` is not a declaration form in this profile; write `structural Name = { ... };`",
-            .type_alias_declaration => "`type` is not a declaration form in this profile; write `structural Name = ...;`",
             .distinct_type_declaration => "`distinct type` is not a declaration form in this profile; write `nominal Name = string;`",
             .retired_types_import => "`zttp:types` is not a module in this profile; remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names",
             .default_parameter => "default parameters are not part of this profile; replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body",
@@ -75,6 +72,20 @@ pub const StripDiagnostic = struct {
     line: u32,
     column: u32,
     kind: StripDiagnosticKind,
+};
+
+/// An expected source failure found while materializing authored types.
+pub const SourceTypeFailureKind = enum {
+    nominal_base_not_scalar,
+    nominal_argument_count,
+    nominal_brand_query,
+};
+
+pub const SourceTypeFailure = struct {
+    kind: SourceTypeFailureKind,
+    start_offset: u32,
+    end_offset: u32,
+    got: u16 = 0,
 };
 
 /// A line and column, both with a first index of one.
@@ -97,6 +108,10 @@ pub const SourceView = struct {
     pub fn position(self: SourceView, line: u32, column: u32) Position {
         if (self.normalize_positions) return positionOfOffset(self.text, offsetOfPosition(self.text, line, column));
         return .{ .line = line, .column = column };
+    }
+
+    pub fn positionAtOffset(self: SourceView, offset: u32) Position {
+        return positionOfOffset(self.text, self.sourceOffset(offset));
     }
 
     pub fn sourceOffset(self: SourceView, parsed_offset: u32) u32 {

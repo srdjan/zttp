@@ -61,10 +61,14 @@ const source_frontend_mod = @import("zts-engine").source_frontend;
 const compat_mod = @import("zts-base").compat;
 const string_mod = @import("zts-engine").string;
 const effect_inference = @import("effect_inference.zig");
+const intrinsic_lowering = @import("intrinsic_lowering.zig");
+
+pub const validateSourceIntrinsics = intrinsic_lowering.validateSource;
 
 const NodeIndex = ir_mod.NodeIndex;
 const IrView = ir_mod.IrView;
 const BoolChecker = bool_checker_mod.BoolChecker;
+pub const SourceTypeFailure = source_diagnostics.SourceTypeFailure;
 const TypeChecker = type_checker_mod.TypeChecker;
 const StrictChecker = strict_checker_mod.StrictChecker;
 const HandlerVerifier = handler_verifier_mod.HandlerVerifier;
@@ -145,10 +149,18 @@ pub fn importedEffectsForLoadedModule(
 // ---------------------------------------------------------------------------
 
 pub const ParsedModule = struct {
+    pub const IntrinsicSource = struct {
+        parser: *parser_mod.JsParser,
+        module_path: []const u8,
+    };
+
     ir_view: IrView,
     root: NodeIndex,
     atoms: ?*AtomTable,
     type_store: ?*const TypeSyntax.Store = null,
+    /// Mutable owner retained by an admitted parser path. Intrinsic lowering
+    /// must update this parser before any analyzer reads module facts.
+    intrinsic_source: ?IntrinsicSource = null,
     /// The parser remains owned by the caller through the analysis session.
     scopes: ?*const @import("zts-engine").parser.ScopeAnalyzer = null,
 
@@ -168,6 +180,24 @@ pub const ParsedModule = struct {
             .root = root,
             .atoms = atoms,
             .type_store = type_store,
+        };
+    }
+
+    pub fn fromAdmittedParser(
+        parser: *parser_mod.JsParser,
+        root: NodeIndex,
+        atoms: *AtomTable,
+        module_path: []const u8,
+    ) ParsedModule {
+        return .{
+            .ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants),
+            .root = root,
+            .atoms = atoms,
+            .type_store = &parser.type_store,
+            .intrinsic_source = .{
+                .parser = parser,
+                .module_path = module_path,
+            },
         };
     }
 };
@@ -625,13 +655,24 @@ pub const TypeEnvStorage = struct {
     pool: TypePool = undefined,
     env: TypeEnv = undefined,
     initialized: bool = false,
+    source_type_failure: ?SourceTypeFailure = null,
 
     pub fn initWithSource(
         self: *TypeEnvStorage,
         allocator: std.mem.Allocator,
         source: type_env_mod.SourceTypeInput,
     ) !void {
+        try self.initWithImportsAndSource(allocator, null, source);
+    }
+
+    pub fn initWithImportsAndSource(
+        self: *TypeEnvStorage,
+        allocator: std.mem.Allocator,
+        file_imports: ?*const import_signatures_mod.FileImportSignatures,
+        source: type_env_mod.SourceTypeInput,
+    ) !void {
         if (self.initialized) return error.TypeEnvironmentAlreadyInitialized;
+        self.source_type_failure = null;
         self.pool = TypePool.init(allocator);
         errdefer self.pool.deinit(allocator);
         try self.pool.ensureHealthy();
@@ -641,7 +682,11 @@ pub const TypeEnvStorage = struct {
         module_types_mod.populateModuleTypes(&self.env, &self.pool, allocator);
         abi_types_mod.populateHandlerAbiTypes(&self.env, &self.pool, allocator);
         try self.pool.ensureHealthy();
-        try self.env.populateSourceTypes(source);
+        if (file_imports) |imports| try imports.installTypeImports(&self.env);
+        self.env.populateSourceTypes(source) catch |err| {
+            if (err != error.OutOfMemory) self.source_type_failure = self.env.sourceTypeFailure();
+            return err;
+        };
         try self.finishInitialization();
     }
 
@@ -659,6 +704,290 @@ pub const TypeEnvStorage = struct {
 
     pub fn envPtr(self: *TypeEnvStorage) ?*TypeEnv {
         return if (self.initialized) &self.env else null;
+    }
+
+    pub fn sourceTypeFailure(self: *const TypeEnvStorage) ?SourceTypeFailure {
+        return self.source_type_failure;
+    }
+};
+
+fn reportIntrinsicIssues(
+    checker: *TypeChecker,
+    issues: []const intrinsic_lowering.ValidationIssue,
+) void {
+    for (issues) |issue| switch (issue) {
+        .value_argument_count => |found| checker.reportIntrinsicValueArgumentCount(
+            found.node,
+            found.got,
+        ),
+        .type_argument_count => |found| checker.reportIntrinsicTypeArgumentCount(
+            found.node,
+            found.got,
+        ),
+        .target_constraint => |found| checker.reportIntrinsicTargetConstraint(
+            found.node,
+            found.target,
+        ),
+        .base_mismatch => |found| checker.reportIntrinsicBaseMismatch(
+            found.operand,
+            found.nominal,
+        ),
+        .unsupported_reference => |found| checker.reportUnsupportedIntrinsicReference(
+            found.node,
+        ),
+    };
+}
+
+pub const GraphFrontendValidation = struct {
+    pub const FailureSink = struct {
+        context: *anyopaque,
+        report_type_diagnostics: *const fn (
+            context: *anyopaque,
+            module_path: []const u8,
+            source: []const u8,
+            view: IrView,
+            checker: *const TypeChecker,
+        ) anyerror!void,
+        report_unexported_type: *const fn (
+            context: *anyopaque,
+            module_path: []const u8,
+            source: []const u8,
+            specifier: []const u8,
+            imported: []const u8,
+            offset: u32,
+        ) anyerror!void,
+        report_source_type_failure: *const fn (
+            context: *anyopaque,
+            module_path: []const u8,
+            source: []const u8,
+            failure: SourceTypeFailure,
+        ) anyerror!void,
+    };
+
+    allocator: std.mem.Allocator,
+    atoms: *context_mod.AtomTable,
+    check_types: bool,
+    /// Runtime initialization needs boolean checks before any module executes.
+    /// Build and CHECK perform these checks in their later analysis sessions.
+    check_booleans: bool = false,
+    exports: import_signatures_mod.ExportedSignatures,
+    failure_sink: ?FailureSink = null,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        atoms: *context_mod.AtomTable,
+        check_types: bool,
+    ) GraphFrontendValidation {
+        return .{
+            .allocator = allocator,
+            .atoms = atoms,
+            .check_types = check_types,
+            .exports = import_signatures_mod.ExportedSignatures.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *GraphFrontendValidation) void {
+        self.exports.deinit();
+    }
+
+    pub fn hook(self: *GraphFrontendValidation) modules_mod.compiler.FrontendValidation {
+        return .{ .context = self, .validate = validate };
+    }
+
+    fn validate(
+        raw_context: *anyopaque,
+        graph: *const modules_mod.module_graph.ModuleGraph,
+        graph_index: modules_mod.module_graph.ModuleIndex,
+        parser: *parser_mod.JsParser,
+        root: NodeIndex,
+    ) anyerror!void {
+        const self: *GraphFrontendValidation = @ptrCast(@alignCast(raw_context));
+        if (@as(usize, graph_index) >= graph.module_list.items.len) return error.InvalidModuleIndex;
+        const module = &graph.module_list.items[graph_index];
+        const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+        var facts = try ModuleFacts.build(self.allocator, view, self.atoms, null);
+        defer facts.deinit();
+        var import_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer import_arena.deinit();
+        const file_imports = try self.fileImportSignatures(
+            import_arena.allocator(),
+            graph,
+            module.path,
+            view,
+            &parser.type_store,
+        );
+        var pool = type_pool_mod.TypePool.init(self.allocator);
+        defer pool.deinit(self.allocator);
+        var env = TypeEnv.init(self.allocator, &pool);
+        defer env.deinit();
+        module_types_mod.populateModuleTypes(&env, &pool, self.allocator);
+        abi_types_mod.populateHandlerAbiTypes(&env, &pool, self.allocator);
+        try file_imports.installTypeImports(&env);
+        env.populateSourceTypes(.{ .direct = .{
+            .store = &parser.type_store,
+            .ir_view = view,
+            .atoms = self.atoms,
+            .module_path = module.path,
+        } }) catch |err| {
+            if (err != error.OutOfMemory) {
+                if (env.sourceTypeFailure()) |failure| {
+                    if (self.failure_sink) |sink| {
+                        try sink.report_source_type_failure(
+                            sink.context,
+                            module.path,
+                            module.source,
+                            failure,
+                        );
+                    }
+                    return error.TypeCheckFailed;
+                }
+            }
+            return err;
+        };
+        var intrinsic_issues: intrinsic_lowering.ValidationIssues = .empty;
+        defer intrinsic_issues.deinit(self.allocator);
+        try intrinsic_lowering.validateAndLowerNominalConstructorsForAnalysis(
+            self.allocator,
+            parser,
+            self.atoms,
+            &env,
+            &facts,
+            &file_imports,
+            &intrinsic_issues,
+        );
+        var checker = TypeChecker.init(
+            self.allocator,
+            IrView.fromIRStore(&parser.nodes, &parser.constants),
+            self.atoms,
+            &env,
+        );
+        checker.scopes = &parser.scopes;
+        checker.file_imports = &file_imports;
+        defer checker.deinit();
+        const type_errors = try checker.check(root);
+        reportIntrinsicIssues(&checker, intrinsic_issues.items);
+        if (intrinsic_issues.items.len > 0 or (self.check_types and type_errors != 0)) {
+            if (self.failure_sink) |sink| {
+                try sink.report_type_diagnostics(
+                    sink.context,
+                    module.path,
+                    module.source,
+                    IrView.fromIRStore(&parser.nodes, &parser.constants),
+                    &checker,
+                );
+            }
+            return error.TypeCheckFailed;
+        }
+        if (self.check_booleans) {
+            var boolean_checker = BoolChecker.init(
+                self.allocator,
+                IrView.fromIRStore(&parser.nodes, &parser.constants),
+                self.atoms,
+            );
+            defer boolean_checker.deinit();
+            boolean_checker.facts = &facts;
+            boolean_checker.authoritative_type_checker = if (self.check_types) &checker else null;
+            if (try boolean_checker.check(root) != 0) return error.SoundModeViolation;
+        }
+        try self.recordSourceTypeExports(module.path, &parser.type_store, &env);
+        try checker.recordExportedSignatures(root, module.path, &self.exports);
+    }
+
+    fn fileImportSignatures(
+        self: *GraphFrontendValidation,
+        arena: std.mem.Allocator,
+        graph: *const modules_mod.module_graph.ModuleGraph,
+        importing_path: []const u8,
+        view: IrView,
+        store: *const TypeSyntax.Store,
+    ) !import_signatures_mod.FileImportSignatures {
+        var rows = std.ArrayList(import_signatures_mod.FileImportSignatures.Row).empty;
+        const runtime_links = try graph.fileImportLinks(arena, importing_path, view, self.atoms);
+        for (runtime_links) |link| {
+            var row: import_signatures_mod.FileImportSignatures.Row = .{
+                .specifier = link.specifier,
+                .imported = link.imported,
+                .sig = null,
+            };
+            if (link.target) |target| {
+                const target_path = graph.module_list.items[target].path;
+                if (self.exports.findValue(target_path, link.imported)) |exported| {
+                    row.sig = exported.sig;
+                    row.value_type = exported.value_type;
+                }
+            }
+            try rows.append(arena, row);
+        }
+        for (store.type_only_modules.items) |type_module| {
+            if (type_module.kind != .import_type) continue;
+            const specifier = store.typeOnlySpecifier(type_module) orelse return error.InvalidTypeImport;
+            const target = switch (modules_mod.resolve(specifier)) {
+                .file => try graph.fileImportTarget(arena, importing_path, specifier) orelse
+                    return error.UnresolvedTypeImport,
+                .virtual => continue,
+                .unknown => return error.UnresolvedTypeImport,
+            };
+            const target_path = graph.module_list.items[target].path;
+            for (store.typeOnlyBindings(type_module)) |binding| {
+                const imported = binding.imported_span.text(store.source);
+                const local = binding.local_span.text(store.source);
+                var row: import_signatures_mod.FileImportSignatures.Row = .{
+                    .specifier = specifier,
+                    .imported = imported,
+                    .local = local,
+                    .sig = null,
+                };
+                const exported = self.exports.findType(target_path, imported) orelse {
+                    if (self.failure_sink) |sink| {
+                        try sink.report_unexported_type(
+                            sink.context,
+                            importing_path,
+                            store.source,
+                            specifier,
+                            imported,
+                            binding.imported_span.start,
+                        );
+                    }
+                    return error.UntypedTypeImport;
+                };
+                row.type_alias = exported.type_alias;
+                row.brand_origin = exported.brand_origin;
+                try rows.append(arena, row);
+            }
+        }
+        return .{ .source = &self.exports.pool, .rows = try rows.toOwnedSlice(arena) };
+    }
+
+    fn recordSourceTypeExports(
+        self: *GraphFrontendValidation,
+        module_path: []const u8,
+        store: *const TypeSyntax.Store,
+        env: *TypeEnv,
+    ) !void {
+        for (store.declarations.items) |declaration| {
+            if (declaration.export_span == null) continue;
+            const name = declaration.name_span.text(store.source);
+            var copier = self.exports.copierFrom(env.pool, env);
+            defer copier.deinit();
+            if (env.getGenericAlias(name)) |alias| {
+                const copied = copier.copyGenericAlias(alias, name, name) orelse return error.UntypedTypeExport;
+                try self.exports.addTypeAlias(module_path, name, .{ .generic = copied });
+            } else if (env.getTypeAlias(name)) |type_idx| {
+                const copied = copier.copyAlias(type_idx, name, name);
+                if (copied == type_pool_mod.null_type_idx) return error.UntypedTypeExport;
+                try self.exports.addTypeAlias(module_path, name, .{ .direct = copied });
+            } else {
+                return error.UntypedTypeExport;
+            }
+        }
+        for (store.brand_declarations.items) |brand| {
+            if (!brand.exported) continue;
+            const name = brand.name_span.text(store.source);
+            const origin = env.brandOrigin(name) orelse return error.UntypedTypeExport;
+            if (!std.mem.eql(u8, origin.module_path, module_path)) return error.InvalidNominalOrigin;
+            try self.exports.addBrand(module_path, name, origin.declaration_start);
+        }
+        try self.exports.pool.ensureHealthy();
     }
 };
 
@@ -686,6 +1015,8 @@ pub const ExtractContractOptions = struct {
     /// File-import effects prepared from earlier modules in one loaded graph.
     /// Borrowed through extraction only.
     imported_effects: []const ImportedEffect = &.{},
+    /// Checked file-import types for an already validated graph module.
+    file_import_signatures: ?*const import_signatures_mod.FileImportSignatures = null,
     /// Return an owned export table beside the contract.
     capture_export_effects: bool = false,
     /// Select the flow pass for `.sound_extraction`: `extractContract` runs it and applies
@@ -695,7 +1026,7 @@ pub const ExtractContractOptions = struct {
 
 pub const ModuleSourceTypeInput = union(type_env_mod.SourceTypeMode) {
     omitted,
-    direct,
+    direct: []const u8,
 };
 
 fn normalizeModuleSourceTypes(explicit: ?ModuleSourceTypeInput) ModuleSourceTypeInput {
@@ -708,10 +1039,11 @@ fn sourceTypeInput(
 ) !type_env_mod.SourceTypeInput {
     return switch (source) {
         .omitted => .omitted,
-        .direct => .{ .direct = .{
+        .direct => |module_path| .{ .direct = .{
             .store = parsed.type_store orelse return error.DirectTypeSyntaxUnavailable,
             .ir_view = parsed.ir_view,
             .atoms = parsed.atoms orelse return error.DirectTypeSyntaxUnavailable,
+            .module_path = module_path,
         } },
     };
 }
@@ -895,6 +1227,7 @@ pub const ModuleAnalysisSession = struct {
     flow_state: PassState = .skipped,
     flow_error_count: u32 = 0,
     extraction_state: PassState = .skipped,
+    intrinsic_issues: intrinsic_lowering.ValidationIssues = .empty,
 
     pub fn initFull(
         self: *ModuleAnalysisSession,
@@ -961,6 +1294,7 @@ pub const ModuleAnalysisSession = struct {
             .profile = .sound_extraction,
             .extraction_opts = opts,
             .source_types = source_types,
+            .file_import_signatures = opts.file_import_signatures,
             .contract_context = contextFromExtractOptions(opts),
             .state = .ready,
             .resolution_state = .ready,
@@ -979,6 +1313,8 @@ pub const ModuleAnalysisSession = struct {
             .unattempted, .unavailable => {},
         }
         self.path_effect_state = .unattempted;
+        self.intrinsic_issues.deinit(self.allocator);
+        self.intrinsic_issues = .empty;
         if (self.exported_effects) |*effects| effects.deinit(self.allocator);
         self.exported_effects = null;
         if (self.checked) |*checked| checked.deinit();
@@ -1003,12 +1339,18 @@ pub const ModuleAnalysisSession = struct {
         if (self.state != .ready) return error.AnalysisAlreadyAttempted;
         self.state = .analysis_attempted;
 
+        try self.validateRequiredIntrinsics();
+
         switch (self.profile) {
             .full => try self.completeFull(),
             .contract_only => try self.completeContractOnly(),
             .sound_extraction => try self.completeSoundExtraction(),
         }
         self.state = .completed;
+    }
+
+    pub fn sourceTypeFailure(self: *const ModuleAnalysisSession) ?SourceTypeFailure {
+        return self.type_env_storage.sourceTypeFailure();
     }
 
     pub fn facts(self: *ModuleAnalysisSession) !*const ModuleFacts {
@@ -1341,9 +1683,10 @@ pub const ModuleAnalysisSession = struct {
             self.parsed,
             self.extraction_opts.manifest_registry,
         );
-        if (hasAuthoredSource(self.source_types)) {
-            try self.type_env_storage.initWithSource(
+        if (hasAuthoredSource(self.source_types) and self.type_env_storage.envPtr() == null) {
+            try self.type_env_storage.initWithImportsAndSource(
                 self.allocator,
+                self.file_import_signatures,
                 try sourceTypeInput(self.parsed, self.source_types),
             );
         }
@@ -1356,6 +1699,9 @@ pub const ModuleAnalysisSession = struct {
             .allow_raw_exported_boundary = self.allow_raw_exported_boundary,
             .file_import_signatures = self.file_import_signatures,
         });
+        if (self.resolved.?.type_checker) |*checker| {
+            reportIntrinsicIssues(checker, self.intrinsic_issues.items);
+        }
         if (self.resolved.?.type_checker) |*checker| try checker.ensureHealthy();
         self.resolution_state = .completed;
         if (self.resolved.?.type_checker != null) self.contract_type_state = .completed;
@@ -1385,9 +1731,10 @@ pub const ModuleAnalysisSession = struct {
         self.resolution_facts = try buildModuleFacts(self.allocator, self.parsed, null);
         const resolution_facts = &self.resolution_facts.?;
 
-        if (hasAuthoredSource(self.source_types)) {
-            try self.type_env_storage.initWithSource(
+        if (hasAuthoredSource(self.source_types) and self.type_env_storage.envPtr() == null) {
+            try self.type_env_storage.initWithImportsAndSource(
                 self.allocator,
+                self.file_import_signatures,
                 try sourceTypeInput(self.parsed, self.source_types),
             );
         }
@@ -1396,7 +1743,11 @@ pub const ModuleAnalysisSession = struct {
             .strict = self.extraction_opts.strict,
             .module_facts = resolution_facts,
             .type_import_facts = resolution_facts,
+            .file_import_signatures = self.file_import_signatures,
         });
+        if (self.resolved.?.type_checker) |*checker| {
+            reportIntrinsicIssues(checker, self.intrinsic_issues.items);
+        }
         self.resolution_state = .completed;
         const resolved = &self.resolved.?;
         if (resolved.bool_error_count > 0 or
@@ -1411,6 +1762,59 @@ pub const ModuleAnalysisSession = struct {
         // A module scan runs in `extractContract`, before this tail.
         if (self.extraction_opts.module_scan != null) return;
         try self.finishSoundTypeSession();
+    }
+
+    fn validateRequiredIntrinsics(self: *ModuleAnalysisSession) !void {
+        if (self.parsed.intrinsic_source) |source| {
+            try parser_mod.markIntrinsicValidationRequirement(
+                self.allocator,
+                source.parser,
+                self.parsed.atoms,
+            );
+        }
+        const store = self.parsed.type_store orelse return;
+        if (!store.requires_intrinsic_validation or store.intrinsics_validated) return;
+        const source = self.parsed.intrinsic_source orelse return error.UnvalidatedIntrinsicSource;
+        if (store != &source.parser.type_store) return error.InvalidIntrinsicSourceOwner;
+        const atoms = self.parsed.atoms orelse return error.DirectTypeSyntaxUnavailable;
+
+        if (hasAuthoredSource(self.source_types)) {
+            try self.type_env_storage.initWithImportsAndSource(
+                self.allocator,
+                self.file_import_signatures,
+                try sourceTypeInput(self.parsed, .{ .direct = source.module_path }),
+            );
+            try intrinsic_lowering.validateSourceForAnalysis(
+                self.allocator,
+                source.parser,
+                atoms,
+                self.type_env_storage.envPtr() orelse return error.AnalysisPassIncomplete,
+                self.file_import_signatures,
+                &self.intrinsic_issues,
+            );
+        } else {
+            var validation_types: TypeEnvStorage = .{};
+            defer validation_types.deinit(self.allocator);
+            try validation_types.initWithImportsAndSource(
+                self.allocator,
+                self.file_import_signatures,
+                try sourceTypeInput(self.parsed, .{ .direct = source.module_path }),
+            );
+            try intrinsic_lowering.validateSourceWithImports(
+                self.allocator,
+                source.parser,
+                atoms,
+                validation_types.envPtr() orelse return error.AnalysisPassIncomplete,
+                self.file_import_signatures,
+            );
+        }
+
+        self.parsed.ir_view = IrView.fromIRStore(
+            &source.parser.nodes,
+            &source.parser.constants,
+        );
+        self.parsed.type_store = &source.parser.type_store;
+        self.parsed.scopes = &source.parser.scopes;
     }
 
     /// The type check and contract facts of a sound-extraction session.
@@ -1632,11 +2036,11 @@ pub fn extractContract(
     };
     const ir_view = IrView.fromIRStore(&frontend.parser.nodes, &frontend.parser.constants);
     try frontend.parser.type_store.validateRuntimeOwners(allocator, ir_view);
-    var parsed = ParsedModule.fromTypedExisting(ir_view, root, &frontend.atoms, &frontend.parser.type_store);
+    var parsed = ParsedModule.fromAdmittedParser(&frontend.parser, root, &frontend.atoms, filename);
     parsed.scopes = &frontend.parser.scopes;
     var contract_opts = opts;
-    contract_opts.source_types = opts.source_types orelse .direct;
-    if (hasFileImports(ir_view)) {
+    contract_opts.source_types = opts.source_types orelse .{ .direct = filename };
+    if (hasFileImports(ir_view, &frontend.parser.type_store)) {
         const read_file = opts.read_file orelse return error.FileImportReaderRequired;
         return extractMultiModuleContract(allocator, source, filename, read_file, &frontend.atoms, contract_opts);
     }
@@ -1673,11 +2077,11 @@ pub fn extractPreparedEvalContract(
     };
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     try parser.type_store.validateRuntimeOwners(allocator, view);
-    var parsed = ParsedModule.fromExisting(view, root, &atoms);
+    var parsed = ParsedModule.fromAdmittedParser(&parser, root, &atoms, filename);
     parsed.scopes = &parser.scopes;
     var options = opts;
     options.source_types = .omitted;
-    if (hasFileImports(view)) {
+    if (hasFileImports(view, &parser.type_store)) {
         const reader = options.read_file orelse return error.FileImportReaderRequired;
         return extractMultiModuleContractWithEntry(allocator, source, filename, reader, &atoms, options, true);
     }
@@ -1692,13 +2096,23 @@ pub fn extractPreparedEvalContract(
     return contract;
 }
 
-fn hasFileImports(ir_view: IrView) bool {
+pub fn hasFileImports(ir_view: IrView, type_store: ?*const TypeSyntax.Store) bool {
     for (0..ir_view.nodeCount()) |idx| {
         const tag = ir_view.getTag(@intCast(idx)) orelse continue;
         if (tag != .import_decl) continue;
 
         const import_decl = ir_view.getImportDecl(@intCast(idx)) orelse continue;
         const module_name = ir_view.getString(import_decl.module_idx) orelse continue;
+        switch (modules_mod.resolver.resolve(module_name)) {
+            .file => return true,
+            .virtual, .unknown => {},
+        }
+    }
+
+    const store = type_store orelse return false;
+    for (store.type_only_modules.items) |type_module| {
+        if (type_module.kind != .import_type) continue;
+        const module_name = store.typeOnlySpecifier(type_module) orelse continue;
         switch (modules_mod.resolver.resolve(module_name)) {
             .file => return true,
             .virtual, .unknown => {},
@@ -1743,7 +2157,10 @@ fn extractMultiModuleContractWithEntry(
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();
 
+    var frontend_validation = GraphFrontendValidation.init(allocator, atoms, false);
+    defer frontend_validation.deinit();
     var module_compiler = modules_mod.ModuleCompiler.init(allocator, atoms, &strings);
+    module_compiler.frontend_validation = frontend_validation.hook();
     var compile_result = try module_compiler.compileAll(&graph);
     defer compile_result.deinit();
     defer {
@@ -1759,24 +2176,41 @@ fn extractMultiModuleContractWithEntry(
         loaded_effects.deinit(allocator);
     }
 
-    const entry_index = compile_result.modules.len - 1;
-    for (compile_result.modules, compile_result.parsers, 0..) |compiled_module, *js_parser, idx| {
-        const graph_idx = graph.execution_order[idx];
+    const entry_index = graph.execution_order.len - 1;
+    for (graph.execution_order, 0..) |graph_idx, idx| {
+        const compile_position = compile_result.positionOfModule(graph_idx) orelse
+            return error.AnalysisPassIncomplete;
+        const compiled_module = compile_result.modules[compile_position];
+        const js_parser = &compile_result.parsers[compile_position];
         const module = &graph.module_list.items[graph_idx];
         const is_entry = idx == entry_index;
         const module_view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         var parsed = ParsedModule.fromTypedExisting(module_view, compiled_module.root, atoms, &js_parser.type_store);
         parsed.scopes = &js_parser.scopes;
 
+        var link_arena = std.heap.ArenaAllocator.init(allocator);
+        defer link_arena.deinit();
+        const file_imports = try frontend_validation.fileImportSignatures(
+            link_arena.allocator(),
+            &graph,
+            module.path,
+            module_view,
+            &js_parser.type_store,
+        );
+
         var module_opts = opts;
         if (is_entry) {
-            module_opts.source_types = opts.source_types;
+            module_opts.source_types = switch (opts.source_types orelse .omitted) {
+                .omitted => .omitted,
+                .direct => .{ .direct = module.path },
+            };
         } else {
             module_opts.source_types = .omitted;
         }
         module_opts.read_file = null;
         module_opts.capture_export_effects = true;
         module_opts.flow = false;
+        module_opts.file_import_signatures = &file_imports;
         if (!is_entry) {
             module_opts.dispatch = null;
             module_opts.has_default_response = false;
@@ -1814,6 +2248,213 @@ fn extractMultiModuleContractWithEntry(
     }
 
     return merged;
+}
+
+fn compileGraphTypeTransportFixture(
+    allocator: std.mem.Allocator,
+    root_path: []const u8,
+    entry_source: []const u8,
+) !void {
+    const file_io = @import("zts-engine").file_io;
+    const entry_path = try std.fs.path.join(allocator, &.{ root_path, "entry.ts" });
+    defer allocator.free(entry_path);
+    var graph = modules_mod.ModuleGraph.init(allocator);
+    defer graph.deinit();
+    try graph.build(entry_path, entry_source, file_io.readFileForModuleGraph);
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+    var validation = GraphFrontendValidation.init(allocator, &atoms, true);
+    defer validation.deinit();
+    var compiler = modules_mod.ModuleCompiler.init(allocator, &atoms, &strings);
+    compiler.frontend_validation = validation.hook();
+    var compiled = try compiler.compileAll(&graph);
+    defer compiled.deinit();
+    defer for (compiled.codegens) |*codegen| codegen.freeOwnedConstantPayloads();
+}
+
+test "graph frontend transports renamed brands aliases and recursive generics" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "types.ts",
+        .data =
+        \\import type { Nominal as N } from "zttp:core";
+        \\export declare const wireBrand: unique symbol;
+        \\export type Wire = N<string, typeof wireBrand>;
+        \\export type Box<T> = { value: T };
+        \\export type Chain<T> = { value: T; next: Chain<T> | null };
+        \\export function wireValue(): string { return "ok"; }
+        ,
+    });
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root_path = root_buffer[0..root_length];
+    try compileGraphTypeTransportFixture(
+        allocator,
+        root_path,
+        \\import type { wireBrand as localBrand, Wire as Message, Box as Package, Chain as List } from "./types.ts";
+        \\import type { Nominal as N } from "zttp:core";
+        \\import { nominal as make } from "zttp:core";
+        \\import { wireValue } from "./types.ts";
+        \\type Local = N<string, typeof localBrand>;
+        \\const message: Message = make<Message>(wireValue());
+        \\const local: Local = make<Local>("ok");
+        \\const box: Package<string> = { value: String(message) };
+        \\const tail: List<string> = { value: String(local), next: null };
+        \\const head: List<string> = { value: box.value, next: null };
+        \\export const result = [head.value, tail.value].join("");
+        ,
+    );
+}
+
+test "graph frontend keeps one brand compatible across imported aliases" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "types.ts",
+        .data =
+        \\import type { Nominal as N } from "zttp:core";
+        \\export declare const sharedBrand: unique symbol;
+        \\export type Left = N<string, typeof sharedBrand>;
+        \\export type Right = N<string, typeof sharedBrand>;
+        ,
+    });
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root_path = root_buffer[0..root_length];
+    try compileGraphTypeTransportFixture(
+        allocator,
+        root_path,
+        \\import type { Left as A, Right as B } from "./types.ts";
+        \\import { nominal as make } from "zttp:core";
+        \\const left: A = make<A>("same");
+        \\const right: B = left;
+        \\export const result = String(right);
+        ,
+    );
+}
+
+test "graph frontend keeps equal brand names from different files incompatible" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const branded_source =
+        \\import type { Nominal as N } from "zttp:core";
+        \\export declare const sharedBrand: unique symbol;
+        \\export type Id = N<string, typeof sharedBrand>;
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "left.ts", .data = branded_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "right.ts", .data = branded_source });
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root_path = root_buffer[0..root_length];
+    try std.testing.expectError(
+        error.TypeCheckFailed,
+        compileGraphTypeTransportFixture(
+            allocator,
+            root_path,
+            \\import type { Id as Left } from "./left.ts";
+            \\import type { Id as Right } from "./right.ts";
+            \\import { nominal as make } from "zttp:core";
+            \\const left: Left = make<Left>("different");
+            \\const right: Right = left;
+            \\export const result = String(right);
+            ,
+        ),
+    );
+}
+
+test "graph frontend refuses an unexported type import" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "types.ts",
+        .data = "type Hidden = string;\nexport type Public = string;\n",
+    });
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root_path = root_buffer[0..root_length];
+    try std.testing.expectError(
+        error.UntypedTypeImport,
+        compileGraphTypeTransportFixture(
+            allocator,
+            root_path,
+            "import type { Hidden } from \"./types.ts\";\nconst value: Hidden = \"x\";\n",
+        ),
+    );
+}
+
+test "graph frontend refuses a value imported as a type" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "values.ts",
+        .data = "export const Value = \"x\";\n",
+    });
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root_path = root_buffer[0..root_length];
+    try std.testing.expectError(
+        error.UntypedTypeImport,
+        compileGraphTypeTransportFixture(
+            allocator,
+            root_path,
+            "import type { Value } from \"./values.ts\";\nconst value: Value = \"x\";\n",
+        ),
+    );
+}
+
+test "graph frontend checks imported nominal constructor operands" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "id.ts",
+        .data =
+        \\import type { Nominal as N } from "zttp:core";
+        \\export declare const idBrand: unique symbol;
+        \\export type Id = N<string, typeof idBrand>;
+        \\export function numberValue(): number { return 1; }
+        ,
+    });
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root_path = root_buffer[0..root_length];
+    try std.testing.expectError(
+        error.TypeCheckFailed,
+        compileGraphTypeTransportFixture(
+            allocator,
+            root_path,
+            \\import type { Id } from "./id.ts";
+            \\import { numberValue } from "./id.ts";
+            \\import { nominal as make } from "zttp:core";
+            \\const id: Id = make<Id>(numberValue());
+            ,
+        ),
+    );
+}
+
+test "graph frontend refuses an unknown type module" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root_path = root_buffer[0..root_length];
+    try std.testing.expectError(
+        error.ParseError,
+        compileGraphTypeTransportFixture(
+            allocator,
+            root_path,
+            "import type { Missing } from \"unknown:types\";\nconst value: Missing = \"x\";\n",
+        ),
+    );
 }
 
 comptime {

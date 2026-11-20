@@ -41,7 +41,6 @@ pub fn prepareErrorForAdmissionFailure(failure: parser.AdmissionFailure) Prepare
             .unterminated_string => error.UnterminatedString,
             .nominal_base_not_scalar => error.NominalBaseNotScalar,
             .interface_declaration => error.InterfaceDeclaration,
-            .type_alias_declaration => error.TypeAliasDeclaration,
             .distinct_type_declaration => error.DistinctTypeDeclaration,
             .retired_types_import => error.LegacyTypesImport,
             .default_parameter => error.DefaultParameter,
@@ -87,7 +86,6 @@ pub fn sourceDiagnosticFromAdmission(
         .unterminated_string => .unterminated_string,
         .nominal_base_not_scalar => .nominal_base_not_scalar,
         .interface_declaration => .interface_declaration,
-        .type_alias_declaration => .type_alias_declaration,
         .distinct_type_declaration => .distinct_type_declaration,
         .retired_types_import => .retired_types_import,
         .default_parameter => .default_parameter,
@@ -195,6 +193,11 @@ pub fn refuseUndeclaredTypes(
                 "type name `{s}` is imported and cannot be declared again",
                 .{refusal.name},
                 "write a different name",
+            ),
+            .unsupported_type_query => p.errors.addError(
+                .unsupported_feature,
+                token.location(),
+                "a type-position `typeof` is not supported; write the type",
             ),
         }
     }
@@ -304,6 +307,11 @@ pub const DirectCheckSource = struct {
                 if (view.getTag(root) != .program) return error.InvalidDirectSourceRoot;
                 try self.parser.type_store.validateRuntimeOwners(type_allocator, view);
                 if (try self.refuseUndeclaredTypeNames(type_allocator, view, root)) return;
+                try parser.markIntrinsicValidationRequirement(
+                    allocator,
+                    &self.parser,
+                    &self.atoms,
+                );
             },
             .recovered_admission_refused,
             .parser_refused,
@@ -902,7 +910,6 @@ test "direct source exposes ordered refusal diagnostics" {
     // marker test in parser/parse.zig.
     const expected = [_]struct { kind: source_diagnostics.StripDiagnosticKind, line: u32, marker: []const u8 }{
         .{ .kind = .interface_declaration, .line = 1, .marker = "interface" },
-        .{ .kind = .type_alias_declaration, .line = 2, .marker = "type" },
         .{ .kind = .distinct_type_declaration, .line = 3, .marker = "distinct" },
         .{ .kind = .any_type, .line = 4, .marker = "any" },
         .{ .kind = .as_assertion, .line = 5, .marker = "string" },
@@ -954,7 +961,6 @@ test "admission failures retain measured preparation errors" {
         .{ .kind = .unterminated_string, .expected = error.UnterminatedString },
         .{ .kind = .nominal_base_not_scalar, .expected = error.NominalBaseNotScalar },
         .{ .kind = .interface_declaration, .expected = error.InterfaceDeclaration },
-        .{ .kind = .type_alias_declaration, .expected = error.TypeAliasDeclaration },
         .{ .kind = .distinct_type_declaration, .expected = error.DistinctTypeDeclaration },
         .{ .kind = .retired_types_import, .expected = error.LegacyTypesImport },
         .{ .kind = .default_parameter, .expected = error.DefaultParameter },

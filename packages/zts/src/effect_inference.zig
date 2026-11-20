@@ -1934,6 +1934,9 @@ pub const Analyzer = struct {
         }
 
         // P1, P2, and P2b.
+        // A raw intrinsic call means semantic validation did not lower it.
+        // Keep the module conservative until that required boundary runs.
+        var unlowered_intrinsic: ?FunctionValueEscape = null;
         for (0..node_count) |index| {
             const node: NodeIndex = @intCast(index);
             const tag = self.ir_view.getTag(node) orelse continue;
@@ -1941,7 +1944,22 @@ pub const Analyzer = struct {
             const call = self.ir_view.getCall(node) orelse continue;
             const callee_tag = self.ir_view.getTag(call.callee) orelse continue;
             if (callee_tag == .identifier) {
-                if (self.functionValueRef(call.callee, &declared)) |ref| {
+                if (self.compilerIntrinsicRef(call.callee)) {
+                    const binding = self.ir_view.getBinding(call.callee) orelse continue;
+                    const loc = self.ir_view.getLoc(call.callee);
+                    const candidate: FunctionValueEscape = .{
+                        .line = if (loc) |value| value.line else 0,
+                        .column = if (loc) |value| value.column else 0,
+                        .name = self.resolveAtomName(binding.name_atom) orelse "a compiler intrinsic",
+                    };
+                    if (unlowered_intrinsic) |current| {
+                        if (candidate.line < current.line or
+                            (candidate.line == current.line and candidate.column < current.column))
+                        {
+                            unlowered_intrinsic = candidate;
+                        }
+                    } else unlowered_intrinsic = candidate;
+                } else if (self.functionValueRef(call.callee, &declared)) |ref| {
                     if (!ref.reassignable) closed[call.callee] = true;
                 }
                 // Only the callback slot (argument 1) is closed. Each combinator
@@ -1962,7 +1980,7 @@ pub const Analyzer = struct {
         // P3.
         try self.closeRouteTables(&declared, closed);
 
-        var first: ?FunctionValueEscape = null;
+        var first = unlowered_intrinsic;
         for (0..node_count) |index| {
             const node: NodeIndex = @intCast(index);
             // A sibling's escaped function value comes back as a call result
@@ -2029,6 +2047,7 @@ pub const Analyzer = struct {
     /// from a call argument that was itself judged.
     fn functionValueRef(self: *const Analyzer, node: NodeIndex, declared: *const DeclaredFunctions) ?FunctionValueRef {
         if (self.ir_view.getTag(node) != .identifier) return null;
+        if (self.compilerIntrinsicRef(node)) return null;
         const binding = self.ir_view.getBinding(node) orelse return null;
         if (self.importOf(binding)) |imported| {
             if (isRelativeModule(imported.module)) {
@@ -2045,6 +2064,13 @@ pub const Analyzer = struct {
             return null;
         }
         return .{ .reassignable = declared.get(binding.name_atom) orelse false };
+    }
+
+    fn compilerIntrinsicRef(self: *const Analyzer, node: NodeIndex) bool {
+        if (self.ir_view.getTag(node) != .identifier) return false;
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        const imported = self.importOf(binding) orelse return false;
+        return builtin_modules.findIntrinsic(imported.module, imported.name) != null;
     }
 
     /// Close `arg` when it is a function literal, or a reference that no
@@ -5278,6 +5304,52 @@ fn expectEscape(source: []const u8, expected_name: ?[]const u8) !void {
         }
         for (facts.all()) |function| try testing.expect(!function.row.function_value_escape);
     }
+}
+
+fn expectLoweredImportEscape(source: []const u8, expected_name: ?[]const u8) !void {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const before = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var lowered = false;
+    for (0..before.nodeCount()) |raw| {
+        const node: NodeIndex = @intCast(raw);
+        if (before.getTag(node) != .call) continue;
+        const call = before.getCall(node) orelse continue;
+        try parser.nodes.lowerCallToTransparent(
+            node,
+            before.getListIndex(call.args_start, 0),
+        );
+        lowered = true;
+        break;
+    }
+    try testing.expect(lowered);
+
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var facts = try buildEffectFacts(allocator, view, &atoms, root, .{});
+    defer facts.deinit(allocator);
+    const site = facts.functionValueEscape();
+    if (expected_name) |name| {
+        const found = site orelse return error.EscapeMissing;
+        try testing.expectEqualStrings(name, found.name);
+    } else {
+        try testing.expect(site == null);
+    }
+}
+
+test "only a validated lowered intrinsic stops being a runtime function value" {
+    const intrinsic =
+        "import { nominal } from \"zttp\\x3acore\"; function handler() { return nominal(\"x\"); }";
+    try expectEscape(intrinsic, "nominal");
+    try expectLoweredImportEscape(intrinsic, null);
+    try expectLoweredImportEscape(
+        "import { nominal } from \"zttp:auth\"; function handler() { return nominal(\"x\"); }",
+        "nominal",
+    );
 }
 
 test "a function value outside the closed positions sets the escape flag" {

@@ -1301,6 +1301,7 @@ fn expectCoverage(decls: []const u8, param_type: []const u8, arms: []const u8, w
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
     try env.populateSourceTypes(.{ .direct = .{
+        .module_path = "match-analysis-test.ts",
         .store = &parser.type_store,
         .ir_view = view,
         .atoms = &atoms,

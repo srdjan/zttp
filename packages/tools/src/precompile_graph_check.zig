@@ -32,6 +32,90 @@ const debugPrint = stderr_mod.debugPrint;
 const SourceReader = zts.modules.module_graph.SourceReader;
 const ReadFileError = zts.modules.module_graph.ReadFileError;
 
+const FrontendFailureAdapter = struct {
+    sink: *precompile.GraphSink,
+
+    fn reportTypeDiagnostics(
+        raw_context: *anyopaque,
+        module_path: []const u8,
+        source: []const u8,
+        view: zts.IrView,
+        checker: *const zts.TypeChecker,
+    ) anyerror!void {
+        const self: *FrontendFailureAdapter = @ptrCast(@alignCast(raw_context));
+        for (checker.getDiagnostics()) |diagnostic| {
+            try self.sink.appendChecker(.type, diagnostic, view, module_path, source);
+            self.sink.type_errors += 1;
+            if (!self.sink.json_mode and !builtin.is_test) {
+                const location = view.getLoc(diagnostic.node) orelse continue;
+                debugPrint("{s}:{d}:{d}: {s} {s}\n", .{
+                    module_path,
+                    location.line,
+                    location.column,
+                    zts.DiagnosticCatalog.typeCode(diagnostic.kind),
+                    diagnostic.message,
+                });
+            }
+        }
+    }
+
+    fn reportUnexportedType(
+        raw_context: *anyopaque,
+        module_path: []const u8,
+        source: []const u8,
+        specifier: []const u8,
+        imported: []const u8,
+        offset: u32,
+    ) anyerror!void {
+        const self: *FrontendFailureAdapter = @ptrCast(@alignCast(raw_context));
+        try self.sink.appendUnexportedType(
+            module_path,
+            source,
+            specifier,
+            imported,
+            offset,
+        );
+    }
+
+    fn reportSourceTypeFailure(
+        raw_context: *anyopaque,
+        module_path: []const u8,
+        source: []const u8,
+        failure: zts.pipeline.SourceTypeFailure,
+    ) anyerror!void {
+        const self: *FrontendFailureAdapter = @ptrCast(@alignCast(raw_context));
+        var diagnostic = try json_diag.fromSourceTypeFailure(
+            self.sink.allocator,
+            source,
+            failure,
+            module_path,
+        );
+        errdefer diagnostic.deinit(self.sink.allocator);
+        diagnostic.file = try self.sink.allocator.dupe(u8, module_path);
+        diagnostic.file_owned = true;
+        try self.sink.diagnostics.append(self.sink.allocator, diagnostic);
+        if (!self.sink.json_mode and !builtin.is_test) {
+            debugPrint("{s}:{d}:{d}: {s} {s}\n", .{
+                module_path,
+                diagnostic.line,
+                diagnostic.column,
+                diagnostic.code,
+                diagnostic.message,
+            });
+        }
+        self.sink.type_errors += 1;
+    }
+
+    fn hook(self: *FrontendFailureAdapter) zts.pipeline.GraphFrontendValidation.FailureSink {
+        return .{
+            .context = self,
+            .report_type_diagnostics = reportTypeDiagnostics,
+            .report_unexported_type = reportUnexportedType,
+            .report_source_type_failure = reportSourceTypeFailure,
+        };
+    }
+};
+
 /// Carries an `ImportReader` into the reader of the module graph. The graph
 /// reads through it, so a base revision selected by a caller reaches the graph.
 const ReaderAdapter = struct {
@@ -149,16 +233,11 @@ pub const GraphCheck = struct {
 
         // The front end refuses a dependency before the compiler parses it, so
         // the finding carries the parser or admission code and not a bare error.
-        const dependency_count = self.graph.dependencyCount();
-        for (self.graph.execution_order[0..dependency_count]) |graph_index| {
+        const dependency_count = self.graph.analysisDependencyCount();
+        for (self.graph.analysis_order[0..dependency_count]) |graph_index| {
             const module = &self.graph.module_list.items[graph_index];
             if (try appendDependencyRefusals(allocator, result, module.source, module.path, opts.json_mode)) return .refused;
         }
-
-        var module_compiler = zts.modules.ModuleCompiler.init(allocator, &self.atoms, &self.strings);
-        module_compiler.record_witnesses = !opts.skip_contract;
-        self.compile_result = try module_compiler.compileAll(&self.graph);
-        const compile_result = &self.compile_result.?;
 
         var sink: precompile.GraphSink = .{
             .allocator = allocator,
@@ -166,6 +245,21 @@ pub const GraphCheck = struct {
             .json_mode = opts.json_mode,
         };
         defer applySink(result, &sink);
+        var failure_adapter: FrontendFailureAdapter = .{ .sink = &sink };
+        var frontend_validation = zts.pipeline.GraphFrontendValidation.init(allocator, &self.atoms, true);
+        defer frontend_validation.deinit();
+        frontend_validation.failure_sink = failure_adapter.hook();
+        var module_compiler = zts.modules.ModuleCompiler.init(allocator, &self.atoms, &self.strings);
+        module_compiler.record_witnesses = !opts.skip_contract;
+        module_compiler.frontend_validation = frontend_validation.hook();
+        const frontend_errors_before = sink.errorTotal();
+        self.compile_result = module_compiler.compileAll(&self.graph) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            if (sink.errorTotal() > frontend_errors_before) return .refused;
+            return err;
+        };
+        std.mem.swap(zts.ExportedSignatures, &self.exports, &frontend_validation.exports);
+        const compile_result = &self.compile_result.?;
         const compile_opts: precompile.CompileOptions = .{
             .emit_verify = !opts.skip_contract,
             .strict = true,
@@ -173,13 +267,21 @@ pub const GraphCheck = struct {
             .manifest_registry = null,
             .emit_proof_evidence = !opts.skip_contract,
         };
-        for (0..dependency_count) |position| {
+        const evidence_by_module = try allocator.alloc(?zts.ProofEvidence, self.graph.module_list.items.len);
+        @memset(evidence_by_module, null);
+        defer {
+            for (evidence_by_module) |*maybe_evidence| {
+                if (maybe_evidence.*) |*evidence| evidence.deinit();
+            }
+            allocator.free(evidence_by_module);
+        }
+        for (self.graph.analysis_order[0..dependency_count]) |graph_index| {
             const errors_before = sink.errorTotal();
             var checks = precompile.checkGraphModule(
                 allocator,
                 &self.graph,
                 compile_result,
-                position,
+                graph_index,
                 &self.atoms,
                 &self.exports,
                 compile_opts,
@@ -192,16 +294,21 @@ pub const GraphCheck = struct {
             };
             defer checks.deinit(allocator);
             if (checks.evidence) |*evidence| {
-                self.evidences.append(allocator, evidence.*) catch |err| {
-                    evidence.deinit();
-                    return err;
-                };
+                evidence_by_module[graph_index] = evidence.*;
             }
             if (checks.verify_failed) return .refused;
-            for (checks.mutation_nodes) |node| {
-                try self.reported_writes.append(allocator, .{ .module = @intCast(position + 1), .node = node });
+            if (self.graph.runtimePosition(graph_index)) |runtime_position| {
+                for (checks.mutation_nodes) |node| {
+                    try self.reported_writes.append(allocator, .{ .module = @intCast(runtime_position + 1), .node = node });
+                }
+                if (checks.has_module_mutation or checks.unresolved_route_dispatch) self.shares_state = true;
             }
-            if (checks.has_module_mutation or checks.unresolved_route_dispatch) self.shares_state = true;
+        }
+        for (self.graph.execution_order[0..self.graph.runtimeDependencyCount()]) |graph_index| {
+            if (evidence_by_module[graph_index]) |evidence| {
+                try self.evidences.append(allocator, evidence);
+                evidence_by_module[graph_index] = null;
+            }
         }
         return .passed;
     }
@@ -289,7 +396,9 @@ pub const GraphCheck = struct {
     }
 
     pub fn entryIndex(self: *const GraphCheck) usize {
-        return self.compile_result.?.modules.len - 1;
+        const graph_index = self.graph.execution_order[self.graph.execution_order.len - 1];
+        const compiled = self.compile_result orelse unreachable;
+        return compiled.positionOfModule(graph_index) orelse unreachable;
     }
 
     pub fn entryParser(self: *GraphCheck) *zts.parser.JsParser {
@@ -301,7 +410,7 @@ pub const GraphCheck = struct {
     }
 
     fn entryModule(self: *const GraphCheck) *const zts.modules.module_graph.Module {
-        return &self.graph.module_list.items[self.graph.execution_order[self.entryIndex()]];
+        return &self.graph.module_list.items[self.graph.execution_order[self.graph.execution_order.len - 1]];
     }
 
     /// The signature table of the file imports of the entry: what each checked
@@ -403,7 +512,7 @@ pub const GraphCheck = struct {
         return zts.pipeline.importedEffectsForLoadedModule(
             self.allocator,
             &self.graph,
-            self.graph.execution_order[self.entryIndex()],
+            self.graph.execution_order[self.graph.execution_order.len - 1],
             facts,
             deps.loaded_effects.items,
         );

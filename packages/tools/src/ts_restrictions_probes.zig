@@ -184,7 +184,7 @@ const refusal_rows_a = [_]RefusalRow{
             r("import type", top("import type { Nope } from \"zttp:result\";")),
             r("import type", top("import type { FetchError, Nope } from \"zttp:fetch\";")),
         },
-        .clean = c(top("import type { Result } from \"zttp:result\";\nimport type { FetchError, FetchOptions } from \"zttp:fetch\";\nfunction g(o: FetchOptions, e: FetchError, r: Result<number, FetchError>): Result<number, FetchError> {\n  return r;\n}")),
+        .clean = c(top("import type { Nominal } from \"zttp:core\";\nimport type { Result } from \"zttp:result\";\nimport type { FetchError, FetchOptions } from \"zttp:fetch\";\nfunction g(o: FetchOptions, e: FetchError, r: Result<number, FetchError>): Result<number, FetchError> {\n  return r;\n}")),
     },
     .{
         .key = "`namespace` and `module` declarations",
@@ -279,17 +279,22 @@ const refusal_rows_a = [_]RefusalRow{
             r("class", top("class A {\n}")),
             r("class", body("  const A = class {\n  };")),
         },
-        .clean = c(top("structural A = { a: number };")),
+        .clean = c(top("type A = { a: number };")),
     },
     .{
-        .key = "`declare` declarations",
+        .key = "`declare` declarations other than the exact top-level unique-symbol brand declaration",
         .refused = &.{r("declare", top("declare const a: number;"))},
-        .clean = c(top("const a: number = 1;")),
+        .clean = c(top("import type { Nominal } from \"zttp:core\";\ndeclare const idBrand: unique symbol;\ntype Id = Nominal<string, typeof idBrand>;")),
+    },
+    .{
+        .key = "A runtime read of a unique-symbol brand, such as `idBrand` in a value expression",
+        .refused = &.{r("idBrand", top("declare const idBrand: unique symbol;\nfunction g(): unknown {\n  return idBrand;\n}"))},
+        .clean = c(top("import type { Nominal } from \"zttp:core\";\ndeclare const idBrand: unique symbol;\ntype Id = Nominal<string, typeof idBrand>;")),
     },
     .{
         .key = "`abstract class`",
         .refused = &.{r("abstract class", top("abstract class A {\n}"))},
-        .clean = c(top("structural A = { a: number };")),
+        .clean = c(top("type A = { a: number };")),
     },
     .{
         .key = "The non-null assertion `x!`",
@@ -340,12 +345,7 @@ const refusal_rows_a = [_]RefusalRow{
     .{
         .key = "`interface X { ... }`",
         .refused = &.{r("interface X { ... }", top("interface X {\n  a: number;\n}"))},
-        .clean = c(top("structural X = { a: number };")),
-    },
-    .{
-        .key = "`type X = ...;`",
-        .refused = &.{r("type X = ...;", top("type X = string;"))},
-        .clean = c(top("structural X = string;")),
+        .clean = c(top("type X = { a: number };")),
     },
     .{
         .key = "`distinct type X = string;`",
@@ -377,7 +377,7 @@ const refusal_rows_a = [_]RefusalRow{
     .{
         .key = "A nominal type called as a function, such as `Id(\"a\")`",
         .refused = &.{r("Id(\"a\")", top("nominal Id = string;\nfunction g(): string {\n  const x = Id(\"a\");\n  return x;\n}"))},
-        .clean = c(top("nominal Id = string;\nfunction g(): string {\n  const x: Id = \"a\";\n  return x;\n}")),
+        .clean = c(top("import { nominal } from \"zttp:core\";\nimport type { Nominal } from \"zttp:core\";\ndeclare const idBrand: unique symbol;\ntype Id = Nominal<string, typeof idBrand>;\nfunction g(): string {\n  const x: Id = nominal<Id>(\"a\");\n  return x;\n}")),
     },
 
     // ----- Functions And Parameters -----
@@ -1399,7 +1399,7 @@ const refusal_rows_b = [_]RefusalRow{
     .{
         .key = "`import type X from \"./x.ts\";`",
         .refused = &.{r("import type X from \"./x.ts\";", top("import type X from \"./x.ts\";"))},
-        .clean = c(top("import type { X } from \"./x.ts\";")),
+        .clean = cf(top("import type { X } from \"./x.ts\";"), &.{.{ .name = "x.ts", .text = "export type X = string;\n" }}),
     },
     .{
         .key = "A module specifier that is not a string literal, such as `import { ok } from m;` and `import type { T } from m;`",
@@ -1527,9 +1527,9 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("structural C = number;")),
     },
     .{
-        .key = "A type-position typeof, such as `typeof base`",
+        .key = "A type-position typeof that is not a resolved brand identity inside imported Nominal, such as `typeof base`",
         .refused = &.{r("typeof base", top("const base: number = 1;\nfunction f(x: typeof base): number {\n  return x;\n}"))},
-        .clean = c(top("const base: number = 1;\nfunction f(x: number): number {\n  return x;\n}")),
+        .clean = c(top("import type { Nominal } from \"zttp:core\";\ndeclare const idBrand: unique symbol;\ntype Id = Nominal<string, typeof idBrand>;\nfunction f(x: Id): Id {\n  return x;\n}")),
     },
     .{
         .key = "A quoted key in a record type, such as `{ \"a\": number }`",
@@ -1551,7 +1551,7 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(paramText("string | 32767 | -32768 | 0x7FFF")),
     },
     .{
-        .key = "A type form outside the admitted grammar, such as `new () => T`, `unique symbol`, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, a call signature such as `{ (): number }`, and an empty parenthesized type with no arrow, such as `Outer<()>` and `structural E = ();`",
+        .key = "A type form outside the admitted grammar, such as `new () => T`, `unique symbol` outside the exact brand declaration, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, a call signature such as `{ (): number }`, and an empty parenthesized type with no arrow, such as `Outer<()>` and `structural E = ();`",
         .refused = &.{
             r("new () => T", paramText("new () => string")),
             r("unique symbol", paramText("unique symbol")),

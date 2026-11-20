@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const engine = @import("zts-engine");
+const source_diagnostics = @import("zts-base").source_diagnostics;
 const type_pool_mod = @import("type_pool.zig");
 const type_syntax_lowering = @import("type_syntax_lowering.zig");
 
@@ -30,6 +31,7 @@ pub const DirectSyntaxInput = struct {
     store: *const TypeSyntax.Store,
     ir_view: IrView,
     atoms: *AtomTable,
+    module_path: []const u8,
 };
 
 pub const SourceTypeInput = union(SourceTypeMode) {
@@ -166,6 +168,7 @@ test "consumer type source validates modes and health before absence" {
         .store = accepted.type_store,
         .ir_view = accepted.ir_view,
         .atoms = accepted.atoms,
+        .module_path = "test://direct",
     } });
     try std.testing.expectEqual(&direct, (try (try ConsumerTypeSource.fromEnvironment(&direct)).validate()).?);
 
@@ -413,6 +416,7 @@ pub const TypeEnv = struct {
     generic_scopes: std.ArrayListUnmanaged(GenericScope),
     /// Direct call and compatibility arguments keyed by final runtime owner.
     direct_call_type_args: std.AutoHashMapUnmanaged(NodeIndex, CallTypeArgs),
+    direct_nominal_constructors: std.AutoHashMapUnmanaged(NodeIndex, TypeIndex),
     /// Alias names whose definition contains a cycle that no data constructor
     /// guards (spec 5.7). Filled once, after the type-namespace pass; read by
     /// the type checker at every site that resolves such a name.
@@ -423,6 +427,10 @@ pub const TypeEnv = struct {
     /// union itself, so a name-only lookup would miss every alias that has a
     /// body, which is every one that matters.
     non_contractive_indices: std.AutoHashMapUnmanaged(TypeIndex, void),
+    brand_origins: std.StringHashMapUnmanaged(type_pool_mod.NominalOrigin),
+    imported_type_names: std.StringHashMapUnmanaged(void),
+    imported_brand_names: std.StringHashMapUnmanaged(void),
+    direct_module_path: []const u8 = "",
 
     /// Stable storage for interned names used as hash-map keys.
     /// Keys must not move after insertion, so each name owns its own allocation.
@@ -435,6 +443,7 @@ pub const TypeEnv = struct {
     /// author declared nothing". `TypeChecker` and `TypePool` already carry
     /// the same flag for the same reason.
     allocation_failed: bool = false,
+    source_type_failure: ?source_diagnostics.SourceTypeFailure = null,
     source_selection: ?SourceTypeMode = null,
     direct_annotation_count: usize = 0,
     direct_accumulator_events: usize = 0,
@@ -455,8 +464,12 @@ pub const TypeEnv = struct {
             .direct_source_fn_annotations = .empty,
             .generic_scopes = .empty,
             .direct_call_type_args = .empty,
+            .direct_nominal_constructors = .empty,
             .non_contractive_aliases = .empty,
             .non_contractive_indices = .empty,
+            .brand_origins = .empty,
+            .imported_type_names = .empty,
+            .imported_brand_names = .empty,
             .name_storage = .empty,
         };
         env.registerBuiltins();
@@ -520,6 +533,9 @@ pub const TypeEnv = struct {
     pub fn deinit(self: *TypeEnv) void {
         self.non_contractive_aliases.deinit(self.allocator);
         self.non_contractive_indices.deinit(self.allocator);
+        self.brand_origins.deinit(self.allocator);
+        self.imported_type_names.deinit(self.allocator);
+        self.imported_brand_names.deinit(self.allocator);
         self.type_aliases.deinit(self.allocator);
         self.generic_aliases.deinit(self.allocator);
         self.var_types_by_name.deinit(self.allocator);
@@ -531,6 +547,7 @@ pub const TypeEnv = struct {
         self.direct_source_fn_annotations.deinit(self.allocator);
         self.generic_scopes.deinit(self.allocator);
         self.direct_call_type_args.deinit(self.allocator);
+        self.direct_nominal_constructors.deinit(self.allocator);
         for (self.name_storage.items) |name| {
             self.allocator.free(name);
         }
@@ -627,6 +644,10 @@ pub const TypeEnv = struct {
         return self.source_selection;
     }
 
+    pub fn sourceTypeFailure(self: *const TypeEnv) ?source_diagnostics.SourceTypeFailure {
+        return self.source_type_failure;
+    }
+
     fn validateDirectSourceOrder(store: *const TypeSyntax.Store) !void {
         try validateDirectCallOrder(store);
 
@@ -679,6 +700,25 @@ pub const TypeEnv = struct {
         const lowered = try self.allocator.alloc(TypeIndex, input.store.nodes.items.len);
         defer self.allocator.free(lowered);
         @memset(lowered, null_type_idx);
+
+        if (input.store.brand_declarations.items.len > 0 and input.module_path.len == 0) {
+            return error.MissingModulePath;
+        }
+        self.direct_module_path = if (input.store.brand_declarations.items.len != 0 or
+            input.store.declarations.items.len != 0)
+            self.internName(input.module_path)
+        else
+            "";
+        try self.ensureHealthy();
+        for (input.store.brand_declarations.items) |brand| {
+            const name = self.internName(brand.name_span.text(input.store.source));
+            try self.ensureHealthy();
+            if (self.imported_brand_names.contains(name)) return error.DuplicateTypeBinding;
+            try self.brand_origins.put(self.allocator, name, .{
+                .module_path = self.direct_module_path,
+                .declaration_start = brand.declaration_start,
+            });
+        }
 
         for (input.store.declarations.items, 0..) |_, declaration_index| {
             try self.populateParsedDeclaration(
@@ -860,7 +900,11 @@ pub const TypeEnv = struct {
         try self.pool.ensureHealthy();
         try self.ensureHealthy();
         const tag = input.ir_view.getTag(owner) orelse return error.InvalidGenericOwner;
-        if (tag != .call) return error.InvalidGenericOwner;
+        if (tag != .call and
+            !(tag == .unary_op and input.store.nominalConstructor(owner) != null))
+        {
+            return error.InvalidGenericOwner;
+        }
         const fragments = input.store.semanticFragmentSlice(fragment_range) orelse
             return error.InvalidTypeRange;
         if (fragments.len > MAX_TYPE_PARAMS) return error.InvalidTypeRange;
@@ -881,6 +925,16 @@ pub const TypeEnv = struct {
         try self.pool.ensureHealthy();
         try self.ensureHealthy();
         try self.direct_call_type_args.put(self.allocator, owner, arguments);
+        if (input.store.nominalConstructor(owner) != null) {
+            if (arguments.count != 1) return error.InvalidNominalConstructor;
+            const nominal = self.resolveRef(arguments.args[0]);
+            if (!self.pool.isNominal(nominal) or
+                self.pool.nominalConstruction(nominal) != .explicit_only)
+            {
+                return error.InvalidNominalConstructor;
+            }
+            try self.recordNominalConstructor(owner, nominal);
+        }
         try self.pool.ensureHealthy();
         try self.ensureHealthy();
     }
@@ -1189,6 +1243,9 @@ pub const TypeEnv = struct {
         try self.ensureHealthy();
         if (declaration_index >= store.declarations.items.len) return error.InvalidTypeRange;
         const declaration = store.declarations.items[declaration_index];
+        if (self.imported_type_names.contains(declaration.name_span.text(store.source))) {
+            return error.DuplicateTypeBinding;
+        }
         var structural_parameters: ?[]const TypeSyntax.ProjectedGenericParameter = null;
         if (declaration.generic_owner) |owner_index| {
             if (@as(usize, owner_index) >= store.generic_owners.items.len) return error.InvalidGenericOwner;
@@ -1311,15 +1368,207 @@ pub const TypeEnv = struct {
             present.raw_span,
         );
         const name = declaration.name_span.text(store.source);
+        if (declaration.kind == .structural) {
+            if (try self.modernNominalType(store, type_idx, declaration)) |nominal| {
+                self.putTypeAlias(name, nominal);
+                try self.pool.ensureHealthy();
+                try self.ensureHealthy();
+                return;
+            }
+        }
         switch (declaration.kind) {
             .structural => self.putTypeAlias(name, type_idx),
             .nominal => if (type_idx != null_type_idx) {
-                const nominal = self.pool.addNominalAlias(self.allocator, type_idx, name);
+                if (self.direct_module_path.len == 0) return error.MissingModulePath;
+                const nominal = self.pool.addNominalAliasWithOrigin(
+                    self.allocator,
+                    type_idx,
+                    name,
+                    .{
+                        .module_path = self.direct_module_path,
+                        .declaration_start = declaration.full_span.start,
+                    },
+                    .legacy_implicit,
+                );
                 if (nominal != null_type_idx) self.putTypeAlias(name, nominal);
             },
         }
         try self.pool.ensureHealthy();
         try self.ensureHealthy();
+    }
+
+    fn modernNominalType(
+        self: *TypeEnv,
+        store: *const TypeSyntax.Store,
+        type_idx: TypeIndex,
+        declaration: TypeSyntax.Declaration,
+    ) !?TypeIndex {
+        if (self.pool.getTag(type_idx) != .t_generic_app) {
+            if (self.pool.getTag(type_idx) == .t_ref and
+                self.isNominalTypeBinding(store, self.pool.getRefName(type_idx)))
+            {
+                const span = switch (declaration.body) {
+                    .present => |body| body.raw_span,
+                    .absent => declaration.name_span,
+                };
+                self.retainSourceTypeFailure(.{
+                    .kind = .nominal_argument_count,
+                    .start_offset = span.start,
+                    .end_offset = span.end,
+                    .got = 0,
+                });
+                return error.InvalidNominalDeclaration;
+            }
+            return null;
+        }
+        const application = self.pool.getGenericAppInfo(type_idx);
+        const base_name = self.pool.getRefName(application.base);
+        if (!self.isNominalTypeBinding(store, base_name)) return null;
+        const syntax = nominalApplicationSyntax(store, declaration) orelse
+            return error.InvalidNominalDeclaration;
+        if (application.args.len != 2) {
+            self.retainSourceTypeFailure(.{
+                .kind = .nominal_argument_count,
+                .start_offset = syntax.span.start,
+                .end_offset = syntax.span.end,
+                .got = @intCast(@min(application.args.len, std.math.maxInt(u16))),
+            });
+            return error.InvalidNominalDeclaration;
+        }
+        const base = self.resolveRef(application.args[0]);
+        if (self.pool.isNominal(base)) {
+            self.retainSourceTypeFailureForChild(store, syntax.arguments[0], .nominal_base_not_scalar);
+            return error.InvalidNominalDeclaration;
+        }
+        switch (self.pool.getTag(base) orelse return error.InvalidNominalDeclaration) {
+            .t_string, .t_number, .t_boolean => {},
+            else => {
+                self.retainSourceTypeFailureForChild(store, syntax.arguments[0], .nominal_base_not_scalar);
+                return error.InvalidNominalDeclaration;
+            },
+        }
+        const brand_name = nominalBrandQueryTarget(store, declaration) orelse
+            {
+                self.retainSourceTypeFailureForChild(store, syntax.arguments[1], .nominal_brand_query);
+                return error.InvalidNominalDeclaration;
+            };
+        const origin = self.brand_origins.get(brand_name) orelse {
+            self.retainSourceTypeFailureForChild(store, syntax.arguments[1], .nominal_brand_query);
+            return error.UnresolvedNominalBrand;
+        };
+        const nominal = self.pool.addNominalAliasWithOrigin(
+            self.allocator,
+            base,
+            declaration.name_span.text(store.source),
+            origin,
+            .explicit_only,
+        );
+        try self.pool.ensureHealthy();
+        if (nominal == null_type_idx) return error.InvalidNominalDeclaration;
+        return nominal;
+    }
+
+    const NominalApplicationSyntax = struct {
+        span: TypeSyntax.Span,
+        arguments: []const TypeSyntax.Child,
+    };
+
+    fn nominalApplicationSyntax(
+        store: *const TypeSyntax.Store,
+        declaration: TypeSyntax.Declaration,
+    ) ?NominalApplicationSyntax {
+        const body = switch (declaration.body) {
+            .present => |value| value,
+            .absent => return null,
+        };
+        const root_index = switch (body.root) {
+            .present => |index| index,
+            .absent => return null,
+        };
+        if (@as(usize, root_index) >= store.nodes.items.len) return null;
+        const root = store.nodes.items[root_index];
+        const application = switch (root.data) {
+            .generic_application => |value| value,
+            // exhaustive: other roots are not a Nominal application; the caller refuses this declaration.
+            else => return null,
+        };
+        return .{
+            .span = root.semantic_span,
+            .arguments = store.memberSlice(application.arguments) orelse return null,
+        };
+    }
+
+    fn retainSourceTypeFailureForChild(
+        self: *TypeEnv,
+        store: *const TypeSyntax.Store,
+        child: TypeSyntax.Child,
+        kind: source_diagnostics.SourceTypeFailureKind,
+    ) void {
+        const index = switch (child) {
+            .present => |value| value,
+            .absent => return,
+        };
+        if (@as(usize, index) >= store.nodes.items.len) return;
+        const span = store.nodes.items[index].semantic_span;
+        self.retainSourceTypeFailure(.{
+            .kind = kind,
+            .start_offset = span.start,
+            .end_offset = span.end,
+        });
+    }
+
+    fn retainSourceTypeFailure(
+        self: *TypeEnv,
+        failure: source_diagnostics.SourceTypeFailure,
+    ) void {
+        if (self.source_type_failure == null) self.source_type_failure = failure;
+    }
+
+    fn nominalBrandQueryTarget(store: *const TypeSyntax.Store, declaration: TypeSyntax.Declaration) ?[]const u8 {
+        const body = switch (declaration.body) {
+            .present => |value| value,
+            .absent => return null,
+        };
+        const root_index = switch (body.root) {
+            .present => |index| index,
+            .absent => return null,
+        };
+        if (@as(usize, root_index) >= store.nodes.items.len) return null;
+        const application = switch (store.nodes.items[root_index].data) {
+            .generic_application => |value| value,
+            // exhaustive: other roots have no Nominal identity argument; the caller refuses the declaration.
+            else => return null,
+        };
+        const arguments = store.memberSlice(application.arguments) orelse return null;
+        if (arguments.len != 2) return null;
+        const query_index = switch (arguments[1]) {
+            .present => |index| index,
+            .absent => return null,
+        };
+        if (@as(usize, query_index) >= store.nodes.items.len) return null;
+        const query = store.nodes.items[query_index];
+        const target = switch (query.data) {
+            .named_reference => |span| span,
+            // exhaustive: other identity arguments are not brand queries; the caller reports a refusal.
+            else => return null,
+        };
+        if (target.start <= query.semantic_span.start) return null;
+        if (target.end != query.semantic_span.end) return null;
+        return target.text(store.source);
+    }
+
+    fn isNominalTypeBinding(self: *const TypeEnv, store: *const TypeSyntax.Store, local_name: []const u8) bool {
+        _ = self;
+        for (store.type_only_modules.items) |module| {
+            if (module.kind != .import_type) continue;
+            const specifier = store.typeOnlySpecifier(module) orelse continue;
+            if (!std.mem.eql(u8, specifier, "zttp:core")) continue;
+            for (store.typeOnlyBindings(module)) |binding| {
+                if (!std.mem.eql(u8, binding.imported_span.text(store.source), "Nominal")) continue;
+                if (std.mem.eql(u8, binding.local_span.text(store.source), local_name)) return true;
+            }
+        }
+        return false;
     }
 
     fn lowerParsedGenericRoot(
@@ -2126,6 +2375,52 @@ pub const TypeEnv = struct {
         return self.type_aliases.get(name);
     }
 
+    pub fn getGenericAlias(self: *const TypeEnv, name: []const u8) ?GenericAlias {
+        return self.generic_aliases.get(name);
+    }
+
+    pub fn brandOrigin(self: *const TypeEnv, name: []const u8) ?type_pool_mod.NominalOrigin {
+        return self.brand_origins.get(name);
+    }
+
+    pub fn putImportedBrand(self: *TypeEnv, name: []const u8, origin: type_pool_mod.NominalOrigin) !void {
+        if (self.brand_origins.contains(name)) return error.DuplicateTypeBinding;
+        const owned_name = self.internName(name);
+        const owned_path = self.internName(origin.module_path);
+        try self.ensureHealthy();
+        try self.brand_origins.put(self.allocator, owned_name, .{
+            .module_path = owned_path,
+            .declaration_start = origin.declaration_start,
+        });
+        try self.imported_brand_names.put(self.allocator, owned_name, {});
+    }
+
+    pub fn putImportedTypeAlias(self: *TypeEnv, name: []const u8, type_idx: TypeIndex) !void {
+        if (self.type_aliases.contains(name) or self.generic_aliases.contains(name)) {
+            return error.DuplicateTypeBinding;
+        }
+        const owned_name = self.internName(name);
+        try self.ensureHealthy();
+        try self.type_aliases.put(self.allocator, owned_name, type_idx);
+        try self.imported_type_names.put(self.allocator, owned_name, {});
+    }
+
+    pub fn putImportedGenericAlias(self: *TypeEnv, name: []const u8, imported: GenericAlias) !void {
+        if (self.type_aliases.contains(name) or self.generic_aliases.contains(name)) {
+            return error.DuplicateTypeBinding;
+        }
+        const owned_name = self.internName(name);
+        try self.ensureHealthy();
+        var alias = imported;
+        for (0..alias.param_count) |i| {
+            alias.param_names[i] = self.internName(imported.param_names[i]);
+            try self.ensureHealthy();
+        }
+        alias.body_breach = self.firstBodyBreach(alias.body, 0);
+        try self.generic_aliases.put(self.allocator, owned_name, alias);
+        try self.imported_type_names.put(self.allocator, owned_name, {});
+    }
+
     /// Register a type alias that no source text declares. The runtime's own
     /// globals arrive this way: a handler writes `: Response` and there is no
     /// `structural Response = ...` anywhere to read it from.
@@ -2146,9 +2441,18 @@ pub const TypeEnv = struct {
         view: IrView,
         call: NodeIndex,
     ) ?CallTypeArgs {
-        if (view.getTag(call) != .call) return null;
+        const tag = view.getTag(call) orelse return null;
+        if (tag != .call and tag != .unary_op) return null;
         if (self.source_selection != .direct) return null;
         return self.direct_call_type_args.get(call);
+    }
+
+    pub fn recordNominalConstructor(self: *TypeEnv, owner: NodeIndex, type_idx: TypeIndex) !void {
+        try self.direct_nominal_constructors.put(self.allocator, owner, type_idx);
+    }
+
+    pub fn nominalConstructorType(self: *const TypeEnv, owner: NodeIndex) ?TypeIndex {
+        return self.direct_nominal_constructors.get(owner);
     }
 
     /// Walk a TypeIndex (typically a function return-type annotation),
@@ -2874,7 +3178,12 @@ test "direct call arguments retain eight entries under allocation failure" {
     };
     var successes: usize = 0;
     try std.testing.checkAllAllocationFailures(allocator, Context.run, .{
-        DirectSyntaxInput{ .store = accepted.type_store, .ir_view = accepted.ir_view, .atoms = accepted.atoms },
+        DirectSyntaxInput{
+            .store = accepted.type_store,
+            .ir_view = accepted.ir_view,
+            .atoms = accepted.atoms,
+            .module_path = "/tests/call-arguments.ts",
+        },
         call,
         &successes,
     });
@@ -3199,6 +3508,7 @@ fn populateTestSource(env: *TypeEnv, source: []const u8) !void {
         .store = accepted.type_store,
         .ir_view = accepted.ir_view,
         .atoms = accepted.atoms,
+        .module_path = "test://direct",
     } });
 }
 
@@ -4653,6 +4963,7 @@ fn growthExpectTraceCase(case: GrowthCase) ![2]usize {
         .store = &direct_parser.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
     try growthExpectTraceSignatures(&direct_env, &direct_parser, &direct_atoms, case);
 
@@ -4679,6 +4990,7 @@ fn growthExpectTraceCase(case: GrowthCase) ![2]usize {
         .store = &direct_parser.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } }, trace.observer());
     try growthExpectExactPool(&direct_pool, &trace_pool);
     try growthExpectFinalSignatures(&direct_env, &trace_env, direct_view, &direct_parser.type_store);
@@ -4738,6 +5050,7 @@ fn growthExpectSignatureKind(
         .store = &direct_parser.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
     try std.testing.expectEqual(expected_events, direct_env.direct_accumulator_events);
     try std.testing.expectEqual(expected_signatures, direct_env.direct_fn_signatures.count());
@@ -4811,6 +5124,7 @@ test "direct signature replay covers parameter return guard generic-only and ato
         .store = &parser.type_store,
         .ir_view = view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
     try std.testing.expect(env.getFnSigByName("null") != null);
     try std.testing.expectEqual(@as(usize, 1), env.fn_sigs_by_name.count());
@@ -4877,6 +5191,7 @@ fn growthPublicAllocationSweep(
         .store = &parser.type_store,
         .ir_view = view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } }, completion.observer())) |_| {} else |err| {
         switch (err) {
             error.OutOfMemory => {},
@@ -5030,6 +5345,7 @@ test "direct signature replay allocation failures poison incomplete publication"
         .store = &growth_parser.type_store,
         .ir_view = growthParserView(&growth_parser),
         .atoms = &growth_atoms,
+        .module_path = "test://direct",
     } }, arm.observer()));
     try std.testing.expect(arm.armed);
     try std.testing.expect(failing.has_induced_failure);
@@ -5197,6 +5513,7 @@ test "direct signature replay preserves existing entries after failed growth" {
             .store = &parser.type_store,
             .ir_view = view,
             .atoms = &atoms,
+            .module_path = "test://direct",
         } });
         try growthExpectTraceSignatures(&expected_env, &parser, &atoms, .plain);
 
@@ -5220,6 +5537,7 @@ test "direct signature replay preserves existing entries after failed growth" {
             .store = &parser.type_store,
             .ir_view = view,
             .atoms = &atoms,
+            .module_path = "test://direct",
         } }, observer.observer());
         try std.testing.expect(observer.armed);
         try std.testing.expect(observer.observed_after);

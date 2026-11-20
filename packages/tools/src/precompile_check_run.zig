@@ -253,12 +253,14 @@ pub const GraphModules = struct {
     /// dependencies. The graph compile also stores the writes of the entry under
     /// the entry position plus one, and that id is past the dependencies.
     pub fn resolve(self: GraphModules, id: zts.pipeline.FlowModuleId) ?Resolved {
-        const entry_position = self.compile_result.modules.len -| 1;
-        const position: usize = if (id == 0) entry_position else id - 1;
-        if (id != 0 and position >= entry_position) return null;
+        const entry_position = self.graph.execution_order.len -| 1;
+        const runtime_position: usize = if (id == 0) entry_position else id - 1;
+        if (id != 0 and runtime_position >= entry_position) return null;
+        const graph_index = self.graph.execution_order[runtime_position];
+        const position = self.compile_result.positionOfModule(graph_index) orelse return null;
         const parser = &self.compile_result.parsers[position];
         return .{
-            .module = &self.graph.module_list.items[self.graph.execution_order[position]],
+            .module = &self.graph.module_list.items[graph_index],
             .view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants),
         };
     }
@@ -902,8 +904,9 @@ fn runCheckOnParsedSource(
     var graph_check: ?*GraphCheck = null;
     defer if (graph_check) |graph| graph.destroy();
     var entry_imports: ?*const zts.FileImportSignatures = null;
+    var analysis_path = handler_path;
     if (comptime builtin.target.os.tag != .freestanding) {
-        if (handler_fn != null and precompile_mod.hasFileImports(ir_view)) {
+        if (handler_fn != null and precompile_mod.hasFileImports(ir_view, &js_parser.type_store)) {
             const graph = try GraphCheck.create(allocator);
             graph_check = graph;
             const graph_opts: graph_check_mod.RunOptions = .{
@@ -923,11 +926,22 @@ fn runCheckOnParsedSource(
             js_parser = graph.entryParser();
             root = graph.entryRoot();
             atoms = &graph.atoms;
+            const entry_graph_index = graph.graph.execution_order[graph.graph.execution_order.len - 1];
+            analysis_path = graph.graph.module_list.items[entry_graph_index].path;
             ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
             handler_fn = zts.findHandlerFunction(ir_view, root);
             parsed = zts.pipeline.ParsedModule.fromTypedExisting(ir_view, root, atoms, &js_parser.type_store);
             parsed.scopes = &js_parser.scopes;
-            entry_imports = try graph.entryFileImports(ir_view);
+            graph.entry_imports = try contract_mod.fileImportSignaturesWithTypes(
+                graph.link_arena.allocator(),
+                &graph.graph,
+                analysis_path,
+                ir_view,
+                &graph.atoms,
+                &graph.exports,
+                &js_parser.type_store,
+            );
+            entry_imports = if (graph.entry_imports) |*imports| imports else return error.AnalysisPassIncomplete;
         }
     }
 
@@ -936,7 +950,7 @@ fn runCheckOnParsedSource(
         allocator,
         parsed,
         .{
-            .source_types = .direct,
+            .source_types = .{ .direct = analysis_path },
             .strict = true,
             .manifest_registry = null,
             // Which sections the project's policy declares, so a computed
@@ -949,7 +963,33 @@ fn runCheckOnParsedSource(
         },
     );
     defer analysis.deinit();
-    try analysis.complete();
+    analysis.complete() catch |err| {
+        if (err != error.OutOfMemory) {
+            if (analysis.sourceTypeFailure()) |failure| {
+                var diagnostic = try json_diag.fromSourceTypeFailure(
+                    allocator,
+                    source,
+                    failure,
+                    handler_path,
+                );
+                errdefer diagnostic.deinit(allocator);
+                try result.json_diagnostics.append(allocator, diagnostic);
+                if (!json_mode and !builtin.is_test) {
+                    debugPrint("{s}:{d}:{d}: {s} {s}\n", .{
+                        handler_path,
+                        diagnostic.line,
+                        diagnostic.column,
+                        diagnostic.code,
+                        diagnostic.message,
+                    });
+                }
+                result.type_errors += 1;
+                result.stages_run.insert(.types);
+                return result;
+            }
+        }
+        return err;
+    };
     const resolved = try analysis.resolvedForReport();
     // A file import with no type that crosses a module would hand the later
     // checks a value they cannot read, as the build refuses it.

@@ -17,6 +17,7 @@ const type_checker = @import("type_checker.zig");
 
 pub const ParserKind = engine.parser.ErrorKind;
 pub const StripKind = @import("zts-base").source_diagnostics.StripDiagnosticKind;
+pub const SourceTypeFailureKind = @import("zts-base").source_diagnostics.SourceTypeFailureKind;
 pub const SpecKind = contracts.handler_contract.SpecDiagnostic.Kind;
 pub const PolicyCategory = engine.handler_policy.PolicyCategory;
 pub const PolicyViolationKind = engine.handler_policy.ViolationKind;
@@ -187,7 +188,6 @@ pub fn stripCode(kind: StripKind) []const u8 {
         .satisfies_assertion => "ZTS043",
         .nominal_base_not_scalar => "ZTS048",
         .interface_declaration => "ZTS049",
-        .type_alias_declaration => "ZTS050",
         .distinct_type_declaration => "ZTS051",
         .retired_types_import => "ZTS053",
         .default_parameter => "ZTS054",
@@ -198,6 +198,14 @@ pub fn stripCode(kind: StripKind) []const u8 {
         .readonly_array_type_alias => "ZTS059",
         .void_type => "ZTS060",
         .unterminated_string => "ZTS008",
+    };
+}
+
+pub fn sourceTypeCode(kind: SourceTypeFailureKind) []const u8 {
+    return switch (kind) {
+        .nominal_base_not_scalar => "ZTS048",
+        .nominal_argument_count => "ZTS210",
+        .nominal_brand_query => "ZTS001",
     };
 }
 
@@ -233,6 +241,7 @@ pub fn typeCode(kind: type_checker.DiagnosticKind) []const u8 {
         .redundant_match_arm => "ZTS216",
         .function_value_binding => "ZTS217",
         .non_iterable_loop => "ZTS218",
+        .unsupported_intrinsic_reference => "ZTS001",
     };
 }
 
@@ -404,6 +413,7 @@ fn typeMetadata(kind: type_checker.DiagnosticKind) Metadata {
         .family = switch (kind) {
             .unencodable_json_payload => .runtime_safety,
             .readonly_mutation => .state_isolation,
+            .unsupported_intrinsic_reference => .source_profile,
             else => .type_safety,
         },
         .risk = .correctness,
@@ -623,10 +633,11 @@ test "only explicitly shared semantic faults have multiple producers" {
     // and type-position admission. ZTS044 is shared by the compatibility
     // diagnostic family and the parser's depth check. ZTS042 is shared by the
     // admission of `x as T` and the parser's refusal of `<T>x`.
+    // ZTS001 is shared by the parser and the typed intrinsic reference check.
     // ZTS207 is shared by the virtual-import check of a value import and the
     // parser-tier check of an `import type` name that the module does not
     // export.
-    const shared_codes = [_][]const u8{ "ZTS008", "ZTS042", "ZTS044", "ZTS207" };
+    const shared_codes = [_][]const u8{ "ZTS001", "ZTS008", "ZTS042", "ZTS044", "ZTS207" };
     var duplicate_count: usize = 0;
     for (all_entries, 0..) |entry, index| {
         for (all_entries[index + 1 ..]) |other| {

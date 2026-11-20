@@ -100,7 +100,8 @@ top-level initializer must not reach a declaration at or after it.
 | A declaration that holds a function value, such as `const tag = helper;`, `let tag = helper;`, and `const tag = id((x: string): string => x);` | ZTS217 | Call the module-level function by its name, or pass the arrow directly as a call argument |
 | A reserved word as a value name, such as `const set = 1;`, `function from(): number`, a parameter named `of`, an arrow parameter named `get`, the pattern binding `when { from }`, and `import { dictEmpty as match }` | ZTS067 | Another name. A reserved word stays valid as a record key, a type field, a pattern key, and a member name, such as `{ assert: 1 }`, `when { from: f }`, and `x.assert`. Spec Section 5.2 lists the reserved words |
 | `class` declarations and `class` expressions | ZTS001 | Plain records and functions |
-| `declare` declarations | ZTS001 | Import the value from a module |
+| `declare` declarations other than the exact top-level unique-symbol brand declaration | ZTS001 | Import the value from a module. A brand uses `declare const brand: unique symbol;` |
+| A runtime read of a unique-symbol brand, such as `idBrand` in a value expression | ZTS002 | Use the brand only inside `typeof idBrand` as the second argument of `Nominal` |
 | `abstract class` | ZTS001 | Plain records and functions |
 | The non-null assertion `x!` | ZTS001 | Check for `undefined` first, or use `??` |
 | A function overload, which is a signature with no body | ZTS001 | One function whose parameter type is a union |
@@ -108,14 +109,15 @@ top-level initializer must not reach a declaration at or after it.
 | `enum` and `const enum` | ZTS001 | A literal union or a discriminated union |
 | Decorators (`@decorator`) | ZTS001 | Function composition |
 | `implements` and access modifiers (`public`, `private`, `protected`) | ZTS001 | Remove them |
-| `interface X { ... }` | ZTS049 | `structural X = { ... };` |
-| `type X = ...;` | ZTS050 | `structural X = ...;`. `import type` and `export type { ... }` keep the keyword |
+| `interface X { ... }` | ZTS049 | `type X = { ... };` |
 | `distinct type X = string;` | ZTS051 | `nominal X = string;` |
 | A `nominal` type over a record, tuple, union, or function | ZTS048 | `nominal` over `string`, `number`, or `boolean`. Use `structural` for other shapes |
 | An arrow outside a direct call argument: a bound arrow such as `const double = (x) => x * 2;`, an exported one such as `export const f = (x: number): number => x;`, a returned arrow such as `return (x) => x;`, an arrow in a record field such as `{ f: (x) => x }`, an immediately called arrow such as `((x) => x)(1)`, and an arrow as a `?:` arm | ZTS072 | A module-level `function`. Pass an arrow only as a direct call argument, such as `xs.map((x: number): number => x + 1)` |
-| A nominal type called as a function, such as `Id("a")` | ZTS214 | An annotated declaration: `const x: Id = "a";` |
+| A nominal type called as a function, such as `Id("a")` | ZTS214 | `nominal<Id>("a")` for an explicit nominal identity. Legacy annotated construction remains admitted until migration cutover |
 
 Declaration merging, open interfaces, and inheritance are excluded.
+Top-level `type` aliases reuse the existing structural semantics. The exact
+brand declaration creates type identity and no runtime value.
 
 ## Functions And Parameters
 
@@ -321,10 +323,10 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | An index signature, such as `{ [k: string]: number }` | ZTS001 | `Dict<string, number>` |
 | A mapped type, such as `{ [K in "a" \| "b"]: number }` | ZTS001 | The record type |
 | A conditional type, such as `T extends string ? number : boolean`, including one that uses infer | ZTS001 | The type that the condition selects |
-| A type-position typeof, such as `typeof base` | ZTS001 | The type itself |
+| A type-position typeof that is not a resolved brand identity inside imported Nominal, such as `typeof base` | ZTS001 | The type itself. Use `typeof brand` only as the second argument of `Nominal` |
 | A quoted key in a record type, such as `{ "a": number }` | ZTS001 | The key as a name, such as `{ a: number }` |
 | A number literal type that is not an integer in -32768..32767, such as `1.5`, `1e3`, and `40000` | ZTS001 | `number`, or an integer literal type in that range |
-| A type form outside the admitted grammar, such as `new () => T`, `unique symbol`, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, a call signature such as `{ (): number }`, and an empty parenthesized type with no arrow, such as `Outer<()>` and `structural E = ();` | ZTS001 | An admitted type form from section 5.7 of the specification |
+| A type form outside the admitted grammar, such as `new () => T`, `unique symbol` outside the exact brand declaration, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, a call signature such as `{ (): number }`, and an empty parenthesized type with no arrow, such as `Outer<()>` and `structural E = ();` | ZTS001 | An admitted type form from section 5.7 of the specification |
 | An unrecognized type, such as `number number`, an empty type, such as `structural L = ;`, a field with no type, such as `{ x: }`, a missing separator, such as `{ x: number y: string }`, `(x: number y: string) => number`, `B<string number>`, and `[number string]`, a function type with no return type, such as `(x: number) =>`, an unclosed bracket, such as `number [`, an explicit call type argument, such as `f<number number>(1)`, and a generic constraint, such as `T extends number string` | ZTS001 | An admitted type from section 5.7 of the specification |
 | A record type with comma separators, such as `{ a: number, b: string }` | ZTS001 | `{ a: number; b: string }` |
 | `readonly` on a record type, such as `readonly { a: number }` | ZTS001 | The record type |
@@ -342,14 +344,14 @@ shape.
 The admitted types are listed in section 5.7 of the
 [specification](spec/zts-model-1.md). The specification also excludes these
 type features: higher-rank function types, `keyof`, indexed-access types,
-index signatures, type-position `typeof`, conditional types, mapped types,
-`infer`, overloads, and ambient declarations. The Types table gives the
+index signatures, general type-position `typeof`, conditional types, mapped
+types, `infer`, overloads, and general ambient declarations. The Types table gives the
 refusals of generic defaults, type-parameter modifiers, `asserts` return
 types, `keyof`, indexed-access types, index signatures, mapped types,
-conditional types, `infer`, type-position `typeof`, and any other text that
-follows a type. The Declarations And Bindings table gives the refusals of
-overloads and of `declare`. `zts check` gives the other features no targeted
-diagnostic.
+conditional types, `infer`, general type-position `typeof`, and other text
+that follows a type. The Declarations And Bindings table gives the overload
+and general `declare` refusals. Exact brand declarations and brand queries are
+the narrow exceptions. Other features have no targeted diagnostic.
 
 ## Admitted Members
 

@@ -557,14 +557,13 @@ const Lowerer = struct {
     /// `!b.ok`. Any other form of the condition is not a guard.
     fn guardEvent(self: *Lowerer, condition: NodeIndex) ?Tree {
         if (!self.results_active) return null;
-        const tag = self.view.getTag(condition) orelse return null;
         var polarity: Tag = .result_guard_ok;
-        var subject = condition;
-        if (tag == .unary_op) {
-            const unary = self.view.getUnary(condition) orelse return null;
+        var subject = self.view.unwrapTransparent(condition);
+        if (self.view.getTag(subject) == .unary_op) {
+            const unary = self.view.getUnary(subject) orelse return null;
             if (unary.op != .not) return null;
             polarity = .result_guard_err;
-            subject = unary.operand;
+            subject = self.view.unwrapTransparent(unary.operand);
         }
         if (self.view.getTag(subject) != .member_access) return null;
         const member = self.view.getMember(subject) orelse return null;

@@ -445,6 +445,14 @@ packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@9
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@10
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@11
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@12
+
+# Type materialization retains a typed refusal before teardown. CHECK returns
+# one counted error and no contract. Storage propagates the original error;
+# graph validation reports the same refusal and returns TypeCheckFailed.
+# Allocation failures and errors without a retained refusal still propagate.
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@13
+packages/zts/src/pipeline.zig initWithImportsAndSource catch-block
+packages/zts/src/pipeline.zig validate catch-block
 packages/tools/src/precompile_contract.zig appendPolicyDiagnostics catch-block
 packages/tools/src/precompile_contract.zig reportCompletedFlow catch-block
 
@@ -483,6 +491,7 @@ packages/tools/src/precompile_contract.zig mergeDependencyContracts catch-value
 # error.FileImportUntyped. A failed copy never yields a narrower or a wider type.
 packages/zts/src/import_signatures.zig copyAt catch-return
 packages/zts/src/import_signatures.zig copyAt catch-return@2
+packages/zts/src/import_signatures.zig copyBase catch-return
 packages/zts/src/import_signatures.zig copyList catch-return
 packages/zts/src/import_signatures.zig copyRecord catch-return
 packages/zts/src/import_signatures.zig copyFunction catch-return

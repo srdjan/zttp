@@ -227,21 +227,25 @@ pub fn flowModulesForGraph(
     compile_result: *const zts.modules.CompileResult,
     atoms: *zts.AtomTable,
 ) !FlowModuleGraph {
-    const count = compile_result.modules.len;
+    const count = graph.execution_order.len;
     const entry_position = count - 1;
-    const entry_module = &graph.module_list.items[graph.execution_order[entry_position]];
+    const entry_graph_index = graph.execution_order[entry_position];
+    const entry_compile_position = compile_result.positionOfModule(entry_graph_index) orelse return error.AnalysisPassIncomplete;
+    const entry_module = &graph.module_list.items[entry_graph_index];
     var entry_parsed = zts.pipeline.ParsedModule.fromExisting(
-        zts.IrView.fromIRStore(&compile_result.parsers[entry_position].nodes, &compile_result.parsers[entry_position].constants),
-        compile_result.modules[entry_position].root,
+        zts.IrView.fromIRStore(&compile_result.parsers[entry_compile_position].nodes, &compile_result.parsers[entry_compile_position].constants),
+        compile_result.modules[entry_compile_position].root,
         atoms,
     );
-    entry_parsed.scopes = &compile_result.parsers[entry_position].scopes;
+    entry_parsed.scopes = &compile_result.parsers[entry_compile_position].scopes;
     var flow = try FlowModuleGraph.init(allocator, entry_parsed, entry_module.source, entry_module.path);
     errdefer flow.deinit();
 
     for (0..entry_position) |position| {
-        const module = &graph.module_list.items[graph.execution_order[position]];
-        const parser = &compile_result.parsers[position];
+        const graph_index = graph.execution_order[position];
+        const compile_position = compile_result.positionOfModule(graph_index) orelse return error.AnalysisPassIncomplete;
+        const module = &graph.module_list.items[graph_index];
+        const parser = &compile_result.parsers[compile_position];
         try flow.graph_captures.ensureUnusedCapacity(allocator, 1);
         try flow.views.ensureUnusedCapacity(allocator, 1);
         const captures = try allocator.create(zts.pipeline.FlowCaptureTable);
@@ -254,7 +258,7 @@ pub fn flowModulesForGraph(
             .id = flowIdAtPosition(position, entry_position),
             .path = module.path,
             .revision = revision,
-            .root = compile_result.modules[position].root,
+            .root = compile_result.modules[compile_position].root,
             .ir_view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants),
             .atoms = atoms,
             .captures = captures,

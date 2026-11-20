@@ -22,6 +22,17 @@ pub const CompiledModule = struct {
     root: zts_parser.NodeIndex,
 };
 
+pub const FrontendValidation = struct {
+    context: *anyopaque,
+    validate: *const fn (
+        context: *anyopaque,
+        graph: *const module_graph.ModuleGraph,
+        graph_index: module_graph.ModuleIndex,
+        parser: *zts_parser.JsParser,
+        root: zts_parser.NodeIndex,
+    ) anyerror!void,
+};
+
 pub const ModuleCompiler = struct {
     allocator: std.mem.Allocator,
     atoms: *context.AtomTable,
@@ -30,6 +41,8 @@ pub const ModuleCompiler = struct {
     /// code generation fills it. Off by default: recording costs a null check
     /// per emitted node and an owned copy of the witness arrays.
     record_witnesses: bool = false,
+    /// Runs dependency-aware semantic validation after parsing and before code generation.
+    frontend_validation: ?FrontendValidation = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -43,7 +56,7 @@ pub const ModuleCompiler = struct {
         };
     }
 
-    /// Compile all modules in the graph's execution order.
+    /// Compile every analysis-reachable module in dependency order.
     /// Returns a list of CompiledModule structs. The caller must manage
     /// the lifetime of the underlying parser/codegen state through the
     /// returned ParserState handles.
@@ -54,13 +67,18 @@ pub const ModuleCompiler = struct {
         self: *ModuleCompiler,
         graph: *module_graph.ModuleGraph,
     ) !CompileResult {
-        const count = graph.execution_order.len;
+        const count = graph.analysis_order.len;
         const compiled = try self.allocator.alloc(CompiledModule, count);
         errdefer self.allocator.free(compiled);
         const parsers = try self.allocator.alloc(zts_parser.JsParser, count);
         errdefer self.allocator.free(parsers);
         const codegens = try self.allocator.alloc(zts_parser.CodeGen, count);
         errdefer self.allocator.free(codegens);
+        const positions_by_module = try self.allocator.alloc(module_graph.ModuleIndex, graph.module_list.items.len);
+        errdefer self.allocator.free(positions_by_module);
+        for (graph.analysis_order, 0..) |module_index, position| {
+            positions_by_module[module_index] = @intCast(position);
+        }
         // The recorders are allocated before the first module, so each pointer
         // that a code generator keeps stays stable.
         const recorders: []translation_witness.Recorder = if (self.record_witnesses)
@@ -77,7 +95,7 @@ pub const ModuleCompiler = struct {
             }
             for (parsers[0..completed]) |*parser| parser.deinit();
         }
-        for (graph.execution_order, 0..) |mod_idx, index| {
+        for (graph.analysis_order, 0..) |mod_idx, index| {
             const module = &graph.module_list.items[mod_idx];
             const parser = &parsers[index];
             parser.* = try module.initParser(self.allocator);
@@ -97,6 +115,15 @@ pub const ModuleCompiler = struct {
                 const formatted = parser.errors.formatFirstError(&err_buf);
                 if (formatted.len > 0) if (!@import("builtin").is_test) std.log.err("{s}: {s}", .{ module.path, formatted });
                 return error.ParseError;
+            }
+            try zts_parser.markIntrinsicValidationRequirement(self.allocator, parser, self.atoms);
+            if (self.frontend_validation) |validation| {
+                try validation.validate(validation.context, graph, mod_idx, parser, root);
+            }
+            if (parser.type_store.requires_intrinsic_validation and
+                !parser.type_store.intrinsics_validated)
+            {
+                return error.UnvalidatedIntrinsicSource;
             }
             const cg = &codegens[index];
             cg.* = zts_parser.CodeGen.initWithIRStore(self.allocator, &parser.nodes, &parser.constants, &parser.scopes, self.strings, self.atoms);
@@ -122,7 +149,14 @@ pub const ModuleCompiler = struct {
             };
             completed += 1;
         }
-        return .{ .modules = compiled, .parsers = parsers, .codegens = codegens, .recorders = recorders, .allocator = self.allocator };
+        return .{
+            .modules = compiled,
+            .parsers = parsers,
+            .codegens = codegens,
+            .recorders = recorders,
+            .positions_by_module = positions_by_module,
+            .allocator = self.allocator,
+        };
     }
 };
 
@@ -135,7 +169,13 @@ pub const CompileResult = struct {
     /// One per module, in the order of `modules`. Empty unless the compiler
     /// asked for witnesses.
     recorders: []translation_witness.Recorder = &.{},
+    positions_by_module: []module_graph.ModuleIndex,
     allocator: std.mem.Allocator,
+
+    pub fn positionOfModule(self: *const CompileResult, module_index: module_graph.ModuleIndex) ?usize {
+        if (module_index >= self.positions_by_module.len) return null;
+        return self.positions_by_module[module_index];
+    }
 
     pub fn deinit(self: *CompileResult) void {
         if (self.recorders.len > 0) {
@@ -147,6 +187,7 @@ pub const CompileResult = struct {
         for (self.parsers) |*p| p.deinit();
         self.allocator.free(self.parsers);
         self.allocator.free(self.modules);
+        self.allocator.free(self.positions_by_module);
     }
 };
 
@@ -163,17 +204,44 @@ test "compileAll returns a clean error instead of panicking when parser-init all
         .state = .visited,
     });
     graph.execution_order = try allocator.dupe(module_graph.ModuleIndex, &.{0});
+    graph.analysis_order = try allocator.dupe(module_graph.ModuleIndex, &.{0});
 
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    // Three final slices precede parser initialization.
-    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 3 });
+    // Four final slices precede parser initialization.
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 4 });
     var module_compiler = ModuleCompiler.init(failing.allocator(), &atoms, &strings);
 
     try std.testing.expectError(error.OutOfMemory, module_compiler.compileAll(&graph));
+}
+
+test "compileAll refuses a core intrinsic import without frontend validation" {
+    const allocator = std.testing.allocator;
+    const Reader = struct {
+        fn read(_: std.mem.Allocator, _: []const u8) module_graph.ReadFileError![]const u8 {
+            return error.FileNotFound;
+        }
+    };
+    const source =
+        "import type { Nominal } from \"zttp:core\";\n" ++
+        "import { nominal } from \"zttp:core\";\n" ++
+        "declare const idBrand: unique symbol;\n" ++
+        "type Id = Nominal<string, typeof idBrand>;\n";
+    var graph = module_graph.ModuleGraph.init(allocator);
+    defer graph.deinit();
+    try graph.build("/probe/entry.ts", source, Reader.read);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+    var module_compiler = ModuleCompiler.init(allocator, &atoms, &strings);
+    try std.testing.expectError(
+        error.UnvalidatedIntrinsicSource,
+        module_compiler.compileAll(&graph),
+    );
 }
 
 test "graph admission preserves reads bytecode and complete atoms" {

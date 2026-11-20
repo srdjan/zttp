@@ -198,16 +198,77 @@ pub fn fileImportSignatures(
     atoms: *zts.AtomTable,
     exports: *const zts.ExportedSignatures,
 ) !zts.FileImportSignatures {
+    return fileImportSignaturesInternal(arena, graph, module_path, view, atoms, exports, null);
+}
+
+pub fn fileImportSignaturesWithTypes(
+    arena: std.mem.Allocator,
+    graph: *const zts.modules.ModuleGraph,
+    module_path: []const u8,
+    view: zts.IrView,
+    atoms: *zts.AtomTable,
+    exports: *const zts.ExportedSignatures,
+    store: *const zts.parser.type_syntax.Store,
+) !zts.FileImportSignatures {
+    return fileImportSignaturesInternal(arena, graph, module_path, view, atoms, exports, store);
+}
+
+fn fileImportSignaturesInternal(
+    arena: std.mem.Allocator,
+    graph: *const zts.modules.ModuleGraph,
+    module_path: []const u8,
+    view: zts.IrView,
+    atoms: *zts.AtomTable,
+    exports: *const zts.ExportedSignatures,
+    store: ?*const zts.parser.type_syntax.Store,
+) !zts.FileImportSignatures {
     const links = try graph.fileImportLinks(arena, module_path, view, atoms);
-    const rows = try arena.alloc(zts.FileImportSignatures.Row, links.len);
-    for (links, rows) |link, *row| {
-        row.* = .{ .specifier = link.specifier, .imported = link.imported, .sig = null, .value_type = zts.null_type_idx };
-        const target = link.target orelse continue;
-        const exported = exports.find(target, link.imported) orelse continue;
-        row.sig = exported.sig;
-        row.value_type = exported.value_type;
+    var rows: std.ArrayList(zts.FileImportSignatures.Row) = .empty;
+    for (links) |link| {
+        var row: zts.FileImportSignatures.Row = .{
+            .specifier = link.specifier,
+            .imported = link.imported,
+            .sig = null,
+        };
+        if (link.target) |target| {
+            const target_path = graph.module_list.items[target].path;
+            if (exports.findValue(target_path, link.imported)) |exported| {
+                row.sig = exported.sig;
+                row.value_type = exported.value_type;
+            }
+        }
+        try rows.append(arena, row);
     }
-    return .{ .source = &exports.pool, .rows = rows };
+    if (store) |source_types| {
+        for (source_types.type_only_modules.items) |type_module| {
+            if (type_module.kind != .import_type) continue;
+            const specifier = source_types.typeOnlySpecifier(type_module) orelse
+                return error.InvalidTypeImport;
+            const target = switch (zts.modules.resolver.resolve(specifier)) {
+                .file => try graph.fileImportTarget(arena, module_path, specifier) orelse
+                    return error.UnresolvedTypeImport,
+                .virtual => continue,
+                .unknown => return error.UnresolvedTypeImport,
+            };
+            const target_path = graph.module_list.items[target].path;
+            for (source_types.typeOnlyBindings(type_module)) |binding| {
+                const imported = binding.imported_span.text(source_types.source);
+                const local = binding.local_span.text(source_types.source);
+                var row: zts.FileImportSignatures.Row = .{
+                    .specifier = specifier,
+                    .imported = imported,
+                    .local = local,
+                    .sig = null,
+                };
+                if (exports.findType(target_path, imported)) |exported| {
+                    row.type_alias = exported.type_alias;
+                    row.brand_origin = exported.brand_origin;
+                }
+                try rows.append(arena, row);
+            }
+        }
+    }
+    return .{ .source = &exports.pool, .rows = try rows.toOwnedSlice(arena) };
 }
 
 pub const DependencyContract = struct {
@@ -243,12 +304,13 @@ pub fn collectDependencyContracts(
     atoms: *zts.AtomTable,
     inputs: MultiModuleBuild,
 ) !DependencyContracts {
-    const entry_index = compile_result.modules.len - 1;
     var result: DependencyContracts = .{};
     errdefer result.deinit(allocator);
 
-    for (compile_result.modules[0..entry_index], compile_result.parsers[0..entry_index], 0..) |compiled_module, *js_parser, idx| {
-        const graph_idx = graph.execution_order[idx];
+    for (graph.execution_order[0..graph.runtimeDependencyCount()], 0..) |graph_idx, idx| {
+        const compile_position = compile_result.positionOfModule(graph_idx) orelse return error.AnalysisPassIncomplete;
+        const compiled_module = compile_result.modules[compile_position];
+        const js_parser = &compile_result.parsers[compile_position];
         const module = &graph.module_list.items[graph_idx];
 
         const module_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
@@ -408,9 +470,10 @@ pub fn dischargeDependencyCapsules(
     inputs: MultiModuleBuild,
     contract: *HandlerContract,
 ) !void {
-    const entry_index = compile_result.modules.len - 1;
-    for (compile_result.modules[0..entry_index], compile_result.parsers[0..entry_index], 0..) |compiled_module, *js_parser, position| {
-        const graph_idx = graph.execution_order[position];
+    for (graph.execution_order[0..graph.runtimeDependencyCount()], 0..) |graph_idx, position| {
+        const compile_position = compile_result.positionOfModule(graph_idx) orelse return error.AnalysisPassIncomplete;
+        const compiled_module = compile_result.modules[compile_position];
+        const js_parser = &compile_result.parsers[compile_position];
         const module = &graph.module_list.items[graph_idx];
         const module_id: zts.pipeline.FlowModuleId = @intCast(position + 1);
 
@@ -420,11 +483,19 @@ pub fn dischargeDependencyCapsules(
 
         var link_arena = std.heap.ArenaAllocator.init(allocator);
         defer link_arena.deinit();
-        const file_imports = try fileImportSignatures(link_arena.allocator(), graph, module.path, module_view, atoms, exports);
+        const file_imports = try fileImportSignaturesWithTypes(
+            link_arena.allocator(),
+            graph,
+            module.path,
+            module_view,
+            atoms,
+            exports,
+            &js_parser.type_store,
+        );
 
         var session: zts.pipeline.ModuleAnalysisSession = .{};
         try session.initFull(allocator, parsed, .{
-            .source_types = .direct,
+            .source_types = .{ .direct = module.path },
             .strict = inputs.strict,
             .manifest_registry = inputs.manifest_registry,
             .select_verifier = false,
@@ -512,13 +583,13 @@ pub fn buildMultiModuleContract(
     exports: *const zts.ExportedSignatures,
     inputs: MultiModuleBuild,
 ) !HandlerContract {
-    const entry_index = compile_result.modules.len - 1;
     var deps = try collectDependencyContracts(allocator, graph, compile_result, atoms, inputs);
     defer deps.deinit(allocator);
     var policy_checked = deps.policy_checked;
 
     // The entry: a full session with its authored source types and file-import table.
-    const entry_graph_idx = graph.execution_order[entry_index];
+    const entry_graph_idx = graph.execution_order[graph.execution_order.len - 1];
+    const entry_index = compile_result.positionOfModule(entry_graph_idx) orelse return error.AnalysisPassIncomplete;
     const entry_module = &graph.module_list.items[entry_graph_idx];
     const entry_parser = &compile_result.parsers[entry_index];
     const entry_root = compile_result.modules[entry_index].root;
@@ -528,14 +599,22 @@ pub fn buildMultiModuleContract(
 
     var link_arena = std.heap.ArenaAllocator.init(allocator);
     defer link_arena.deinit();
-    const file_imports = try fileImportSignatures(link_arena.allocator(), graph, entry_module.path, entry_view, atoms, exports);
+    const file_imports = try fileImportSignaturesWithTypes(
+        link_arena.allocator(),
+        graph,
+        entry_module.path,
+        entry_view,
+        atoms,
+        exports,
+        &entry_parser.type_store,
+    );
 
     var flow_modules = try imports_mod.flowModulesForGraph(allocator, graph, compile_result, atoms);
     defer flow_modules.deinit();
 
     var analysis: zts.pipeline.ModuleAnalysisSession = .{};
     try analysis.initFull(allocator, parsed, .{
-        .source_types = .direct,
+        .source_types = .{ .direct = entry_module.path },
         .strict = inputs.strict,
         .manifest_registry = inputs.manifest_registry,
         .policy_sections = if (inputs.policy) |*configured| configured.declaredSections() else .{},
@@ -680,9 +759,11 @@ fn printFlowWrite(
     site: check_run_mod.WriteSite,
 ) !void {
     if (builtin.is_test) return;
-    const position: usize = if (site.module == 0) compile_result.modules.len - 1 else site.module - 1;
-    if (position >= compile_result.modules.len) return error.AnalysisPassIncomplete;
-    const module = &graph.module_list.items[graph.execution_order[position]];
+    const runtime_position: usize = if (site.module == 0) graph.execution_order.len - 1 else site.module - 1;
+    if (runtime_position >= graph.execution_order.len) return error.AnalysisPassIncomplete;
+    const graph_index = graph.execution_order[runtime_position];
+    const position = compile_result.positionOfModule(graph_index) orelse return error.AnalysisPassIncomplete;
+    const module = &graph.module_list.items[graph_index];
     const parser = &compile_result.parsers[position];
     const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
     if (view.getLoc(site.node) == null) return;

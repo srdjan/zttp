@@ -1282,14 +1282,14 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
         std.debug.print("{s}", .{differences.items});
         return error.CensusDifference;
     }
-    // Every case reaches the comparison, and 166 of them carry a diagnostic, so
+    // Every case reaches the comparison, and 165 of them carry a diagnostic, so
     // the equality is not over empty lists. A corpus change moves these counts.
     try testing.expectEqual(cases.items.len, compared);
-    try testing.expectEqual(@as(usize, 166), with_diagnostics);
+    try testing.expectEqual(@as(usize, 165), with_diagnostics);
     // Every error carries a plan, and the tiers show where plans come from.
-    try testing.expectEqual(@as(usize, 105), error_codes.count());
+    try testing.expectEqual(@as(usize, 104), error_codes.count());
     try testing.expectEqual(@as(usize, 1), tier_result);
     try testing.expectEqual(@as(usize, 17), tier_intent);
-    try testing.expectEqual(@as(usize, 157), tier_help);
+    try testing.expectEqual(@as(usize, 156), tier_help);
     try testing.expectEqual(@as(usize, 15), tier_other);
 }

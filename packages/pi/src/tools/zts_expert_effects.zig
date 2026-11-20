@@ -59,7 +59,25 @@ pub fn run(
             .{@errorName(e)},
         );
     };
+    try zts.parser.markIntrinsicValidationRequirement(allocator, &js_parser, &atoms);
     const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+
+    var type_pool = zts.TypePool.init(allocator);
+    defer type_pool.deinit(allocator);
+    try type_pool.ensureHealthy();
+    var type_env = zts.TypeEnv.init(allocator, &type_pool);
+    defer type_env.deinit();
+    try type_pool.ensureHealthy();
+    try type_env.populateSourceTypes(.{ .direct = .{
+        .module_path = absolute,
+        .store = &js_parser.type_store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } });
+    try type_pool.ensureHealthy();
+    if (js_parser.type_store.requires_intrinsic_validation) {
+        try zts.pipeline.validateSourceIntrinsics(allocator, &js_parser, &atoms, &type_env);
+    }
 
     var analyzer = zts.EffectAnalyzer.init(allocator, ir_view, &atoms);
     defer analyzer.deinit();
@@ -70,19 +88,6 @@ pub fn run(
             .{@errorName(e)},
         );
     };
-
-    var type_pool = zts.TypePool.init(allocator);
-    defer type_pool.deinit(allocator);
-    try type_pool.ensureHealthy();
-    var type_env = zts.TypeEnv.init(allocator, &type_pool);
-    defer type_env.deinit();
-    try type_pool.ensureHealthy();
-    try type_env.populateSourceTypes(.{ .direct = .{
-        .store = &js_parser.type_store,
-        .ir_view = ir_view,
-        .atoms = &atoms,
-    } });
-    try type_pool.ensureHealthy();
 
     const ctx: WriteContext = .{ .allocator = allocator, .env = &type_env, .ir_view = ir_view };
     var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
@@ -197,4 +202,49 @@ test "effect reports retain declared ceilings and unreadable markers" {
         defer std.testing.allocator.free(expected);
         try std.testing.expectEqualStrings(expected, result.llm_text);
     }
+}
+
+test "effect reports infer nominal construction after shared lowering" {
+    const Function = struct {
+        name: []const u8,
+        pure: bool,
+        deterministic: bool,
+        recursive: bool,
+        has_egress: bool,
+        capabilities: []const []const u8,
+        declared: []const []const u8,
+        declaredUnreadable: bool,
+    };
+    const Payload = struct { functions: []const Function };
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "nominal.ts",
+        .data =
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
+        \\declare const idBrand: unique symbol;
+        \\type Id = Nominal<string, typeof idBrand>;
+        \\function makeId(value: string): Id { return nominal<Id>(value); }
+        ,
+    });
+    const path = try std.Io.Dir.realPathFileAlloc(tmp.dir, std.testing.io, "nominal.ts", allocator);
+    defer allocator.free(path);
+    var result = try run(allocator, path);
+    defer result.deinit(allocator);
+    try std.testing.expect(result.ok);
+    const payload = try std.json.parseFromSlice(Payload, allocator, result.llm_text, .{ .ignore_unknown_fields = true });
+    defer payload.deinit();
+    try std.testing.expectEqual(@as(usize, 1), payload.value.functions.len);
+    try std.testing.expectEqualDeep(Function{
+        .name = "makeId",
+        .pure = true,
+        .deterministic = true,
+        .recursive = false,
+        .has_egress = false,
+        .capabilities = &.{},
+        .declared = &.{},
+        .declaredUnreadable = false,
+    }, payload.value.functions[0]);
 }

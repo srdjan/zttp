@@ -141,6 +141,7 @@ fn expectDirectSourceWithAllocator(allocator: std.mem.Allocator, source: []const
         .store = &parser.type_store,
         .ir_view = view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
     try pool.ensureHealthy();
     try env.ensureHealthy();
@@ -159,6 +160,7 @@ fn lowerSyntaxStore(
         .store = store,
         .ir_view = ir_view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
     try pool.ensureHealthy();
     try env.ensureHealthy();
@@ -503,6 +505,56 @@ fn expectDirectAccepted(source: []const u8) !void {
     );
 }
 
+test "standard type alias reaches direct type checking" {
+    try expectDirectAccepted(
+        "type Label = string;\n" ++
+            "const value: Label = \"ok\";\n",
+    );
+}
+
+test "imported Nominal resolves a local unique-symbol brand" {
+    try expectDirectSourceWithAllocator(
+        std.testing.allocator,
+        "import type { Nominal as N } from \"zttp:core\";\n" ++
+            "declare const userIdBrand: unique symbol;\n" ++
+            "type UserId = N<string, typeof userIdBrand>;\n" ++
+            "const value: UserId = \"u1\";\n",
+    );
+}
+
+test "unique-symbol brands require termination and remain type-only" {
+    const cases = [_]struct { source: []const u8, expected_error: anyerror, message: []const u8 }{
+        .{
+            .source = "declare const brand: unique symbol\nconst value = 1;\n",
+            .expected_error = error.MissingSemicolon,
+            .message = "expected ';' after the brand declaration",
+        },
+        .{
+            .source = "declare const brand: unique symbol;\nconst value = brand;\n",
+            .expected_error = error.ParseError,
+            .message = "a unique-symbol brand is type-only and cannot be read at runtime",
+        },
+        .{
+            .source = "declare const brand: unique symbol;\nconst brand = 1;\n",
+            .expected_error = error.ParseError,
+            .message = "this name is already declared in this scope",
+        },
+    };
+    for (cases) |case| {
+        var parser = try JsParser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .compile,
+        );
+        defer parser.deinit();
+        try std.testing.expectError(case.expected_error, parser.parse());
+        const errors = parser.errors.getErrors();
+        try std.testing.expectEqual(@as(usize, 1), errors.len);
+        try std.testing.expectEqualStrings(case.message, errors[0].message);
+    }
+}
+
 fn expectFirstFunctionSliceRecords(parser: *const JsParser, source: []const u8) !void {
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.parameter_annotations.items.len);
@@ -836,6 +888,8 @@ fn runCleanModuleTypeAllocationSweep(
             const after_seed = parser.current.start >= second_offset;
             var expected = std.mem.zeroes(TypeSyntax.Store.Checkpoint);
             expected.type_only_modules = if (after_seed) 1 else 0;
+            expected.type_only_bindings = if (after_seed) 1 else 0;
+            expected.decoded_module_specifiers = if (after_seed) "./seed".len else 0;
             try std.testing.expect(std.meta.eql(expected, parser.type_store.checkpoint()));
             if (!after_seed) return err;
             const seed = parser.type_store.type_only_modules.items[0];
@@ -871,6 +925,8 @@ fn runExcludedModuleTypeAllocationSweep(
             var expected = std.mem.zeroes(TypeSyntax.Store.Checkpoint);
             // Admission publishes the excluded module, so a failure after the parse (in the replay) keeps both modules.
             expected.type_only_modules = if (parser.current.start > second_offset) 2 else if (after_seed) 1 else 0;
+            expected.type_only_bindings = if (after_seed) 1 else 0;
+            expected.decoded_module_specifiers = if (after_seed) "./seed".len else 0;
             try std.testing.expect(std.meta.eql(expected, parser.type_store.checkpoint()));
             if (after_seed) {
                 const seed = parser.type_store.type_only_modules.items[0];
@@ -1013,6 +1069,12 @@ fn seedCheckpoint() TypeSyntax.Store.Checkpoint {
         .parameter_annotations = 0,
         .function_signatures = 0,
         .type_only_modules = 0,
+        .type_only_bindings = 0,
+        .decoded_module_specifiers = 0,
+        .brand_declarations = 0,
+        .nominal_constructors = 0,
+        .requires_intrinsic_validation = false,
+        .intrinsics_validated = false,
     };
 }
 
@@ -1034,6 +1096,12 @@ fn nominalGenericSeedCheckpoint() TypeSyntax.Store.Checkpoint {
         .parameter_annotations = 0,
         .function_signatures = 0,
         .type_only_modules = 0,
+        .type_only_bindings = 0,
+        .decoded_module_specifiers = 0,
+        .brand_declarations = 0,
+        .nominal_constructors = 0,
+        .requires_intrinsic_validation = false,
+        .intrinsics_validated = false,
     };
 }
 
@@ -2674,7 +2742,6 @@ const DeclarationCase = enum {
     generic_app_structural_compare,
     nominal_structural_compare,
     generic_declaration,
-    unsupported_spelling_refusal,
     invalid_nominal_base_refusal,
 };
 
@@ -2752,7 +2819,6 @@ const declaration_fixtures = [_]DeclarationFixture{
     .{ .case = .generic_app_structural_compare, .source = "structural Items = string[];\nstructural View = { field: readonly Items };", .probe = .equivalent },
     .{ .case = .nominal_structural_compare, .source = "nominal Id = string;", .probe = .equivalent },
     .{ .case = .generic_declaration, .source = "structural Box<T> = T;", .probe = .equivalent },
-    .{ .case = .unsupported_spelling_refusal, .source = "type Alias = number;", .probe = .{ .admission_refused = .type_alias_declaration } },
     .{ .case = .invalid_nominal_base_refusal, .source = "nominal Bad = { value: number };", .probe = .{ .admission_refused = .nominal_base_not_scalar } },
 };
 
@@ -3462,7 +3528,6 @@ fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) 
         .block_indented_refusal,
         .runtime_structural_collision,
         .runtime_nominal_collision,
-        .unsupported_spelling_refusal,
         .invalid_nominal_base_refusal,
         => return error.TestUnexpectedResult,
     }
@@ -4558,6 +4623,7 @@ test "direct calls retain eight projected arguments without publishing a ninth" 
         .store = &parser.type_store,
         .ir_view = view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
     const arguments = env.getCallTypeArgsForCall(view, record.owner) orelse
         return error.TestUnexpectedResult;
@@ -4601,6 +4667,7 @@ test "direct calls retain eight projected arguments without publishing a ninth" 
         .store = &excess.type_store,
         .ir_view = excess_view,
         .atoms = &excess_atoms,
+        .module_path = "test://direct",
     } });
     const projected = excess_env.getCallTypeArgsForCall(excess_view, excess_record.owner) orelse
         return error.TestUnexpectedResult;
@@ -5182,8 +5249,7 @@ test "declaration semantic census observes every case" {
                 try std.testing.expectEqual(@as(usize, 0), parser.type_store.declarations.items.len);
             },
             .admission_refused => |expected| {
-                const marker = if (expected == .type_alias_declaration) "type" else "{ value: number }";
-                const diagnostic = try directDiagnosticAt(fixture.source, expected, marker);
+                const diagnostic = try directDiagnosticAt(fixture.source, expected, "{ value: number }");
                 try expectDirectAdmission(
                     std.testing.allocator,
                     fixture.source,
@@ -5280,6 +5346,7 @@ test "declaration bodies admit numeric leading and blank-line continuations" {
             .store = &parser.type_store,
             .ir_view = view,
             .atoms = &atoms,
+            .module_path = "test://direct",
         } });
         const alias = env.getTypeAlias(case.name) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(case.tag, pool.getTag(alias).?);
@@ -5621,6 +5688,7 @@ fn expectDirectDeclarationNeutral(
         .store = &parser.type_store,
         .ir_view = view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
     const alias = env.getTypeAlias(name) orelse return error.TestUnexpectedResult;
     const base = switch (expected_base) {
@@ -6422,7 +6490,12 @@ test "direct calls and comparisons retain owners and operators" {
         defer pool.deinit(std.testing.allocator);
         var env = TypeEnv.init(std.testing.allocator, &pool);
         defer env.deinit();
-        try env.populateSourceTypes(.{ .direct = .{ .store = &parser.type_store, .ir_view = view, .atoms = &atoms } });
+        try env.populateSourceTypes(.{ .direct = .{
+            .store = &parser.type_store,
+            .ir_view = view,
+            .atoms = &atoms,
+            .module_path = "/tests/direct-owner.ts",
+        } });
         try std.testing.expectEqual(pool.idx_number, env.getVarTypeForDeclaration(view, owner.declaration).?);
         try pool.ensureHealthy();
         try env.ensureHealthy();
@@ -6746,6 +6819,7 @@ fn parseDirectAnnotation(pool: *TypePool, annotation: []const u8) !TypeIndex {
         .store = accepted.type_store,
         .ir_view = accepted.ir_view,
         .atoms = accepted.atoms,
+        .module_path = "/tests/compound.ts",
     } });
     var owner: ?NodeIndex = null;
     for (frontend.parser.nodes.tags.items, 0..) |tag, index| {
@@ -7473,6 +7547,7 @@ fn expectDirectGenericConsumer(
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
     try direct_pool.ensureHealthy();
     try direct_env.ensureHealthy();
@@ -7649,6 +7724,7 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
     try direct_pool.ensureHealthy();
     try direct_env.ensureHealthy();
@@ -7891,6 +7967,7 @@ fn expectDirectCallOrderRefusal(
             .store = &parser.type_store,
             .ir_view = parserIrView(&parser),
             .atoms = &atoms,
+            .module_path = "test://direct",
         } }),
     );
     try std.testing.expect(env.sourceTypeMode() == null);
@@ -7972,6 +8049,7 @@ fn runDirectCallAllocationSweep(
         .store = &parser.type_store,
         .ir_view = parserIrView(&parser),
         .atoms = &atoms,
+        .module_path = "test://direct",
     } }) catch |err| {
         try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
         if (env.sourceTypeMode() == null) {
@@ -8124,6 +8202,7 @@ fn expectDirectPredicateConsumerInner(
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
     try direct_pool.ensureHealthy();
     try direct_env.ensureHealthy();
@@ -8438,6 +8517,7 @@ fn runPredicateAllocationSweep(
         .store = &parser.type_store,
         .ir_view = parserIrView(&parser),
         .atoms = &atoms,
+        .module_path = "test://direct",
     } }) catch |err| {
         try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
         if (env.sourceTypeMode() == null) {
@@ -8570,6 +8650,7 @@ fn runDirectGenericAllocationSweep(
         .store = &parser.type_store,
         .ir_view = parserIrView(&parser),
         .atoms = &atoms,
+        .module_path = "test://direct",
     } }) catch |err| {
         try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
         if (env.sourceTypeMode() == null) {
@@ -8640,6 +8721,7 @@ fn runDirectGenericMapAllocationSweep(
         .store = &parser.type_store,
         .ir_view = parserIrView(&parser),
         .atoms = &atoms,
+        .module_path = "test://direct",
     } }) catch |err| {
         try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
         if (env.sourceTypeMode() == null) {
@@ -8744,6 +8826,7 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
     try std.testing.expectEqual(type_env_mod.SourceTypeMode.direct, direct_env.sourceTypeMode().?);
     try std.testing.expectEqual(@as(usize, 1), direct_env.varAnnotationCount());
@@ -8867,6 +8950,7 @@ fn expectPilotCheckerContrast(
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
     var direct_checker = type_checker_mod.TypeChecker.init(
         std.testing.allocator,
@@ -8963,6 +9047,7 @@ test "direct source selection distinguishes omitted and empty inputs" {
         .store = &empty_parser.type_store,
         .ir_view = empty_view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
     try std.testing.expectEqual(type_env_mod.SourceTypeMode.direct, direct_env.sourceTypeMode().?);
     try std.testing.expectEqual(@as(usize, 0), direct_env.varAnnotationCount());
@@ -8979,6 +9064,7 @@ test "direct source selection distinguishes omitted and empty inputs" {
             .store = &empty_parser.type_store,
             .ir_view = empty_view,
             .atoms = &atoms,
+            .module_path = "test://direct",
         } }),
     );
     const empty_effects: effect_inference.EffectFacts = .{};
@@ -9072,6 +9158,7 @@ fn runDirectPilotAllocationSweep(
         .store = &parser.type_store,
         .ir_view = view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } }) catch |err| {
         if (env.sourceTypeMode() == null) {
             observations.unselected_plan_failures += 1;
@@ -9190,6 +9277,7 @@ fn expectDirectDeclarationConsumer(
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
     try direct_pool.ensureHealthy();
     try direct_env.ensureHealthy();
@@ -9294,6 +9382,7 @@ fn expectDirectGenericDeclarationFacts(
         .store = &parser.type_store,
         .ir_view = parserIrView(&parser),
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
     try pool.ensureHealthy();
     try env.ensureHealthy();
@@ -9603,6 +9692,7 @@ fn runDirectDeclarationAllocationSweep(
         .store = &parser.type_store,
         .ir_view = parserIrView(&parser),
         .atoms = &atoms,
+        .module_path = "test://direct",
     } }) catch |err| {
         if (env.sourceTypeMode() == .direct) {
             observations.selected_failures += 1;
@@ -9660,6 +9750,7 @@ fn runDirectGenericDeclarationAllocationSweep(
         .store = &parser.type_store,
         .ir_view = parserIrView(&parser),
         .atoms = &atoms,
+        .module_path = "test://direct",
     } }) catch |err| {
         try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
         if (env.sourceTypeMode() == .direct) {
@@ -9716,6 +9807,7 @@ test "direct source pilot compacts annotated parameters by final owner" {
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
     const signature_record = direct.type_store.function_signatures.items[0];
     const reference = direct_env.functionTypeRef(direct_view, signature_record.owner) orelse
@@ -9774,6 +9866,7 @@ fn expectDirectConsumerMatrixCase(
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
 
     try direct_pool.ensureHealthy();
@@ -10062,6 +10155,7 @@ fn expectDirectPrimitiveFacts(source: []const u8) !void {
         .store = &parser.type_store,
         .ir_view = view,
         .atoms = &atoms,
+        .module_path = "test://direct",
     } });
 
     try std.testing.expectEqual(@as(usize, 0), parser.type_store.annotations.items.len);
@@ -10124,6 +10218,7 @@ test "direct consumers preserve present null failure and hide refused expression
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
 
     try std.testing.expectEqual(
@@ -10242,6 +10337,7 @@ fn expectDirectFunctionCapsules(source: []const u8) !void {
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
 
     var direct_effects = try effect_inference.buildEffectFacts(
@@ -10375,13 +10471,13 @@ fn expectDirectSingleModuleContract(
     switch (profile) {
         .full => {
             try direct_session.initFull(std.testing.allocator, direct_parsed, .{
-                .source_types = .direct,
+                .source_types = .{ .direct = "test://direct" },
                 .strict = false,
             });
         },
         .sound_extraction => {
             try direct_session.initSoundExtraction(std.testing.allocator, direct_parsed, .{
-                .source_types = .direct,
+                .source_types = .{ .direct = "test://direct" },
                 .strict = false,
             });
         },
@@ -10413,9 +10509,9 @@ fn expectDirectSingleModuleContract(
 
 test "direct single-module full and sound extraction preserve contract bytes" {
     const fixtures = [_]struct { kind: ContractConsumerCase, source: []const u8, json_hash: u64 }{
-        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0xaa07bcb58e80a22 },
-        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0xbcc927433cf181e6 },
-        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0x415ebff34d5ae728 },
+        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0xc07f4daef904537b },
+        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0xde91e10037ae4d },
+        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0xfedb0391cbc01673 },
     };
     const fields = @typeInfo(ContractConsumerCase).@"enum".field_names;
     try std.testing.expectEqual(@as(usize, 3), fixtures.len);
@@ -10501,6 +10597,7 @@ fn expectDirectCallbackCeiling(
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
+        .module_path = "test://direct",
     } });
     const direct_parsed = pipeline_mod.ParsedModule.fromTypedExisting(
         direct_view,
@@ -10690,6 +10787,7 @@ test "admission header fallback preserves grouped and raw arrow type constructio
             .store = &direct.type_store,
             .ir_view = parserIrView(&direct),
             .atoms = &direct_atoms,
+            .module_path = "test://direct",
         } });
         try direct.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&direct));
         try std.testing.expectEqual(prior_type_nodes, direct_pool.nodes.items.len);
@@ -10777,5 +10875,189 @@ test "an undeclared type name is refused at the name" {
         14,
         "type name `Widget` is not declared",
         "declare it with `structural`, import it, or use a type name from `meta` ambient_names",
+    );
+}
+
+test "a nominal alias resolves its local unique-symbol brand query" {
+    try expectNamesResolve(
+        "import type { Nominal } from \"zttp:core\";\n" ++
+            "declare const idBrand: unique symbol;\n" ++
+            "type Id = Nominal<string, typeof idBrand>;\n",
+    );
+}
+
+test "a nominal alias admits a prospective file-import brand query" {
+    try expectNamesResolve(
+        "import type { brand } from \"./brand.ts\";\n" ++
+            "import type { Nominal } from \"zttp:core\";\n" ++
+            "type Id = Nominal<string, typeof brand>;\n",
+    );
+}
+
+test "a brand query outside imported Nominal is refused with ZTS001" {
+    const source =
+        "declare const brand: unique symbol;\n" ++
+        "type Leaked = typeof brand;\n";
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "names.ts");
+    defer frontend.deinit();
+    const errors = frontend.parserErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqualStrings("ZTS001", diagnostic_catalog.parserCode(errors[0].kind));
+    try std.testing.expectEqual(@as(u32, 50), errors[0].location.offset);
+    try std.testing.expectEqualStrings(
+        "a type-position `typeof` is not supported; write the type",
+        errors[0].message,
+    );
+    try std.testing.expect(frontend.acceptedCapabilities() == null);
+}
+
+test "a nested brand query outside imported Nominal is refused with ZTS001" {
+    const source =
+        "declare const brand: unique symbol;\n" ++
+        "type Nested = { value: typeof brand };\n";
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "names.ts");
+    defer frontend.deinit();
+    const errors = frontend.parserErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqualStrings("ZTS001", diagnostic_catalog.parserCode(errors[0].kind));
+    try std.testing.expectEqual(@as(u32, 59), errors[0].location.offset);
+    try std.testing.expectEqualStrings(
+        "a type-position `typeof` is not supported; write the type",
+        errors[0].message,
+    );
+    try std.testing.expect(frontend.acceptedCapabilities() == null);
+}
+
+test "nominal brand queries admit parsed trivia before the brand" {
+    const queries = [_][]const u8{
+        "typeof\tidBrand",
+        "typeof\nidBrand",
+        "typeof /* identity */ idBrand",
+    };
+    for (queries) |query| {
+        const source = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "import type {{ Nominal }} from \"zttp:core\";\n" ++
+                "declare const idBrand: unique symbol;\n" ++
+                "type Id = Nominal<string, {s}>;\n",
+            .{query},
+        );
+        defer std.testing.allocator.free(source);
+        try expectDirectSourceWithAllocator(std.testing.allocator, source);
+    }
+}
+
+test "nominal bases resolve transparent local scalar aliases" {
+    try expectDirectSourceWithAllocator(
+        std.testing.allocator,
+        "import type { Nominal } from \"zttp:core\";\n" ++
+            "type Text = string;\n" ++
+            "declare const idBrand: unique symbol;\n" ++
+            "type Id = Nominal<Text, typeof idBrand>;\n",
+    );
+}
+
+test "nominal bases refuse another nominal identity" {
+    const source =
+        "import type { Nominal } from \"zttp:core\";\n" ++
+        "declare const firstBrand: unique symbol;\n" ++
+        "declare const secondBrand: unique symbol;\n" ++
+        "type First = Nominal<string, typeof firstBrand>;\n" ++
+        "type Second = Nominal<First, typeof secondBrand>;\n";
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    try std.testing.expectError(error.InvalidNominalDeclaration, env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = parserIrView(&parser),
+        .atoms = &atoms,
+        .module_path = "test://nominal-base",
+    } }));
+}
+
+test "nominal bases resolve transparent imported scalar aliases" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "scalar_types.ts",
+        .data = "export type Text = string;\n",
+    });
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const entry_path = try std.fs.path.join(allocator, &.{ root_buffer[0..root_length], "entry.ts" });
+    defer allocator.free(entry_path);
+    const source =
+        "import type { Nominal } from \"zttp:core\";\n" ++
+        "import type { Text } from \"./scalar_types.ts\";\n" ++
+        "declare const idBrand: unique symbol;\n" ++
+        "type Id = Nominal<Text, typeof idBrand>;\n" ++
+        "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+    var contract = try pipeline_mod.extractContract(allocator, source, entry_path, .{
+        .strict = false,
+        .read_file = engine.file_io.readFileForModuleGraph,
+    });
+    defer contract.deinit(allocator);
+}
+
+test "an ordinary type query keeps the unsupported-type diagnostic" {
+    const source =
+        "const base: number = 1;\n" ++
+        "function f(x: typeof base): number { return x; }\n";
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "names.ts");
+    defer frontend.deinit();
+    const errors = frontend.parserErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
+    try std.testing.expectEqual(@as(u32, 38), errors[0].location.offset);
+    try std.testing.expectEqualStrings(
+        "a type-position `typeof` is not supported; write the type",
+        errors[0].message,
+    );
+    try std.testing.expect(frontend.acceptedCapabilities() == null);
+}
+
+test "an unbound nominal brand query keeps the unsupported-type diagnostic" {
+    const source =
+        "import type { Nominal } from \"zttp:core\";\n" ++
+        "type Id = Nominal<string, typeof Missing>;\n";
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "names.ts");
+    defer frontend.deinit();
+    const errors = frontend.parserErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
+    try std.testing.expectEqual(@as(u32, 68), errors[0].location.offset);
+    try std.testing.expectEqualStrings(
+        "a type-position `typeof` is not supported; write the type",
+        errors[0].message,
+    );
+}
+
+test "a type-alias brand query keeps the unsupported-type diagnostic" {
+    const source =
+        "import type { Nominal } from \"zttp:core\";\n" ++
+        "type BrandAlias = string;\n" ++
+        "type Id = Nominal<string, typeof BrandAlias>;\n";
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "names.ts");
+    defer frontend.deinit();
+    const errors = frontend.parserErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
+    try std.testing.expectEqual(@as(u32, 94), errors[0].location.offset);
+    try std.testing.expectEqualStrings(
+        "a type-position `typeof` is not supported; write the type",
+        errors[0].message,
     );
 }

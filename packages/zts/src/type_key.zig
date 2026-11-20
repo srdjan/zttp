@@ -64,9 +64,9 @@ pub const max_depth: usize = 64;
 /// two builds that disagree about the encoding hand the same type two
 /// identities. The version is what lets a client tell the two cases apart, so it
 /// moves whenever a byte of the encoding moves: a new tag, a changed prefix, a
-/// changed field order. It has never moved - the encoding shipped as version 1
-/// and the three extensions in the header above were part of that shipment.
-pub const serialization_version: u32 = 1;
+/// changed field order. Version 2 adds the source origin and construction
+/// policy to keys of source-defined nominal types.
+pub const serialization_version: u32 = 2;
 
 /// The hash `typeDigest` applies to the canonical string. Published beside the
 /// version because a client that recomputes a digest needs both, and neither is
@@ -108,7 +108,19 @@ const Encoder = struct {
 
         if (self.pool.isNominal(idx)) {
             const name = self.pool.nominalName(idx);
-            try w.print("N{d}:{s}", .{ name.len, name });
+            const origin = self.pool.nominalOrigin(idx) orelse return error.TypeKeyTooDeep;
+            if (origin.module_path.len == 0) {
+                try w.print("N{d}:{s}", .{ name.len, name });
+            } else {
+                const construction = self.pool.nominalConstruction(idx) orelse
+                    return error.TypeKeyTooDeep;
+                try w.print("O{d}:{s}@{d}/{d}", .{
+                    origin.module_path.len,
+                    origin.module_path,
+                    origin.declaration_start,
+                    @backingInt(construction),
+                });
+            }
         }
         try self.writeBody(idx, w);
     }

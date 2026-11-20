@@ -4038,3 +4038,136 @@ test "prepared evaluation keeps typed entry source through imported compilation"
     defer response.deinit();
     try std.testing.expectEqualStrings("ok", response.body);
 }
+
+test "type-only imports skip module initializers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "types.ts",
+        .data =
+        \\export structural Message = { text: string };
+        \\function reject(value: boolean): number { assert value; return 1; }
+        \\const marker: number = reject(false);
+        ,
+    });
+    const source =
+        \\import type { Message } from "./types.ts";
+        \\function render(value: Message): string { return value.text; }
+        \\function handler(req: Request): Response { return Response.text(render({ text: "type-only" })); }
+    ;
+    const entry_path = try std.fs.path.resolve(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..], "entry.ts" });
+    const runtime = try HandlerInstance.init(allocator, .{});
+    defer runtime.deinit();
+    try runtime.loadCode(source, entry_path);
+    var response = try runtime.executeHandler(.{ .method = "GET", .url = "/", .headers = .empty, .body = null });
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("type-only", response.body);
+}
+
+test "type-only imports release compiled functions" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "types.ts",
+        .data =
+        \\export type Message = { text: string };
+        \\function unused(): number { return 1; }
+        ,
+    });
+    const entry_path = try std.fs.path.resolve(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..], "entry.ts" });
+    defer allocator.free(entry_path);
+    const runtime = try HandlerInstance.init(allocator, .{});
+    defer runtime.deinit();
+    try runtime.loadCode(
+        \\import type { Message } from "./types.ts";
+        \\function handler(req: Request): Response {
+        \\  const message: Message = { text: "clean" };
+        \\  return Response.text(message.text);
+        \\}
+    , entry_path);
+    var response = try runtime.executeHandler(.{ .method = "GET", .url = "/", .headers = .empty, .body = null });
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("clean", response.body);
+}
+
+test "type-only imports preserve boolean condition refusal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "types.ts", .data = "export type Message = string;\n" });
+    const entry_path = try std.fs.path.resolve(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..], "entry.ts" });
+    const runtime = try HandlerInstance.init(allocator, .{});
+    defer runtime.deinit();
+    try std.testing.expectError(error.SoundModeViolation, runtime.loadCode(
+        \\import type { Message } from "./types.ts";
+        \\function handler(req: Request): Response {
+        \\  if (1) { return Response.text("bad"); }
+        \\  return Response.text("ok");
+        \\}
+    , entry_path));
+}
+
+test "type-only imports skip transitive runtime initializers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "value.ts",
+        .data =
+        \\function reject(value: boolean): number { assert value; return 1; }
+        \\export const marker: number = reject(false);
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "types.ts",
+        .data =
+        \\import { marker } from "./value.ts";
+        \\export structural Message = { text: string };
+        \\const retained: number = marker;
+        ,
+    });
+    const source =
+        \\import type { Message } from "./types.ts";
+        \\function render(value: Message): string { return value.text; }
+        \\function handler(req: Request): Response { return Response.text(render({ text: "transitive" })); }
+    ;
+    const entry_path = try std.fs.path.resolve(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..], "entry.ts" });
+    const runtime = try HandlerInstance.init(allocator, .{});
+    defer runtime.deinit();
+    try runtime.loadCode(source, entry_path);
+    var response = try runtime.executeHandler(.{ .method = "GET", .url = "/", .headers = .empty, .body = null });
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("transitive", response.body);
+}
+
+test "nominal construction retains nested generic call arguments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
+        \\declare const idBrand: unique symbol;
+        \\type Id = Nominal<string, typeof idBrand>;
+        \\function identity<T>(value: T): T { return value; }
+        \\function handler(req: Request): Response { return Response.text(nominal<Id>(identity<string>("typed"))); }
+    ;
+    const runtime = try HandlerInstance.init(allocator, .{});
+    defer runtime.deinit();
+    try runtime.loadCode(source, "/runtime-test/nominal.ts");
+    var response = try runtime.executeHandler(.{ .method = "GET", .url = "/", .headers = .empty, .body = null });
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("typed", response.body);
+}

@@ -79,8 +79,11 @@ fn collect(
     if (tag == .lit_bool) return (view.getBoolValue(node) orelse return false) != negated;
     if (tag == .unary_op) {
         const unary = view.getUnary(node) orelse return false;
-        if (unary.op != .not) return false;
-        return collect(allocator, ctx, unary.operand, !negated, out, depth + 1);
+        return switch (unary.op) {
+            .transparent => collect(allocator, ctx, unary.operand, negated, out, depth + 1),
+            .not => collect(allocator, ctx, unary.operand, !negated, out, depth + 1),
+            else => false,
+        };
     }
     if (tag == .binary_op) {
         const binary = view.getBinary(node) orelse return false;
@@ -387,6 +390,37 @@ test "flow evidence keeps request conjunctions and negates one sufficient clause
     try std.testing.expect(negative.complete);
     try std.testing.expectEqual(@as(usize, 1), negative.constraints.len);
     try std.testing.expectEqualStrings("POST", negative.constraints[0].req_method_not);
+}
+
+test "flow evidence forwards a transparent boolean condition" {
+    const allocator = std.testing.allocator;
+    var store = ir.IRStore.init(allocator);
+    defer store.deinit();
+    var constants = ir.ConstantPool.init(allocator);
+    defer constants.deinit();
+    const loc: ir.SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+    const operand = try store.addBool(loc, true);
+    const wrapped = try store.addUnary(loc, .{ .op = .transparent, .operand = operand });
+    const Fixture = struct {
+        fn field(_: *anyopaque, _: ir.NodeIndex) ?RequestField {
+            return null;
+        }
+
+        fn origin(_: *anyopaque, _: ir.NodeIndex) ?Origin {
+            return null;
+        }
+    };
+    var context: u8 = 0;
+    const result = try condition(allocator, .{
+        .ir_view = ir.IrView.fromIRStore(&store, &constants),
+        .userdata = &context,
+        .requestField = Fixture.field,
+        .ioOrigin = Fixture.origin,
+    }, wrapped, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.complete);
+    try std.testing.expectEqual(@as(usize, 0), result.constraints.len);
 }
 
 test "negated conjunction keeps the entire sufficient nested predicate" {

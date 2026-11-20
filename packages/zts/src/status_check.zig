@@ -164,6 +164,7 @@ pub fn literalNumber(view: ir.IrView, node: ir.NodeIndex) ?f64 {
         },
         .unary_op => {
             const unary = view.getUnary(node) orelse return null;
+            if (unary.op == .transparent) return literalNumber(view, unary.operand);
             if (unary.op != .neg) return null;
             const operand = view.getTag(unary.operand) orelse return null;
             if (operand != .lit_int and operand != .lit_float) return null;
@@ -233,6 +234,22 @@ test "holds reads the operands in source order" {
     const flipped: Comparison = .{ .op = .lt, .literal = 300, .literal_left = true };
     try std.testing.expect(!holds(flipped, 200));
     try std.testing.expect(holds(flipped, 400));
+}
+
+test "literalNumber forwards a transparent literal wrapper" {
+    const allocator = std.testing.allocator;
+    var store = ir.IRStore.init(allocator);
+    defer store.deinit();
+    var constants = ir.ConstantPool.init(allocator);
+    defer constants.deinit();
+    const loc: ir.SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+    const operand = try store.addInt(loc, 404);
+    const wrapped = try store.addUnary(loc, .{ .op = .transparent, .operand = operand });
+
+    try std.testing.expectEqual(
+        @as(?f64, 404),
+        literalNumber(ir.IrView.fromIRStore(&store, &constants), wrapped),
+    );
 }
 
 test "classify forks only on the complement of ok" {

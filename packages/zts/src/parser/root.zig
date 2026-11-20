@@ -29,6 +29,7 @@ const value = @import("../value.zig");
 const string = @import("../string.zig");
 const atom_table_mod = @import("../atom_table.zig");
 const object = @import("../object.zig");
+const builtin_modules = @import("../builtin_modules.zig");
 
 // Re-export all parser components
 // The IR store as a module, for a consumer in another build module that
@@ -150,6 +151,11 @@ pub const Parser = struct {
                     self.js_parser.type_store.allocator,
                     IrView.fromIRStore(&self.js_parser.nodes, &self.js_parser.constants),
                 );
+                try markIntrinsicValidationRequirement(
+                    self.allocator,
+                    &self.js_parser,
+                    self.atoms,
+                );
                 self.root_node = root;
                 self.typed_phase = .ir_ready;
             },
@@ -160,6 +166,11 @@ pub const Parser = struct {
 
     pub fn generateParsed(self: *Parser, codegen_allocator: std.mem.Allocator) ![]const u8 {
         if (self.typed_phase != .ir_ready) return error.InvalidParserPhase;
+        if (self.js_parser.type_store.requires_intrinsic_validation and
+            !self.js_parser.type_store.intrinsics_validated)
+        {
+            return error.UnvalidatedIntrinsicSource;
+        }
         self.typed_phase = .attempted;
         self.code_gen = CodeGen.initWithIRStore(
             codegen_allocator,
@@ -279,6 +290,41 @@ pub const Parser = struct {
     }
 };
 
+/// Mark a parsed source when a value import names a compiler-owned intrinsic.
+/// The marker covers unused imports because no call record is required.
+pub fn markIntrinsicValidationRequirement(
+    _: std.mem.Allocator,
+    p: *JsParser,
+    atoms: ?*atom_table_mod.AtomTable,
+) !void {
+    if (p.type_store.requires_intrinsic_validation) return;
+    const view = IrView.fromIRStore(&p.nodes, &p.constants);
+    for (0..view.nodeCount()) |raw_node| {
+        const node: NodeIndex = @intCast(raw_node);
+        if (view.getTag(node) != .import_decl) continue;
+        const declaration = view.getImportDecl(node) orelse continue;
+        const specifier = view.getString(declaration.module_idx) orelse continue;
+        for (0..declaration.specifiers_count) |raw_specifier_index| {
+            const specifier_node = view.getListIndex(
+                declaration.specifiers_start,
+                @intCast(raw_specifier_index),
+            );
+            const import_specifier = view.getImportSpec(specifier_node) orelse continue;
+            const atom: object.Atom = @fromBackingInt(@intCast(import_specifier.imported_atom));
+            const imported_name = if (atom.isPredefined())
+                atom.toPredefinedName()
+            else if (atoms) |table|
+                table.getName(atom)
+            else
+                view.getString(import_specifier.imported_atom);
+            const name = imported_name orelse continue;
+            if (builtin_modules.findIntrinsic(specifier, name) == null) continue;
+            p.type_store.requires_intrinsic_validation = true;
+            return;
+        }
+    }
+}
+
 test "root module imports" {
     // Just verify imports work
     _ = Token;
@@ -291,6 +337,7 @@ test "root module imports" {
 
 // Pull in tests from submodules
 test {
+    _ = @import("codegen.zig");
     _ = @import("ir_opt.zig");
     _ = @import("trivia.zig");
     _ = @import("ir_children_tests.zig");
@@ -324,6 +371,77 @@ test "Parser API" {
     try std.testing.expectEqual(@backingInt(bytecode.Opcode.push_1), bytecode_data[0]);
     try std.testing.expectEqual(@backingInt(bytecode.Opcode.put_global), bytecode_data[1]);
     try std.testing.expectEqual(@backingInt(bytecode.Opcode.ret_undefined), bytecode_data[4]);
+}
+
+test "typed generation refuses a core intrinsic import without semantic validation" {
+    const allocator = std.testing.allocator;
+    const source =
+        "import type { Nominal } from \"zttp:core\";\n" ++
+        "import { nominal } from \"zttp:core\";\n" ++
+        "declare const idBrand: unique symbol;\n" ++
+        "type Id = Nominal<string, typeof idBrand>;\n";
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+    var atoms = atom_table_mod.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var p = try Parser.initTyped(allocator, allocator, source, &strings, &atoms);
+    defer p.deinit();
+    switch (try p.parseTypedIr()) {
+        .accepted => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectError(error.UnvalidatedIntrinsicSource, p.generateParsed(allocator));
+}
+
+test "intrinsic generation guard recognizes an escaped module specifier before call validation" {
+    const allocator = std.testing.allocator;
+    const source =
+        "import { nominal } from \"zttp\\x3acore\";\n" ++
+        "const value = nominal(1);\n";
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+    var atoms = atom_table_mod.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var p = try Parser.initTyped(allocator, allocator, source, &strings, &atoms);
+    defer p.deinit();
+    switch (try p.parseTypedIr()) {
+        .accepted => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectError(error.UnvalidatedIntrinsicSource, p.generateParsed(allocator));
+}
+
+test "value import IR stores one canonical module specifier" {
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{
+            .source = "import { nominal } from \"zttp\\x3acore\";",
+            .expected = "zttp:core",
+        },
+        .{
+            .source = "import { item } from \"./dir\\\\name.ts\";",
+            .expected = "./dir\\name.ts",
+        },
+    };
+    for (cases) |case| {
+        var parser = try JsParser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .compile,
+        );
+        defer parser.deinit();
+        _ = try parser.parse();
+        const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+        var found: ?[]const u8 = null;
+        for (0..view.nodeCount()) |raw| {
+            const node: NodeIndex = @intCast(raw);
+            if (view.getTag(node) != .import_decl) continue;
+            const declaration = view.getImportDecl(node) orelse continue;
+            found = view.getString(declaration.module_idx);
+            break;
+        }
+        try std.testing.expectEqualStrings(case.expected, found orelse return error.ImportNotFound);
+    }
 }
 
 test "Parser API getImports returns imported names" {

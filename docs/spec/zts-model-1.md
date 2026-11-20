@@ -160,8 +160,10 @@ target class compile, run, and verify without:
 The live compiler implements the `zts-model-1` language boundary described by
 this revision:
 
-- `structural` aliases and scalar `nominal` identities are the only source
-  declaration spellings;
+- Standard `type` aliases and exact unique-symbol brand declarations are
+  admitted;
+- legacy `structural` and `nominal` declarations remain admitted during the
+  approved migration window;
 - boolean-only conditions, boolean operators, and predicates have no
   JavaScript truthiness or operand-returning behavior;
 - text construction uses double-quoted literals, explicit `String(value)`
@@ -272,7 +274,7 @@ Examples of level-1 exclusion:
 - `assert` for invariants and `if` plus `return` for expected guards
 - named reusable functions, not exported or reusable function-valued
   constants
-- `structural`, not `type` or `interface`, for application data contracts
+- `type`, not `interface`, for application data contracts
 - annotations and narrowing, not `as` or `satisfies`
 - `Dict`, not computed keys on shape records
 
@@ -701,11 +703,17 @@ The profile permits:
 ```ts
 import { name, other as local } from "./module.ts";
 import { fetch } from "zttp:fetch";
+import { nominal } from "zttp:core";
+import type { Nominal } from "zttp:core";
 import type { Order } from "./order.ts";
 
-export structural User = { readonly id: UserId; name: string };
-export nominal UserId = string;
+declare const userIdBrand: unique symbol;
+export type User = { readonly id: UserId; name: string };
+export type UserId = Nominal<string, typeof userIdBrand>;
 export function loadUser(id: UserId): Result<User, LoadError> { ... }
+export function makeUserId(value: string): UserId {
+  return nominal<UserId>(value);
+}
 export const version: string = "1";
 ```
 
@@ -1011,6 +1019,11 @@ their identities. The serialization is a versioned registry artifact
 published through `meta.payload.type_serialization`, so an independent
 implementation can reproduce every digest.
 
+Serialization version 2 includes the module path, declaration offset, and
+construction policy of each source-defined nominal identity. Such a digest
+has the scope of those normalized module paths. Artifact acceptance uses the
+executable graph and does not compare these type digests.
+
 The pure intrinsic `String(value)` is the explicit conversion from a number or
 boolean to text.
 Number formatting uses the ECMAScript base-10 shortest-round-trip
@@ -1243,35 +1256,79 @@ No runtime stack cap may be presented as a termination proof.
 
 ### 5.7 Types
 
-The canonical type declaration forms are:
+The standard transparent alias form is:
+
+```ts
+type Name<T> = Type;
+```
+
+The alias reuses the existing structural type semantics. Generic constraints,
+recursion checks, export behavior, and source locations stay unchanged.
+Open interfaces, declaration merging, inheritance, and `implements` remain
+excluded.
+
+The explicit nominal form is:
+
+```ts
+import { nominal } from "zttp:core";
+import type { Nominal } from "zttp:core";
+
+declare const userIdBrand: unique symbol;
+type UserId = Nominal<string, typeof userIdBrand>;
+
+const id: UserId = nominal<UserId>("u1");
+```
+
+The `declare` form is erased and creates no runtime value. The exact permitted
+form is an optionally exported top-level `declare const`. Its type is
+`unique symbol`. Other ambient declarations remain excluded.
+
+The `typeof` query is permitted only as the identity argument of `Nominal`.
+The query must resolve to an admitted unique-symbol brand declaration. Other
+type queries remain excluded.
+
+`Nominal` must resolve from a type-only import of `zttp:core`. `nominal` must
+resolve from a value import of the same module. Import aliases retain the same
+authority. A local or foreign name with the same spelling has no authority.
+
+The first `Nominal` argument resolves to unbranded `string`, `number`, or
+`boolean`. Transparent aliases keep that base. Its second argument is one
+resolved brand identity. The identity includes the source module and the
+declaration location. Separate declarations remain distinct.
+
+The `nominal<T>(value)` intrinsic requires one explicit nominal target and one
+value. The value must have the target's exact unbranded primitive base. The
+intrinsic preserves the runtime value, labels, effects, and source-exact mark.
+A brand declaration cannot be read at runtime.
+
+The general `symbol` type, symbol values, and other unique-symbol types remain
+excluded. The exact brand declaration is the only symbol-related admission.
+
+The legacy declarations remain admitted during this migration window:
 
 ```ts
 structural Name<T> = Type;
 nominal UserId = string;
 ```
 
-`type`, `distinct type`, and `interface` are excluded. `structural` is the one
-transparent alias declaration; `nominal` is the one scalar identity
-declaration. Open interfaces, declaration merging, inheritance, and
-`implements` remain excluded.
+The legacy `nominal` form keeps annotated construction during this window.
+The later source cutover removes the legacy admission. This section does not
+claim that the cutover has happened.
 
 A `nominal` declaration is over `string`, `number`, or `boolean`. A `nominal`
 declaration over a record, tuple, union, or function type is refused (ZTS048).
-A `structural` or `nominal` declaration MUST NOT redefine an ambient type name
-or a name that an `import type` binds (ZTS019), such as `structural Request =
-number;` and `structural string = number;`.
+A type declaration MUST NOT redefine an ambient type name or an imported type
+name (ZTS019). This rule applies to standard and legacy declaration forms.
 
-`nominal UserId = string;` introduces:
+During the migration window, `nominal UserId = string;` defines one identity
+over `string`. An annotated declaration is its implicit construction point:
 
 ```ts
-UserId(value: string): UserId
+const id: UserId = "u1";
 ```
 
-The constructor is pure, total, and represented at runtime by the unchanged
-base value. Only that constructor or a function already returning `UserId` can
-create the nominal type. A distinct value supports the operations of its base
-type, but a raw base value or a different nominal type is not assignable to
-it.
+The compiler refuses `UserId("u1")`. Construction is pure, total, and keeps the
+unchanged base value. A different nominal type is not assignable to `UserId`.
 
 Admitted types are:
 
@@ -1282,7 +1339,8 @@ Admitted types are:
 - fixed records with readonly and optional fields
 - function types
 - unions and intersections
-- named `structural` aliases and scalar `nominal` identities
+- named `type` and legacy `structural` aliases
+- explicit `Nominal` identities and legacy scalar `nominal` identities
 - generic applications and constrained generic parameters
 - template literal types
 - `Proof` and `Effects` capsules
@@ -1340,13 +1398,14 @@ Excluded type features are:
 - `as`, angle-bracket assertions, and `satisfies`
 - generic parameters on function types (higher-rank polymorphism)
 - the utility types `Partial`, `Required`, `Pick`, `Omit`, and `Readonly<T>`;
-  write an explicit `structural` declaration and the `readonly` modifier
+  write an explicit `type` declaration and the `readonly` modifier
   (ZTS065)
 - `keyof`, indexed-access types, and index signatures
-- type-position `typeof`
+- type-position `typeof`, except for one resolved brand identity in `Nominal`
 - conditional, distributive, mapped, and inferred types
 - overload declarations
-- ambient declarations and namespaces
+- ambient declarations, except the exact unique-symbol brand declaration,
+  and namespaces
 - enums
 - decorators and access modifiers
 
@@ -1833,12 +1892,16 @@ Import       ::= "import" ["type"] "{" ImportNames "}" "from" String ";"
 ImportNames  ::= ImportName ("," ImportName)* [","]
 ImportName   ::= Ident ["as" Ident]
 
-TopDecl      ::= ["export"] StructuralDecl
+TopDecl      ::= ["export"] TypeAliasDecl
+               | ["export"] UniqueSymbolDecl
+               | ["export"] StructuralDecl
                | ["export"] NominalDecl
                | ["export"] FunctionDecl
                | ["export"] TopBindingDecl
                | RegistrationCall
 
+TypeAliasDecl ::= "type" Ident TypeParams? "=" Type ";"
+UniqueSymbolDecl ::= "declare" "const" Ident ":" "unique" "symbol" ";"
 StructuralDecl ::= "structural" Ident TypeParams? "=" Type ";"
 NominalDecl  ::= "nominal" Ident "=" ScalarType ";"
 TypeParams   ::= "<" TypeParam ("," TypeParam)* ">"
@@ -1933,10 +1996,13 @@ PrimaryType  ::= NonTuplePrimaryType | TupleType
 NonTuplePrimaryType ::= Primitive
                | LiteralType
                | Ident TypeArgs?
+               | BrandQuery
                | RecordType
                | FunctionType
                | TemplateLiteralType
                | "(" Type ")"
+
+BrandQuery   ::= "typeof" Ident
 
 Primitive    ::= "unknown" | "never" | "undefined" | "null"
                | "boolean" | "number" | "string" | "Bytes"
@@ -1968,10 +2034,13 @@ The advanced surface is intentionally richer than the executable kernel.
 
 | Surface form | Canonical elaboration |
 |---|---|
-| type annotations and structural aliases | erased after producing checked type evidence |
+| type annotations, `type` aliases, and legacy `structural` aliases | erased after producing checked type evidence |
+| unique-symbol brand declaration | erased identity keyed by its module and declaration location |
 | constrained generics | checker instantiation, then erasure |
 | contractive recursive aliases | finite named type graph, then erasure |
-| `nominal` | nominal checker identity plus specified scalar base |
+| `Nominal<Base, typeof brand>` | explicit nominal checker identity plus specified scalar base |
+| `nominal<T>(value)` | checked transparent construction of an explicit nominal identity |
+| legacy `nominal` | nominal checker identity plus specified scalar base during migration |
 | optional member access | evaluate receiver once, branch on `null` or `undefined` |
 | nullish coalescing | evaluate left once, branch on `null` or `undefined` |
 | pure conditional expression | evaluate the boolean condition and exactly one branch |

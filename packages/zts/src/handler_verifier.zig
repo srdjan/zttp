@@ -1539,14 +1539,13 @@ pub const HandlerVerifier = struct {
     /// The guard that an `if` condition forms: exactly `b.ok` or `!b.ok` on a
     /// Result binding. Every other condition is not a guard.
     fn resultGuard(self: *const HandlerVerifier, condition: NodeIndex) ?ResultGuard {
-        const tag = self.ir_view.getTag(condition) orelse return null;
         var negated = false;
-        var subject = condition;
-        if (tag == .unary_op) {
-            const unary = self.ir_view.getUnary(condition) orelse return null;
+        var subject = self.ir_view.unwrapTransparent(condition);
+        if (self.ir_view.getTag(subject) == .unary_op) {
+            const unary = self.ir_view.getUnary(subject) orelse return null;
             if (unary.op != .not) return null;
             negated = true;
-            subject = unary.operand;
+            subject = self.ir_view.unwrapTransparent(unary.operand);
         }
         if (self.ir_view.getTag(subject) != .member_access) return null;
         const member = self.ir_view.getMember(subject) orelse return null;
@@ -2785,6 +2784,7 @@ fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32) !void {
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     @import("abi_types.zig").populateHandlerAbiTypes(&env, &pool, allocator);
     try env.populateSourceTypes(.{ .direct = .{
+        .module_path = "handler-verifier-test.ts",
         .store = &parser.type_store,
         .ir_view = ir_view,
         .atoms = &atoms,

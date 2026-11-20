@@ -219,6 +219,7 @@ fn analyze(src: []const u8, stats: *ShapeStats) !void {
     module_types.populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
     env.populateSourceTypes(.{ .direct = .{
+        .module_path = "fuzz.ts",
         .store = &parser.type_store,
         .ir_view = view,
         .atoms = &atoms,

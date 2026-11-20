@@ -2820,6 +2820,7 @@ fn checkDirectWithSections(
     h.env = TypeEnv.init(testing.allocator, &h.pool);
     errdefer h.env.deinit();
     try h.env.populateSourceTypes(.{ .direct = .{
+        .module_path = "strict-checker-test.ts",
         .store = &h.parser.type_store,
         .ir_view = view,
         .atoms = &h.atoms,

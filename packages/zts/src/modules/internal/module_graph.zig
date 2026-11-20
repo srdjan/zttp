@@ -68,6 +68,7 @@ pub const Module = struct {
     path: []const u8,
     source: []const u8,
     dependencies: []ModuleIndex,
+    type_dependencies: []ModuleIndex = &.{},
     state: DfsState,
 
     const DfsState = enum { unvisited, visiting, visited };
@@ -90,6 +91,9 @@ pub const Module = struct {
         allocator.free(self.source);
         if (self.dependencies.len > 0) {
             allocator.free(self.dependencies);
+        }
+        if (self.type_dependencies.len > 0) {
+            allocator.free(self.type_dependencies);
         }
     }
 };
@@ -149,6 +153,7 @@ pub const ModuleGraph = struct {
     allocator: std.mem.Allocator,
     modules: std.StringHashMap(ModuleIndex),
     module_list: std.ArrayList(Module),
+    analysis_order: []ModuleIndex,
     execution_order: []ModuleIndex,
     /// Detail of the last refusal that `checkBindings` returned.
     binding_refusal: ?BindingRefusal = null,
@@ -163,6 +168,7 @@ pub const ModuleGraph = struct {
             .allocator = allocator,
             .modules = std.StringHashMap(ModuleIndex).init(allocator),
             .module_list = std.ArrayList(Module).empty,
+            .analysis_order = &.{},
             .execution_order = &.{},
         };
     }
@@ -173,6 +179,9 @@ pub const ModuleGraph = struct {
         }
         self.module_list.deinit(self.allocator);
         self.modules.deinit();
+        if (self.analysis_order.len > 0) {
+            self.allocator.free(self.analysis_order);
+        }
         if (self.execution_order.len > 0) {
             self.allocator.free(self.execution_order);
         }
@@ -228,10 +237,21 @@ pub const ModuleGraph = struct {
     }
 
     /// Get the number of modules (excluding the entry file)
-    pub fn dependencyCount(self: *const ModuleGraph) usize {
+    pub fn runtimeDependencyCount(self: *const ModuleGraph) usize {
         if (self.execution_order.len == 0) return 0;
-        // Last element in execution_order is the entry file
         return self.execution_order.len - 1;
+    }
+
+    pub fn analysisDependencyCount(self: *const ModuleGraph) usize {
+        if (self.analysis_order.len == 0) return 0;
+        return self.analysis_order.len - 1;
+    }
+
+    pub fn runtimePosition(self: *const ModuleGraph, module_index: ModuleIndex) ?usize {
+        for (self.execution_order, 0..) |candidate, position| {
+            if (candidate == module_index) return position;
+        }
+        return null;
     }
 
     /// Build the module graph starting from the entry file.
@@ -285,8 +305,8 @@ pub const ModuleGraph = struct {
         // Recursively discover dependencies
         try self.discoverDependencies(entry_idx, reader, 0);
 
-        // Topological sort
-        try self.topologicalSort();
+        self.analysis_order = try self.topologicalSort(entry_idx, true);
+        self.execution_order = try self.topologicalSort(entry_idx, false);
     }
 
     /// Add a module to the graph. Takes ownership of both path and source.
@@ -310,6 +330,7 @@ pub const ModuleGraph = struct {
             .path = owned_path,
             .source = owned_source,
             .dependencies = &.{},
+            .type_dependencies = &.{},
             .state = .unvisited,
         });
         ownership_transferred = true;
@@ -330,8 +351,11 @@ pub const ModuleGraph = struct {
         const module_path = module.path;
 
         // Quick-parse to extract import declarations
+        var atoms = atom_table_mod.AtomTable.init(self.allocator);
+        defer atoms.deinit();
         var js_parser = try module.initParser(self.allocator);
         defer js_parser.deinit();
+        js_parser.setAtomTable(&atoms);
 
         _ = module.parse(&js_parser) catch return; // Parse errors handled later during compilation
         const view = zts_parser.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
@@ -339,6 +363,8 @@ pub const ModuleGraph = struct {
         // Extract file imports
         var deps = std.ArrayList(ModuleIndex).empty;
         errdefer deps.deinit(self.allocator);
+        var type_deps = std.ArrayList(ModuleIndex).empty;
+        errdefer type_deps.deinit(self.allocator);
 
         const node_count = view.nodeCount();
         for (0..node_count) |idx| {
@@ -351,50 +377,68 @@ pub const ModuleGraph = struct {
             // Only process file imports (skip virtual modules)
             const resolve_result = resolver.resolve(module_str);
             switch (resolve_result) {
-                .file => |specifier| {
-                    const importing_dir = file_resolver.dirName(module_path);
-                    const resolved_path = try file_resolver.resolve(self.allocator, specifier, importing_dir, null);
-
-                    // Check if already in graph (dedup)
-                    if (self.modules.get(resolved_path)) |existing_idx| {
-                        self.allocator.free(resolved_path);
-                        try deps.append(self.allocator, existing_idx);
-                        continue;
-                    }
-
-                    // Read the file
-                    const dep_source = reader.read(self.allocator, resolved_path) catch {
-                        self.recordImportRefusal(.unreadable, module_path, specifier);
-                        self.allocator.free(resolved_path);
-                        return error.ImportFileNotFound;
-                    };
-
-                    // Admit before addModule, which frees the path when it fails.
-                    admitModule(self.allocator, dep_source, resolved_path) catch |err| {
-                        if (err != error.OutOfMemory) self.recordImportRefusal(.not_admitted, resolved_path, "");
-                        self.allocator.free(resolved_path);
-                        self.allocator.free(dep_source);
-                        return err;
-                    };
-
-                    // addModule takes ownership of resolved_path and dep_source
-                    const dep_idx = try self.addModule(resolved_path, dep_source, false);
-
-                    try deps.append(self.allocator, dep_idx);
-
-                    // Recurse into the dependency
+                .file => |specifier| if (try self.appendFileDependency(&deps, module_path, specifier, reader)) |dep_idx| {
                     try self.discoverDependencies(dep_idx, reader, depth + 1);
                 },
                 .virtual, .unknown => {},
             }
         }
 
+        for (js_parser.type_store.type_only_modules.items) |type_module| {
+            const module_str = js_parser.type_store.typeOnlySpecifier(type_module) orelse continue;
+            switch (resolver.resolve(module_str)) {
+                .file => |specifier| if (try self.appendFileDependency(&type_deps, module_path, specifier, reader)) |dep_idx| {
+                    try self.discoverDependencies(dep_idx, reader, depth + 1);
+                },
+                .virtual, .unknown => {},
+            }
+        }
+
+        const owned_deps = try deps.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(owned_deps);
+        const owned_type_deps = try type_deps.toOwnedSlice(self.allocator);
+
         // Re-fetch module pointer (module_list may have been reallocated)
         module = &self.module_list.items[module_idx];
-        module.dependencies = try deps.toOwnedSlice(self.allocator);
+        module.dependencies = owned_deps;
+        module.type_dependencies = owned_type_deps;
     }
 
-    fn topologicalSort(self: *ModuleGraph) !void {
+    fn appendFileDependency(
+        self: *ModuleGraph,
+        dependencies: *std.ArrayList(ModuleIndex),
+        module_path: []const u8,
+        specifier: []const u8,
+        reader: SourceReader,
+    ) !?ModuleIndex {
+        const importing_dir = file_resolver.dirName(module_path);
+        const resolved_path = try file_resolver.resolve(self.allocator, specifier, importing_dir, null);
+
+        if (self.modules.get(resolved_path)) |existing_idx| {
+            self.allocator.free(resolved_path);
+            try dependencies.append(self.allocator, existing_idx);
+            return null;
+        }
+
+        const dep_source = reader.read(self.allocator, resolved_path) catch {
+            self.recordImportRefusal(.unreadable, module_path, specifier);
+            self.allocator.free(resolved_path);
+            return error.ImportFileNotFound;
+        };
+
+        admitModule(self.allocator, dep_source, resolved_path) catch |err| {
+            if (err != error.OutOfMemory) self.recordImportRefusal(.not_admitted, resolved_path, "");
+            self.allocator.free(resolved_path);
+            self.allocator.free(dep_source);
+            return err;
+        };
+
+        const dep_idx = try self.addModule(resolved_path, dep_source, false);
+        try dependencies.append(self.allocator, dep_idx);
+        return dep_idx;
+    }
+
+    fn topologicalSort(self: *ModuleGraph, entry_idx: ModuleIndex, include_type_dependencies: bool) ![]ModuleIndex {
         var order = std.ArrayList(ModuleIndex).empty;
         errdefer order.deinit(self.allocator);
 
@@ -403,14 +447,8 @@ pub const ModuleGraph = struct {
             m.state = .unvisited;
         }
 
-        // DFS from each unvisited module
-        for (0..self.module_list.items.len) |i| {
-            if (self.module_list.items[i].state == .unvisited) {
-                try self.dfsVisit(@intCast(i), &order);
-            }
-        }
-
-        self.execution_order = try order.toOwnedSlice(self.allocator);
+        try self.dfsVisit(entry_idx, &order, include_type_dependencies);
+        return order.toOwnedSlice(self.allocator);
     }
 
     /// Format the last `checkBindings` refusal into `buffer`. Paths appear as the
@@ -459,7 +497,7 @@ pub const ModuleGraph = struct {
     pub fn checkBindings(self: *ModuleGraph) CheckBindingsError!void {
         if (self.binding_refusal) |refusal| self.allocator.free(refusal.name);
         self.binding_refusal = null;
-        if (self.dependencyCount() == 0) return;
+        if (self.runtimeDependencyCount() == 0) return;
 
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
@@ -486,7 +524,7 @@ pub const ModuleGraph = struct {
 
             const importing_dir = file_resolver.dirName(module.path);
             for (imports) |import| {
-                const target = try self.fileImportTarget(arena, import.specifier, importing_dir) orelse continue;
+                const target = try self.fileImportTarget(arena, module.path, import.specifier) orelse continue;
                 if (!facts[target].exports.contains(import.imported)) {
                     return self.refuse(.missing_export, import.imported, module.path, self.module_list.items[target].path);
                 }
@@ -523,7 +561,7 @@ pub const ModuleGraph = struct {
     ) CheckBindingsError![]const u8 {
         for (imports) |import| {
             if (!std.mem.eql(u8, import.local, name)) continue;
-            const owner_path: []const u8 = if (try self.fileImportTarget(arena, import.specifier, importing_dir)) |target|
+            const owner_path: []const u8 = if (try self.fileImportTargetInDir(arena, import.specifier, importing_dir)) |target|
                 self.module_list.items[target].path
             else
                 import.specifier;
@@ -564,14 +602,24 @@ pub const ModuleGraph = struct {
             try links.append(arena, .{
                 .specifier = import.specifier,
                 .imported = import.imported,
-                .target = try self.fileImportTarget(arena, import.specifier, importing_dir),
+                .target = try self.fileImportTargetInDir(arena, import.specifier, importing_dir),
             });
         }
         return links.items;
     }
 
+    /// Resolve one decoded file specifier from an importing module.
+    pub fn fileImportTarget(
+        self: *const ModuleGraph,
+        arena: std.mem.Allocator,
+        importing_path: []const u8,
+        specifier: []const u8,
+    ) CheckBindingsError!?ModuleIndex {
+        return self.fileImportTargetInDir(arena, specifier, file_resolver.dirName(importing_path));
+    }
+
     /// The module that a file import names, or null for a virtual or unknown specifier.
-    fn fileImportTarget(
+    fn fileImportTargetInDir(
         self: *const ModuleGraph,
         arena: std.mem.Allocator,
         specifier: []const u8,
@@ -609,7 +657,12 @@ pub const ModuleGraph = struct {
         };
     }
 
-    fn dfsVisit(self: *ModuleGraph, idx: ModuleIndex, order: *std.ArrayList(ModuleIndex)) !void {
+    fn dfsVisit(
+        self: *ModuleGraph,
+        idx: ModuleIndex,
+        order: *std.ArrayList(ModuleIndex),
+        include_type_dependencies: bool,
+    ) !void {
         var module = &self.module_list.items[idx];
 
         if (module.state == .visiting) {
@@ -621,7 +674,12 @@ pub const ModuleGraph = struct {
         module.state = .visiting;
 
         for (module.dependencies) |dep_idx| {
-            try self.dfsVisit(dep_idx, order);
+            try self.dfsVisit(dep_idx, order, include_type_dependencies);
+        }
+        if (include_type_dependencies) {
+            for (module.type_dependencies) |dep_idx| {
+                try self.dfsVisit(dep_idx, order, true);
+            }
         }
 
         module.state = .visited;
@@ -740,6 +798,20 @@ fn testReadFile(allocator: std.mem.Allocator, path: []const u8) ReadFileError![]
     return allocator.dupe(u8, source) catch return error.OutOfMemory;
 }
 
+fn testReadRealFile(allocator: std.mem.Allocator, path: []const u8) ReadFileError![]const u8 {
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(10 * 1024 * 1024)) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.StreamTooLong => error.FileTooBig,
+        else => error.FileNotFound,
+    };
+}
+
+fn testTmpRoot(tmp: *std.testing.TmpDir, allocator: std.mem.Allocator) ![]u8 {
+    const owned = try std.Io.Dir.realPathFileAlloc(tmp.dir, std.testing.io, ".", allocator);
+    defer allocator.free(owned);
+    return allocator.dupe(u8, owned);
+}
+
 test "module graph: no imports" {
     const allocator = std.testing.allocator;
     var graph = ModuleGraph.init(allocator);
@@ -749,7 +821,7 @@ test "module graph: no imports" {
     try graph.build("/app/handler.ts", source, testReadFile);
 
     try std.testing.expectEqual(@as(usize, 1), graph.module_list.items.len);
-    try std.testing.expectEqual(@as(usize, 0), graph.dependencyCount());
+    try std.testing.expectEqual(@as(usize, 0), graph.runtimeDependencyCount());
 }
 
 test "module graph: single file import" {
@@ -761,9 +833,97 @@ test "module graph: single file import" {
     try graph.build("/app/handler.ts", source, testReadFile);
 
     try std.testing.expectEqual(@as(usize, 2), graph.module_list.items.len);
-    try std.testing.expectEqual(@as(usize, 1), graph.dependencyCount());
+    try std.testing.expectEqual(@as(usize, 1), graph.runtimeDependencyCount());
     // utils.ts should come before handler.ts in execution order
     try std.testing.expectEqual(@as(usize, 2), graph.execution_order.len);
+}
+
+test "module graph loads a type-only dependency without making it executable" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "types.ts", .data = "export structural Label = string;\n" });
+    const root = try testTmpRoot(&tmp, allocator);
+    defer allocator.free(root);
+    const entry_path = try std.fs.path.join(allocator, &.{ root, "handler.ts" });
+    defer allocator.free(entry_path);
+    var graph = ModuleGraph.init(allocator);
+    defer graph.deinit();
+
+    try graph.build(
+        entry_path,
+        "import type { Label } from \"./types.ts\";\nexport const label: Label = \"ready\";\n",
+        testReadRealFile,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), graph.analysisDependencyCount());
+    try std.testing.expectEqual(@as(usize, 0), graph.runtimeDependencyCount());
+}
+
+test "type-only reachability does not activate transitive runtime imports" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "types.ts", .data = "import { side } from \"./side.ts\";\nexport structural Label = string;\nexport const value = side;\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "side.ts", .data = "export const side = 1;\n" });
+    const root = try testTmpRoot(&tmp, allocator);
+    defer allocator.free(root);
+    const entry_path = try std.fs.path.join(allocator, &.{ root, "handler.ts" });
+    defer allocator.free(entry_path);
+    var graph = ModuleGraph.init(allocator);
+    defer graph.deinit();
+    try graph.build(
+        entry_path,
+        "import type { Label } from \"./types.ts\";\nexport const label: Label = \"ready\";\n",
+        testReadRealFile,
+    );
+    try std.testing.expectEqual(@as(usize, 2), graph.analysisDependencyCount());
+    try std.testing.expectEqual(@as(usize, 0), graph.runtimeDependencyCount());
+}
+
+test "a value path activates a module first found through a type-only path" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "shared.ts", .data = "export structural Label = string;\nexport const value = 1;\n" });
+    const root = try testTmpRoot(&tmp, allocator);
+    defer allocator.free(root);
+    const entry_path = try std.fs.path.join(allocator, &.{ root, "handler.ts" });
+    defer allocator.free(entry_path);
+    var graph = ModuleGraph.init(allocator);
+    defer graph.deinit();
+    try graph.build(
+        entry_path,
+        "import type { Label } from \"./shared.ts\";\nimport { value } from \"./shared.ts\";\nexport const result: Label = String(value);\n",
+        testReadRealFile,
+    );
+    try std.testing.expectEqual(@as(usize, 1), graph.analysisDependencyCount());
+    try std.testing.expectEqual(@as(usize, 1), graph.runtimeDependencyCount());
+}
+
+test "a type-only import cycle is refused" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.ts", .data = "import type { A } from \"./a.ts\";\nexport structural B = string;\n" });
+    const root = try testTmpRoot(&tmp, allocator);
+    defer allocator.free(root);
+    const entry_path = try std.fs.path.join(allocator, &.{ root, "a.ts" });
+    defer allocator.free(entry_path);
+    var graph = ModuleGraph.init(allocator);
+    defer graph.deinit();
+    try std.testing.expectError(
+        error.CircularImport,
+        graph.build(entry_path, "import type { B } from \"./b.ts\";\nexport structural A = string;\n", testReadRealFile),
+    );
+    var buffer: [512]u8 = undefined;
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "Module '{s}' is part of an import cycle. Remove one import so that the modules form no cycle.",
+        .{entry_path},
+    );
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, graph.importRefusalMessage(&buffer));
 }
 
 test "module graph: fan-out imports" {
@@ -775,7 +935,7 @@ test "module graph: fan-out imports" {
     try graph.build("/app/handler.ts", source, testReadFile);
 
     try std.testing.expectEqual(@as(usize, 3), graph.module_list.items.len);
-    try std.testing.expectEqual(@as(usize, 2), graph.dependencyCount());
+    try std.testing.expectEqual(@as(usize, 2), graph.runtimeDependencyCount());
 }
 
 test "module graph: circular import detected" {
@@ -815,7 +975,6 @@ test "graph refuses every hard admission producer" {
         .{ .kind = .unterminated_string, .err = error.UnterminatedString, .source = "import type { A } /* ; */ from \"./a\";\nconst value = \"open\nconst after = 1;\n" },
         .{ .kind = .nominal_base_not_scalar, .err = error.NominalBaseNotScalar, .source = "import type { A } /* ; */ from \"./a\";\nnominal Box = T;\n" },
         .{ .kind = .interface_declaration, .err = error.InterfaceDeclaration, .source = "import type { A } /* ; */ from \"./a\";\ninterface Box { value: string }\n" },
-        .{ .kind = .type_alias_declaration, .err = error.TypeAliasDeclaration, .source = "import type { A } /* ; */ from \"./a\";\ntype Box = string;\n" },
         .{ .kind = .distinct_type_declaration, .err = error.DistinctTypeDeclaration, .source = "import type { A } /* ; */ from \"./a\";\ndistinct type Box = string;\n" },
         .{ .kind = .retired_types_import, .err = error.LegacyTypesImport, .source = "import type { A } /* ; */ from \"./a\";\nimport type { Value } from '" ++ @import("zts-base").module_specifier.retired_types_module ++ "';\n" },
         .{ .kind = .default_parameter, .err = error.DefaultParameter, .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value = 1) { return value; }\n" },
@@ -979,6 +1138,36 @@ test "build records a dependency that admission refuses" {
         "Dependency '/app/lib.ts' is refused at admission. Use a TypeScript file that the parser admits.",
         graph.importRefusalMessage(&buffer),
     );
+}
+
+test "build records a type-only dependency that admission refuses" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "types.ts", .data = "export structural Value = string; /* open" });
+    const root = try testTmpRoot(&tmp, allocator);
+    defer allocator.free(root);
+    const entry_path = try std.fs.path.join(allocator, &.{ root, "entry.ts" });
+    defer allocator.free(entry_path);
+    const dependency_path = try std.fs.path.join(allocator, &.{ root, "types.ts" });
+    defer allocator.free(dependency_path);
+    var graph = ModuleGraph.init(allocator);
+    defer graph.deinit();
+    try std.testing.expectError(
+        error.UnterminatedComment,
+        graph.build(entry_path, "import type { Value } from \"./types.ts\";\n", testReadRealFile),
+    );
+    const refusal = graph.import_refusal orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(ImportRefusal.Kind.not_admitted, refusal.kind);
+    try std.testing.expectEqualStrings(dependency_path, refusal.module_path);
+    var buffer: [512]u8 = undefined;
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "Dependency '{s}' is refused at admission. Use a TypeScript file that the parser admits.",
+        .{dependency_path},
+    );
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, graph.importRefusalMessage(&buffer));
 }
 
 test "buildWithReader reads a dependency from the reader context" {

@@ -55,6 +55,7 @@ fn evaluate(view: ir.IrView, index: ir.NodeIndex, remaining: *usize) ?Constant {
 
 fn unary(op: ir.UnaryOp, operand: Constant) ?Constant {
     return switch (op) {
+        .transparent => operand,
         .not => switch (operand) {
             .boolean => |v| .{ .boolean = !v },
             else => null,
@@ -140,6 +141,24 @@ test "constant arithmetic follows VM division and remainder semantics" {
     try std.testing.expect(binary(.add, .{ .int = std.math.maxInt(i32) }, .{ .int = 1 }) == null);
     try std.testing.expect(unary(.neg, .{ .int = std.math.minInt(i32) }) == null);
     try std.testing.expect(std.math.signbit(binary(.div, .{ .float = -0.0 }, .{ .int = 2 }).?.float));
+}
+
+test "transparent unary folding returns the operand constant" {
+    const allocator = std.testing.allocator;
+    var store = ir.IRStore.init(allocator);
+    defer store.deinit();
+    var constants = ir.ConstantPool.init(allocator);
+    defer constants.deinit();
+    const loc: ir.SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+    const operand = try store.addInt(loc, 42);
+    const wrapped = try store.addUnary(loc, .{ .op = .transparent, .operand = operand });
+    const folded = fold(ir.IrView.fromIRStore(&store, &constants), wrapped) orelse
+        return error.TestExpectedEqual;
+
+    try std.testing.expectEqual(
+        Constant{ .int = 42 },
+        folded,
+    );
 }
 
 test "folding is bounded and leaves calls in short circuits" {

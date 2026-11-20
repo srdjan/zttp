@@ -5,6 +5,7 @@ const ir = @import("ir.zig");
 const token_mod = @import("token.zig");
 const BindingRef = ir.BindingRef;
 const Token = token_mod.Token;
+const Tokenizer = @import("tokenizer.zig").Tokenizer;
 const scan_mod = @import("type_syntax_scan.zig");
 const isTypeWhitespace = scan_mod.isTypeWhitespace;
 const parser_mod = @import("type_syntax_parser.zig");
@@ -49,7 +50,6 @@ pub const AdmissionKind = enum {
     unterminated_string,
     nominal_base_not_scalar,
     interface_declaration,
-    type_alias_declaration,
     distinct_type_declaration,
     retired_types_import,
     default_parameter,
@@ -578,6 +578,27 @@ pub const TypeOnlyModuleKind = enum {
 pub const TypeOnlyModule = struct {
     kind: TypeOnlyModuleKind,
     raw_span: Span,
+    specifier_span: ?Span = null,
+    specifier_value: ?Range = null,
+    bindings_span: ?Span = null,
+    bindings: Range = .{ .start = 0, .count = 0 },
+};
+
+pub const TypeOnlyBinding = struct {
+    imported_span: Span,
+    local_span: Span,
+};
+
+pub const BrandDeclaration = struct {
+    name_span: Span,
+    declaration_start: u32,
+    full_span: Span,
+    exported: bool,
+};
+
+pub const NominalConstructor = struct {
+    owner: ir.NodeIndex,
+    operand: ir.NodeIndex,
 };
 
 pub const TypeOnlyModuleRefusalReason = enum {
@@ -779,6 +800,12 @@ pub const Store = struct {
     parameter_annotations: std.ArrayListUnmanaged(ParameterAnnotation) = .empty,
     function_signatures: std.ArrayListUnmanaged(FunctionSignature) = .empty,
     type_only_modules: std.ArrayListUnmanaged(TypeOnlyModule) = .empty,
+    type_only_bindings: std.ArrayListUnmanaged(TypeOnlyBinding) = .empty,
+    decoded_module_specifiers: std.ArrayListUnmanaged(u8) = .empty,
+    brand_declarations: std.ArrayListUnmanaged(BrandDeclaration) = .empty,
+    nominal_constructors: std.ArrayListUnmanaged(NominalConstructor) = .empty,
+    requires_intrinsic_validation: bool = false,
+    intrinsics_validated: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Store {
         return .{
@@ -804,6 +831,10 @@ pub const Store = struct {
         self.parameter_annotations.deinit(self.allocator);
         self.function_signatures.deinit(self.allocator);
         self.type_only_modules.deinit(self.allocator);
+        self.type_only_bindings.deinit(self.allocator);
+        self.decoded_module_specifiers.deinit(self.allocator);
+        self.brand_declarations.deinit(self.allocator);
+        self.nominal_constructors.deinit(self.allocator);
     }
 
     pub const Checkpoint = struct {
@@ -823,6 +854,12 @@ pub const Store = struct {
         parameter_annotations: usize,
         function_signatures: usize,
         type_only_modules: usize,
+        type_only_bindings: usize,
+        decoded_module_specifiers: usize,
+        brand_declarations: usize,
+        nominal_constructors: usize,
+        requires_intrinsic_validation: bool,
+        intrinsics_validated: bool,
     };
 
     /// Keeps the first refusal until the runtime parser takes it.
@@ -854,6 +891,12 @@ pub const Store = struct {
             .parameter_annotations = self.parameter_annotations.items.len,
             .function_signatures = self.function_signatures.items.len,
             .type_only_modules = self.type_only_modules.items.len,
+            .type_only_bindings = self.type_only_bindings.items.len,
+            .decoded_module_specifiers = self.decoded_module_specifiers.items.len,
+            .brand_declarations = self.brand_declarations.items.len,
+            .nominal_constructors = self.nominal_constructors.items.len,
+            .requires_intrinsic_validation = self.requires_intrinsic_validation,
+            .intrinsics_validated = self.intrinsics_validated,
         };
     }
 
@@ -874,12 +917,25 @@ pub const Store = struct {
         self.parameter_annotations.items.len = value.parameter_annotations;
         self.function_signatures.items.len = value.function_signatures;
         self.type_only_modules.items.len = value.type_only_modules;
+        self.type_only_bindings.items.len = value.type_only_bindings;
+        self.decoded_module_specifiers.items.len = value.decoded_module_specifiers;
+        self.brand_declarations.items.len = value.brand_declarations;
+        self.nominal_constructors.items.len = value.nominal_constructors;
+        self.requires_intrinsic_validation = value.requires_intrinsic_validation;
+        self.intrinsics_validated = value.intrinsics_validated;
     }
 
     pub fn appendNode(self: *Store, value: Node) !NodeIndex {
         const index = std.math.cast(NodeIndex, self.nodes.items.len) orelse return error.TooManyTypeNodes;
         try self.nodes.append(self.allocator, value);
         return index;
+    }
+
+    pub fn nominalConstructor(self: *const Store, owner: ir.NodeIndex) ?NominalConstructor {
+        for (self.nominal_constructors.items) |record| {
+            if (record.owner == owner) return record;
+        }
+        return null;
     }
 
     pub fn appendMembers(self: *Store, values: []const Child) !Range {
@@ -1223,7 +1279,74 @@ pub const Store = struct {
                 return error.InvalidTypeSourceOrder;
             }
         }
-        try self.type_only_modules.append(self.allocator, module);
+        var stored = module;
+        stored.bindings.start = std.math.cast(u32, self.type_only_bindings.items.len) orelse
+            return error.TooManyTypeItems;
+        if (module.bindings_span) |span| try self.appendTypeOnlyBindings(span);
+        stored.bindings.count = @intCast(self.type_only_bindings.items.len - stored.bindings.start);
+        if (module.specifier_span) |span| {
+            const decoded = try scan_mod.decodeStringLiteralContent(self.allocator, span.text(self.source));
+            defer self.allocator.free(decoded);
+            stored.specifier_value = .{
+                .start = std.math.cast(u32, self.decoded_module_specifiers.items.len) orelse
+                    return error.TooManyTypeItems,
+                .count = std.math.cast(u32, decoded.len) orelse return error.TooManyTypeItems,
+            };
+            try self.decoded_module_specifiers.appendSlice(self.allocator, decoded);
+        }
+        try self.type_only_modules.append(self.allocator, stored);
+    }
+
+    fn appendTypeOnlyBindings(self: *Store, span: Span) !void {
+        var tokenizer = Tokenizer.init(self.source);
+        var imported: ?Span = null;
+        var alias_pending = false;
+        while (true) {
+            const token = tokenizer.next();
+            if (token.type == .eof or token.start >= span.end) break;
+            if (token.start <= span.start) continue;
+            if (token.type == .identifier) {
+                const token_span: Span = .{ .start = token.start, .end = token.start + token.len };
+                if (imported == null) {
+                    imported = token_span;
+                } else if (alias_pending) {
+                    try self.type_only_bindings.append(self.allocator, .{
+                        .imported_span = imported orelse return error.InvalidTypeOnlyModule,
+                        .local_span = token_span,
+                    });
+                    imported = null;
+                    alias_pending = false;
+                }
+                continue;
+            }
+            if (token.type == .kw_as and imported != null) {
+                alias_pending = true;
+                continue;
+            }
+            if (token.type == .comma or token.type == .rbrace) {
+                if (imported) |name| {
+                    try self.type_only_bindings.append(self.allocator, .{
+                        .imported_span = name,
+                        .local_span = name,
+                    });
+                }
+                imported = null;
+                alias_pending = false;
+            }
+        }
+    }
+
+    pub fn typeOnlySpecifier(self: *const Store, module: TypeOnlyModule) ?[]const u8 {
+        const range = module.specifier_value orelse return null;
+        const end = std.math.add(usize, range.start, range.count) catch return null;
+        if (end > self.decoded_module_specifiers.items.len) return null;
+        return self.decoded_module_specifiers.items[range.start..end];
+    }
+
+    pub fn typeOnlyBindings(self: *const Store, module: TypeOnlyModule) []const TypeOnlyBinding {
+        const end = std.math.add(usize, module.bindings.start, module.bindings.count) catch return &.{};
+        if (end > self.type_only_bindings.items.len) return &.{};
+        return self.type_only_bindings.items[module.bindings.start..end];
     }
 
     pub fn validateFunctionDeclarationWrapper(
@@ -1296,6 +1419,14 @@ pub const Store = struct {
                 return error.InvalidGenericOwner;
             }
             call_owners[arguments.owner] = 1;
+        }
+        for (self.nominal_constructors.items) |record| {
+            if (view.getTag(record.owner) != .unary_op) return error.InvalidIntrinsicOwner;
+            const unary = view.getUnary(record.owner) orelse return error.InvalidIntrinsicOwner;
+            if (unary.op != .transparent or unary.operand != record.operand) {
+                return error.InvalidIntrinsicOwner;
+            }
+            if (call_owners[record.owner] == 0) return error.InvalidIntrinsicOwner;
         }
         for (self.function_signatures.items) |signature| {
             try self.validateFunctionSignatureRecord(signature, view);
@@ -1471,6 +1602,18 @@ pub const Store = struct {
                 if (prior.start >= module.raw_span.start or prior.end > module.raw_span.start) {
                     return error.InvalidTypeSourceOrder;
                 }
+            }
+        }
+        for (self.brand_declarations.items, 0..) |brand, index| {
+            try self.validateSpan(brand.name_span);
+            try self.validateSpan(brand.full_span);
+            if (!spanContains(brand.full_span, brand.name_span) or
+                brand.declaration_start != brand.full_span.start)
+            {
+                return error.InvalidTypeSpan;
+            }
+            if (index > 0 and self.brand_declarations.items[index - 1].full_span.start >= brand.full_span.start) {
+                return error.InvalidTypeSourceOrder;
             }
         }
         try self.validateRecordOwnership();
@@ -1783,9 +1926,21 @@ pub const Store = struct {
             module.kind,
             &diagnostics,
         )) orelse return error.InvalidTypeOnlyModule;
-        if (scanned.refused or !std.meta.eql(scanned.module, module)) {
+        if (scanned.refused or scanned.module.kind != module.kind or
+            !std.meta.eql(scanned.module.raw_span, module.raw_span) or
+            !std.meta.eql(scanned.module.specifier_span, module.specifier_span) or
+            !std.meta.eql(scanned.module.bindings_span, module.bindings_span))
+        {
             return error.InvalidTypeOnlyModule;
         }
+        if (module.specifier_value) |range| {
+            const end = std.math.add(usize, range.start, range.count) catch
+                return error.InvalidTypeRange;
+            if (end > self.decoded_module_specifiers.items.len) return error.InvalidTypeRange;
+        }
+        const binding_end = std.math.add(usize, module.bindings.start, module.bindings.count) catch
+            return error.InvalidTypeRange;
+        if (binding_end > self.type_only_bindings.items.len) return error.InvalidTypeRange;
     }
 
     pub fn validateReturnSyntax(self: *const Store, value: ReturnSyntax) !void {
@@ -2211,7 +2366,11 @@ pub const Store = struct {
     ) !void {
         try self.validateExplicitCallArgumentsSyntax(arguments);
         const tag = view.getTag(arguments.owner) orelse return error.InvalidGenericOwner;
-        if (tag != .call) return error.InvalidGenericOwner;
+        if (tag != .call and
+            !(tag == .unary_op and self.nominalConstructor(arguments.owner) != null))
+        {
+            return error.InvalidGenericOwner;
+        }
         const location = view.getLoc(arguments.owner) orelse return error.InvalidGenericOwner;
         if (location.offset != arguments.list_span.end) return error.InvalidGenericOwner;
         if (arguments.capture_spans.actual_erased_span.end > location.offset) return error.InvalidGenericOwner;
@@ -3178,7 +3337,7 @@ test "return validation refuses an empty predicate narrowing" {
     }
 }
 
-test "admission vocabulary retains seventeen ordered kinds" {
+test "admission vocabulary retains sixteen ordered kinds" {
     const expected = [_]AdmissionKind{
         .any_type,
         .as_assertion,
@@ -3186,7 +3345,6 @@ test "admission vocabulary retains seventeen ordered kinds" {
         .unterminated_string,
         .nominal_base_not_scalar,
         .interface_declaration,
-        .type_alias_declaration,
         .distinct_type_declaration,
         .retired_types_import,
         .default_parameter,
@@ -3198,7 +3356,7 @@ test "admission vocabulary retains seventeen ordered kinds" {
         .void_type,
         .nesting_too_deep,
     };
-    try std.testing.expectEqual(@as(usize, 17), @typeInfo(AdmissionKind).@"enum".field_names.len);
+    try std.testing.expectEqual(@as(usize, 16), @typeInfo(AdmissionKind).@"enum".field_names.len);
     for (expected, 0..) |kind, index| {
         try std.testing.expectEqual(index, @backingInt(kind));
     }

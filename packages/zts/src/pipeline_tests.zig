@@ -836,7 +836,7 @@ test "ModuleAnalysisSession profiles preserve type diagnostic acceptance" {
 
     var contract_only: ModuleAnalysisSession = .{};
     try contract_only.initContractOnly(allocator, parsed, .{
-        .extraction = .{ .source_types = .direct },
+        .extraction = .{ .source_types = .{ .direct = "profile.ts" } },
     });
     defer contract_only.deinit();
     try contract_only.complete();
@@ -846,7 +846,7 @@ test "ModuleAnalysisSession profiles preserve type diagnostic acceptance" {
     var sound: ModuleAnalysisSession = .{};
     try sound.initSoundExtraction(allocator, parsed, .{
         .strict = false,
-        .source_types = .direct,
+        .source_types = .{ .direct = "profile.ts" },
     });
     defer sound.deinit();
     try testing.expectError(error.SoundModeViolation, sound.complete());
@@ -868,7 +868,7 @@ test "ModuleAnalysisSession full profile supports typed and untyped extraction" 
 
     var typed: ModuleAnalysisSession = .{};
     try typed.initFull(allocator, typed_parsed, .{
-        .source_types = .direct,
+        .source_types = .{ .direct = "typed.ts" },
         .strict = false,
     });
     defer typed.deinit();
@@ -1024,7 +1024,7 @@ fn extractOwnedSessionResultsForTest(allocator: std.mem.Allocator) !ContractExtr
     try session.initContractOnly(
         allocator,
         ParsedModule.fromTypedExisting(view, accepted.root, accepted.atoms, accepted.type_store),
-        .{ .extraction = .{ .source_types = .direct, .capture_export_effects = true } },
+        .{ .extraction = .{ .source_types = .{ .direct = "owned.ts" }, .capture_export_effects = true } },
     );
     defer session.deinit();
     try session.complete();
@@ -1057,7 +1057,7 @@ test "ModuleAnalysisSession runs a custom callback only during extraction" {
     var analysis: ModuleAnalysisSession = .{};
     try analysis.initSoundExtraction(allocator, parsed, .{
         .strict = false,
-        .source_types = .direct,
+        .source_types = .{ .direct = "custom.ts" },
         .module_scan = rejectingModuleScan,
         .capture_export_effects = true,
     });
@@ -1408,6 +1408,25 @@ test "extractContract accepts authored TypeScript and honors strict opt out" {
     try testing.expectEqualStrings("handler.ts", contract.handler.path);
 }
 
+test "extractContract validates an admitted nominal constructor" {
+    const source =
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
+        \\declare const idBrand: unique symbol;
+        \\type Id = Nominal<string, typeof idBrand>;
+        \\function handler(req: Request): Response {
+        \\  const id: Id = nominal<Id>("u1");
+        \\  return Response.text(String(id));
+        \\}
+    ;
+
+    var contract = try extractContract(testing.allocator, source, "handler.ts", .{
+        .strict = false,
+    });
+    defer contract.deinit(testing.allocator);
+    try testing.expectEqualStrings("handler.ts", contract.handler.path);
+}
+
 test "extractContract preserves single-file custom callback output" {
     const allocator = testing.allocator;
     const source =
@@ -1741,6 +1760,47 @@ test "extractContract merges capabilities from relative imports" {
     );
 }
 
+test "extractContract resolves a file imported only for exported types" {
+    const allocator = testing.allocator;
+    const file_io = @import("zts-engine").file_io;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(io, &dir_buf);
+    const dir = dir_buf[0..dir_len];
+    const types_path = try allocator.print("{s}/types.ts", .{dir});
+    defer allocator.free(types_path);
+    try file_io.writeFile(allocator, types_path,
+        \\import type { Nominal } from "zttp:core";
+        \\export declare const idBrand: unique symbol;
+        \\export type Id = Nominal<string, typeof idBrand>;
+        \\export type Chain<T> = { value: T; next: Chain<T> | null };
+        \\
+    );
+    const entry_path = try allocator.print("{s}/entry.ts", .{dir});
+    defer allocator.free(entry_path);
+    const source =
+        \\import type { Chain as List, Id as UserId } from "./types.ts";
+        \\import { nominal } from "zttp:core";
+        \\function handler(req: Request): Response {
+        \\  const id: UserId = nominal<UserId>("u1");
+        \\  const list: List<string> = { value: String(id), next: null };
+        \\  return Response.text(list.value);
+        \\}
+    ;
+
+    var contract = try extractContract(allocator, source, entry_path, .{
+        .strict = false,
+        .read_file = file_io.readFileForModuleGraph,
+    });
+    defer contract.deinit(allocator);
+    try testing.expectEqualStrings(entry_path, contract.handler.path);
+    try testing.expectEqual(@as(usize, 0), contract.modules.items.len);
+}
+
 test "the three index consumers reuse an injected index" {
     // The half of C2's gate that cannot pass vacuously. C1 made injection
     // behavior-neutral by construction - an analyzer with no index builds an
@@ -1892,6 +1952,7 @@ fn withSession(
     var storage: TypeEnvStorage = .{};
     defer storage.deinit(allocator);
     try storage.initWithSource(allocator, .{ .direct = .{
+        .module_path = "probe.ts",
         .store = accepted.type_store,
         .ir_view = view,
         .atoms = accepted.atoms,
@@ -3003,13 +3064,13 @@ test "sound extraction sessions preserve source selection and direct ownership" 
     defer omitted.deinit(allocator);
     try expectExistingCheckerFacts(&omitted, false);
 
-    var direct = try extractSoundSessionForTest(allocator, direct_parsed, .{ .source_types = .direct, .strict = false });
+    var direct = try extractSoundSessionForTest(allocator, direct_parsed, .{ .source_types = .{ .direct = "source-selection-test.ts" }, .strict = false });
     defer direct.deinit(allocator);
     try expectExistingCheckerFacts(&direct, true);
 
     try testing.expectError(
         error.DirectTypeSyntaxUnavailable,
-        extractSoundSessionForTest(allocator, direct_unbound, .{ .source_types = .direct, .strict = false }),
+        extractSoundSessionForTest(allocator, direct_unbound, .{ .source_types = .{ .direct = "source-selection-test.ts" }, .strict = false }),
     );
 }
 
@@ -3048,7 +3109,7 @@ test "contract-only graph sessions omit every supplied source selection" {
     defer for (compiled.codegens) |*codegen| codegen.freeOwnedConstantPayloads();
     try testing.expectEqual(@as(usize, 2), compiled.modules.len);
 
-    const modes = [_]ModuleSourceTypeInput{ .omitted, .direct };
+    const modes = [_]ModuleSourceTypeInput{ .omitted, .{ .direct = "/source-selection/entry.ts" } };
     try testing.expectEqual(@as(usize, 2), modes.len);
     var baseline: [2]?[]u8 = @splat(null);
     defer for (baseline) |bytes| if (bytes) |owned| allocator.free(owned);
@@ -3133,7 +3194,7 @@ test "source graph uses compiled direct entry types and omits dependency types" 
             dependencies += 1;
         }
     };
-    const selections = [_]?ModuleSourceTypeInput{ .direct, null };
+    const selections = [_]?ModuleSourceTypeInput{ .{ .direct = "/source-selection/entry.ts" }, null };
     for (selections) |selection| {
         Probe.entries = 0;
         Probe.dependencies = 0;
@@ -3244,7 +3305,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "isDict",
         "boolean",
         3291,
-        "0ffc584b4491677cc189734168d295e75de60050d2b8982078c3fd62277c435c",
+        "1343bc65eecad8d9f8be7daa65189e1fb5795e883b24532c779b35267a82605b",
     );
 
     const helper_source =
@@ -3262,7 +3323,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "helper",
         "unknown",
         3295,
-        "dd885643b514adf47fcc0b4a7687955e527657b6a97afea381b1ecb084327941",
+        "29952726b0fad99e6b2cf3a47d3977eccd7aa9b1235926bdc108e052cec99853",
     );
 }
 
@@ -3284,7 +3345,7 @@ test "an empty parser-owned Store selects direct and remains distinct from omitt
 
     var direct: ModuleAnalysisSession = .{};
     try direct.initSoundExtraction(allocator, typed, .{
-        .source_types = .direct,
+        .source_types = .{ .direct = "empty-store-test.ts" },
         .strict = false,
     });
     defer direct.deinit();
@@ -3310,7 +3371,7 @@ test "an empty parser-owned Store selects direct and remains distinct from omitt
     try missing.initSoundExtraction(
         allocator,
         ParsedModule.fromExisting(view, root, &atoms),
-        .{ .source_types = .direct, .strict = false },
+        .{ .source_types = .{ .direct = "missing-store-test.ts" }, .strict = false },
     );
     defer missing.deinit();
     try testing.expectError(error.DirectTypeSyntaxUnavailable, missing.complete());
@@ -3368,6 +3429,7 @@ test "consumer entry points reject operational source failures before semantic a
     var source_atoms = AtomTable.init(allocator);
     defer source_atoms.deinit();
     try healthy_env.populateSourceTypes(.{ .direct = .{
+        .module_path = "healthy-environment-test.ts",
         .store = &empty_store,
         .ir_view = view,
         .atoms = &source_atoms,
@@ -3424,6 +3486,7 @@ test "consumer entry points reject operational source failures before semantic a
     var other_env = TypeEnv.init(allocator, &other_pool);
     defer other_env.deinit();
     try other_env.populateSourceTypes(.{ .direct = .{
+        .module_path = "other-environment-test.ts",
         .store = &empty_store,
         .ir_view = view,
         .atoms = &source_atoms,
@@ -3529,7 +3592,7 @@ test "direct session population closes allocation failures without retry" {
         fn populate(run_allocator: std.mem.Allocator, module: ParsedModule) !void {
             var analysis: ModuleAnalysisSession = .{};
             try analysis.initSoundExtraction(run_allocator, module, .{
-                .source_types = .direct,
+                .source_types = .{ .direct = "allocation-test.ts" },
                 .strict = false,
             });
             defer analysis.deinit();
@@ -3581,6 +3644,7 @@ test "direct callback effect projection closes every allocation failure" {
     var marker_storage: TypeEnvStorage = .{};
     defer marker_storage.deinit(marker_allocator.allocator());
     try marker_storage.initWithSource(marker_allocator.allocator(), .{ .direct = .{
+        .module_path = "marker-test.ts",
         .store = &parser.type_store,
         .ir_view = view,
         .atoms = &atoms,
@@ -3612,6 +3676,7 @@ test "direct callback effect projection closes every allocation failure" {
     var storage: TypeEnvStorage = .{};
     defer storage.deinit(allocator);
     try storage.initWithSource(allocator, .{ .direct = .{
+        .module_path = "effect-facts-test.ts",
         .store = &parser.type_store,
         .ir_view = view,
         .atoms = &atoms,
@@ -3706,7 +3771,7 @@ test "direct extraction keeps attempted state across allocation failures" {
             });
             var analysis: ModuleAnalysisSession = .{};
             try analysis.initSoundExtraction(counting.allocator(), module, .{
-                .source_types = .direct,
+                .source_types = .{ .direct = "allocation-test.ts" },
                 .strict = false,
                 .capture_export_effects = true,
             });
@@ -3737,7 +3802,7 @@ test "direct extraction keeps attempted state across allocation failures" {
             });
             var analysis: ModuleAnalysisSession = .{};
             try analysis.initSoundExtraction(failing.allocator(), module, .{
-                .source_types = .direct,
+                .source_types = .{ .direct = "allocation-test.ts" },
                 .strict = false,
                 .capture_export_effects = true,
             });
@@ -3804,7 +3869,7 @@ test "serialization failure preserves a completed direct extraction" {
     try analysis.initSoundExtraction(
         allocator,
         ParsedModule.fromTypedExisting(view, root, &atoms, &parser.type_store),
-        .{ .source_types = .direct, .strict = false },
+        .{ .source_types = .{ .direct = "effects-test.ts" }, .strict = false },
     );
     defer analysis.deinit();
     try analysis.complete();
@@ -6237,7 +6302,7 @@ test "array literal binding: wide heterogeneous inference propagates allocation 
         fn analyze(run_allocator: std.mem.Allocator, module: ParsedModule) !void {
             var analysis: ModuleAnalysisSession = .{};
             try analysis.initSoundExtraction(run_allocator, module, .{
-                .source_types = .direct,
+                .source_types = .{ .direct = "allocation-test.ts" },
                 .strict = false,
             });
             defer analysis.deinit();
@@ -6420,7 +6485,7 @@ test "wide recursive write-slot widening propagates allocation failure" {
         fn analyze(run_allocator: std.mem.Allocator, module: ParsedModule) !void {
             var analysis: ModuleAnalysisSession = .{};
             try analysis.initSoundExtraction(run_allocator, module, .{
-                .source_types = .direct,
+                .source_types = .{ .direct = "allocation-test.ts" },
                 .strict = false,
             });
             defer analysis.deinit();
@@ -6520,7 +6585,7 @@ test "wide container write propagates allocation failure" {
         fn analyze(run_allocator: std.mem.Allocator, module: ParsedModule) !void {
             var analysis: ModuleAnalysisSession = .{};
             try analysis.initSoundExtraction(run_allocator, module, .{
-                .source_types = .direct,
+                .source_types = .{ .direct = "allocation-test.ts" },
                 .strict = false,
             });
             defer analysis.deinit();
@@ -7134,7 +7199,7 @@ fn analyzeAcrossFile(
         dep_accepted.atoms,
         dep_accepted.type_store,
     ), .{
-        .source_types = .direct,
+        .source_types = .{ .direct = "b.ts" },
         .strict = false,
         .select_verifier = true,
         .allow_raw_exported_boundary = true,
@@ -7167,7 +7232,7 @@ fn analyzeAcrossFile(
         entry_accepted.atoms,
         entry_accepted.type_store,
     ), .{
-        .source_types = .direct,
+        .source_types = .{ .direct = "handler.ts" },
         .strict = false,
         .allow_raw_exported_boundary = true,
     });
@@ -7220,7 +7285,7 @@ fn exportRowForTest(allocator: std.mem.Allocator, source: []const u8, name: []co
         accepted.atoms,
         accepted.type_store,
     ), .{
-        .source_types = .direct,
+        .source_types = .{ .direct = "b.ts" },
         .strict = false,
         .select_verifier = true,
         .allow_raw_exported_boundary = true,

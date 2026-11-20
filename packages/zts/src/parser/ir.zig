@@ -116,6 +116,7 @@ pub const UnaryOp = enum(u4) {
     not,
     bit_not,
     typeof_op,
+    transparent,
 };
 
 /// Function flags
@@ -787,6 +788,16 @@ pub const IRStore = struct {
         return self.addNode(.unary_op, loc, .{ .a = @backingInt(u.op), .b = u.operand });
     }
 
+    pub fn lowerCallToTransparent(self: *IRStore, owner: NodeIndex, operand: NodeIndex) !void {
+        if (owner >= self.tags.items.len or self.tags.items[owner] != .call) {
+            return error.InvalidIntrinsicOwner;
+        }
+        if (operand >= self.tags.items.len) return error.InvalidIntrinsicOperand;
+        self.tags.items[owner] = .unary_op;
+        self.data.items[owner] = .{ .a = @backingInt(UnaryOp.transparent), .b = operand };
+        self.binding_name_atoms.items[owner] = 0;
+    }
+
     pub fn addTernary(self: *IRStore, loc: SourceLocation, t: Node.TernaryExpr) !NodeIndex {
         const extra_start = try self.addExtra(&.{ t.condition, t.then_branch, t.else_branch });
         return self.addNode(.ternary, loc, .{ .a = extra_start, .b = 0 });
@@ -1307,6 +1318,21 @@ pub const IrView = struct {
     pub fn getTag(self: IrView, idx: NodeIndex) ?NodeTag {
         const ir = self.store;
         return if (idx < ir.tags.items.len) ir.tags.items[idx] else null;
+    }
+
+    /// Remove transparent unary wrappers from an expression.
+    /// Malformed or cyclic chains return the original node.
+    pub fn unwrapTransparent(self: IrView, node: NodeIndex) NodeIndex {
+        const original = node;
+        var subject = node;
+        for (0..self.nodeCount()) |_| {
+            const tag = self.getTag(subject) orelse return original;
+            if (tag != .unary_op) return subject;
+            const unary = self.getUnary(subject) orelse return original;
+            if (unary.op != .transparent) return subject;
+            subject = unary.operand;
+        }
+        return original;
     }
 
     /// Invoke `visit(ctx, child)` for each structural child node-index of `node`,
@@ -2383,6 +2409,24 @@ test "expressionChildren of a binary operation are its operands" {
 
 test "expressionChildren of a unary operation is its operand" {
     try expectChildrenOf("const r = !a;", .unary_op, 0, &.{.{ .tag = .identifier }});
+}
+
+test "unwrapTransparent forwards valid wrappers and rejects invalid chains" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+    const operand = try store.addInt(testLoc(), 9);
+    const inner = try store.addUnary(testLoc(), .{ .op = .transparent, .operand = operand });
+    const outer = try store.addUnary(testLoc(), .{ .op = .transparent, .operand = inner });
+    const cycle_index: NodeIndex = @intCast(store.len());
+    const cycle = try store.addUnary(testLoc(), .{ .op = .transparent, .operand = cycle_index });
+    const malformed = try store.addUnary(testLoc(), .{ .op = .transparent, .operand = null_node });
+    const view = IrView.fromIRStore(&store, &constants);
+
+    try std.testing.expectEqual(operand, view.unwrapTransparent(outer));
+    try std.testing.expectEqual(cycle, view.unwrapTransparent(cycle));
+    try std.testing.expectEqual(malformed, view.unwrapTransparent(malformed));
 }
 
 test "expressionChildren of a ternary are condition then and else" {

@@ -18,6 +18,7 @@ const js_object = @import("../object.zig");
 const atom_table = @import("../atom_table.zig");
 const handler_analyzer = @import("../handler_analyzer.zig");
 const node_types = @import("../node_types.zig");
+const builtin_modules = @import("../builtin_modules.zig");
 const module_specifier = @import("zts-base").module_specifier;
 
 // Re-export types used by this module
@@ -568,6 +569,7 @@ pub const CodeGen = struct {
 
             // Parser currently only accepts named imports.
             if (spec.kind != .named) continue;
+            if (self.importIsCompilerIntrinsic(import_decl.module_idx, spec.imported_atom)) continue;
 
             // Copy the exported global into the local import binding. Virtual
             // modules use namespaced globals to avoid collisions such as
@@ -578,6 +580,12 @@ pub const CodeGen = struct {
             self.pushStack(1);
             try self.emitSetBinding(spec.local_binding);
         }
+    }
+
+    fn importIsCompilerIntrinsic(self: *CodeGen, module_idx: u16, imported_atom: u16) bool {
+        const module_name = self.ir.getString(module_idx) orelse return false;
+        const imported_name = self.atomName(imported_atom) orelse return false;
+        return builtin_modules.findIntrinsic(module_name, imported_name) != null;
     }
 
     fn importGlobalAtom(self: *CodeGen, module_idx: u16, imported_atom: u16) !u16 {
@@ -899,6 +907,7 @@ pub const CodeGen = struct {
         try self.emitNode(unary.operand);
 
         const opcode: Opcode = switch (unary.op) {
+            .transparent => return,
             .neg => .neg,
             .not => .not,
             .bit_not => .bit_not,
@@ -2532,6 +2541,88 @@ test "global binding codegen uses the binding name atom" {
     try std.testing.expectEqual(@backingInt(Opcode.get_global), result.code[0]);
     try std.testing.expectEqual(@as(u8, 0x34), result.code[1]);
     try std.testing.expectEqual(@as(u8, 0x12), result.code[2]);
+}
+
+test "transparent unary codegen emits only the operand" {
+    const allocator = std.testing.allocator;
+    var nodes = IRStore.init(allocator);
+    defer nodes.deinit();
+    var constants = ConstantPool.init(allocator);
+    defer constants.deinit();
+    var scopes = try ScopeAnalyzer.init(allocator);
+    defer scopes.deinit();
+    const loc: ir.SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+    const operand = try nodes.addIdentifier(loc, .{
+        .scope_id = 0,
+        .slot = 7,
+        .name_atom = 0x1234,
+        .kind = .global,
+    });
+    const wrapped = try nodes.addUnary(loc, .{ .op = .transparent, .operand = operand });
+    var wrapped_gen = CodeGen.initWithIRStore(allocator, &nodes, &constants, &scopes, null, null);
+    defer wrapped_gen.deinit();
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ @backingInt(Opcode.get_global), 0x34, 0x12, @backingInt(Opcode.ret_undefined) },
+        (try wrapped_gen.generate(wrapped)).code,
+    );
+}
+
+test "compiler intrinsic import emits no runtime bytecode" {
+    const allocator = std.testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("parse.zig").Parser.initAdmission(
+        allocator,
+        allocator,
+        "import { nominal } from \"zttp\\x3acore\";",
+        .compile,
+    );
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    var gen = CodeGen.initWithIRStore(
+        allocator,
+        &parser.nodes,
+        &parser.constants,
+        &parser.scopes,
+        null,
+        &atoms,
+    );
+    defer gen.deinit();
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{@backingInt(Opcode.ret_undefined)},
+        (try gen.generate(root)).code,
+    );
+
+    var foreign_atoms = atom_table.AtomTable.init(allocator);
+    defer foreign_atoms.deinit();
+    var foreign_parser = try @import("parse.zig").Parser.initAdmission(
+        allocator,
+        allocator,
+        "import { nominal } from \"zttp:auth\";",
+        .compile,
+    );
+    defer foreign_parser.deinit();
+    foreign_parser.setAtomTable(&foreign_atoms);
+    const foreign_root = try foreign_parser.parse();
+    var foreign_gen = CodeGen.initWithIRStore(
+        allocator,
+        &foreign_parser.nodes,
+        &foreign_parser.constants,
+        &foreign_parser.scopes,
+        null,
+        &foreign_atoms,
+    );
+    defer foreign_gen.deinit();
+    const foreign_code = (try foreign_gen.generate(foreign_root)).code;
+    try std.testing.expectEqual(@as(usize, 7), foreign_code.len);
+    try std.testing.expectEqual(@backingInt(Opcode.get_global), foreign_code[0]);
+    try std.testing.expectEqual(@backingInt(Opcode.put_global), foreign_code[3]);
+    try std.testing.expectEqual(@backingInt(Opcode.ret_undefined), foreign_code[6]);
 }
 
 test "binary op codegen" {

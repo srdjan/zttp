@@ -90,6 +90,45 @@ pub fn fromAnalyzerError(allocator: std.mem.Allocator, file: []const u8, err: an
     };
 }
 
+pub fn fromSourceTypeFailure(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    failure: zts.pipeline.SourceTypeFailure,
+    file: []const u8,
+) !JsonDiagnostic {
+    const position = zts.SourceView.of(source).positionAtOffset(failure.start_offset);
+    var diagnostic: JsonDiagnostic = .{
+        .code = diagnostic_catalog.sourceTypeCode(failure.kind),
+        .severity = "error",
+        .message = undefined,
+        .file = file,
+        .line = position.line,
+        .column = position.column,
+        .start_offset = failure.start_offset,
+        .end_offset = failure.end_offset,
+        .suggestion = null,
+    };
+    switch (failure.kind) {
+        .nominal_base_not_scalar => {
+            diagnostic.message = "a nominal declaration carries scalar identity only";
+            diagnostic.suggestion = "its base must be `string`, `number`, or `boolean`";
+        },
+        .nominal_argument_count => {
+            diagnostic.message = try allocator.print(
+                "wrong number of type arguments: expected 2, got {d}",
+                .{failure.got},
+            );
+            diagnostic.message_owned = true;
+            diagnostic.suggestion = "Give exactly two type arguments to Nominal.";
+        },
+        .nominal_brand_query => {
+            diagnostic.message = "the second Nominal type argument must be a resolved unique-symbol brand query";
+            diagnostic.suggestion = "Use `typeof brand` after an admitted unique-symbol brand declaration.";
+        },
+    }
+    return diagnostic;
+}
+
 // -------------------------------------------------------------------------
 // Diagnostic code mapping
 // -------------------------------------------------------------------------
@@ -1291,7 +1330,9 @@ test "every diagnostic code names exactly one diagnostic" {
     // `nesting_too_deep`: type syntax and expression syntax both report ZTS044.
     // `type_assertion` and `as_assertion`: the parser's refusal of `<T>x` and the
     // admission of `x as T` both report ZTS042 for a type assertion.
+    // Intrinsic references are source-profile refusals, like unsupported parser forms (ZTS001).
     const shared_codes = [_]struct { code: []const u8, kinds: [2][]const u8 }{
+        .{ .code = "ZTS001", .kinds = .{ "unsupported_intrinsic_reference", "unsupported_feature" } },
         .{ .code = "ZTS008", .kinds = .{ "unterminated_string", "unterminated_string" } },
         .{ .code = "ZTS042", .kinds = .{ "type_assertion", "as_assertion" } },
         .{ .code = "ZTS044", .kinds = .{ "nesting_too_deep", "nesting_too_deep" } },

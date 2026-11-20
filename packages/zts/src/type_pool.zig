@@ -129,6 +129,16 @@ pub const TypeData = packed struct(u32) {
     b: u16 = 0, // meaning depends on tag
 };
 
+pub const NominalOrigin = struct {
+    module_path: []const u8,
+    declaration_start: u32,
+};
+
+pub const NominalConstruction = enum {
+    legacy_implicit,
+    explicit_only,
+};
+
 /// A single type in the pool.
 pub const TypeNode = struct {
     tag: TypeTag,
@@ -143,6 +153,9 @@ pub const TypeNode = struct {
     /// same base differ only by pool index - and a canonical key computed from
     /// tag and data alone would report them as one type.
     nominal_name: NameRef = .{ .start = 0, .len = 0 },
+    nominal_module: NameRef = .{ .start = 0, .len = 0 },
+    nominal_declaration_start: u32 = 0,
+    nominal_construction: NominalConstruction = .legacy_implicit,
 };
 
 // ---------------------------------------------------------------------------
@@ -499,13 +512,31 @@ pub const TypePool = struct {
     /// structurally identical but incompatible with other types via nominal flag.
     /// Returns the new nominal type index.
     pub fn addNominalAlias(self: *TypePool, allocator: std.mem.Allocator, base: TypeIndex, name: []const u8) TypeIndex {
+        return self.addNominalAliasWithOrigin(allocator, base, name, .{
+            .module_path = "",
+            .declaration_start = 0,
+        }, .legacy_implicit);
+    }
+
+    pub fn addNominalAliasWithOrigin(
+        self: *TypePool,
+        allocator: std.mem.Allocator,
+        base: TypeIndex,
+        name: []const u8,
+        origin: NominalOrigin,
+        construction: NominalConstruction,
+    ) TypeIndex {
         const base_node = if (base < self.nodes.items.len) self.nodes.items[base] else return null_type_idx;
         const n = self.addName(allocator, name);
+        const module = self.addName(allocator, origin.module_path);
         return self.addNode(allocator, .{
             .tag = base_node.tag,
             .data = base_node.data,
             .nominal = true,
             .nominal_name = n,
+            .nominal_module = module,
+            .nominal_declaration_start = origin.declaration_start,
+            .nominal_construction = construction,
         });
     }
 
@@ -517,6 +548,32 @@ pub const TypePool = struct {
         const node = self.nodes.items[idx];
         if (!node.nominal) return "";
         return self.getName(node.nominal_name.start, node.nominal_name.len);
+    }
+
+    pub fn nominalOrigin(self: *const TypePool, idx: TypeIndex) ?NominalOrigin {
+        if (!self.isNominal(idx)) return null;
+        const node = self.nodes.items[idx];
+        return .{
+            .module_path = self.getName(node.nominal_module.start, node.nominal_module.len),
+            .declaration_start = node.nominal_declaration_start,
+        };
+    }
+
+    pub fn nominalConstruction(self: *const TypePool, idx: TypeIndex) ?NominalConstruction {
+        if (!self.isNominal(idx)) return null;
+        return self.nodes.items[idx].nominal_construction;
+    }
+
+    fn sameNominalOrigin(self: *const TypePool, first: TypeIndex, second: TypeIndex) bool {
+        const a = self.nominalOrigin(first) orelse return false;
+        const b = self.nominalOrigin(second) orelse return false;
+        if (a.module_path.len == 0 and b.module_path.len == 0) {
+            const name = self.nominalName(first);
+            return name.len > 0 and std.mem.eql(u8, name, self.nominalName(second));
+        }
+        if (a.module_path.len == 0 or b.module_path.len == 0) return false;
+        return a.declaration_start == b.declaration_start and
+            std.mem.eql(u8, a.module_path, b.module_path);
     }
 
     /// Unwrap a nominal type to its base primitive. A non-nominal type, and a
@@ -1626,10 +1683,7 @@ pub const TypePool = struct {
             // nominal type. The pool does not intern, so the same
             // `distinct type` resolved twice holds two indices, and index
             // identity alone would call them different types.
-            const tgt_name = self.nominalName(target);
-            if (self.isNominal(source) and tgt_name.len > 0 and
-                std.mem.eql(u8, self.nominalName(source), tgt_name))
-            {
+            if (self.isNominal(source) and self.sameNominalOrigin(source, target)) {
                 if (src_tag != tgt_tag) return false;
                 if (src_tag == .t_record) return self.isRecordAssignable(ctx, source, target);
                 return true;
@@ -3541,6 +3595,21 @@ test "the nominal direction is asymmetric and keyed by name" {
     // But the same brand is the same type, whichever node carries it.
     try std.testing.expect(pool.isAssignableTo(user_id_again, user_id));
     try std.testing.expect(pool.isAssignableTo(user_id, user_id_again));
+}
+
+test "a legacy empty origin cannot match a resolved nominal origin" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    const legacy = pool.addNominalAlias(allocator, pool.idx_string, "Id");
+    const modern = pool.addNominalAliasWithOrigin(
+        allocator,
+        pool.idx_string,
+        "Id",
+        .{ .module_path = "/app/id.ts", .declaration_start = 12 },
+        .explicit_only,
+    );
+    try std.testing.expect(!pool.isAssignableTo(legacy, modern));
 }
 
 test "a recursive type terminates instead of recursing to the stack end" {

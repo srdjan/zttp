@@ -100,15 +100,120 @@ pub fn scanRawTypeOnlyModule(
     var raw_scanner = RawModuleScanner.init(allocator, source, diagnostics);
     defer raw_scanner.deinit();
     const end = try raw_scanner.scanStatementEnd(pos);
-    const module: TypeOnlyModule = .{
+    var module: TypeOnlyModule = .{
         .kind = kind,
         .raw_span = .{ .start = start, .end = @intCast(end) },
     };
+    populateTypeOnlyModuleSpans(source, &module);
     const refused = kind == .import_type and containsRetiredTypesImport(module.raw_span.text(source));
     return .{
         .module = module,
         .refused = refused,
         .encountered_diagnostic = raw_scanner.encountered_diagnostic,
+    };
+}
+
+fn populateTypeOnlyModuleSpans(source: []const u8, module: *TypeOnlyModule) void {
+    var tokenizer = Tokenizer.init(source);
+    var open: ?u32 = null;
+    var close: ?u32 = null;
+    var saw_from = false;
+    while (true) {
+        const token = tokenizer.next();
+        if (token.type == .eof or token.start >= module.raw_span.end) break;
+        if (token.start < module.raw_span.start) continue;
+        switch (token.type) {
+            .lbrace => {
+                if (open == null) open = token.start;
+            },
+            .rbrace => {
+                if (open != null and close == null) close = token.start + token.len;
+            },
+            .kw_from => saw_from = true,
+            .string_literal => {
+                if (saw_from and token.len >= 2) {
+                    module.specifier_span = .{
+                        .start = token.start + 1,
+                        .end = token.start + token.len - 1,
+                    };
+                    break;
+                }
+            },
+            else => {},
+        }
+    }
+    if (open) |start_span| {
+        if (close) |end_span| {
+            module.bindings_span = .{ .start = start_span, .end = end_span };
+        }
+    }
+}
+
+pub fn decodeStringLiteralContent(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var result = try allocator.alloc(u8, input.len);
+    errdefer allocator.free(result);
+    var out: usize = 0;
+    var pos: usize = 0;
+    while (pos < input.len) {
+        if (input[pos] != '\\') {
+            result[out] = input[pos];
+            out += 1;
+            pos += 1;
+            continue;
+        }
+        if (pos + 1 >= input.len) return error.InvalidEscapeSequence;
+        const escaped = input[pos + 1];
+        if (escaped == '\n' or escaped == '\r') return error.StringLineContinuation;
+        if (escaped == 'x') {
+            if (pos + 3 >= input.len) return error.InvalidEscapeSequence;
+            result[out] = std.fmt.parseInt(u8, input[pos + 2 .. pos + 4], 16) catch
+                return error.InvalidEscapeSequence;
+            out += 1;
+            pos += 4;
+            continue;
+        }
+        if (escaped == 'u') {
+            const decoded = try decodeTypeModuleUnicodeEscape(input, pos);
+            const width = std.unicode.utf8Encode(decoded.codepoint, result[out..]) catch
+                return error.InvalidEscapeSequence;
+            out += width;
+            pos = decoded.next;
+            continue;
+        }
+        result[out] = switch (escaped) {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'b' => 0x08,
+            'f' => 0x0c,
+            'v' => 0x0b,
+            '0' => 0,
+            '\\', '\'', '"', '`', '$' => escaped,
+            else => return error.InvalidEscapeSequence,
+        };
+        out += 1;
+        pos += 2;
+    }
+    return allocator.realloc(result, out);
+}
+
+fn decodeTypeModuleUnicodeEscape(input: []const u8, at: usize) !struct { codepoint: u21, next: usize } {
+    if (at + 2 < input.len and input[at + 2] == '{') {
+        const limit = @min(at + 10, input.len);
+        const close = std.mem.indexOfScalarPos(u8, input[0..limit], at + 3, '}') orelse
+            return error.InvalidEscapeSequence;
+        const hex = input[at + 3 .. close];
+        if (hex.len == 0) return error.InvalidEscapeSequence;
+        return .{
+            .codepoint = std.fmt.parseInt(u21, hex, 16) catch return error.InvalidEscapeSequence,
+            .next = close + 1,
+        };
+    }
+    if (at + 5 >= input.len) return error.InvalidEscapeSequence;
+    return .{
+        .codepoint = std.fmt.parseInt(u16, input[at + 2 .. at + 6], 16) catch
+            return error.InvalidEscapeSequence,
+        .next = at + 6,
     };
 }
 
