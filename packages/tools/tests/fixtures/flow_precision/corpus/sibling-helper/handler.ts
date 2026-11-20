@@ -1,6 +1,6 @@
 import { apiToken, displayName } from "./lib/settings.ts";
 
-structural Guard<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
+type Guard<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
 
 export function handler(req: Request): Guard<Response> {
   const token = apiToken();

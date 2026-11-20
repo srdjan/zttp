@@ -770,3 +770,11 @@ The main verification repeats all 61 example checks and both CLI smoke flows suc
 The logs are `/tmp/zttp-syntax-u6-examples-main.log` and `/tmp/zttp-syntax-u6-smokes-main.log`.
 The main agent also reviews the corrected teaching comments and the SQL example diff.
 This closes the active example cohort. Whole-file formatting remains outside that cohort.
+
+The main agent reviews all 13 tool-fixture changes. Each replaces only `structural` with `type`.
+The main agent repeats every public analyzer call against the retained baseline output.
+All 13 outputs remain byte-identical. Seven exit zero and six retain exit one.
+Unfiltered contract goldens and the generic intersection matrix pass.
+The main unfiltered proof ratchet passes 56 tests and reports 96 re-derived certificates without differences.
+The logs are `/tmp/zttp-syntax-u6-tool-fixtures-main.log` and `/tmp/zttp-syntax-u6-tool-proof-main.log`.
+The earlier interrupted combined worker run supplies no additional gate verdict.

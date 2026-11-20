@@ -1,6 +1,6 @@
 import { fetch } from "zttp:fetch";
 
-structural UpstreamStatus<T> = Proof<T, "deterministic" | "state_isolated" | "fault_covered">;
+type UpstreamStatus<T> = Proof<T, "deterministic" | "state_isolated" | "fault_covered">;
 
 export function handler(req: Request): UpstreamStatus<Response> {
   const upstream = fetch("https://api.example.com/v1/status", {

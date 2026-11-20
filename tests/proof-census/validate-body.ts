@@ -4,7 +4,7 @@
 import { schemaCompile, validateJson } from "zttp:validate";
 import { stringifyJson } from "zttp:json";
 
-structural Guard<T> = Proof<T, "state_isolated">;
+type Guard<T> = Proof<T, "state_isolated">;
 
 schemaCompile("item", '{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}');
 

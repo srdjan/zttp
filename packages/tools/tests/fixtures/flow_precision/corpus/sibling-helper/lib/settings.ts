@@ -1,7 +1,7 @@
 import { env } from "zttp:env";
 
-export structural ApiToken = string | undefined;
-export structural DisplayName = string;
+export type ApiToken = string | undefined;
+export type DisplayName = string;
 
 export function apiToken(): ApiToken {
   return env("API_TOKEN");

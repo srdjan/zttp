@@ -5,7 +5,7 @@ schemaCompile(
   "{\"type\":\"object\",\"required\":[\"name\"],\"properties\":{\"name\":{\"type\":\"string\"}}}",
 );
 
-structural Guard<T> = Proof<T, "deterministic" | "state_isolated" | "result_safe" | "canonical">;
+type Guard<T> = Proof<T, "deterministic" | "state_isolated" | "result_safe" | "canonical">;
 
 export function handler(req: Request): Guard<Response> {
   const body = requestText(req);
