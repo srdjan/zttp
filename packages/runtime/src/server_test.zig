@@ -312,6 +312,33 @@ test "fluent match preserves descriptors and selected callback execution" {
     );
 }
 
+test "a nonselected fluent callback has no observable action" {
+    const allocator = std.heap.c_allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\function dirty(req: Request): string {
+        \\  req.headers.set("x-match-probe", "dirty");
+        \\  return "nonselected";
+        \\}
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  req.headers.set("x-match-probe", "clean");
+        \\  const selected = match(req.method)
+        \\    .with("GET", (): string => "selected")
+        \\    .otherwise((): string => dirty(req));
+        \\  const observed = req.headers.get("x-match-probe") ?? "missing";
+        \\  return Response.text([selected, observed].join("|"));
+        \\}
+    ;
+    var pool = try HandlerPool.init(allocator, .{}, source, "<server-test>", 1, 0);
+    defer pool.deinit();
+    var req = try getRequest(allocator, "/");
+    defer req.deinit(allocator);
+    var resp = try pool.executeHandler(req.asView());
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expectEqualStrings("selected|clean", resp.body);
+}
+
 test "equal local brand names execute as distinct module identities" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
