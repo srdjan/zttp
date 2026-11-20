@@ -16,7 +16,11 @@ const ModuleFacts = module_facts_mod.ModuleFacts;
 
 pub const ValidationIssue = union(enum) {
     value_argument_count: struct { node: engine.parser.NodeIndex, got: usize },
-    type_argument_count: struct { node: engine.parser.NodeIndex, got: usize },
+    type_argument_count: struct {
+        node: engine.parser.NodeIndex,
+        expected: usize,
+        got: usize,
+    },
     target_constraint: struct {
         node: engine.parser.NodeIndex,
         target: type_pool_mod.TypeIndex,
@@ -132,6 +136,49 @@ fn validateAndLowerNominalConstructorsInternal(
     defer checker.deinit();
     if (file_imports) |imports| try checker.prepareFileImports(imports);
 
+    for (0..parser.nodes.tags.items.len) |raw_statement| {
+        const statement: engine.parser.NodeIndex = @intCast(raw_statement);
+        const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+        if (view.getTag(statement) != .expr_stmt) continue;
+        const owner = view.getOptValue(statement) orelse continue;
+        if (view.getTag(owner) != .call) continue;
+        const call = view.getCall(owner) orelse continue;
+        if (view.getTag(call.callee) != .identifier) continue;
+        const binding = view.getBinding(call.callee) orelse continue;
+        const imported = facts.importForReference(binding, .module_reference, .builtin) orelse continue;
+        const intrinsic = builtin_modules.findIntrinsic(
+            imported.module_specifier,
+            imported.imported_name,
+        ) orelse continue;
+        if (intrinsic.kind != .assert) continue;
+        handled[call.callee] = true;
+        if (call.args_count != 1) {
+            if (issues) |out| {
+                try out.append(allocator, .{ .value_argument_count = .{
+                    .node = owner,
+                    .got = call.args_count,
+                } });
+                continue;
+            }
+            return error.InvalidAssertionCall;
+        }
+        if (env.getCallTypeArgsForCall(view, owner)) |type_arguments| {
+            if (type_arguments.count != 0) {
+                if (issues) |out| {
+                    try out.append(allocator, .{ .type_argument_count = .{
+                        .node = owner,
+                        .expected = 0,
+                        .got = type_arguments.count,
+                    } });
+                    continue;
+                }
+                return error.InvalidAssertionCall;
+            }
+        }
+        const condition = view.getListIndex(call.args_start, 0);
+        try parser.nodes.lowerCallStatementToAssert(statement, owner, condition);
+    }
+
     for (0..parser.nodes.tags.items.len) |raw_owner| {
         const owner: engine.parser.NodeIndex = @intCast(raw_owner);
         const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -160,6 +207,7 @@ fn validateAndLowerNominalConstructorsInternal(
             if (issues) |out| {
                 try out.append(allocator, .{ .type_argument_count = .{
                     .node = owner,
+                    .expected = 1,
                     .got = 0,
                 } });
                 handled[call.callee] = true;
@@ -171,6 +219,7 @@ fn validateAndLowerNominalConstructorsInternal(
             if (issues) |out| {
                 try out.append(allocator, .{ .type_argument_count = .{
                     .node = owner,
+                    .expected = 1,
                     .got = type_arguments.count,
                 } });
                 handled[call.callee] = true;

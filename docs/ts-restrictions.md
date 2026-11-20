@@ -87,6 +87,9 @@ top-level initializer must not reach a declaration at or after it.
 
 ## Declarations And Bindings
 
+The exact named import `import { assert } from "zttp:core";` can bind the reserved name `assert`.
+A renamed import must use a name that is not reserved. This exception does not admit another declaration named `assert`.
+
 | Refused form | Code | Write instead |
 |---|---|---|
 | `var` | ZTS001 | `const`, or `let` when the binding is reassigned |

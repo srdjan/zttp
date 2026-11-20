@@ -9440,15 +9440,19 @@ pub const TypeChecker = struct {
     pub fn reportIntrinsicTypeArgumentCount(
         self: *TypeChecker,
         node: NodeIndex,
+        expected: usize,
         got: usize,
     ) void {
         self.addGenericDiagnostic(
             .type_argument_count_mismatch,
             node,
             "wrong number of type arguments: expected {d}, got {d}",
-            .{ 1, got },
+            .{ expected, got },
             "wrong number of type arguments",
-            "Give exactly one nominal type argument.",
+            if (expected == 0)
+                "Remove the type arguments from this intrinsic call."
+            else
+                "Give exactly one nominal type argument.",
         );
     }
 

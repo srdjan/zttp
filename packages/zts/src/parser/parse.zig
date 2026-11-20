@@ -2106,7 +2106,10 @@ pub const Parser = struct {
                 self.advance();
                 return error.ParseError;
             },
-            .kw_assert => self.parseAssertStatement(),
+            .kw_assert => if (self.assertKeywordHasBinding())
+                self.parseExpressionStatement()
+            else
+                self.parseAssertStatement(),
             // class keyword in statement context: class Foo { }
             // Catches class declarations after TypeScript preparation.
             .kw_class => {
@@ -4893,6 +4896,16 @@ pub const Parser = struct {
 
             // Identifiers and keywords
             .identifier => self.parseIdentifier(),
+            // `assert` remains a legacy statement keyword until U6. A named
+            // import can also bind it as a value. Parsing only a real binding
+            // here gives semantic lowering the identity without granting the
+            // spelling intrinsic authority.
+            .kw_assert => if (self.assertKeywordHasBinding())
+                self.parseIdentifier()
+            else blk: {
+                self.errorAtCurrent("expected expression");
+                break :blk error.UnexpectedToken;
+            },
             .kw_this => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'this' is not supported; pass context explicitly as a parameter");
                 return error.ParseError;
@@ -5624,6 +5637,17 @@ pub const Parser = struct {
             if (self.undeclared_guard == null and std.mem.eql(u8, name, "guard")) self.undeclared_guard = node;
         }
         return node;
+    }
+
+    fn assertKeywordHasBinding(self: *const Parser) bool {
+        var scope_id = self.scopes.current_scope;
+        while (true) {
+            const scope = &self.scopes.scopes.items[scope_id];
+            for (scope.bindings.items) |binding| {
+                if (std.mem.eql(u8, binding.name, "assert")) return true;
+            }
+            scope_id = scope.parent orelse return false;
+        }
     }
 
     fn parseUnaryOp(self: *Parser, op: UnaryOp) anyerror!NodeIndex {

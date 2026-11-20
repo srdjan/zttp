@@ -231,8 +231,35 @@ test "a failed assert without a message answers without the frame's values" {
 
     var resp = try pool.executeHandler(req.asView());
     defer resp.deinit();
-    try std.testing.expect(resp.status != 200);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "held-in-a-local") == null);
+    try std.testing.expectEqual(@as(u16, 500), resp.status);
+    try std.testing.expectEqualStrings(
+        "The compiler did not claim exhaustive_returns for this response path. The handler returned something other than a Response.",
+        resp.body,
+    );
+}
+
+test "a failed imported assert keeps the legacy invariant response" {
+    const allocator = std.heap.c_allocator;
+    var pool = try HandlerPool.init(
+        allocator,
+        .{},
+        "import { assert } from 'zttp:core'; function handler(req) { const s = 'held-in-a-local'; assert(req.method === 'POST'); return Response.text(s.length > 0 ? 'ok' : 'empty'); }",
+        "<server-test>",
+        1,
+        0,
+    );
+    defer pool.deinit();
+
+    var req = try getRequest(allocator, "/");
+    defer req.deinit(allocator);
+
+    var resp = try pool.executeHandler(req.asView());
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 500), resp.status);
+    try std.testing.expectEqualStrings(
+        "The compiler did not claim exhaustive_returns for this response path. The handler returned something other than a Response.",
+        resp.body,
+    );
 }
 
 test "a closure that escapes a block keeps its binding, not a reused slot" {

@@ -2666,6 +2666,213 @@ test "CHECK validates ordinary member calls in a type-import graph" {
     try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
 }
 
+test "CHECK imported assertions preserve binding authority and narrowing" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        "import { assert } from \"zttp:core\";\n" ++
+            "function narrow(value: string | number): string {\n" ++
+            "  assert(typeof value === \"string\");\n" ++
+            "  return value;\n" ++
+            "}\n" ++
+            "function handler(req: Request): Response { return Response.text(narrow(req.method)); }\n",
+        "import { assert as invariant } from \"zttp:core\";\n" ++
+            "function narrow(value: string | number): string {\n" ++
+            "  invariant(typeof value === \"string\");\n" ++
+            "  return value;\n" ++
+            "}\n" ++
+            "function handler(req: Request): Response { return Response.text(narrow(req.method)); }\n",
+    };
+    for (cases) |source| {
+        var result = try runCheckOnlyFromSourceWithOptions(
+            allocator,
+            source,
+            "handler.ts",
+            .{ .json_mode = true },
+        );
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    }
+}
+
+test "CHECK refuses malformed imported assertions at their source positions" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        statement: []const u8,
+        diagnostic: CompoundDiagnostic,
+    }{
+        .{
+            .statement = "  invariant(1);\n",
+            .diagnostic = .{
+                .code = "ZTS100",
+                .message = "boolean context requires a value of type boolean",
+                .line = 3,
+                .column = 13,
+                .suggestion = "compare the value explicitly so the expression has type boolean",
+            },
+        },
+        .{
+            .statement = "  invariant(true, false);\n",
+            .diagnostic = .{ .code = "ZTS202", .message = "wrong number of arguments: expected 1, got 2", .line = 3, .column = 12 },
+        },
+        .{
+            .statement = "  invariant();\n",
+            .diagnostic = .{ .code = "ZTS202", .message = "wrong number of arguments: expected 1, got 0", .line = 3, .column = 12 },
+        },
+        .{
+            .statement = "  const held = invariant(true);\n",
+            .diagnostic = .{
+                .code = "ZTS001",
+                .message = "a compiler intrinsic cannot be used as a value",
+                .line = 3,
+                .column = 16,
+                .suggestion = "Call the compiler intrinsic directly in its admitted form.",
+            },
+        },
+        .{
+            .statement = "  invariant<boolean>(true);\n",
+            .diagnostic = .{
+                .code = "ZTS210",
+                .message = "wrong number of type arguments: expected 0, got 1",
+                .line = 3,
+                .column = 21,
+                .suggestion = "Remove the type arguments from this intrinsic call.",
+            },
+        },
+    };
+    for (cases) |case| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "import {{ assert as invariant }} from \"zttp:core\";\n" ++
+                "function probe(): number {{\n{s}  return 1;\n}}\n" ++
+                "function handler(req: Request): Response {{ return Response.text(\"ok\"); }}\n",
+            .{case.statement},
+        );
+        defer allocator.free(source);
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+    }
+}
+
+test "CHECK refuses malformed plain imported assertions after binding resolution" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        statement: []const u8,
+        diagnostic: CompoundDiagnostic,
+    }{
+        .{
+            .statement = "  assert(true, false);\n",
+            .diagnostic = .{
+                .code = "ZTS202",
+                .message = "wrong number of arguments: expected 1, got 2",
+                .line = 3,
+                .column = 9,
+            },
+        },
+        .{
+            .statement = "  const held = assert(true);\n",
+            .diagnostic = .{
+                .code = "ZTS001",
+                .message = "a compiler intrinsic cannot be used as a value",
+                .line = 3,
+                .column = 16,
+                .suggestion = "Call the compiler intrinsic directly in its admitted form.",
+            },
+        },
+    };
+    for (cases) |case| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "import {{ assert }} from \"zttp:core\";\n" ++
+                "function probe(): number {{\n{s}  return 1;\n}}\n" ++
+                "function handler(req: Request): Response {{ return Response.text(\"ok\"); }}\n",
+            .{case.statement},
+        );
+        defer allocator.free(source);
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+    }
+}
+
+test "CHECK keeps a same-local-name foreign import ordinary" {
+    var fixture = try SiblingFixture.init(
+        \\import { add as invariant } from "./foreign.ts";
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  const sum = invariant(1, 2);
+        \\  return Response.text(String(sum));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("foreign.ts", "export function add(left: number, right: number): number { return left + right; }\n");
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+}
+
+test "CHECK imported assertion conditions preserve labels and effects" {
+    const allocator = std.testing.allocator;
+    const secret_source =
+        "import { assert as invariant } from \"zttp:core\";\n" ++
+        "import { env } from \"zttp:env\";\n" ++
+        "function handler(req: Request): Proof<Response, \"no_secret_leakage\"> {\n" ++
+        "  const secret = env(\"API_SECRET\") ?? \"\";\n" ++
+        "  invariant(secret === \"allowed\");\n" ++
+        "  return Response.text(\"ok\");\n" ++
+        "}\n";
+    var secret = try runCheckOnlyFromSourceWithOptions(allocator, secret_source, "secret.ts", .{ .json_mode = true });
+    defer secret.deinit(allocator);
+    const secret_properties = (secret.contract orelse return error.TestUnexpectedResult).properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(secret_properties.no_secret_leakage);
+    try std.testing.expectEqual(@as(u32, 0), secret.totalErrors());
+
+    const returned_secret_source =
+        "import { assert as invariant } from \"zttp:core\";\n" ++
+        "import { env } from \"zttp:env\";\n" ++
+        "function handler(req: Request): Proof<Response, \"no_secret_leakage\"> {\n" ++
+        "  const secret = env(\"API_SECRET\") ?? \"\";\n" ++
+        "  invariant(secret === \"allowed\");\n" ++
+        "  return Response.text(secret);\n" ++
+        "}\n";
+    var returned_secret = try runCheckOnlyFromSourceWithOptions(
+        allocator,
+        returned_secret_source,
+        "returned-secret.ts",
+        .{ .json_mode = true },
+    );
+    defer returned_secret.deinit(allocator);
+    const returned_secret_properties = (returned_secret.contract orelse return error.TestUnexpectedResult).properties orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!returned_secret_properties.no_secret_leakage);
+    try std.testing.expectEqual(@as(u32, 1), returned_secret.flow_errors);
+    try std.testing.expectEqualStrings("ZTS400", returned_secret.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("secret data flows into response body", returned_secret.json_diagnostics.items[0].message);
+
+    const varying_source =
+        "import { assert as invariant } from \"zttp:core\";\n" ++
+        "function handler(req: Request): Proof<Response, \"deterministic\"> {\n" ++
+        "  invariant(Date.now() % 2 === 0);\n" ++
+        "  return Response.text(\"ok\");\n" ++
+        "}\n";
+    var varying = try runCheckOnlyFromSourceWithOptions(allocator, varying_source, "varying.ts", .{ .json_mode = true });
+    defer varying.deinit(allocator);
+    const varying_properties = (varying.contract orelse return error.TestUnexpectedResult).properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!varying_properties.deterministic);
+    try std.testing.expectEqual(@as(usize, 1), varying.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS500", varying.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings(
+        "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:3 by `a branch on a value that varies between requests`)",
+        varying.json_diagnostics.items[0].message,
+    );
+}
+
 test "CHECK reports a missing file type export as ZTS207" {
     var fixture = try SiblingFixture.init(
         \\import type { Hidden } from "./types.ts";

@@ -798,6 +798,29 @@ pub const IRStore = struct {
         self.binding_name_atoms.items[owner] = 0;
     }
 
+    pub fn lowerCallStatementToAssert(
+        self: *IRStore,
+        statement: NodeIndex,
+        call: NodeIndex,
+        condition: NodeIndex,
+    ) !void {
+        if (statement >= self.tags.items.len or self.tags.items[statement] != .expr_stmt) {
+            return error.InvalidIntrinsicStatement;
+        }
+        if (call >= self.tags.items.len or self.tags.items[call] != .call) {
+            return error.InvalidIntrinsicOwner;
+        }
+        if (condition >= self.tags.items.len) return error.InvalidIntrinsicOperand;
+        if (self.data.items[statement].a != call) return error.InvalidIntrinsicStatement;
+
+        self.tags.items[call] = .unary_op;
+        self.data.items[call] = .{ .a = @backingInt(UnaryOp.transparent), .b = condition };
+        self.binding_name_atoms.items[call] = 0;
+        self.tags.items[statement] = .assert_stmt;
+        self.data.items[statement] = .{ .a = condition, .b = null_node };
+        self.binding_name_atoms.items[statement] = 0;
+    }
+
     pub fn addTernary(self: *IRStore, loc: SourceLocation, t: Node.TernaryExpr) !NodeIndex {
         const extra_start = try self.addExtra(&.{ t.condition, t.then_branch, t.else_branch });
         return self.addNode(.ternary, loc, .{ .a = extra_start, .b = 0 });

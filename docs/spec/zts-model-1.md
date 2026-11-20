@@ -789,7 +789,7 @@ not `{ value }`. A fixed-shape record uses literal field names; dynamic keyed
 data uses `Dict`. Reusable behavior is a named function with explicit inputs
 and outputs.
 
-A reserved word is never the name of a value: a variable, a function, a
+A reserved word is not the name of a value: a variable, a function, a
 parameter, an import alias, or a pattern binding. A reserved word stays valid
 as a record key, a record type field, a pattern key, and a member name after
 `.`. The reserved words are `var`, `let`, `const`, `function`, `return`, `if`,
@@ -800,6 +800,10 @@ as a record key, a record type field, a pattern key, and a member name after
 `get`, `set`, `debugger`, `with`, `enum`, `implements`, `public`, `private`,
 `protected`, `match`, `when`, `assert`, `true`, `false`, `null`, and
 `undefined`.
+
+The exact named import `import { assert } from "zttp:core";` is an exception.
+That import binds the compiler intrinsic under its own name. A renamed import
+must use a name that is not reserved.
 
 A default is explicit in the parameter type, call, and function body:
 
@@ -1146,8 +1150,18 @@ Rules:
 
 #### `assert`
 
-`assert predicate;` declares an invariant. It installs forward narrowing or
-halts with a typed runtime assertion fault.
+An imported `assert(predicate);` declares an invariant. Its import must resolve
+to `zttp:core`. A renamed import has the same semantics. The call must be a
+standalone statement with one boolean argument and no type arguments.
+It installs forward narrowing or halts with a typed runtime assertion fault.
+
+```ts
+import { assert } from "zttp:core";
+
+assert(predicate);
+```
+
+Legacy `assert predicate;` remains admitted until the syntax cutover.
 
 `assert` has no fallback form. Expected early return uses explicit ordinary
 control flow:

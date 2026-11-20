@@ -21,14 +21,18 @@ Native execution uses Sol workers at high effort. No external implementation eng
 
 ## Current work
 
-The declaration study uses ignored files under `demos/typescript-syntax-study/`.
-The baseline inventory is complete. Its census includes packages, examples, corpus files, shell fixtures, documentation, and embedded skills.
-The main agent owns verification, this log, and local commits.
-The workers used twelve-turn budgets. The declaration worker received bounded extensions of twelve, eight, and eight turns for reproduced omissions.
-The independent review is complete. The main agent reproduced its recursive-union failure and checked the correction.
 Baseline capture, the declaration study, and intrinsic metadata are complete.
-The metadata commit is `eeb3716d`. Type aliases, nominal construction, and graph integration pass their owning behavior checks.
-The aggregate remains held on empirical replay until the approved owner recording.
+The metadata commit is `eeb3716d`. U3 (admit aliases and explicit nominal construction) is committed as `33c69fc8`.
+Its owning behavior checks pass. The aggregate remains held on empirical replay until the approved owner recording.
+
+The assertion worker completes U4 (lower imported invariant assertions) within its sixteen-turn implementation budget.
+The main agent owns the specification, verification, this log, and local commits.
+U5 (lower complete fluent match chains) and U6 (complete normalization and source cutover) have completed read-only preparation.
+Neither worker has permission to edit yet. The match representation must preserve singular subject evaluation across proof consumers.
+
+Remaining implementation follows U4, U5, U6, and U7 (align authoring surfaces and website claims), in that order.
+U8 (close evidence for the migrated profile) then requires the owner recording before the main agent publishes fresh evidence.
+The baseline inventory covers packages, examples, corpus files, shell fixtures, documentation, and embedded skills.
 
 ## Intrinsic metadata work
 
@@ -256,6 +260,9 @@ The pure contrast passes with `deterministic` true. Existing runtime, effect, fa
 
 ## Declaration evidence
 
+The declaration study uses ignored files under `demos/typescript-syntax-study/`.
+The workers used twelve-turn budgets. The declaration worker received bounded extensions of twelve, eight, and eight turns for reproduced omissions.
+The independent review is complete. The main agent reproduced its recursive-union failure and checked the correction.
 The first study missed finite record splits, optional-field partitions, and general arrays. The main agent reproduced each TypeScript failure.
 Further public probes confirmed unknown subjects and bindings for missing fields. Their initial target forms also failed TypeScript.
 The corrected projection covers those cases without a runtime helper or interface change.
@@ -282,3 +289,49 @@ Owner recording remains an external prerequisite. The migration cannot finish wi
 
 The assertion worker will execute U4 (lower imported invariant assertions) after the U3 local commit.
 The main agent owns review, unfiltered verification, and the next local commit.
+
+## Imported assertion unit
+
+U3 (admit aliases and explicit nominal construction) is committed as `33c69fc8`.
+The assertion worker now executes U4 (lower imported invariant assertions) with a sixteen-turn budget.
+Its ownership covers parser statement handling, shared intrinsic lowering, type diagnostics, and public check and server tests.
+The main agent owns the specification, integration review, unfiltered gates, and local commit.
+The fluent-match and normalization workers remain read-only until their execution signals.
+
+The imported assertion passes public narrowing, exact arity and type-argument diagnostics, label, effect, and runtime checks.
+The initial narrowing regression fails before lowering. The empty-call case now reports exact ZTS202 instead of reaching an operand accessor.
+A two-number foreign call returns a used number without gaining assertion semantics.
+A returned secret still reports ZTS400 and leaves `no_secret_leakage` false.
+Legacy and imported failed assertions both return status 500 with the same exact public body.
+The reserved-name policy still refuses `import { add as assert }`; this migration does not broaden that policy.
+
+The main agent reviews every changed source line and runs the owning suites without filters.
+`env -u DEEPSEEK_API_KEY -u ZTTP_CODEGEN_RECORD zig build test-zts test-precompile test-server test-proof-swallow check-spine test` exits one.
+It reports 9069 passing tests, three skipped tests, and one failed test across 9073 tests.
+The only failed test is the held empirical replay. No owning behavior suite fails.
+The log is `/tmp/zttp-syntax-u4-final.log`. Separate documentation drift and spine checks exit zero after the final documentation changes.
+Formatting and diff checks pass. The aggregate remains held until the owner recording, and is not reported as green.
+
+The main agent reviews the proposed fluent-match representation before execution.
+Passing the discriminant node as an ordinary callback argument would repeat subject traversal.
+The initial duplicate-I/O example uses a call subject, which the approved profile refuses.
+No duplicate I/O has been reproduced for an admitted subject. Subjects remain identifiers and member paths.
+The lowering must preserve one subject evaluation in the interpreter, flow analysis, and fault paths.
+Public regressions must establish that behavior before the representation is accepted.
+
+A four-turn refinement replaces the rejected callback-call marker with explicit `MatchArmKind` metadata.
+The main agent accepts `value` and `callback` arms, with `value` as the default.
+A callback arm keeps the original arrow node as its body. Only the match discriminant contains the subject expression.
+The IR store uses extra storage for the new field. It does not pack metadata into a node index.
+Runtime and static consumers must invoke or analyze the selected callback with the retained subject value.
+
+After U4, the match worker will own lowering, IR, code generation, typing, narrowing, and public CHECK cases.
+A separate worker will own flow, paths, boolean inference, and contract facts.
+Kernel handling must preserve callback bindings and captures. Unsupported proof normalization must fail closed.
+The consumer worker starts a four-turn read-only preparation unit before the U4 commit.
+That worker cannot edit until the main agent sends an execution signal.
+Its source trace shows that IR comparison and kernel comparison parse source strings, without intrinsic lowering.
+Neither public comparison path receives callback arms. U5 therefore adds no unreachable identity branch or private IR test.
+U6 must validate migration through its named repair rules. It cannot treat an unsupported kernel result as equality.
+The consumer worker will increment path analysis from version 6 to 7 and flow analysis from version 10 to 11.
+These callback semantics change policy identity. Empirical pins remain unchanged until U8 and the owner recording.

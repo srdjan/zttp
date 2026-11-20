@@ -722,6 +722,7 @@ fn reportIntrinsicIssues(
         ),
         .type_argument_count => |found| checker.reportIntrinsicTypeArgumentCount(
             found.node,
+            found.expected,
             found.got,
         ),
         .target_constraint => |found| checker.reportIntrinsicTargetConstraint(
