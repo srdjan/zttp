@@ -312,6 +312,44 @@ test "fluent match preserves descriptors and selected callback execution" {
     );
 }
 
+test "equal local brand names execute as distinct module identities" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source =
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
+        \\import { makeId } from "./foreign.ts";
+        \\declare const idBrand: unique symbol;
+        \\type Id = Nominal<string, typeof idBrand>;
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  const local: Id = nominal<Id>("local");
+        \\  const foreign = makeId();
+        \\  return Response.text([String(local), String(foreign)].join("|"));
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "foreign.ts", .data =
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
+        \\declare const idBrand: unique symbol;
+        \\type Id = Nominal<string, typeof idBrand>;
+        \\export function makeId(): Proof<Id, "read_only"> {
+        \\  return nominal<Id>("foreign");
+        \\}
+    });
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
+    defer allocator.free(handler_path);
+    var pool = try HandlerPool.init(allocator, .{}, source, handler_path, 1, 0);
+    defer pool.deinit();
+    var req = try getRequest(allocator, "/");
+    defer req.deinit(allocator);
+    var resp = try pool.executeHandler(req.asView());
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expectEqualStrings("local|foreign", resp.body);
+}
+
 test "a closure that escapes a block keeps its binding, not a reused slot" {
     // A closed block gave its slots to later bindings even when a closure
     // still held an open upvalue on one, so the closure read the later value.

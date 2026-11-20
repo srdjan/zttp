@@ -2623,6 +2623,61 @@ const SiblingFixture = struct {
     }
 };
 
+const local_nominal_handler =
+    \\import type { Nominal } from "zttp:core";
+    \\import { nominal } from "zttp:core";
+    \\import { makeId } from "./foreign.ts";
+    \\declare const idBrand: unique symbol;
+    \\type Id = Nominal<string, typeof idBrand>;
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const local: Id = nominal<Id>("local");
+    \\  const foreign = makeId();
+    \\  return Response.text([String(local), String(foreign)].join("|"));
+    \\}
+;
+
+const foreign_nominal_module =
+    \\import type { Nominal } from "zttp:core";
+    \\import { nominal } from "zttp:core";
+    \\declare const idBrand: unique symbol;
+    \\type Id = Nominal<string, typeof idBrand>;
+    \\export function makeId(): Proof<Id, "read_only"> {
+    \\  return nominal<Id>("foreign");
+    \\}
+;
+
+test "CHECK keeps equal local brand names module-scoped" {
+    var fixture = try SiblingFixture.init(local_nominal_handler);
+    defer fixture.deinit();
+    try fixture.add("foreign.ts", foreign_nominal_module);
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expect(result.contract != null);
+}
+
+test "CHECK keeps equal local brand names distinct across modules" {
+    var fixture = try SiblingFixture.init(
+        \\import type { Nominal } from "zttp:core";
+        \\import { makeId } from "./foreign.ts";
+        \\declare const idBrand: unique symbol;
+        \\type Id = Nominal<string, typeof idBrand>;
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  const value: Id = makeId();
+        \\  return Response.text(String(value));
+        \\}
+    );
+    defer fixture.deinit();
+    try fixture.add("foreign.ts", foreign_nominal_module);
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS200", result.json_diagnostics.items[0].code);
+}
+
 test "CHECK resolves a file imported only for exported types" {
     var fixture = try SiblingFixture.init(
         \\import type { Box, Chain as List, Id as UserId } from "./types.ts";

@@ -532,6 +532,7 @@ pub const ModuleGraph = struct {
 
             const global_scope = parser.scopes.getScope(0);
             for (global_scope.bindings.items) |binding| {
+                if (isTypeOnlyBrand(&parser.type_store, binding.name)) continue;
                 const name = try arena.dupe(u8, binding.name);
                 if (known_globals.isRuntimeGlobal(name)) return self.refuse(.reserved, name, module.path, "");
                 if (module_index != entry_index and std.mem.eql(u8, name, "handler")) {
@@ -546,6 +547,13 @@ pub const ModuleGraph = struct {
                 }
             }
         }
+    }
+
+    fn isTypeOnlyBrand(store: *const zts_parser.type_syntax.Store, name: []const u8) bool {
+        for (store.brand_declarations.items) |brand| {
+            if (std.mem.eql(u8, brand.name_span.text(store.source), name)) return true;
+        }
+        return false;
     }
 
     /// The identity of a top-level binding. Two bindings with the same identity
