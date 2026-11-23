@@ -539,7 +539,7 @@ pub fn calibrateCodeCollector(allocator: std.mem.Allocator) !void {
 
 fn calibrateCodeCollectorWith(allocator: std.mem.Allocator, collector: CodeCollector) !void {
     const rules = zts.PolicyCatalog.rules();
-    if (rules.len < 57 or zts.PolicyCatalog.findByCode("ZTS056") != null or
+    if (rules.len < 56 or zts.PolicyCatalog.findByCode("ZTS056") != null or
         zts.PolicyCatalog.findByCode("ZTS203") != null) return error.CollectorCalibrationFailed;
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();

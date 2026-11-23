@@ -366,7 +366,7 @@ test "simulate refuses a mixed-binding batch atomically" {
     const source =
         \\
         \\
-        \\structural Guardrails<T> = Proof<T, "state_isolated">;
+        \\type Guardrails<T> = Proof<T, "state_isolated">;
         \\
         \\export function handler(req: Request): Guardrails<Response> {
         \\    let first = "a";
@@ -608,6 +608,15 @@ test "every published module example checks clean and names live modules" {
     }
 }
 
+fn loweredExampleView(allocator: std.mem.Allocator, frontend: *zts.DirectCheckSource, root: zts.parser.NodeIndex) !zts.IrView {
+    const parsed = zts.pipeline.ParsedModule.fromAdmittedParser(&frontend.parser, root, &frontend.atoms, frontend.path);
+    var analysis: zts.pipeline.ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(allocator, parsed, .{});
+    defer analysis.deinit();
+    try analysis.complete();
+    return analysis.parsed.ir_view;
+}
+
 test "every published example exercises the form it names" {
     // A clean example that no longer contains its form still checks clean, so
     // legality alone would let an edit hollow one out. The evidence is read
@@ -619,7 +628,7 @@ test "every published example exercises the form it names" {
         try frontend.initCompileInPlace(a, a, entry.source, "example.ts");
         defer frontend.deinit();
         const accepted = frontend.acceptedCapabilities() orelse return error.TestExpectedExample;
-        const view = accepted.ir_view;
+        const view = try loweredExampleView(a, &frontend, accepted.root);
 
         const found = switch (entry.evidence) {
             .node => |tag| blk: {
@@ -657,7 +666,12 @@ test "every published example exercises the form it names" {
                     break :blk false;
                 },
             },
-            .source_text => |text| std.mem.indexOf(u8, entry.source, text.needle) != null,
+            .source_text => |text| blk: {
+                for (text.needles) |needle| {
+                    if (std.mem.indexOf(u8, entry.source, needle) == null) break :blk false;
+                }
+                break :blk true;
+            },
         };
 
         if (!found) {
@@ -680,7 +694,7 @@ test "the example evidence check can fail, so its verdict means something" {
     try frontend.initCompileInPlace(a, a, entry.source, "example.ts");
     defer frontend.deinit();
     const accepted = frontend.acceptedCapabilities() orelse return error.TestExpectedExample;
-    const view = accepted.ir_view;
+    const view = try loweredExampleView(a, &frontend, accepted.root);
 
     var saw_break = false;
     var saw_match = false;

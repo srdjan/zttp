@@ -19,6 +19,7 @@ const handler_contract_mod = @import("zts-contracts").handler_contract;
 const contract_builder_mod = @import("contract_builder.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
 const bytecode_mod = @import("zts-engine").bytecode;
+const handler_analyzer_mod = @import("zts-engine").handler_analyzer;
 const source_frontend_mod = @import("zts-engine").source_frontend;
 const string_mod = @import("zts-engine").string;
 const effect_inference = @import("effect_inference.zig");
@@ -33,6 +34,7 @@ const HandlerContract = handler_contract_mod.HandlerContract;
 const VerificationInfo = handler_contract_mod.VerificationInfo;
 const ContractBuilder = contract_builder_mod.ContractBuilder;
 const PatternDispatchTable = bytecode_mod.PatternDispatchTable;
+const PatternType = bytecode_mod.PatternType;
 const pipeline_mod = @import("pipeline.zig");
 const ExtractContractOptions = pipeline_mod.ExtractContractOptions;
 const ContractExtraction = pipeline_mod.ContractExtraction;
@@ -1450,6 +1452,182 @@ test "fluent match callback results keep boolean and effect facts" {
     try testing.expect(!properties.deterministic);
 }
 
+test "HandlerAnalyzer extracts static URL guards" {
+    const allocator = testing.allocator;
+    const source =
+        \\function handler(request: Request): Response {
+        \\  const url = request.url;
+        \\  if (url === "/api/a") { return Response.json({ ok: true }); }
+        \\  if (url === "/api/b") { return Response.text("plain"); }
+        \\  return Response.json({ error: "nf" }, { status: 404 });
+        \\}
+    ;
+
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(
+        allocator,
+        ParsedModule.fromAdmittedParser(&parser, root, &atoms, "/app/handler-analyzer-routes.ts"),
+        .{},
+    );
+    defer analysis.deinit();
+    try analysis.complete();
+
+    const ir_view = analysis.parsed.ir_view;
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+    var analyzer = handler_analyzer_mod.HandlerAnalyzer.init(allocator, ir_view, &atoms);
+    defer analyzer.deinit();
+
+    const dispatch = (try analyzer.analyze(handler_fn)) orelse return error.PatternDispatchMissing;
+    defer {
+        dispatch.deinit();
+        allocator.destroy(dispatch);
+    }
+
+    try testing.expectEqual(@as(usize, 2), dispatch.patterns.len);
+    try testing.expectEqual(PatternType.exact, dispatch.patterns[0].pattern_type);
+    try testing.expectEqualStrings("/api/a", dispatch.patterns[0].url_bytes);
+    try testing.expectEqualStrings("{\"ok\":true}", dispatch.patterns[0].static_body);
+    try testing.expectEqual(PatternType.exact, dispatch.patterns[1].pattern_type);
+    try testing.expectEqualStrings("/api/b", dispatch.patterns[1].url_bytes);
+    try testing.expectEqualStrings("plain", dispatch.patterns[1].static_body);
+}
+
+test "HandlerAnalyzer does not fast-path match-object arms that constrain method" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\function handler(request: Request): Response {
+        \\  const url = request.url;
+        \\  return match(request)
+        \\    .with({ method: "POST", path: "/echo" }, () => Response.json({ ok: true }))
+        \\    .otherwise(() => Response.json({ error: "nf" }, { status: 404 }));
+        \\}
+    ;
+
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(
+        allocator,
+        ParsedModule.fromAdmittedParser(&parser, root, &atoms, "/app/handler-analyzer-method.ts"),
+        .{},
+    );
+    defer analysis.deinit();
+    try analysis.complete();
+
+    const ir_view = analysis.parsed.ir_view;
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+    var analyzer = handler_analyzer_mod.HandlerAnalyzer.init(allocator, ir_view, &atoms);
+    defer analyzer.deinit();
+
+    if (try analyzer.analyze(handler_fn)) |dispatch| {
+        defer {
+            dispatch.deinit();
+            allocator.destroy(dispatch);
+        }
+        for (dispatch.patterns) |pattern| {
+            try testing.expect(!std.mem.eql(u8, pattern.url_bytes, "/echo"));
+        }
+    }
+}
+
+test "HandlerAnalyzer does not fast-path ambiguous fluent callback returns" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\function handler(request: Request): Response {
+        \\  const url = request.url;
+        \\  return match(url)
+        \\    .with("/api/a", () => {
+        \\      if (request.method === "GET") { return Response.text("get"); }
+        \\      return Response.text("other");
+        \\    })
+        \\    .otherwise(() => Response.text("missing", { status: 404 }));
+        \\}
+    ;
+
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(
+        allocator,
+        ParsedModule.fromAdmittedParser(&parser, root, &atoms, "/app/handler-analyzer-ambiguous.ts"),
+        .{},
+    );
+    defer analysis.deinit();
+    try analysis.complete();
+
+    const ir_view = analysis.parsed.ir_view;
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+    var analyzer = handler_analyzer_mod.HandlerAnalyzer.init(allocator, ir_view, &atoms);
+    defer analyzer.deinit();
+
+    try testing.expect((try analyzer.analyze(handler_fn)) == null);
+}
+
+test "fluent matching on another local does not publish a URL dispatch table" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\function handler(request: Request): Response {
+        \\  const url = request.url;
+        \\  const subject = request.method;
+        \\  return match(subject)
+        \\    .with("/api/a", () => Response.text("matched"))
+        \\    .otherwise(() => Response.text("unmatched"));
+        \\}
+    ;
+
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(
+        allocator,
+        ParsedModule.fromAdmittedParser(&parser, root, &atoms, "/app/handler-analyzer-subject.ts"),
+        .{},
+    );
+    defer analysis.deinit();
+    try analysis.complete();
+
+    const ir_view = analysis.parsed.ir_view;
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+    var analyzer = handler_analyzer_mod.HandlerAnalyzer.init(allocator, ir_view, &atoms);
+    defer analyzer.deinit();
+
+    const dispatch = try analyzer.analyze(handler_fn);
+    defer if (dispatch) |table| {
+        table.deinit();
+        allocator.destroy(table);
+    };
+    try testing.expectEqual(@as(@TypeOf(dispatch), null), dispatch);
+}
+
 test "fluent callback analysis propagates allocation failures" {
     const source =
         \\import { match } from "zttp:core";
@@ -2037,8 +2215,6 @@ fn withSession(
     defer frontend.deinit();
     const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
     const view = IrView.fromIRStore(&frontend.parser.nodes, &frontend.parser.constants);
-    const parsed = ParsedModule.fromTypedExisting(view, accepted.root, accepted.atoms, accepted.type_store);
-
     var storage: TypeEnvStorage = .{};
     defer storage.deinit(allocator);
     try storage.initWithSource(allocator, .{ .direct = .{
@@ -2048,13 +2224,17 @@ fn withSession(
         .atoms = accepted.atoms,
     } });
 
-    var resolved = try resolve(allocator, parsed, .{ .type_env = storage.envPtr(), .strict = true });
+    const env = storage.envPtr() orelse return error.TestUnexpectedResult;
+    try @import("intrinsic_lowering.zig").validateSource(allocator, &frontend.parser, accepted.atoms, env);
+    const lowered_view = IrView.fromIRStore(&frontend.parser.nodes, &frontend.parser.constants);
+    const parsed = ParsedModule.fromTypedExisting(lowered_view, accepted.root, accepted.atoms, accepted.type_store);
+    var resolved = try resolve(allocator, parsed, .{ .type_env = env, .strict = true });
     defer resolved.deinit();
     try run(.{
         .allocator = allocator,
         .resolved = &resolved,
         .parsed = parsed,
-        .handler = handler_function_mod.findHandlerFunction(view, accepted.root),
+        .handler = handler_function_mod.findHandlerFunction(lowered_view, accepted.root),
     });
 }
 
@@ -2438,7 +2618,7 @@ fn expectBoolErrors(source: []const u8, comptime expected: u32) !void {
     }.run);
 }
 
-const guard_union_decl = "structural Ev = { kind: \"a\"; flag: boolean } | { kind: \"b\"; n: number };\n";
+const guard_union_decl = "type Ev = { kind: \"a\"; flag: boolean } | { kind: \"b\"; n: number };\n";
 
 test "the right operand of && is typed under the left operand's guard" {
     // An optional boolean read after an undefined test.
@@ -2634,7 +2814,7 @@ test "isDict and isBytes are booleans in every boolean context" {
 }
 
 test "a member read through a record parameter's named field is typed" {
-    const todo = "structural Todo = { text: string; done: boolean };\n";
+    const todo = "type Todo = { text: string; done: boolean };\n";
     try expectBoolErrors(
         todo ++ "function f(p: { todo: Todo }): number { return p.todo.done ? 1 : 0; }",
         0,
@@ -2794,7 +2974,7 @@ test "times on a result that may be undefined is refused" {
 
 test "minus on an optional field is refused" {
     try expectArithCounts(
-        \\structural Box = { n?: number };
+        \\type Box = { n?: number };
         \\const b: Box = {};
         \\const total = b.n - 1;
     ,
@@ -2863,7 +3043,7 @@ test "unary minus on a boolean is refused" {
 
 test "a plus on an optional string leaves the times around it alone" {
     try expectArithCounts(
-        \\structural Box = { s?: string };
+        \\type Box = { s?: string };
         \\const b: Box = {};
         \\const total = (b.s + 1) * 2;
     ,
@@ -2988,12 +3168,10 @@ test "arithmetic on a value proven to be a number is accepted" {
         0,
     );
     try expectArithCounts(
-        \\structural Msg = { kind: "n"; value: number } | { kind: "s"; text: string };
+        \\import { match } from "zttp:core";
+        \\type Msg = { kind: "n"; value: number } | { kind: "s"; text: string };
         \\function f(m: Msg): number {
-        \\  return match (m) {
-        \\    when { kind: "n", value }: value + 1
-        \\    default: 0
-        \\  };
+        \\  return match(m).with({ kind: "n" }, (selected) => selected.value + 1).otherwise(() => 0);
         \\}
     ,
         0,
@@ -3395,7 +3573,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "isDict",
         "boolean",
         3291,
-        "f7aaceae5c224902ca830e15c2c119b98abbfe6b80ae92692bafad60f8dcf779",
+        "600e10b44a9a27fa988de6b0b23d1edd2628ea293066603b54e78ceb1404f0f0",
     );
 
     const helper_source =
@@ -3413,7 +3591,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "helper",
         "unknown",
         3295,
-        "df21a7e5a599dd4603514b18b052125e0e85ea6dd9284092dce705969a2d50c9",
+        "1a6e82ed27ae6743696a0bcaee49e392b5a0a34cf6a2cf1442fa1d10dd609b45",
     );
 }
 
@@ -3649,7 +3827,7 @@ test "consumer entry points reject operational source failures before semantic a
 }
 
 const directCallbackSource =
-    \\structural CryptoValue = Effects<string, "crypto">;
+    \\type CryptoValue = Effects<string, "crypto">;
     \\function run(callback: (value: string) => CryptoValue, value: string): Effects<string, "crypto"> {
     \\  return callback(value);
     \\}
@@ -4045,7 +4223,7 @@ fn readFlowProjectionDependency(allocator: std.mem.Allocator, path: []const u8) 
     if (!std.mem.endsWith(u8, path, "dep.ts")) return error.FileNotFound;
     return allocator.dupe(u8,
         \\import { env } from "zttp:env";
-        \\export structural SecretText = string;
+        \\export type SecretText = string;
         \\export function value(): SecretText { return env("API_SECRET") ?? ""; }
     );
 }
@@ -4106,7 +4284,7 @@ test "ModuleAnalysisSession leaves the flow properties unproven for a module wit
 // ---------------------------------------------------------------------------
 // Builtin result types (U1a of the builtin result types plan)
 //
-// Each form is assigned to `structural Nope = { zz: Bytes };`. A form with a
+// Each form is assigned to `type Nope = { zz: Bytes };`. A form with a
 // type gets one ZTS200 whose message names that type. A form with no type
 // gets none, which is how an untyped result passes today.
 // ---------------------------------------------------------------------------
@@ -4136,126 +4314,126 @@ fn expectNoTypeDiagnostic(source: []const u8) !void {
 
 test "builtin result: length of an array is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[]): number { const p: Nope = xs.length; return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: length of a string literal is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = "abc".length; return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: length of a string is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = s.length; return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: Math.floor of a number is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(n: number): number { const p: Nope = Math.floor(n); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: Math.PI is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = Math.PI; return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: Number.MAX_SAFE_INTEGER is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = Number.MAX_SAFE_INTEGER; return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: parseInt of a string and a radix is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = parseInt(s, 10); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: Number of a string is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = Number(s); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: Number.isInteger of a number is boolean" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(n: number): number { const p: Nope = Number.isInteger(n); return 0; }
     , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: String of a number is string" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(n: number): number { const p: Nope = String(n); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: indexOf on a string is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = s.indexOf("b"); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: split on a string is string array" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = s.split(","); return 0; }
     , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: toUpperCase on a string is string" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = s.toUpperCase(); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: repeat on a string is string or undefined" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = s.repeat(2); return 0; }
     , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: Date.now is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = Date.now(); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: renderToString is string" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = renderToString("x"); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: Headers get on a request is string or undefined" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(req: Request): number { const p: Nope = req.headers.get("x"); return 0; }
     , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: Headers has on a request is boolean" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(req: Request): number { const p: Nope = req.headers.has("x"); return 0; }
     , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4274,57 +4452,57 @@ test "false proof F2: a header that may be missing is not a string" {
 
 test "builtin result: an argument of the wrong type is ZTS203 and adds no result type" {
     try expectOneArgMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = Math.floor(s); return 0; }
     , "Math.floor argument 1 must be a number, got 'string'");
 }
 
 test "builtin result: an argument that may be undefined is ZTS203 and adds no result type" {
     try expectOneArgMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(n: number | undefined): number { const p: Nope = Math.floor(n); return 0; }
     , "Math.floor argument 1 must be a number, got 'number | undefined'");
 }
 
 test "builtin result: a missing argument is ZTS202 and adds no result type" {
     try expectOneCountMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = Math.floor(); return 0; }
     , "Math.floor takes 1 argument(s), got 0");
 }
 
 test "builtin result: split with a separator that is not a string is ZTS203 and adds no result type" {
     try expectOneArgMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string, n: number): number { const p: Nope = s.split(n); return 0; }
     , "String.prototype.split argument 1 must be a string, got 'number'");
 }
 
 test "builtin result: the length of a string that may be undefined stays untyped" {
     try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string | undefined): number { const p: Nope = s.length; return 0; }
     );
 }
 
 test "builtin result: a parameter named Math keeps its own type" {
     try expectNoTypeDiagnostic(
-        \\structural M = { floor: (n: number) => string };
+        \\type M = { floor: (n: number) => string };
         \\function f(Math: M): string { const s: string = Math.floor(1); return s; }
     );
 }
 
 test "builtin result: a parameter named Math is not the builtin" {
     try expectOneMismatch(
-        \\structural M = { floor: (n: number) => string };
-        \\structural Nope = { zz: Bytes };
+        \\type M = { floor: (n: number) => string };
+        \\type Nope = { zz: Bytes };
         \\function f(Math: M): number { const p: Nope = Math.floor(1); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: a top-level binding named Math is not the builtin" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function floorText(n: number): string { return "x"; }
         \\const Math = { floor: floorText };
         \\function f(): number { const p: Nope = Math.floor(1); return 0; }
@@ -4333,7 +4511,7 @@ test "builtin result: a top-level binding named Math is not the builtin" {
 
 test "builtin result: a parameter named parseInt is not the builtin" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(parseInt: (s: string) => string): number { const p: Nope = parseInt("1"); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4346,84 +4524,84 @@ test "builtin result: a parameter named parseInt is not the builtin" {
 
 test "builtin result: indexOf on an array is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[]): number { const p: Nope = xs.indexOf(1); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: includes on an array is boolean" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[]): number { const p: Nope = xs.includes(1); return 0; }
     , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: join on an array is string" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[]): number { const p: Nope = xs.join(","); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: join with a separator that is not a string is still string" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[], n: number): number { const p: Nope = xs.join(n); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: slice on an array is the receiver array" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[]): number { const p: Nope = xs.slice(0, 1); return 0; }
     , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: push on an array is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[]): number { const p: Nope = xs.push(1, 2); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: map is the array of the callback return type" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[], cb: (n: number) => string): number { const p: Nope = xs.map(cb); return 0; }
     , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: map with a callback that has no type stays untyped" {
     try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[], cb: (n: number) => unknown): number { const p: Nope = xs.map(cb); return 0; }
     );
 }
 
 test "builtin result: reduce with an initial value joins its type and the callback return" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[], cb: (acc: number, n: number) => number): number { const p: Nope = xs.reduce(cb, 0); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: reduce keeps the initial value type when it differs from the callback return" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[], cb: (acc: string | number, n: number) => number): number { const p: Nope = xs.reduce(cb, ""); return 0; }
     , "type 'string | number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: map with a callback whose parameter does not accept the element is ZTS203 and adds no result type" {
     try expectOneArgMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[], cb: (n: number) => number): number { const p: Nope = xs.map(cb); return 0; }
     , "callback parameter '#1' is 'number', but map passes 'string'");
 }
 
 test "builtin result: reduce with an accumulator that does not accept the callback return is ZTS203 and adds no result type" {
     try expectOneArgMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[], cb: (acc: string, n: number) => number): number { const p: Nope = xs.reduce(cb, ""); return 0; }
     , "callback parameter '#1' is 'string', but reduce passes 'number'");
 }
@@ -4469,14 +4647,14 @@ test "string index: charAt, slice, and length on a string report nothing" {
 
 test "string index: an index read on a string array keeps string or undefined" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[]): number { const p: Nope = xs[0]; return 0; }
     , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "string index: an index read on a union of string and string array is string or undefined" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(x: string | string[]): number { const p: Nope = x[0]; return 0; }
     , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4556,9 +4734,9 @@ test "member access: a member read on an unknown value reports nothing" {
 
 test "member access: a read on a union of named records types the shared field" {
     try expectOneMismatch(
-        \\structural A = { kind: "a"; n: number };
-        \\structural B = { kind: "b"; s: string };
-        \\structural Nope = { zz: Bytes };
+        \\type A = { kind: "a"; n: number };
+        \\type B = { kind: "b"; s: string };
+        \\type Nope = { zz: Bytes };
         \\function f(x: A | B): number { const p: Nope = x.kind; return 0; }
     , "type '\"a\" | \"b\"' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4585,23 +4763,23 @@ test "member access: a typeof guard gives an unknown value a member" {
 
 test "member access: a member that a union of records lacks is ZTS201 when called" {
     try expectOneMissingField(
-        \\structural A = { kind: "a"; f: (n: number) => number };
-        \\structural B = { kind: "b"; g: number };
+        \\type A = { kind: "a"; f: (n: number) => number };
+        \\type B = { kind: "b"; g: number };
         \\function run(x: A | B): number { return x.f(2); }
     , union_call_message, union_call_help);
 }
 
 test "member access: a member that a record and a string do not share is ZTS201 when called" {
     try expectOneMissingField(
-        \\structural A = { f: (n: number) => number };
+        \\type A = { f: (n: number) => number };
         \\function run(x: A | string): number { return x.f(2); }
     , union_call_message, union_call_help);
 }
 
 test "member access: a union member that lacks a read member makes the read optional" {
     try expectOneMismatch(
-        \\structural P = { age: number };
-        \\structural Nope = { zz: Bytes };
+        \\type P = { age: number };
+        \\type Nope = { zz: Bytes };
         \\function f(x: P | string): number { const a: Nope = x.age; return 0; }
     , "type 'number | undefined' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4621,7 +4799,7 @@ test "member access: string members, length, array methods, and tuple length rep
 
 test "member access: a record field that holds a function is still callable" {
     try expectNoTypeDiagnostic(
-        \\structural A = { f: (n: number) => number };
+        \\type A = { f: (n: number) => number };
         \\function run(r: A): number { return r.f(2); }
     );
 }
@@ -4634,12 +4812,12 @@ test "member access: a builtin constant reports nothing" {
 
 // K1a: the types of the `zttp:collections` calls that read a Dict, and a Dict
 // that a typed annotation reaches. Each form is assigned to
-// `structural Nope = { zz: Bytes };` so that the message prints its type.
+// `type Nope = { zz: Bytes };` so that the message prints its type.
 
 test "dict types: dictEmpty is a Dict with no key and no value" {
     try expectOneMismatch(
         \\import { dictEmpty } from "zttp:collections";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = dictEmpty(); return 0; }
     , "type 'Dict<never, never>' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4647,7 +4825,7 @@ test "dict types: dictEmpty is a Dict with no key and no value" {
 test "dict types: dictSet on an empty Dict takes the widened key and value" {
     try expectOneMismatch(
         \\import { dictEmpty, dictSet } from "zttp:collections";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = dictSet(dictEmpty(), "a", 1); return 0; }
     , "type 'Dict<string, number>' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4655,7 +4833,7 @@ test "dict types: dictSet on an empty Dict takes the widened key and value" {
 test "dict types: dictSet with a second value type joins the value types" {
     try expectOneMismatch(
         \\import { dictEmpty, dictSet } from "zttp:collections";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = dictSet(dictSet(dictEmpty(), "a", 1), "b", "two"); return 0; }
     , "type 'Dict<string, number | string>' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4663,7 +4841,7 @@ test "dict types: dictSet with a second value type joins the value types" {
 test "dict types: dictSet with a number key after a string key joins the key types" {
     try expectOneMismatch(
         \\import { dictEmpty, dictSet } from "zttp:collections";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = dictSet(dictSet(dictEmpty(), "a", 1), 2, 3); return 0; }
     , "type 'Dict<string | number, number>' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4671,7 +4849,7 @@ test "dict types: dictSet with a number key after a string key joins the key typ
 test "dict types: dictGet reads the value type or undefined" {
     try expectOneMismatch(
         \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = dictGet(dictSet(dictSet(dictEmpty(), "a", 1), "b", "two"), "a"); return 0; }
     , "type 'number | string | undefined' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4679,7 +4857,7 @@ test "dict types: dictGet reads the value type or undefined" {
 test "dict types: dictGet on an empty Dict is undefined" {
     try expectOneMismatch(
         \\import { dictEmpty, dictGet } from "zttp:collections";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = dictGet(dictEmpty(), "x"); return 0; }
     , "type 'undefined' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4687,7 +4865,7 @@ test "dict types: dictGet on an empty Dict is undefined" {
 test "dict types: dictHas is boolean" {
     try expectOneMismatch(
         \\import { dictEmpty, dictSet, dictHas } from "zttp:collections";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = dictHas(dictSet(dictEmpty(), "a", 1), "a"); return 0; }
     , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4695,7 +4873,7 @@ test "dict types: dictHas is boolean" {
 test "dict types: dictRemove keeps the Dict type" {
     try expectOneMismatch(
         \\import { dictEmpty, dictSet, dictRemove } from "zttp:collections";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = dictRemove(dictSet(dictEmpty(), "a", 1), "a"); return 0; }
     , "type 'Dict<string, number>' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4703,7 +4881,7 @@ test "dict types: dictRemove keeps the Dict type" {
 test "dict types: dictEntries is an array of key and value pairs" {
     try expectOneMismatch(
         \\import { dictEmpty, dictSet, dictEntries } from "zttp:collections";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = dictEntries(dictSet(dictEmpty(), "a", 1)); return 0; }
     , "type '[string, number][]' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4711,7 +4889,7 @@ test "dict types: dictEntries is an array of key and value pairs" {
 test "dict types: a Dict from isDict keeps dictGet unknown" {
     try expectOneMismatch(
         \\import { dictGet } from "zttp:collections";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(u: unknown): number { if (isDict(u)) { const p: Nope = dictGet(u, "a"); } return 0; }
     , "type 'unknown' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4817,7 +4995,7 @@ test "dict types: a let of a Dict with entries keeps its type as a let of an arr
 test "dict types: a const of an empty Dict keeps the empty Dict type" {
     try expectOneMismatch(
         \\import { dictEmpty } from "zttp:collections";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const d = dictEmpty(); const p: Nope = d; return 0; }
     , "type 'Dict<never, never>' is not assignable to type '{ zz: Bytes }'");
 }
@@ -4825,7 +5003,7 @@ test "dict types: a const of an empty Dict keeps the empty Dict type" {
 test "dict types: a union of two Dict types keeps the declared dictGet type" {
     try expectOneMismatch(
         \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(c: boolean): number {
         \\  const d = c ? dictSet(dictEmpty(), "a", 1) : dictSet(dictEmpty(), "a", "x");
         \\  const p: Nope = dictGet(d, "a");
@@ -4840,7 +5018,7 @@ test "dict types: a union of two Dict types keeps the declared dictGet type" {
 
 const dict_callback_setup =
     \\import { dictEmpty, dictSet, dictFold, dictMapValues, dictFilter } from "zttp:collections";
-    \\structural Nope = { zz: Bytes };
+    \\type Nope = { zz: Bytes };
     \\
 ;
 
@@ -5006,14 +5184,14 @@ test "dict callbacks: a callback over a union of Dict types keeps today's behavi
 
 test "builtin result: an array method on a receiver that may be undefined stays untyped" {
     try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[] | undefined): number { const p: Nope = xs.slice(0, 1); return 0; }
     );
 }
 
 test "builtin result: an array method through an optional chain stays untyped" {
     try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[]): number { const p: Nope = xs?.slice(0, 1); return 0; }
     );
 }
@@ -5575,7 +5753,7 @@ test "result shape: a Result from a module export is accepted at mapResult" {
 test "result type: ok(21) carries the number value and a never error" {
     try expectOneMismatch(
         \\import { ok } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = ok(21); return 0; }
     , "type '{ ok: boolean; value?: number; error?: never; errors?: never }' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5583,7 +5761,7 @@ test "result type: ok(21) carries the number value and a never error" {
 test "result type: err(\"x\") carries the string error and a never value" {
     try expectOneMismatch(
         \\import { err } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = err("x"); return 0; }
     , "type '{ ok: boolean; value?: never; error?: string; errors?: never }' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5591,7 +5769,7 @@ test "result type: err(\"x\") carries the string error and a never value" {
 test "result type: unwrapOr of ok(21) and 0 is number" {
     try expectOneMismatch(
         \\import { ok, unwrapOr } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = unwrapOr(ok(21), 0); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5599,7 +5777,7 @@ test "result type: unwrapOr of ok(21) and 0 is number" {
 test "result type: unwrapOr of err(\"x\") and -1 is number" {
     try expectOneMismatch(
         \\import { err, unwrapOr } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = unwrapOr(err("x"), -1); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5607,7 +5785,7 @@ test "result type: unwrapOr of err(\"x\") and -1 is number" {
 test "result type: unwrapOr of ok(21) and a string is a union" {
     try expectOneMismatch(
         \\import { ok, unwrapOr } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = unwrapOr(ok(21), "none"); return 0; }
     , "type 'number | string' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5615,7 +5793,7 @@ test "result type: unwrapOr of ok(21) and a string is a union" {
 test "result type: a ternary of ok and err is one Result record" {
     try expectOneMismatch(
         \\import { err, ok } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(flag: boolean): number {
         \\  const r = flag ? ok(1) : err("x");
         \\  const p: Nope = r;
@@ -5627,7 +5805,7 @@ test "result type: a ternary of ok and err is one Result record" {
 test "result type: the value of a joined Result reads as number after the ok guard" {
     try expectOneMismatch(
         \\import { err, ok } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(flag: boolean): number {
         \\  const r = flag ? ok(1) : err("x");
         \\  if (r.ok) {
@@ -5640,7 +5818,7 @@ test "result type: the value of a joined Result reads as number after the ok gua
 
 test "result type: a local function named ok keeps its own type" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function ok(x: number): string { return "x"; }
         \\function f(): number { const p: Nope = ok(21); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
@@ -5675,7 +5853,7 @@ test "result combinator: a reduce callback that returns the element under a stri
 test "result combinator: mapResult of ok(21) and a doubling callback is a number Result" {
     try expectOneMismatch(
         \\import { mapResult, ok } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = mapResult(ok(21), (n) => n * 2); return 0; }
     , "type '{ ok: boolean; value?: number; error?: never; errors?: never }' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5724,7 +5902,7 @@ test "result combinator: an annotated mapResult callback that accepts the value 
 test "result combinator: mapError of err(\"boom\") and a join callback has a string error" {
     try expectOneMismatch(
         \\import { err, mapError } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = mapError(err("boom"), (e) => [e, "!"].join("")); return 0; }
     , "type '{ ok: boolean; value?: never; error?: string; errors?: never }' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5732,7 +5910,7 @@ test "result combinator: mapError of err(\"boom\") and a join callback has a str
 test "result combinator: andThen of ok(1) and a string Result is a string Result with a never error" {
     try expectOneMismatch(
         \\import { andThen, ok } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = andThen(ok(1), (n) => ok(String(n))); return 0; }
     , "type '{ ok: boolean; value?: string; error?: never; errors?: never }' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5740,7 +5918,7 @@ test "result combinator: andThen of ok(1) and a string Result is a string Result
 test "result combinator: orElse of err(\"x\") and ok(0) is a number Result with a never error" {
     try expectOneMismatch(
         \\import { err, ok, orElse } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = orElse(err("x"), (e) => ok(0)); return 0; }
     , "type '{ ok: boolean; value?: number; error?: never; errors?: never }' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5748,7 +5926,7 @@ test "result combinator: orElse of err(\"x\") and ok(0) is a number Result with 
 test "result combinator: collectAll of an ok and an err is a number array Result with a string error" {
     try expectOneMismatch(
         \\import { collectAll, err, ok } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = collectAll([ok(1), err("e")]); return 0; }
     , "type '{ ok: boolean; value?: number[]; error?: string; errors?: never }' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5756,7 +5934,7 @@ test "result combinator: collectAll of an ok and an err is a number array Result
 test "result combinator: collectAll of an empty array keeps the table record" {
     try expectOneMismatch(
         \\import { collectAll } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = collectAll([]); return 0; }
     , "type '{ ok: boolean; value?: unknown; error?: unknown; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5764,7 +5942,7 @@ test "result combinator: collectAll of an empty array keeps the table record" {
 test "result combinator: an andThen callback parameter takes the number value of a mapResult chain" {
     try expectOneMismatch(
         \\import { andThen, mapResult, ok } from "zttp:result";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number {
         \\  const doubled = mapResult(ok(21), (n) => n * 2);
         \\  const chained = andThen(doubled, (m) => { const q: Nope = m; return ok(m + 1); });
@@ -5830,7 +6008,7 @@ test "result errors: a validateJson error with a nullish fallback is a string" {
 test "result errors: a validateJson Result declares unknown errors and an error that may be undefined" {
     try expectOneMismatch(
         \\import { validateJson } from "zttp:validate";
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(text: string): number { const p: Nope = validateJson("user", text); return 0; }
     , "type '{ ok: boolean; value?: unknown; error?: string | undefined; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5848,31 +6026,31 @@ test "result combinator: a mapResult callback annotated number refuses a JSON va
 
 test "builtin result: Object.keys of a record is a string array" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\structural O = { a: number };
+        \\type Nope = { zz: Bytes };
+        \\type O = { a: number };
         \\function f(o: O): number { const p: Nope = Object.keys(o); return 0; }
     , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: Object.keys of a string is ZTS203 and adds no result type" {
     try expectOneArgMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = Object.keys(s); return 0; }
     , "Object.keys argument 1 must be an object, got 'string'");
 }
 
 test "builtin result: Object.values of a record is an unknown array" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\structural O = { a: number };
+        \\type Nope = { zz: Bytes };
+        \\type O = { a: number };
         \\function f(o: O): number { const p: Nope = Object.values(o); return 0; }
     , "type 'unknown[]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: Object.entries of a record is an array of string and unknown pairs" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\structural O = { a: number };
+        \\type Nope = { zz: Bytes };
+        \\type O = { a: number };
         \\function f(o: O): number { const p: Nope = Object.entries(o); return 0; }
     , "type '[string, unknown][]' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5885,90 +6063,90 @@ test "builtin result: Object.values of an object literal is not a number array" 
 
 test "builtin result: Object.values of a string is ZTS203 and adds no result type" {
     try expectOneArgMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = Object.values(s); return 0; }
     , "Object.values argument 1 must be an object, got 'string'");
 }
 
 test "builtin result: Object.entries of a string is ZTS203 and adds no result type" {
     try expectOneArgMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(s: string): number { const q: Nope = Object.entries(s); return 0; }
     , "Object.entries argument 1 must be an object, got 'string'");
 }
 
 test "builtin result: Array.isArray is boolean" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[]): number { const p: Nope = Array.isArray(xs); return 0; }
     , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: a parameter named JSON keeps its own type" {
     try expectOneMismatch(
-        \\structural J = { parse: (s: string) => number };
-        \\structural Nope = { zz: Bytes };
+        \\type J = { parse: (s: string) => number };
+        \\type Nope = { zz: Bytes };
         \\function f(JSON: J): number { const p: Nope = JSON.parse("1"); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: a parameter named Array keeps its own type" {
     try expectOneMismatch(
-        \\structural A = { isArray: (x: number) => string };
-        \\structural Nope = { zz: Bytes };
+        \\type A = { isArray: (x: number) => string };
+        \\type Nope = { zz: Bytes };
         \\function f(Array: A): number { const p: Nope = Array.isArray(1); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: the index of a map callback is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[]): number { xs.map((v, i) => { const p: Nope = i; return v; }); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: the index of a filter callback is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[]): number { xs.filter((v, i) => { const p: Nope = i; return true; }); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: the index of a find callback is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[]): number { xs.find((v, i) => { const p: Nope = i; return true; }); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: the index of a findIndex callback is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[]): number { xs.findIndex((v, i) => { const p: Nope = i; return true; }); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: the index of a some callback is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[]): number { xs.some((v, i) => { const p: Nope = i; return true; }); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: both parameters of a toSorted comparator are the element type" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[]): number { xs.toSorted((a, b) => { const p: Nope = a; return 0; }); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[]): number { xs.toSorted((a, b) => { const p: Nope = b; return 0; }); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: reduce with an initial value is typed by the widened initial value" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[]): number { const p: Nope = xs.reduce((acc, v) => acc + v, 0); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
@@ -5981,21 +6159,21 @@ test "callback parameter: reduce that sums into a number is accepted" {
 
 test "callback parameter: the accumulator of a reduce callback is the widened initial value type" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[]): number { xs.reduce((acc, v) => { const p: Nope = acc; return acc; }, 0); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: the element of a reduce callback is the element type" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[]): number { xs.reduce((acc, v) => { const p: Nope = v; return acc; }, 0); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: the index of a reduce callback is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: string[]): number { xs.reduce((acc, v, i) => { const p: Nope = i; return acc; }, 0); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
@@ -6014,49 +6192,49 @@ test "callback parameter: a reduce callback with an annotated accumulator is not
 
 test "callback parameter: a reduce callback whose return has no type leaves the accumulator untyped" {
     try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[], g: unknown): number { xs.reduce((acc, v) => { const p: Nope = acc; return g; }, 0); return 0; }
     );
 }
 
 test "callback parameter: the element of for...of over range is number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { for (const i of range(3)) { const p: Nope = i; } return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: a parameter named range keeps its own type in for...of" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(range: (n: number) => string[]): number { for (const s of range(3)) { const p: Nope = s; } return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "for...of over a tuple of numbers binds the variable to number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { for (const n of [1, 2, 3]) { const p: Nope = n; } return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "for...of over a mixed tuple binds the union of the widened element types" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { for (const s of ["a", 1]) { const p: Nope = s; } return 0; }
     , "type 'string | number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "for...of over a union of an array and a tuple binds the union of the element types" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(u: number[] | [string, string]): number { for (const v of u) { const p: Nope = v; } return 0; }
     , "type 'number | string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "for...of nested over an array of mixed rows binds the inner variable to number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { for (const row of [[1, 2], [3]]) { for (const m of row) { const p: Nope = m; } } return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
@@ -6088,42 +6266,42 @@ fn expectOneNonIterableLoop(source: []const u8) !void {
 
 test "for...of over a union with a member that is not an array or tuple is refused with ZTS218" {
     try expectOneNonIterableLoop(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(u: number[] | string): number { for (const v of u) { const p: Nope = v; } return 0; }
     );
 }
 
 test "array literal binding: a const of numbers is a number array" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const ys = [4, 5]; const p: Nope = ys; return 0; }
     , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "array literal binding: a let of numbers is a number array" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { let ys = [4, 4]; const p: Nope = ys; return 0; }
     , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "array literal binding: a const of mixed elements is a tuple of the widened types" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const t = ["a", 1]; const p: Nope = t; return 0; }
     , "type '[string, number]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "array literal binding: an empty literal is an unknown array" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const out = []; const p: Nope = out; return 0; }
     , "type 'unknown[]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "array literal binding: a literal longer than the inference buffer is a number array" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const ys = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]; const p: Nope = ys; return 0; }
     , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
 }
@@ -6338,7 +6516,7 @@ test "array literal binding: a variable array spread does not claim fixed tuple 
 
 test "array literal binding: empty containers, known spread, and unknown target remain accepted" {
     try expectNoTypeDiagnostic(
-        \\structural Box = { value?: number };
+        \\type Box = { value?: number };
         \\function f(): number {
         \\  const tail: number[] = [1, 2];
         \\  const literal_tail: ("a" | "b")[] = ["a", "b"];
@@ -6505,8 +6683,8 @@ test "container mutation keeps inferred numeric widening at sixteen union member
 }
 
 const wide_nested_record_union_mutation_source =
-    \\structural Nested = { a: 0 } | { b: 0 };
-    \\structural Item = {
+    \\type Nested = { a: 0 } | { b: 0 };
+    \\type Item = {
     \\  kind: number;
     \\  nested: { a: number } | { b: number };
     \\  after: number;
@@ -6587,48 +6765,48 @@ test "wide recursive write-slot widening propagates allocation failure" {
 }
 
 const wide_container_record_prefix =
-    \\structural A01 = { kind: "01"; v: number };
-    \\structural A02 = { kind: "02"; v: number };
-    \\structural A03 = { kind: "03"; v: number };
-    \\structural A04 = { kind: "04"; v: number };
-    \\structural A05 = { kind: "05"; v: number };
-    \\structural A06 = { kind: "06"; v: number };
-    \\structural A07 = { kind: "07"; v: number };
-    \\structural A08 = { kind: "08"; v: number };
-    \\structural A09 = { kind: "09"; v: number };
-    \\structural A10 = { kind: "10"; v: number };
-    \\structural A11 = { kind: "11"; v: number };
-    \\structural A12 = { kind: "12"; v: number };
-    \\structural A13 = { kind: "13"; v: number };
-    \\structural A14 = { kind: "14"; v: number };
-    \\structural A15 = { kind: "15"; v: number };
-    \\structural A16 = { kind: "16"; v: number };
+    \\type A01 = { kind: "01"; v: number };
+    \\type A02 = { kind: "02"; v: number };
+    \\type A03 = { kind: "03"; v: number };
+    \\type A04 = { kind: "04"; v: number };
+    \\type A05 = { kind: "05"; v: number };
+    \\type A06 = { kind: "06"; v: number };
+    \\type A07 = { kind: "07"; v: number };
+    \\type A08 = { kind: "08"; v: number };
+    \\type A09 = { kind: "09"; v: number };
+    \\type A10 = { kind: "10"; v: number };
+    \\type A11 = { kind: "11"; v: number };
+    \\type A12 = { kind: "12"; v: number };
+    \\type A13 = { kind: "13"; v: number };
+    \\type A14 = { kind: "14"; v: number };
+    \\type A15 = { kind: "15"; v: number };
+    \\type A16 = { kind: "16"; v: number };
 ;
 
 const wide_container_array_members =
-    \\structural K01 = { kind: "01" };
-    \\structural K02 = { kind: "02" };
-    \\structural K03 = { kind: "03" };
-    \\structural K04 = { kind: "04" };
-    \\structural K05 = { kind: "05" };
-    \\structural K06 = { kind: "06" };
-    \\structural K07 = { kind: "07" };
-    \\structural K08 = { kind: "08" };
-    \\structural K09 = { kind: "09" };
-    \\structural K10 = { kind: "10" };
-    \\structural K11 = { kind: "11" };
-    \\structural K12 = { kind: "12" };
-    \\structural K13 = { kind: "13" };
-    \\structural K14 = { kind: "14" };
-    \\structural K15 = { kind: "15" };
-    \\structural K16 = { kind: "16" };
-    \\structural K17 = { kind: "17" };
+    \\type K01 = { kind: "01" };
+    \\type K02 = { kind: "02" };
+    \\type K03 = { kind: "03" };
+    \\type K04 = { kind: "04" };
+    \\type K05 = { kind: "05" };
+    \\type K06 = { kind: "06" };
+    \\type K07 = { kind: "07" };
+    \\type K08 = { kind: "08" };
+    \\type K09 = { kind: "09" };
+    \\type K10 = { kind: "10" };
+    \\type K11 = { kind: "11" };
+    \\type K12 = { kind: "12" };
+    \\type K13 = { kind: "13" };
+    \\type K14 = { kind: "14" };
+    \\type K15 = { kind: "15" };
+    \\type K16 = { kind: "16" };
+    \\type K17 = { kind: "17" };
 ;
 
 test "container write checks the seventeenth record union member" {
     try expectOneMismatch(wide_container_record_prefix ++ "\n" ++
-        \\structural A17 = { kind: "17"; v: string };
-        \\structural U = A01 | A02 | A03 | A04 | A05 | A06 | A07 | A08 |
+        \\type A17 = { kind: "17"; v: string };
+        \\type U = A01 | A02 | A03 | A04 | A05 | A06 | A07 | A08 |
         \\  A09 | A10 | A11 | A12 | A13 | A14 | A15 | A16 | A17;
         \\function f(x: U, n: number): number { x.v = n; return 0; }
     , "type 'number' is not assignable to type 'string'");
@@ -6636,7 +6814,7 @@ test "container write checks the seventeenth record union member" {
 
 test "container mutation checks the seventeenth array union member" {
     try expectOneArgMismatch(wide_container_array_members ++ "\n" ++
-        \\structural U = (number | K01)[] | (number | K02)[] |
+        \\type U = (number | K01)[] | (number | K02)[] |
         \\  (number | K03)[] | (number | K04)[] | (number | K05)[] |
         \\  (number | K06)[] | (number | K07)[] | (number | K08)[] |
         \\  (number | K09)[] | (number | K10)[] | (number | K11)[] |
@@ -6648,8 +6826,8 @@ test "container mutation checks the seventeenth array union member" {
 
 test "container write accepts every compatible member of a wide union" {
     try expectNoTypeDiagnostic(wide_container_record_prefix ++ "\n" ++
-        \\structural A17 = { kind: "17"; v: number };
-        \\structural U = A01 | A02 | A03 | A04 | A05 | A06 | A07 | A08 |
+        \\type A17 = { kind: "17"; v: number };
+        \\type U = A01 | A02 | A03 | A04 | A05 | A06 | A07 | A08 |
         \\  A09 | A10 | A11 | A12 | A13 | A14 | A15 | A16 | A17;
         \\function f(x: U, n: number): number { x.v = n; return 0; }
     );
@@ -6658,8 +6836,8 @@ test "container write accepts every compatible member of a wide union" {
 test "wide container write propagates allocation failure" {
     const allocator = testing.allocator;
     const source = wide_container_record_prefix ++ "\n" ++
-        \\structural A17 = { kind: "17"; v: number };
-        \\structural U = A01 | A02 | A03 | A04 | A05 | A06 | A07 | A08 |
+        \\type A17 = { kind: "17"; v: number };
+        \\type U = A01 | A02 | A03 | A04 | A05 | A06 | A07 | A08 |
         \\  A09 | A10 | A11 | A12 | A13 | A14 | A15 | A16 | A17;
         \\function f(x: U, n: number): number { x.v = n; return 0; }
     ;
@@ -6688,7 +6866,7 @@ test "wide container write propagates allocation failure" {
 
 test "container mutation gives a tuple priority after seventeen array union members" {
     try expectOneMismatch(wide_container_array_members ++ "\n" ++
-        \\structural U = (number | K01)[] | (number | K02)[] |
+        \\type U = (number | K01)[] | (number | K02)[] |
         \\  (number | K03)[] | (number | K04)[] | (number | K05)[] |
         \\  (number | K06)[] | (number | K07)[] | (number | K08)[] |
         \\  (number | K09)[] | (number | K10)[] | (number | K11)[] |
@@ -6704,7 +6882,7 @@ test "array literal binding: an inferred array of 400 distinct records is accept
 
 test "array literal binding: a module scope const of numbers is a number array" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\const ys = [4, 5];
         \\function f(): number { const p: Nope = ys; return 0; }
     , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
@@ -6733,14 +6911,14 @@ test "array literal binding: a literal index read may be undefined" {
 
 test "array literal binding: an annotated array keeps its annotation" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const ys: number[] = [4, 5]; const p: Nope = ys; return 0; }
     , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "array literal binding: an annotated tuple keeps its annotation" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(): number { const t: [number, number] = [4, 5]; const p: Nope = t; return 0; }
     , "type '[number, number]' is not assignable to type '{ zz: Bytes }'");
 }
@@ -6754,29 +6932,29 @@ test "array literal binding: an array literal passed as an argument keeps its li
 
 test "untyped builtin results: the length of Object.values is a number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\structural O = { a: number };
+        \\type Nope = { zz: Bytes };
+        \\type O = { a: number };
         \\function f(o: O): number { const p: Nope = Object.values(o).length; return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "untyped builtin results: arithmetic on the length of Object.values is clean" {
     try expectNoTypeDiagnostic(
-        \\structural O = { a: number };
+        \\type O = { a: number };
         \\function f(o: O): number { return Object.values(o).length - 1; }
     );
 }
 
 test "untyped builtin results: length of a union of a string and a string array is a number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(u: string | string[]): number { const p: Nope = u.length; return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "untyped builtin results: length of a union of a string and a tuple is a number" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(u: string | [number, number]): number { const p: Nope = u.length; return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
@@ -6789,14 +6967,14 @@ test "untyped builtin results: arithmetic on the length of a union of a string a
 
 test "untyped builtin results: slice of a union of a string and a string array is the union of both results" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(u: string | string[]): number { const p: Nope = u.slice(1); return 0; }
     , "type 'string | string[]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "untyped builtin results: a method call on a union of arrays that depends on a callback stays untyped" {
     try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(u: number[] | string[]): number { const p: Nope = u.map((x) => x); return 0; }
     );
 }
@@ -6815,14 +6993,14 @@ test "untyped builtin results: a method that every union member has stays clean 
 
 test "callback parameter: an annotated index parameter keeps its annotation" {
     try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function f(xs: number[]): number { xs.map((v: number, i: number | string) => { const p: Nope = i; return v; }); return 0; }
     , "type 'number | string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: a named function passed to map is unchanged" {
     try expectNoTypeDiagnostic(
-        \\structural Nope = { zz: Bytes };
+        \\type Nope = { zz: Bytes };
         \\function g(v, i) { const p: Nope = i; return v; }
         \\function f(xs: number[]): number { xs.map(g); return 0; }
     );
@@ -6912,7 +7090,7 @@ test "callback acceptance: a module export passed to map is checked against the 
 
 test "callback acceptance: a named function passed to a record method that takes a no-parameter callback keeps the arity refusal" {
     try expectOneArgMismatch(
-        \\structural Api = { run: (cb: () => number) => number };
+        \\type Api = { run: (cb: () => number) => number };
         \\function g(n: number): number { return n; }
         \\function f(api: Api): number { return api.run(g); }
     , "argument type does not match parameter type: expected () => number, got (: number) => number");
@@ -6992,7 +7170,7 @@ test "response init: a headers member of a declared parameter type is ZTS203" {
 
 test "response init: a headers member of a named record type is ZTS203" {
     try expectOneArgMismatch(
-        \\structural Init = { status: number; headers: { a: string } };
+        \\type Init = { status: number; headers: { a: string } };
         \\function reply(init: Init): Response { return Response.text("x", init); }
     , "Response.text does not support the init member 'headers'");
 }
@@ -7635,7 +7813,7 @@ test "ModuleAnalysisSession freezes writes_module_state in imported effects" {
 
 test "array suffix after a generic application is an array of the application" {
     try expectNoTypeDiagnostic("function f(x: Dict<string, number>[]): number { return x.length; }");
-    try expectNoTypeDiagnostic("structural Result<T, E> = { ok: T; error: E };\nfunction f(x: Result<number, string>[]): number { return x.length; }");
+    try expectNoTypeDiagnostic("type Result<T, E> = { ok: T; error: E };\nfunction f(x: Result<number, string>[]): number { return x.length; }");
     try expectNoTypeDiagnostic("function f(x: Dict<string, number>[][]): number { return x[0].length; }");
 }
 
@@ -7643,7 +7821,7 @@ test "an imported Result accepts ok and err and a returned Result of its own typ
     try expectNoTypeDiagnostic(
         \\import { err, ok } from "zttp:result";
         \\import type { Result } from "zttp:result";
-        \\structural DivideError = { kind: "division-by-zero" };
+        \\type DivideError = { kind: "division-by-zero" };
         \\function divide(n: number, d: number): Result<number, DivideError> {
         \\  if (d === 0) {
         \\    return err({ kind: "division-by-zero" });

@@ -7,7 +7,7 @@
 //! `advisory` severity, rewritten where the rewrite is provable, and otherwise
 //! left alone.
 //!
-//! The table is complete against spec 4.2.1: 17 rows, in the document's own
+//! The table is complete against spec 4.2.1: 15 rows, in the document's own
 //! order, held there by `scripts/check-idiom-table.sh`. Phase 0 seeded the rows
 //! that needed no language the engine lacked; the Dict rows arrived with
 //! `Dict`; the `Result`, selection, record-update, fold, and search-loop rows
@@ -51,7 +51,7 @@ pub const entries = [_]IdiomEntry{
         .id = "idiom.absence-default",
         .operation = "absence default",
         .idiomatic = "x ?? d",
-        .superseded = "x === undefined ? d : x, x !== undefined ? x : d, match (x) { when undefined: d default: x }",
+        .superseded = "x === undefined ? d : x, x !== undefined ? x : d, match(x).with(undefined, () => d).otherwise(() => x)",
         .precondition = "operand type excludes null and is neither a generic parameter nor unknown",
         .rewrite_rule = null,
     },
@@ -160,22 +160,6 @@ pub const entries = [_]IdiomEntry{
         .rewrite_rule = null,
     },
     .{
-        .id = "idiom.matched-field-read",
-        .operation = "matched field read",
-        .idiomatic = "a binding pattern field",
-        .superseded = "a match arm that reads the field off the scrutinee",
-        .precondition = "none",
-        .rewrite_rule = null,
-    },
-    .{
-        .id = "idiom.binding-field-name",
-        .operation = "match binding field name",
-        .idiomatic = "match shorthand { value }",
-        .superseded = "match pattern { value: value }",
-        .precondition = "none",
-        .rewrite_rule = null,
-    },
-    .{
         .id = "idiom.element-iteration",
         .operation = "element iteration",
         .idiomatic = "for (const item of items)",
@@ -262,7 +246,7 @@ test "idiom registry has unique stable ids" {
     // here fails `scripts/check-idiom-table.sh`; a row added here and not there
     // fails it too. This asserts the number itself so a same-size swap of one
     // row for another still has to face the text comparison.
-    try std.testing.expectEqual(@as(usize, 17), entries.len);
+    try std.testing.expectEqual(@as(usize, 15), entries.len);
 }
 
 test "idiom registry rows are fully populated" {

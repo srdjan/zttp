@@ -3287,7 +3287,7 @@ const init_handler =
     "// Starter handler with author-declared specs.\n" ++
     "// Run `zttp dev` to check every spec again on each save.\n" ++
     "\n\n" ++
-    "structural Guardrails<T> = Proof<T,\n" ++
+    "type Guardrails<T> = Proof<T,\n" ++
     "    | \"deterministic\"\n" ++
     "    | \"no_secret_leakage\"\n" ++
     "    | \"injection_safe\"\n" ++

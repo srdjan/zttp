@@ -492,7 +492,7 @@ grep -qF -- "--> writer.ts:3:10" <<<"$flow_out" || fail "compile with a flow-onl
 step "negative: test prints each error that its summary counts"
 cat > "$BROKEN_APP_DIR/src/handler.ts" <<'TS'
 import { env } from "zttp:env";
-structural RO<T> = Proof<T, "read_only">;
+type RO<T> = Proof<T, "read_only">;
 function handler(req: Request): RO<Response> {
   return Response.json({ v: env("API_TOKEN") ?? "" });
 }

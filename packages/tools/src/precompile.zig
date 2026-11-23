@@ -2863,7 +2863,8 @@ test "compileHandler graph refuses an invalid virtual import in a dependency" {
 
 test "compileHandler graph refuses a top-level statement in a dependency" {
     var fixture = try graphDependencyFixture(
-        \\assert 1 === 1;
+        \\import { assert } from "zttp:core";
+        \\assert(1 === 1);
         \\export function value(): number {
         \\  return 1;
         \\}
@@ -2875,8 +2876,9 @@ test "compileHandler graph refuses a top-level statement in a dependency" {
 
 test "compileHandler graph accepts an assert inside a dependency function" {
     var fixture = try graphDependencyFixture(
+        \\import { assert } from "zttp:core";
         \\export function value(): string {
-        \\  assert 1 === 1;
+        \\  assert(1 === 1);
         \\  return "ok";
         \\}
         \\
@@ -3126,9 +3128,9 @@ test "compileHandler graph accepts the right argument type to an imported functi
     );
 }
 
-test "compileHandler graph reads an exported structural alias of string as string" {
+test "compileHandler graph reads an exported type alias of string as string" {
     const alias_dep =
-        \\structural Label = string;
+        \\type Label = string;
         \\export function label(): Label {
         \\  return "x";
         \\}
@@ -3330,7 +3332,7 @@ test "compileHandler graph accepts an import of a type" {
         \\}
         \\
     ,
-        \\export structural Label = string;
+        \\export type Label = string;
         \\export function greet(): Response {
         \\  return Response.text("x");
         \\}
@@ -3477,7 +3479,7 @@ const parity_refused_rows = [_]ParityRow{
     },
     .{
         .label = "entry declares a type with an ambient type name",
-        .entry = "structural Request = number;\n" ++
+        .entry = "type Request = number;\n" ++
             "export function handler(req: Request): Response {\n  return Response.text(\"x\");\n}\n",
         .files = &.{},
         .code = "ZTS019",
@@ -3586,14 +3588,14 @@ test "check parity: zts check reports each refusal that zts compile makes, with 
     }
 }
 
-test "check parity: a top-level assert in a dependency is ZTS074 at its position" {
-    var fixture = try parityFixture(parityEntry("result_safe"), &.{.{ .name = "lib.ts", .source = "assert 1 === 1;\nexport function f(): string {\n  return \"x\";\n}\n" }});
+test "check parity: a top-level assert call in a dependency is ZTS074 at its position" {
+    var fixture = try parityFixture(parityEntry("result_safe"), &.{.{ .name = "lib.ts", .source = "import { assert } from \"zttp:core\";\nassert(1 === 1);\nexport function f(): string {\n  return \"x\";\n}\n" }});
     defer fixture.deinit();
     var checked = try parityCheck(&fixture, null);
     defer checked.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("ZTS074", checked.json_diagnostics.items[0].code);
     try std.testing.expectEqualStrings("lib.ts", std.fs.path.basename(checked.json_diagnostics.items[0].file));
-    try std.testing.expectEqual(@as(u32, 1), checked.json_diagnostics.items[0].line);
+    try std.testing.expectEqual(@as(u32, 2), checked.json_diagnostics.items[0].line);
     try std.testing.expectEqual(@as(u32, 1), checked.json_diagnostics.items[0].column);
     try std.testing.expect(try compileRefuses(&fixture, null));
 }
@@ -3601,7 +3603,7 @@ test "check parity: a top-level assert in a dependency is ZTS074 at its position
 const sibling_helper_handler =
     \\import { apiToken, displayName } from "./lib/settings.ts";
     \\
-    \\structural Guard<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
+    \\type Guard<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
     \\
     \\export function handler(req: Request): Guard<Response> {
     \\  const token = apiToken();
@@ -3617,8 +3619,8 @@ const sibling_helper_handler =
 const sibling_helper_seed =
     \\import { env } from "zttp:env";
     \\
-    \\export structural ApiToken = string | undefined;
-    \\export structural DisplayName = string;
+    \\export type ApiToken = string | undefined;
+    \\export type DisplayName = string;
     \\
     \\export function apiToken(): ApiToken {
     \\  return env("API_TOKEN");

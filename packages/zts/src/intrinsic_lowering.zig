@@ -825,3 +825,509 @@ test "a refused nominal constructor cannot generate bytecode after analysis" {
     try validateSourceForAnalysis(allocator, &parser.js_parser, &atoms, &env, null, &issues);
     try std.testing.expectError(error.UnvalidatedIntrinsicSource, parser.generateParsed(allocator));
 }
+
+fn prepareMatchTestBytecode(
+    parser: *engine.parser.Parser,
+    allocator: std.mem.Allocator,
+    atoms: *engine.atom_table.AtomTable,
+) ![]const u8 {
+    try std.testing.expect((try parser.parseTypedIr()) == .accepted);
+    try validateMatchTestSource(parser, allocator, atoms);
+    return parser.generateParsed(allocator);
+}
+
+fn validateMatchTestSource(
+    parser: *engine.parser.Parser,
+    allocator: std.mem.Allocator,
+    atoms: *engine.atom_table.AtomTable,
+) !void {
+    var pool = type_pool_mod.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.js_parser.type_store,
+        .ir_view = IrView.fromIRStore(&parser.js_parser.nodes, &parser.js_parser.constants),
+        .atoms = atoms,
+        .module_path = "fluent-match-test.ts",
+    } });
+    try validateSource(allocator, &parser.js_parser, atoms, &env);
+}
+
+test "End-to-end: a match evaluates exactly one arm" {
+    // Spec 5.5 admits effectful arm expressions and says exactly one arm's
+    // expression is evaluated. The property is a consequence of how the arms
+    // are laid out - one labelled body per arm, each jumping to the end - so
+    // this pins it by observing an effect rather than by reading the emitter.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try engine.gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try engine.context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var strings = engine.string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source =
+        \\import { match } from "zttp:core";
+        \\let firstCalls = 0;
+        \\let secondCalls = 0;
+        \\function first() { firstCalls = firstCalls + 1; return 1; }
+        \\function second() { secondCalls = secondCalls + 1; return 2; }
+        \\let tag = "b";
+        \\let picked = match(tag).with("a", () => first()).with("b", () => second()).exhaustive();
+        \\let result = firstCalls * 100 + secondCalls * 10 + picked;
+    ;
+
+    var p = try engine.parser.Parser.initTyped(allocator, allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+
+    const code = try prepareMatchTestBytecode(&p, allocator, &ctx.atoms);
+    try std.testing.expect(code.len > 0);
+
+    const shapes = p.getShapes();
+    if (shapes.len > 0) {
+        try ctx.materializeShapes(shapes);
+    }
+
+    var func = engine.bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+        .line_table = null,
+    };
+
+    var interp = engine.interpreter.Interpreter.init(ctx);
+    _ = try interp.run(&func);
+
+    const result_atom = try ctx.atoms.intern("result");
+    const result_val = ctx.getGlobal(result_atom) orelse return error.MissingResult;
+    try std.testing.expect(result_val.isInt());
+    // The selected arm ran once and the other never ran: 0*100 + 1*10 + 2.
+    // Evaluating both arms would give 112.
+    try std.testing.expectEqual(@as(i32, 12), result_val.getInt());
+}
+
+/// Compile `source`, run it with the builtins installed, and hand the context
+/// to `check`, which reads the globals the program left behind. Match tests
+/// need the builtins because a record or array pattern lowers to a call.
+fn runMatchProgram(source: []const u8, comptime check: fn (*engine.context.Context) anyerror!void) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try engine.gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try engine.context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    try engine.builtins.initBuiltins(ctx);
+
+    var strings = engine.string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var p = try engine.parser.Parser.initTyped(allocator, allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+
+    const code = try prepareMatchTestBytecode(&p, allocator, &ctx.atoms);
+    try std.testing.expect(code.len > 0);
+
+    const shapes = p.getShapes();
+    if (shapes.len > 0) {
+        try ctx.materializeShapes(shapes);
+    }
+
+    var func = engine.bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+        .line_table = null,
+    };
+
+    var interp = engine.interpreter.Interpreter.init(ctx);
+    _ = try interp.run(&func);
+    try check(ctx);
+}
+
+fn expectGlobalString(ctx: *engine.context.Context, name: []const u8, expected: []const u8) !void {
+    const atom = try ctx.atoms.intern(name);
+    const val = ctx.getGlobal(atom) orelse return error.MissingResult;
+    try std.testing.expect(val.isString());
+    try std.testing.expectEqualStrings(expected, val.toPtr(engine.string.JSString).data());
+}
+
+test "End-to-end: a fluent match callback reads fields at each depth of the selected pattern" {
+    const source =
+        \\import { match } from "zttp:core";
+        \\let nested = { a: { b: "deep" } };
+        \\let r1 = match(nested).with({ a: {} }, (selected) => selected.a.b).otherwise(() => "none");
+        \\let boxed = { kind: "box", inner: { v: "seven" } };
+        \\let r2 = match(boxed).with({ kind: "box", inner: {} }, (selected) => selected.inner.v).otherwise(() => "none");
+        \\let arr = [{ n: "first" }];
+        \\let r3 = match(arr).with([{}], (selected) => selected[0].n).otherwise(() => "none");
+        \\let three = { a: { b: { c: "c3" } } };
+        \\let r4 = match(three).with({ a: { b: {} } }, (selected) => selected.a.b.c).otherwise(() => "none");
+        \\let mixed = { items: [{ id: "i1" }] };
+        \\let r5 = match(mixed).with({ items: [{}] }, (selected) => selected.items[0].id).otherwise(() => "none");
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *engine.context.Context) anyerror!void {
+            try expectGlobalString(ctx, "r1", "deep");
+            try expectGlobalString(ctx, "r2", "seven");
+            try expectGlobalString(ctx, "r3", "first");
+            try expectGlobalString(ctx, "r4", "c3");
+            try expectGlobalString(ctx, "r5", "i1");
+        }
+    }.check);
+}
+
+test "End-to-end: a nested empty array or record pattern is still a test" {
+    // Spec 5.5: a nested `[]` matches an array of length 0 and a nested `{}`
+    // matches a record. Codegen must not drop either test, or the arm would
+    // match whatever the field held, present or not.
+    const source =
+        \\import { match } from "zttp:core";
+        \\let full = { v: [1, 2] };
+        \\let empty = { v: [] };
+        \\let absent = {};
+        \\let e1 = match(full).with({ v: [] }, () => "empty").otherwise(() => "other");
+        \\let e2 = match(empty).with({ v: [] }, () => "empty").otherwise(() => "other");
+        \\let e3 = match(absent).with({ v: [] }, () => "empty").otherwise(() => "other");
+        \\let inner = [[1]];
+        \\let e4 = match(inner).with([[]], () => "empty").otherwise(() => "other");
+        \\let rec = { w: { k: 1 } };
+        \\let r1 = match(rec).with({ w: {} }, () => "record").otherwise(() => "other");
+        \\let r2 = match(absent).with({ w: {} }, () => "record").otherwise(() => "other");
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *engine.context.Context) anyerror!void {
+            try expectGlobalString(ctx, "e1", "other");
+            try expectGlobalString(ctx, "e2", "empty");
+            try expectGlobalString(ctx, "e3", "other");
+            try expectGlobalString(ctx, "e4", "other");
+            try expectGlobalString(ctx, "r1", "record");
+            try expectGlobalString(ctx, "r2", "other");
+        }
+    }.check);
+}
+
+test "End-to-end: a record pattern matches only a record, at every depth" {
+    const source =
+        \\import { match, P } from "zttp:core";
+        \\let str = "s";
+        \\let num = 5;
+        \\let arr = [1];
+        \\let nothing = null;
+        \\let rec = { w: 1 };
+        \\let empty = {};
+        \\let lengthy = { length: 3 };
+        \\function one() { return 1; }
+        \\let fun = one;
+        \\let t1 = match(str).with({}, () => "record").otherwise(() => "other");
+        \\let t2 = match(rec).with({}, () => "record").otherwise(() => "other");
+        \\let t3 = match(arr).with({}, () => "record").otherwise(() => "other");
+        \\let t4 = match(num).with({}, () => "record").otherwise(() => "other");
+        \\let t5 = match(empty).with({}, () => "record").otherwise(() => "other");
+        \\let t6 = match(nothing).with({}, () => "record").otherwise(() => "other");
+        \\let t7 = match(lengthy).with({}, () => "record").otherwise(() => "other");
+        \\let t8 = match(fun).with({}, () => "record").otherwise(() => "other");
+        \\let t9 = match(arr).with({}, () => "record").otherwise(() => "other");
+        \\let outer_str = { a: "str" };
+        \\let outer_rec = { a: { b: 1 } };
+        \\let outer_arr = { a: [1] };
+        \\let n1 = match(outer_str).with({ a: {} }, () => "record").otherwise(() => "other");
+        \\let n2 = match(outer_rec).with({ a: {} }, () => "record").otherwise(() => "other");
+        \\let n3 = match(outer_str).with({ a: {} }, () => "record").otherwise(() => "other");
+        \\let n4 = match(outer_arr).with({ a: {} }, () => "record").otherwise(() => "other");
+        \\let n5 = match(outer_rec).with({ a: {} }, () => "record").otherwise(() => "other");
+        \\let strs = ["s"];
+        \\let n6 = match(strs).with([{}], () => "record").otherwise(() => "other");
+        \\let recs = [{ n: 1 }];
+        \\let n7 = match(recs).with([{}], () => "record").otherwise(() => "other");
+        \\let empty_str = { v: "" };
+        \\let empty_lengthy = { v: { length: 0 } };
+        \\let a1 = match(empty_str).with({ v: [] }, () => "empty").otherwise(() => "other");
+        \\let a2 = match(empty_lengthy).with({ v: [] }, () => "empty").otherwise(() => "other");
+        \\let empty_text = "";
+        \\let a3 = match(empty_text).with([], () => "empty").otherwise(() => "other");
+        \\let empty_arr = [];
+        \\let a4 = match(empty_arr).with([], () => "empty").otherwise(() => "other");
+        \\let empty_field = { v: [] };
+        \\let a5 = match(empty_field).with({ v: [] }, () => "empty").otherwise(() => "other");
+        \\let a6 = match(lengthy).with([P.any, P.any, P.any], () => "array").otherwise(() => "other");
+        \\let abc = "abc";
+        \\let a7 = match(abc).with([P.any, P.any, P.any], () => "array").otherwise(() => "other");
+        \\let three = [1, 2, 3];
+        \\let a8 = match(three).with([P.any, P.any, P.any], () => "array").otherwise(() => "other");
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *engine.context.Context) anyerror!void {
+            try expectGlobalString(ctx, "t1", "other");
+            try expectGlobalString(ctx, "t2", "record");
+            try expectGlobalString(ctx, "t3", "other");
+            try expectGlobalString(ctx, "t4", "other");
+            try expectGlobalString(ctx, "t5", "record");
+            try expectGlobalString(ctx, "t6", "other");
+            try expectGlobalString(ctx, "t7", "record");
+            try expectGlobalString(ctx, "t8", "other");
+            try expectGlobalString(ctx, "t9", "other");
+            try expectGlobalString(ctx, "n1", "other");
+            try expectGlobalString(ctx, "n2", "record");
+            try expectGlobalString(ctx, "n3", "other");
+            try expectGlobalString(ctx, "n4", "other");
+            try expectGlobalString(ctx, "n5", "record");
+            try expectGlobalString(ctx, "n6", "other");
+            try expectGlobalString(ctx, "n7", "record");
+            try expectGlobalString(ctx, "a1", "other");
+            try expectGlobalString(ctx, "a2", "other");
+            try expectGlobalString(ctx, "a3", "other");
+            try expectGlobalString(ctx, "a4", "empty");
+            try expectGlobalString(ctx, "a5", "empty");
+            try expectGlobalString(ctx, "a6", "other");
+            try expectGlobalString(ctx, "a7", "other");
+            try expectGlobalString(ctx, "a8", "array");
+        }
+    }.check);
+}
+
+test "End-to-end: a fluent presence descriptor checks for a defined field value" {
+    // Spec 5.5, and the model `match_analysis.zig` uses: a field `_` fails on
+    // `undefined` and matches every other value, `null` included; a field
+    const source =
+        \\import { match, P } from "zttp:core";
+        \\let present = { a: 1 };
+        \\let nulled = { a: null };
+        \\let absent = { b: 1 };
+        \\let undef = { a: undefined };
+        \\let u1 = match(present).with({ a: P.present }, () => "present").otherwise(() => "other");
+        \\let u2 = match(nulled).with({ a: P.present }, () => "present").otherwise(() => "other");
+        \\let u3 = match(absent).with({ a: P.present }, () => "present").otherwise(() => "other");
+        \\let u4 = match(undef).with({ a: P.present }, () => "present").otherwise(() => "other");
+        \\let b1 = match(absent).with({}, () => "bound").otherwise(() => "other");
+        \\let b2 = match(undef).with({}, () => "bound").otherwise(() => "other");
+        \\let wild_a = [undefined, 2];
+        \\let wild_b = [1, 3];
+        \\let w1 = match(wild_a).with([P.any, 2], () => "wild").otherwise(() => "other");
+        \\let w2 = match(wild_b).with([P.any, 2], () => "wild").otherwise(() => "other");
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *engine.context.Context) anyerror!void {
+            try expectGlobalString(ctx, "u1", "present");
+            try expectGlobalString(ctx, "u2", "present");
+            try expectGlobalString(ctx, "u3", "other");
+            try expectGlobalString(ctx, "u4", "other");
+            try expectGlobalString(ctx, "b1", "bound");
+            try expectGlobalString(ctx, "b2", "bound");
+            try expectGlobalString(ctx, "w1", "wild");
+            try expectGlobalString(ctx, "w2", "other");
+        }
+    }.check);
+}
+
+// The tests below are the soundness check for `match_analysis.zig`. Each one
+// writes the arms of a match the analysis accepts without a `default` (the
+// corpus cases under `tests/corpus/check/good` carry the same arms), runs every
+// value of the matched type through it, and reads each result as a string. A
+// result of `undefined` would mean the model called a match exhaustive that the
+// runtime lets fall through.
+
+test "End-to-end: split coverage over record fields reaches an arm for every value" {
+    const source =
+        \\import { match } from "zttp:core";
+        \\let f1 = { x: true, y: true };
+        \\let f2 = { x: true, y: false };
+        \\let f3 = { x: false, y: true };
+        \\let f4 = { x: false, y: false };
+        \\let s1 = match(f1).with({ x: true, y: true }, () => "both").with({ x: true, y: false }, () => "x only").with({ x: false }, () => "no x").exhaustive();
+        \\let s2 = match(f2).with({ x: true, y: true }, () => "both").with({ x: true, y: false }, () => "x only").with({ x: false }, () => "no x").exhaustive();
+        \\let s3 = match(f3).with({ x: true, y: true }, () => "both").with({ x: true, y: false }, () => "x only").with({ x: false }, () => "no x").exhaustive();
+        \\let s4 = match(f4).with({ x: true, y: true }, () => "both").with({ x: true, y: false }, () => "x only").with({ x: false }, () => "no x").exhaustive();
+        \\let n1 = { k: "x", inner: { t: "p" } };
+        \\let n2 = { k: "x", inner: { t: "q" } };
+        \\let n3 = { k: "y" };
+        \\let d1 = match(n1).with({ k: "x", inner: { t: "p" } }, () => "x-p").with({ k: "x", inner: { t: "q" } }, () => "x-q").with({ k: "y" }, () => "y").exhaustive();
+        \\let d2 = match(n2).with({ k: "x", inner: { t: "p" } }, () => "x-p").with({ k: "x", inner: { t: "q" } }, () => "x-q").with({ k: "y" }, () => "y").exhaustive();
+        \\let d3 = match(n3).with({ k: "x", inner: { t: "p" } }, () => "x-p").with({ k: "x", inner: { t: "q" } }, () => "x-q").with({ k: "y" }, () => "y").exhaustive();
+        \\let c1 = { kind: "a", n: 1 };
+        \\let c2 = { kind: "b" };
+        \\let c3 = { kind: "c", t: "s" };
+        \\let k1 = match(c1).with({ kind: "a" }, () => "a").with({ kind: "b" }, () => "b").with({ kind: "c" }, () => "c").exhaustive();
+        \\let k2 = match(c2).with({ kind: "a" }, () => "a").with({ kind: "b" }, () => "b").with({ kind: "c" }, () => "c").exhaustive();
+        \\let k3 = match(c3).with({ kind: "a" }, () => "a").with({ kind: "b" }, () => "b").with({ kind: "c" }, () => "c").exhaustive();
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *engine.context.Context) anyerror!void {
+            try expectGlobalString(ctx, "s1", "both");
+            try expectGlobalString(ctx, "s2", "x only");
+            try expectGlobalString(ctx, "s3", "no x");
+            try expectGlobalString(ctx, "s4", "no x");
+            try expectGlobalString(ctx, "d1", "x-p");
+            try expectGlobalString(ctx, "d2", "x-q");
+            try expectGlobalString(ctx, "d3", "y");
+            try expectGlobalString(ctx, "k1", "a");
+            try expectGlobalString(ctx, "k2", "b");
+            try expectGlobalString(ctx, "k3", "c");
+        }
+    }.check);
+}
+
+test "End-to-end: optional fields, tuples, and arrays reach an arm for every value" {
+    // `{ a?: string }` has three runtime shapes: the field holds a string, holds
+    const source =
+        \\import { match, P } from "zttp:core";
+        \\let o1 = { a: "x" };
+        \\let o2 = { a: "z" };
+        \\let o3 = {};
+        \\let o4 = { a: undefined };
+        \\let b1 = match(o1).with({ a: "x" }, () => "x").with({}, () => "other").exhaustive();
+        \\let b2 = match(o2).with({ a: "x" }, () => "x").with({}, () => "other").exhaustive();
+        \\let b3 = match(o3).with({ a: "x" }, () => "x").with({}, () => "other").exhaustive();
+        \\let b4 = match(o4).with({ a: "x" }, () => "x").with({}, () => "other").exhaustive();
+        \\let u1 = match(o1).with({ a: undefined }, () => "absent").with({ a: P.present }, () => "present").exhaustive();
+        \\let u2 = match(o3).with({ a: undefined }, () => "absent").with({ a: P.present }, () => "present").exhaustive();
+        \\let u3 = match(o4).with({ a: undefined }, () => "absent").with({ a: P.present }, () => "present").exhaustive();
+        \\let t1 = [true, "p"];
+        \\let t2 = [true, "q"];
+        \\let t3 = [false, "p"];
+        \\let t4 = [false, "q"];
+        \\let p1 = match(t1).with([true, "p"], () => "true-p").with([true, "q"], () => "true-q").with([false, P.any], () => "false").exhaustive();
+        \\let p2 = match(t2).with([true, "p"], () => "true-p").with([true, "q"], () => "true-q").with([false, P.any], () => "false").exhaustive();
+        \\let p3 = match(t3).with([true, "p"], () => "true-p").with([true, "q"], () => "true-q").with([false, P.any], () => "false").exhaustive();
+        \\let p4 = match(t4).with([true, "p"], () => "true-p").with([true, "q"], () => "true-q").with([false, P.any], () => "false").exhaustive();
+        \\let e1 = [];
+        \\let e2 = [1, 2, 3];
+        \\let a1 = match(e1).with([], () => "empty").with(P.array, () => "some").exhaustive();
+        \\let a2 = match(e2).with([], () => "empty").with(P.array, () => "some").exhaustive();
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *engine.context.Context) anyerror!void {
+            try expectGlobalString(ctx, "b1", "x");
+            try expectGlobalString(ctx, "b2", "other");
+            try expectGlobalString(ctx, "b3", "other");
+            try expectGlobalString(ctx, "b4", "other");
+            try expectGlobalString(ctx, "u1", "present");
+            try expectGlobalString(ctx, "u2", "absent");
+            try expectGlobalString(ctx, "u3", "absent");
+            try expectGlobalString(ctx, "p1", "true-p");
+            try expectGlobalString(ctx, "p2", "true-q");
+            try expectGlobalString(ctx, "p3", "false");
+            try expectGlobalString(ctx, "p4", "false");
+            try expectGlobalString(ctx, "a1", "empty");
+            try expectGlobalString(ctx, "a2", "some");
+        }
+    }.check);
+}
+
+test "End-to-end: literal and type-test partitions reach an arm for every value" {
+    // `string | { w: number }` needs a record arm and a string arm: the record
+    // arm does not take the string. The six value kinds of a JSON-like union
+    // each reach their own type test, and `boolean` and a literal pair reach
+    // theirs.
+    const source =
+        \\import { match, P } from "zttp:core";
+        \\let m1 = "s";
+        \\let m2 = { w: 1 };
+        \\let r1 = match(m1).with({}, () => "record").with(P.string, () => "text").exhaustive();
+        \\let r2 = match(m2).with({}, () => "record").with(P.string, () => "text").exhaustive();
+        \\let v1 = null;
+        \\let v2 = true;
+        \\let v3 = 1;
+        \\let v4 = "s";
+        \\let v5 = [1];
+        \\let k1 = match(v1).with(null, () => "null").with(P.boolean, () => "boolean").with(P.number, () => "number").with(P.string, () => "string").with(P.array, () => "array").exhaustive();
+        \\let k2 = match(v2).with(null, () => "null").with(P.boolean, () => "boolean").with(P.number, () => "number").with(P.string, () => "string").with(P.array, () => "array").exhaustive();
+        \\let k3 = match(v3).with(null, () => "null").with(P.boolean, () => "boolean").with(P.number, () => "number").with(P.string, () => "string").with(P.array, () => "array").exhaustive();
+        \\let k4 = match(v4).with(null, () => "null").with(P.boolean, () => "boolean").with(P.number, () => "number").with(P.string, () => "string").with(P.array, () => "array").exhaustive();
+        \\let k5 = match(v5).with(null, () => "null").with(P.boolean, () => "boolean").with(P.number, () => "number").with(P.string, () => "string").with(P.array, () => "array").exhaustive();
+        \\let t = true;
+        \\let f = false;
+        \\let l1 = match(t).with(true, () => "t").with(false, () => "f").exhaustive();
+        \\let l2 = match(f).with(true, () => "t").with(false, () => "f").exhaustive();
+        \\let one = 1;
+        \\let two = 2;
+        \\let n1 = match(one).with(1, () => "one").with(2, () => "two").exhaustive();
+        \\let n2 = match(two).with(1, () => "one").with(2, () => "two").exhaustive();
+        \\let present = "a";
+        \\let absent = undefined;
+        \\let q1 = match(present).with("a", () => "a").with(undefined, () => "none").exhaustive();
+        \\let q2 = match(absent).with("a", () => "a").with(undefined, () => "none").exhaustive();
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *engine.context.Context) anyerror!void {
+            try expectGlobalString(ctx, "r1", "text");
+            try expectGlobalString(ctx, "r2", "record");
+            try expectGlobalString(ctx, "k1", "null");
+            try expectGlobalString(ctx, "k2", "boolean");
+            try expectGlobalString(ctx, "k3", "number");
+            try expectGlobalString(ctx, "k4", "string");
+            try expectGlobalString(ctx, "k5", "array");
+            try expectGlobalString(ctx, "l1", "t");
+            try expectGlobalString(ctx, "l2", "f");
+            try expectGlobalString(ctx, "n1", "one");
+            try expectGlobalString(ctx, "n2", "two");
+            try expectGlobalString(ctx, "q1", "a");
+            try expectGlobalString(ctx, "q2", "none");
+        }
+    }.check);
+}
+
+test "End-to-end: a match with no covering arm evaluates to undefined" {
+    // The other half of the soundness check: where the analysis reports a
+    // missing case, the runtime really does fall through, which is why the type
+    // of such a match includes `undefined`.
+    const source =
+        \\import { match, P } from "zttp:core";
+        \\let v = { kind: "c" };
+        \\let r = match(v).with({ kind: "a" }, () => "a").with({ kind: "b" }, () => "b").exhaustive();
+        \\let s = "text";
+        \\let r2 = match(s).with({}, () => "record").exhaustive();
+        \\let tup = [true, "q"];
+        \\let r3 = match(tup).with([true, "p"], () => "true-p").with([false, P.any], () => "false").exhaustive();
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *engine.context.Context) anyerror!void {
+            for ([_][]const u8{ "r", "r2", "r3" }) |name| {
+                const atom = try ctx.atoms.intern(name);
+                const val = ctx.getGlobal(atom) orelse return error.MissingResult;
+                try std.testing.expect(val.isUndefined());
+            }
+        }
+    }.check);
+}
+
+test "a fluent match refuses code generation when its record key cannot be interned" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { match } from "zttp:core";
+        \\function h(subject: unknown): number {
+        \\  return match(subject).with({ zzkind: "x" }, () => 200).otherwise(() => 404);
+        \\}
+    ;
+    var atoms = engine.atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var strings = engine.string.StringTable.init(allocator);
+    defer strings.deinit();
+    var parser = try engine.parser.Parser.initTyped(allocator, allocator, source, &strings, &atoms);
+    defer parser.deinit();
+    try std.testing.expect((try parser.parseTypedIr()) == .accepted);
+    try validateMatchTestSource(&parser, allocator, &atoms);
+
+    atoms.next_id = 0xFFFE;
+    try std.testing.expectError(error.OutOfMemory, parser.generateParsed(allocator));
+}

@@ -3137,6 +3137,7 @@ test "a write reached as a function value fails the handler properties closed" {
 }
 
 const save_helper =
+    \\import { assert } from "zttp:core";
     \\import { cacheSet } from "zttp:cache";
     \\function save() {
     \\  cacheSet("items", "key", "value", 60);
@@ -3159,7 +3160,7 @@ fn expectWriteHandlerProperties(handler_source: []const u8) !void {
 test "a write inside an assert condition fails the handler properties closed" {
     try expectWriteHandlerProperties(
         \\function handler(req) {
-        \\  assert save();
+        \\  assert(save());
         \\  return Response.text("ok");
         \\}
     );
@@ -3188,7 +3189,7 @@ test "a write bound before an assert still fails the handler properties closed" 
     try expectWriteHandlerProperties(
         \\function handler(req) {
         \\  const ok = save();
-        \\  assert ok;
+        \\  assert(ok);
         \\  return Response.text("ok");
         \\}
     );

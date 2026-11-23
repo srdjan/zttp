@@ -51,6 +51,10 @@ pub fn prepareErrorForAdmissionFailure(failure: parser.AdmissionFailure) Prepare
             .readonly_array_type_alias => error.ReadonlyArrayTypeAlias,
             .void_type => error.VoidType,
             .nesting_too_deep => error.NestingTooDeep,
+            .legacy_structural_declaration => error.LegacyStructuralDeclaration,
+            .legacy_nominal_declaration => error.LegacyNominalDeclaration,
+            .legacy_match_expression => error.LegacyMatchExpression,
+            .legacy_assert_statement => error.LegacyAssertStatement,
         },
     };
 }
@@ -96,6 +100,10 @@ pub fn sourceDiagnosticFromAdmission(
         .readonly_array_type_alias => .readonly_array_type_alias,
         .void_type => .void_type,
         .nesting_too_deep => .nesting_too_deep,
+        .legacy_structural_declaration => .legacy_structural_declaration,
+        .legacy_nominal_declaration => .legacy_nominal_declaration,
+        .legacy_match_expression => .legacy_match_expression,
+        .legacy_assert_statement => .legacy_assert_statement,
     };
     const position = diag.positionIn(source);
     return .{
@@ -452,7 +460,10 @@ test "direct source owns authored TypeScript and classifies virtual JavaScript" 
 
 test "direct source retains legacy migration spans without executable access" {
     const source =
-        "function choose(value: { kind: string; text: string }): string {\n" ++
+        "structural Input = { kind: string; text: string };\n" ++
+        "nominal Name = string;\n" ++
+        "const name: Name = \"Ada\";\n" ++
+        "function choose(value: Input): string {\n" ++
         "  assert value.text !== \"\";\n" ++
         "  return match (value) { when { kind: \"echo\", text }: text, default: \"none\" };\n" ++
         "}\n";
@@ -460,7 +471,12 @@ test "direct source retains legacy migration spans without executable access" {
     try owner.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "handler.ts");
     defer owner.deinit();
 
+    try std.testing.expect(owner.acceptedCapabilities() == null);
     const records = owner.legacyRepairRecords();
+    try std.testing.expectEqual(@as(usize, 2), records.declarations.len);
+    try std.testing.expectEqualStrings("structural", records.declarations[0].keyword_span.text(source));
+    try std.testing.expectEqualStrings("nominal", records.declarations[1].keyword_span.text(source));
+    try std.testing.expectEqual(@as(usize, 1), records.nominal_initializers.len);
     try std.testing.expectEqual(@as(usize, 1), records.asserts.len);
     try std.testing.expectEqualStrings("assert value.text !== \"\";", records.asserts[0].full_span.text(source));
     try std.testing.expectEqualStrings("value.text !== \"\"", records.asserts[0].predicate_span.text(source));
@@ -492,8 +508,8 @@ test "direct source closes every initialization allocation failure" {
 test "direct source retains every syntax owner family" {
     const source =
         "import type { Shape } from \"./types\";\n" ++
-        "structural Box<T> = { value: T };\n" ++
-        "nominal UserId = string;\n" ++
+        "type Box<T> = { value: T };\n" ++
+        "type UserId = string;\n" ++
         "function keep<T>(value: T): Box<T> { return { value: value }; }\n" ++
         "function isText(value: unknown): value is string { return typeof value === \"string\"; }\n" ++
         "const boxed: Box<string> = keep<Box<string>>({ value: \"x\" });\n";
@@ -524,7 +540,7 @@ test "direct source retains every syntax owner family" {
 
     try std.testing.expectEqual(@as(usize, 2), store.declarations.items.len);
     try std.testing.expectEqual(parser.type_syntax.DeclarationKind.structural, store.declarations.items[0].kind);
-    try std.testing.expectEqual(parser.type_syntax.DeclarationKind.nominal, store.declarations.items[1].kind);
+    try std.testing.expectEqual(parser.type_syntax.DeclarationKind.structural, store.declarations.items[1].kind);
     try std.testing.expectEqualStrings("Box", store.declarations.items[0].name_span.text(source));
     try std.testing.expectEqualStrings("UserId", store.declarations.items[1].name_span.text(source));
     try std.testing.expectEqualStrings("{ value: T }", store.declarations.items[0].body.present.raw_span.text(source));
@@ -1015,6 +1031,10 @@ test "admission failures retain measured preparation errors" {
         .{ .kind = .readonly_array_type_alias, .expected = error.ReadonlyArrayTypeAlias },
         .{ .kind = .void_type, .expected = error.VoidType },
         .{ .kind = .nesting_too_deep, .expected = error.NestingTooDeep },
+        .{ .kind = .legacy_structural_declaration, .expected = error.LegacyStructuralDeclaration },
+        .{ .kind = .legacy_nominal_declaration, .expected = error.LegacyNominalDeclaration },
+        .{ .kind = .legacy_match_expression, .expected = error.LegacyMatchExpression },
+        .{ .kind = .legacy_assert_statement, .expected = error.LegacyAssertStatement },
     };
     try std.testing.expectEqual(@typeInfo(Kind).@"enum".field_names.len, cases.len);
     var seen = std.EnumSet(Kind).empty;

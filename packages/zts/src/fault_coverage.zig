@@ -21,6 +21,9 @@ const parser_mod = @import("zts-engine").parser;
 const path_gen = @import("path_generator.zig");
 const effect_inference = @import("effect_inference.zig");
 const handler_function_mod = @import("handler_function.zig");
+const intrinsic_lowering = @import("intrinsic_lowering.zig");
+const type_env_mod = @import("type_env.zig");
+const type_pool_mod = @import("type_pool.zig");
 
 const Constraint = path_gen.Constraint;
 const StubInfo = path_gen.StubInfo;
@@ -438,6 +441,17 @@ fn analyzeSourceFaultCoverage(allocator: std.mem.Allocator, source: []const u8) 
     parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
+    var pool = type_pool_mod.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = type_env_mod.TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .module_path = "/app/fault-coverage-test.ts",
+        .store = &parser.type_store,
+        .ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants),
+        .atoms = &atoms,
+    } });
+    try intrinsic_lowering.validateSource(allocator, &parser, &atoms, &env);
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
@@ -606,6 +620,7 @@ const FaultProbe = struct {
 };
 
 const probe_prefix =
+    \\import { match } from "zttp:core";
     \\import { jwtVerify } from "zttp:auth";
     \\import { env } from "zttp:env";
     \\import { logInfo } from "zttp:log";
@@ -674,10 +689,10 @@ const fault_probes = [_]FaultProbe{
         \\  const a = jwtVerify("t1", "secret");
         \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  const b = jwtVerify("t2", "secret");
-        \\  return match (b.ok) {
-        \\    when true: Response.text("ok")
-        \\    when false: Response.text("forbidden", { status: 403 })
-        \\  };
+        \\  return match(b.ok)
+        \\    .with(true, () => Response.text("ok"))
+        \\    .with(false, () => Response.text("forbidden", { status: 403 }))
+        \\    .exhaustive();
         \\}
     },
     .{ .name = "second call as an argument (f12)", .clean = false, .source = probe_prefix ++
@@ -1040,6 +1055,7 @@ test "a ?? fallback does not cover a Result export" {
 }
 
 const fetch_prefix =
+    \\import { match } from "zttp:core";
     \\import { fetch } from "zttp:fetch";
     \\import { logInfo } from "zttp:log";
     \\import { routerMatch } from "zttp:router";
@@ -1227,10 +1243,10 @@ const fetch_probes = [_]FaultProbe{
         \\  const a = fetch("https://api.example.com/a");
         \\  if (!a.ok) { return Response.text("a failed", { status: 502 }); }
         \\  const b = fetch("https://api.example.com/b");
-        \\  return match (b.ok) {
-        \\    when true: Response.text("ok")
-        \\    when false: Response.text("b failed", { status: 502 })
-        \\  };
+        \\  return match(b.ok)
+        \\    .with(true, () => Response.text("ok"))
+        \\    .with(false, () => Response.text("b failed", { status: 502 }))
+        \\    .exhaustive();
         \\}
     },
     .{ .name = "f12 second fetch as an argument", .clean = false, .source = fetch_prefix ++

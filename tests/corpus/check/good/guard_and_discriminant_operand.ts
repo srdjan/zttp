@@ -1,5 +1,5 @@
 // Proves: a discriminant test narrows the right operand of && to the matched member.
-structural Ev = { kind: "a"; flag: boolean } | { kind: "b"; n: number };
+type Ev = { kind: "a"; flag: boolean } | { kind: "b"; n: number };
 
 function flagOf(e: Ev): number {
     const on = e.kind === "a" && e.flag;

@@ -2409,7 +2409,17 @@ fn expectChildrenOf(source: []const u8, tag: NodeTag, nth: usize, expected: []co
     const allocator = std.testing.allocator;
     var parser = try @import("parse.zig").Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
-    _ = try parser.parse();
+    switch (tag) {
+        .match_expr, .match_arm, .match_pattern, .match_type_test, .array_pattern => {
+            try std.testing.expectError(error.AdmissionRefused, parser.parse());
+            try std.testing.expectEqual(.legacy_match_expression, (parser.getLastAdmissionObservation() orelse return error.TestUnexpectedResult).kind);
+        },
+        .assert_stmt => {
+            try std.testing.expectError(error.AdmissionRefused, parser.parse());
+            try std.testing.expectEqual(.legacy_assert_statement, (parser.getLastAdmissionObservation() orelse return error.TestUnexpectedResult).kind);
+        },
+        else => _ = try parser.parse(),
+    }
     try std.testing.expect(!parser.errors.hasErrors());
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
@@ -2808,7 +2818,8 @@ test "subtreeContains finds a node inside an assert condition" {
     const allocator = std.testing.allocator;
     var parser = try @import("parse.zig").Parser.initAdmission(allocator, allocator, "function g() { assert a; }", .compile);
     defer parser.deinit();
-    const root = try parser.parse();
+    try std.testing.expectError(error.AdmissionRefused, parser.parse());
+    try std.testing.expectEqual(.legacy_assert_statement, (parser.getLastAdmissionObservation() orelse return error.TestUnexpectedResult).kind);
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     var assert_node: NodeIndex = null_node;
     var i: NodeIndex = 0;
@@ -2817,5 +2828,5 @@ test "subtreeContains finds a node inside an assert condition" {
     }
     try std.testing.expect(assert_node != null_node);
     const stmt = view.getAssertStmt(assert_node).?;
-    try std.testing.expect(view.subtreeContains(root, stmt.condition));
+    try std.testing.expect(view.subtreeContains(assert_node, stmt.condition));
 }

@@ -858,7 +858,7 @@ const testing = std.testing;
 
 const good_source =
     \\// A handler with a narrow capsule passes every stage.
-    \\structural Guardrails<T> = Proof<T, "result_safe">;
+    \\type Guardrails<T> = Proof<T, "result_safe">;
     \\
     \\function handler(req: Request): Guardrails<Response> {
     \\    return Response.json({ ok: true });
@@ -876,12 +876,13 @@ const parse_bad_source =
 
 const check_bad_source =
     \\// A match with no default arm is not exhaustive.
-    \\structural Guardrails<T> = Proof<T, "result_safe">;
+    \\import { match } from "zttp:core";
+    \\type Guardrails<T> = Proof<T, "result_safe">;
     \\
     \\function handler(req: Request): Guardrails<Response> {
-    \\    return match (req.method) {
-    \\        when "GET": Response.json({ ok: true })
-    \\    };
+    \\    return match(req.method)
+    \\        .with("GET", (): Response => Response.json({ ok: true }))
+    \\        .exhaustive();
     \\}
     \\
 ;

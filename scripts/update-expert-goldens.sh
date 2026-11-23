@@ -32,6 +32,7 @@ echo ">> regenerating fixtures under $FIXTURES"
 "$ZIGTS" verify-paths "$FIXTURES/clean_handler.ts" --json   > "$FIXTURES/verify_paths_clean.golden.json"
 "$ZIGTS" verify-paths "$FIXTURES/missing.ts" --json         > "$FIXTURES/verify_paths_missing.golden.json" || true
 "$ZIGTS" describe-rule ZTS303 --json                        > "$FIXTURES/describe_rule_ZTS303.golden.json"
+"$ZIGTS" search guard --json                                > "$FIXTURES/search_guard.golden.json"
 "$ZIGTS" canonicalize "$FIXTURES/canonicalize_mixed.ts" --json \
                                                             > "$FIXTURES/canonicalize_mixed.golden.json"
 "$ZIGTS" canonicalize "$FIXTURES/canonicalize_mixed.ts" --json --simulate \

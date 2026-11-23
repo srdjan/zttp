@@ -235,42 +235,37 @@ Use:
   name never reuses the name of an enclosing scope or an import (ZTS068,
   ZTS069).
 - `Math.pow(a, b)` and arithmetic, not `**` or bitwise operators, and an
-  explicit `structural` declaration, not `Partial`, `Pick`, or `Omit`.
+  explicit `type` declaration, not `Partial`, `Pick`, or `Omit`.
 
 ### Match Patterns
 
-A `match` arm takes a literal, a record pattern, an array pattern, or a type
-test. The six type tests are `boolean`, `number`, `string`, `array`, `Dict`,
-and `Bytes`.
-
-A record pattern field is one of three things: a discriminant test, a binding
-of the field under its own name, or a binding under a new name. A binding is an
-arm-scoped `const` that carries the field's narrowed type, so an arm reads the
-field by naming it in the pattern rather than off the scrutinee.
+Import `match` from `zttp:core`. A `.with(pattern, callback)` arm accepts
+a literal, a fixed record or array pattern, or a subject type descriptor.
+The callback receives the narrowed subject.
 
 ```ts
-structural Command =
+import { match } from "zttp:core";
+
+type Command =
     | { kind: "echo"; text: string }
     | { kind: "ping" };
 
 function run(command: Command): string {
-    return match (command) {
-        when { kind: "echo", text }: text
-        when { kind: "ping" }: "pong"
-    };
+    return match(command)
+        .with({ kind: "echo" }, (selected) => selected.text)
+        .with({ kind: "ping" }, () => "pong")
+        .exhaustive();
 }
 ```
 
-A union covered member by member is exhaustive and needs no `default`; an open
-domain such as `string`, `number`, or `T[]` needs one. Arms may split one case,
-for example `{ x: true, y: true }`, `{ x: true, y: false }`, and `{ x: false }`.
-A record pattern matches only a record and an array pattern only an array of
-its exact length, so `when { w }` does not cover a `string`. When the arms do
-not cover the type, the check reports ZTS603 and names the first missing case,
-for example `missing case: when { kind: "c" }`. A `default` after full coverage,
-and an arm no value can reach, is the error ZTS216. Exactly one arm's
-expression is evaluated, and an arm expression may be effectful. A match that
-no arm covers evaluates to `undefined`, so its type includes `undefined`.
+The subject descriptors are `P.boolean`, `P.number`, `P.string`, `P.array`,
+`P.Dict` and `P.Bytes`. Import `P` from the same module. Use `P.present`
+to test that a record field has a value other than `undefined`, and `P.any`
+to match any element in a fixed-length array pattern.
+
+Use `.exhaustive()` when the arms cover the type, and `.otherwise(callback)`
+for remaining values. Only the selected callback runs. ZTS603 names an
+uncovered case. ZTS216 reports an unreachable arm or fallback.
 
 ### `null`
 
@@ -287,15 +282,15 @@ concrete type without `null` both operators keep their single meaning and stay
 the idiomatic spelling of it.
 
 A recursive type alias must be contractive: every cycle passes through a
-record, tuple, or array constructor. `structural JsonValue = null | boolean |
-number | string | readonly JsonValue[]` is admitted; `structural Loop = Loop`
-and `structural U = number | U` are refused (ZTS212), because a union edge does
+record, tuple, or array constructor. `type JsonValue = null | boolean |
+number | string | readonly JsonValue[]` is admitted; `type Loop = Loop`
+and `type U = number | U` are refused (ZTS212), because a union edge does
 not guard recursion.
 
 ### Author-Declared Proofs
 
 ```ts
-structural Safe<T> = Proof<T, "deterministic" | "state_isolated">;
+type Safe<T> = Proof<T, "deterministic" | "state_isolated">;
 
 function handler(req: Request): Safe<Response> {
     return Response.json({ ok: true });

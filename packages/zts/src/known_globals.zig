@@ -20,7 +20,6 @@ pub const names = [_][]const u8{
     "Request",
     "Response",
     "String",
-    "assert",
     "h",
     "hole",
     "isBytes",

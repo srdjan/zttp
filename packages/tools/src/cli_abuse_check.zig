@@ -269,7 +269,7 @@ fn populate(gpa: std.mem.Allocator, io: Io, work: []const u8) !void {
     // the chain. A chain it cannot follow leaves the property undischarged (ZTS500).
     var chain: std.ArrayList(u8) = .empty;
     defer chain.deinit(gpa);
-    try chain.appendSlice(gpa, "structural Leak<T> = Proof<T, \"no_secret_leakage\">;\n");
+    try chain.appendSlice(gpa, "type Leak<T> = Proof<T, \"no_secret_leakage\">;\n");
     try chain.appendSlice(gpa, "function g0(x: string): string { return x; }\n");
     for (1..chain_length) |i| {
         try chain.print(gpa, "function g{d}(x: string): string {{ return g{d}(x); }}\n", .{ i, i - 1 });

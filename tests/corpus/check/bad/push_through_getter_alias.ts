@@ -1,5 +1,5 @@
 // Proves: a push through a local alias of a module record that a getter returns is a shared-state write (ZTS310).
-structural Store = { items: number[] };
+type Store = { items: number[] };
 const store: Store = { items: [] };
 
 function getStore(): Store {

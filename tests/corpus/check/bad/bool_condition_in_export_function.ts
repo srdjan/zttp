@@ -1,9 +1,12 @@
+import type { Nominal } from "zttp:core";
+import { nominal } from "zttp:core";
 // Proves: an optional boolean used as a condition inside an `export function` body is refused (ZTS100).
-structural Flag = boolean | undefined;
-nominal Tag = string;
+type Flag = boolean | undefined;
+declare const tagBrand: unique symbol;
+type Tag = Nominal<string, typeof tagBrand>;
 
 export function pick(flag: Flag): Proof<Tag, "total" | "pure" | "read_only" | "deterministic"> {
-    const tag: Tag = "a";
+    const tag: Tag = nominal<Tag>("a");
     if (flag) {
         return tag;
     }

@@ -63,7 +63,7 @@ zig build -Doptimize=fast
 ## First Handler
 
 ```typescript
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "deterministic"
     | "no_secret_leakage"
     | "injection_safe"

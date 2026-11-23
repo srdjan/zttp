@@ -1,2 +1,2 @@
 stages: strip,parse,imports,boolean,types,strict
-{"code":"ZTS216","severity":"error","message":"match arm is unreachable","file":"check/bad/match_redundant_arm.ts","line":5,"column":9,"suggestion":"earlier arms already match every value this arm matches, or the matched type excludes them; remove the arm","repair_intent":null}
+{"code":"ZTS216","severity":"error","message":"match arm is unreachable","file":"check/bad/match_redundant_arm.ts","line":6,"column":14,"suggestion":"earlier arms already match every value this arm matches, or the matched type excludes them; remove the arm","repair_intent":null}

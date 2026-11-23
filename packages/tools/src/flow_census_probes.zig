@@ -297,7 +297,7 @@ fn isNameChar(c: u8) bool {
 
 fn lookup(vars: Vars, name: []const u8, a: std.mem.Allocator) !?[]const u8 {
     if (std.mem.eql(u8, name, "PRE")) {
-        return try a.print("{s}\nstructural Claim<T> = Proof<T, | {s}>;", .{ header, vars.claim });
+        return try a.print("{s}\ntype Claim<T> = Proof<T, | {s}>;", .{ header, vars.claim });
     }
     if (std.mem.eql(u8, name, "SRC")) return vars.src;
     if (std.mem.eql(u8, name, "STMT")) return vars.stmt;
@@ -482,7 +482,7 @@ const t_export_fn =
 ;
 const t_export_fn_response_env =
     \\@PRE@
-    \\export structural Token = { value: string };
+    \\export type Token = { value: string };
     \\export function helper(t: Token): Response {
     \\  const x = t.value;
     \\  @BODY@
@@ -1129,7 +1129,7 @@ const hand_written = [_]Hand{
         .expect = .refuse_or_unprove,
         .reason = "a closure in a record that a function returns logs the secret; the walk cannot resolve the method, so it can only fail closed",
         .body =
-        \\structural Ops = { run: (s: string) => number };
+        \\type Ops = { run: (s: string) => number };
         \\function id<F>(f: F): F { return f; }
         \\function makeOps(): Ops {
         \\  return { run: id((s: string): number => { logInfo(s, { n: 1 }); return 1; }) };
@@ -1292,7 +1292,7 @@ pub fn generate(a: std.mem.Allocator) ![]Probe {
             .crt = "",
             .effects = "",
         };
-        const claim_line = try a.print("structural Claim<T> = Proof<T, | {s}>;", .{vars.claim});
+        const claim_line = try a.print("type Claim<T> = Proof<T, | {s}>;", .{vars.claim});
         const text = try a.print("{s}\n{s}\n{s}\n", .{ hand_header, claim_line, hand.body });
         const files = try a.alloc(SourceFile, 1);
         files[0] = .{ .name = try a.print("{s}.ts", .{hand.name}), .text = text };

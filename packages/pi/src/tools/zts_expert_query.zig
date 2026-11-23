@@ -433,9 +433,9 @@ test "search preserves frozen response bytes" {
     std.crypto.hash.sha2.Sha256.hash(query_result.llm_text, &digest, .{});
     const hex = std.fmt.bytesToHex(digest, .lower);
     try testing.expect(query_result.ok);
-    try testing.expectEqual(@as(usize, 1017), query_result.llm_text.len);
+    try testing.expectEqual(@as(usize, 1048), query_result.llm_text.len);
     try testing.expectEqualStrings(
-        "38eb111d4ec1acab188a0e3bbf4b2974458cc5398ad1006772b867a85d540d98",
+        "fc07cd8e24943cb0bba031b285aad3633907b9d0ce0c04855f75a831865a17a5",
         &hex,
     );
     try testing.expect(query_result.llm_text[query_result.llm_text.len - 1] == '\n');

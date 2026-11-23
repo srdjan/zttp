@@ -814,7 +814,7 @@ const record_corpus = [_]RecordCase{
         },
         // The 2026-11-01 recording first failed at ZTS203, then reached green.
         .expect_first_attempt_green = false,
-        .expect_committed_intent_pass = false,
+        .expect_committed_intent_pass = true,
     },
     .{
         .name = "jwt-auth",
@@ -903,7 +903,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        .expect_first_attempt_green = true,
+        .expect_first_attempt_green = false,
     },
     .{
         // Fence: the `deterministic` loosening. The property moved from "was a
@@ -932,7 +932,7 @@ const record_corpus = [_]RecordCase{
         },
         // The 2026-11-01 recording first failed at ZTS056, then reached green.
         // The 2026-11-09 recording passed on the first attempt.
-        .expect_first_attempt_green = false,
+        .expect_first_attempt_green = true,
     },
     .{
         // Fence: a read from mutable module state is its own varying source,
@@ -958,7 +958,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        .expect_first_attempt_green = true,
+        .expect_first_attempt_green = false,
     },
     .{
         // Fence: the shapes of egress options object the flow checker could not
@@ -984,7 +984,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        .expect_first_attempt_green = true,
+        .expect_first_attempt_green = false,
         // The 2026-10-27 recording applies an edit and passes this runtime intent.
         .expect_committed_intent_pass = true,
     },
@@ -1011,8 +1011,8 @@ const record_corpus = [_]RecordCase{
                 .bytes =
                 \\import { env } from "zttp:env";
                 \\
-                \\export structural ApiToken = string | undefined;
-                \\export structural DisplayName = string;
+                \\export type ApiToken = string | undefined;
+                \\export type DisplayName = string;
                 \\
                 \\export function apiToken(): ApiToken {
                 \\  return env("API_TOKEN");
@@ -1227,8 +1227,8 @@ const record_corpus = [_]RecordCase{
                 .bytes =
                 \\import { env } from "zttp:env";
                 \\
-                \\export structural ApiToken = string | undefined;
-                \\export structural DisplayName = string;
+                \\export type ApiToken = string | undefined;
+                \\export type DisplayName = string;
                 \\
                 \\export function apiToken(): ApiToken {
                 \\  return env("API_TOKEN");
@@ -2509,13 +2509,11 @@ fn coverageBaseline(
     headline_input: evidence_identity.HeadlineInputIdentity,
 ) ?CoverageBaseline {
     if (provider != headline_provider or !std.mem.eql(u8, model, headline_model) or
-        !std.mem.eql(u8, headline_input.slice(), "91c9e8aaf5e4fed0b828dc417f5eb4931a99cf56499abab1e6d16c9a90874d89"))
+        !std.mem.eql(u8, headline_input.slice(), "70fdb6e50e3cd9339e329e821475b9dcf304508c9df3f8a2ace9b7c066b8edb6"))
         return null;
-    // The 2026-11-19 recording trips ZTS400 and ZTS502 and, outside the
-    // registry, ZTS001, ZTS002, ZTS026, ZTS056, ZTS202, and ZTS203. It no
-    // longer trips ZTS303: no first draft of this corpus uses a Result call
-    // without a const binding.
-    return .{ .minimum_rules = &.{ "ZTS400", "ZTS502" } };
+    // The syntax migration recording trips ZTS400 in the sibling-helper
+    // cases, ZTS500 in cache-counter, and ZTS502 in jwt-auth.
+    return .{ .minimum_rules = &.{ "ZTS400", "ZTS500", "ZTS502" } };
 }
 
 const CoverageExecution = struct { declared: usize, replayed: usize, artifacts: usize, models: usize };
@@ -3266,7 +3264,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
         // Floor on the denominator before the ratio means anything: a registry
         // that failed to assemble would publish "0 of 0" as a finished
         // measurement.
-        if (zts.PolicyCatalog.rules().len < 58) {
+        if (zts.PolicyCatalog.rules().len < 56) {
             std.debug.print(
                 "[proof-coverage] the rule registry carries {d} rules; the denominator is not credible\n",
                 .{zts.PolicyCatalog.rules().len},

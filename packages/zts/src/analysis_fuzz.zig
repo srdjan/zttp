@@ -159,12 +159,12 @@ fn generateAliasChain(rng: std.Random, out: *std.ArrayList(u8), allocator: std.m
     var padding: [320]u8 = @splat('a');
     const name_pad = padding[0..pad];
     const fp = padding[0..field_pad];
-    try out.print(allocator, "structural T{s}0 = {{ f{s}: number }};\n", .{ name_pad, fp });
+    try out.print(allocator, "type T{s}0 = {{ f{s}: number }};\n", .{ name_pad, fp });
     var last: usize = 0;
     // One more line holds two names; the handler holds one more.
     while (last + 1 < want and out.items.len + 3 * pad + 3 * field_pad + 250 < max_source) {
         last += 1;
-        try out.print(allocator, "structural T{s}{d} = T{s}{d};\n", .{ name_pad, last, name_pad, last - 1 });
+        try out.print(allocator, "type T{s}{d} = T{s}{d};\n", .{ name_pad, last, name_pad, last - 1 });
     }
     try out.print(allocator, handler_fmt ++ " const v: T{s}{d} = {{ f{s}: 1 }}; return Response.text(String(v.f{s})); }}\n", .{ name_pad, last, fp, fp });
 }

@@ -69,22 +69,15 @@ pub fn runGenTests(
         return error.ParseError;
     };
 
-    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const handler_fn = findHandlerFunction(ir_view, root) orelse return 0;
+    const parsed = zts.pipeline.ParsedModule.fromAdmittedParser(&js_parser, root, &atoms, handler_path);
+    const handler_fn = findHandlerFunction(parsed.ir_view, root) orelse return 0;
 
-    var effect_facts: ?zts.EffectFacts = zts.buildEffectFacts(
-        allocator,
-        ir_view,
-        &atoms,
-        root,
-        .{},
-    ) catch null;
-    defer if (effect_facts) |*owned_effects| owned_effects.deinit(allocator);
-    const path_effects: zts.EffectFactsRef = if (effect_facts) |*completed_effects|
-        .{ .complete = completed_effects }
-    else
-        .unavailable;
-    var gen = zts.PathGenerator.init(allocator, ir_view, &atoms, path_effects);
+    var analysis: zts.pipeline.ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(allocator, parsed, .{});
+    defer analysis.deinit();
+    try analysis.complete();
+
+    var gen = zts.PathGenerator.init(allocator, analysis.parsed.ir_view, &atoms, try analysis.pathEffectFacts());
     defer gen.deinit();
     try gen.generate(handler_fn);
     try gen.writeJsonl(writer);

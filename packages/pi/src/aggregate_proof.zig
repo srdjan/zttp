@@ -1076,29 +1076,25 @@ test "proof identity binds ordered candidates and full read set" {
     try testing.expect(!std.mem.eql(u8, &first_id, &second.accepted.proof_id));
 }
 
-/// Each handler carries one ZTS626 advisory: a front-end diagnostic that does
-/// not halt analysis, so the skip_contract fallback has something to report.
+/// Each handler carries one ZTS628 advisory for the skip_contract fallback.
 const advisory_prefix =
-    "structural Command = { kind: \"echo\"; text: string } | { kind: \"ping\"; text: string };\n" ++
-    "function run(cmd: Command): string {\n" ++
-    "  return match (cmd) {\n" ++
-    "    when { kind: \"echo\" }: cmd.text\n" ++
-    "    when { kind: \"ping\" }: \"pong\"\n" ++
-    "  };\n" ++
+    "import { dictEmpty, dictEntries, dictSet } from \"zttp:collections\";\n" ++
+    "function total(): number {\n" ++
+    "  const d = dictSet(dictEmpty(), \"a\", 1);\n" ++
+    "  return dictEntries(d).reduce((acc, p) => acc + p[1], 0);\n" ++
     "}\n";
 
 const handler_body =
-    "export function handler(req: Request): Proof<Response, \"state_isolated\"> {\n" ++
-    "  const cmd: Command = { kind: \"echo\", text: \"hi\" };\n";
+    "export function handler(req: Request): Proof<Response, \"state_isolated\"> {\n";
 
 /// Contract analysis refuses this handler with MissingSqlSchema when the
 /// project has no sqlite schema.
 const sql_advisory_handler = "import { sql } from \"zttp:sql\";\n" ++ advisory_prefix ++ handler_body ++
     "  sql(\"q\", \"SELECT id FROM users WHERE id = :id\");\n" ++
-    "  return Response.text(run(cmd));\n}\n";
+    "  return Response.text(String(total()));\n}\n";
 
 const plain_advisory_handler = advisory_prefix ++ handler_body ++
-    "  return Response.text(run(cmd));\n}\n";
+    "  return Response.text(String(total()));\n}\n";
 
 /// Collect check diagnostics for one handler written into a fresh temporary
 /// project that has no sqlite schema.
@@ -1123,7 +1119,7 @@ test "a failed full analysis is recorded beside the fallback diagnostics" {
     var fallback_advisories: usize = 0;
     for (diagnostics.items) |diagnostic| {
         if (std.mem.eql(u8, diagnostic.code, "analysis_incomplete")) incomplete = diagnostic;
-        if (std.mem.eql(u8, diagnostic.code, "ZTS626")) fallback_advisories += 1;
+        if (std.mem.eql(u8, diagnostic.code, "ZTS628")) fallback_advisories += 1;
     }
     try testing.expectEqual(@as(usize, 1), fallback_advisories);
     const entry = incomplete orelse return error.TestUnexpectedResult;
@@ -1183,7 +1179,7 @@ test "aggregate proof rejects an emptied handler whose baseline already has ZTS5
     // diagnostics must not pass as a sub-multiset of them.
     try testing.expect(try replacedHandlerIsRejected(
         "let count = 0;\n" ++
-            "structural Guard<T> = Proof<T, \"state_isolated\">;\n" ++
+            "type Guard<T> = Proof<T, \"state_isolated\">;\n" ++
             "function handler(req: Request): Guard<Response> {\n" ++
             "  count = count + 1;\n" ++
             "  return Response.json({ count: count });\n}\n",

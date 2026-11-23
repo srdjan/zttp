@@ -523,8 +523,8 @@ test "execute passes a clean goal through a resolvable sibling import" {
         },
         .{
             "utils.ts",
-            \\export structural GreetingName = string;
-            \\export structural GreetingText = string;
+            \\export type GreetingName = string;
+            \\export type GreetingText = string;
             \\
             \\export function greet(name: GreetingName): GreetingText {
             \\  return ["Hello, ", name, "!"].join("");
@@ -569,7 +569,7 @@ const import_leak_files: []const [2][]const u8 = &.{
     },
     .{
         "utils.ts",
-        \\export structural Wrapped = string;
+        \\export type Wrapped = string;
         \\
         \\export function wrap(value: string): Wrapped {
         \\  return [value, "!"].join("");

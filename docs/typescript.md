@@ -26,9 +26,9 @@ the original source.
 ### Supported Subset
 
 **Type declarations** (recorded for analysis, absent at runtime):
-- `structural` aliases (including ADT unions)
-- `nominal` declarations (nominal/branded types)
-- `export structural ...` / `export nominal ...` / `import type ...`
+- Transparent `type` aliases, including discriminated unions
+- Scalar brands declared with `Nominal<Base, typeof brand>` from `zttp:core`
+- `export type ...`, `import type ...` and `export type { ... }`
 
 **Type annotations** (recorded for analysis, absent at runtime):
 - Variable annotations: `const x: T = ...` or reassigned `let x: T = ...`
@@ -40,17 +40,17 @@ the original source.
 - `satisfies` assertions: `value satisfies T`
 
 **Basic generics** (recorded for analysis, absent at runtime):
-- Generic params on an alias: `structural Box<T> = ...`
+- Generic params on an alias: `type Box<T> = ...`
 - Generic params on functions: `function id<T>(x: T): T { ... }`
 - A generic arrow is refused (ZTS001), and so is a bound arrow (ZTS072). Write `function id<T>(x: T): T { ... }` at module level.
 
 **Generic type aliases** (recorded and type-checked):
 
-Generic type aliases like `structural Result<T> = { ok: boolean; value: T }` are recorded by the parser and resolved by the type checker. When the alias is used in an annotation (`const x: Result<string>`), the type checker instantiates the body by substituting the type parameters with the provided arguments, producing a concrete record type for structural checking.
+Generic type aliases like `type Result<T> = { ok: boolean; value: T }` are recorded by the parser and resolved by the type checker. When the alias is used in an annotation (`const x: Result<string>`), the type checker instantiates the body by substituting the type parameters with the provided arguments, producing a concrete record type for structural checking.
 
 ```typescript
-structural Result<T> = { ok: boolean; value: T; error: string };
-structural Pair<A, B> = { first: A; second: B };
+type Result<T> = { ok: boolean; value: T; error: string };
+type Pair<A, B> = { first: A; second: B };
 
 const auth: Result<string> = { ok: true, value: "id", error: "" };  // checked as { ok: boolean; value: string; error: string }
 const pair: Pair<string, number> = { first: "a", second: 1 };
@@ -66,7 +66,7 @@ present, every supported v1 property is active by default. An explicit capsule
 narrows the active set to the named properties. No import is required.
 
 ```typescript
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "idempotent"
     | "deterministic"
     | "no_secret_leakage"
@@ -170,7 +170,7 @@ error, so a warning behind a flag would have covered the same helpers.
 
 ```typescript
 // Accepted source
-structural User = { id: number; name: string };
+type User = { id: number; name: string };
 const u: User = { id: 1, name: "a" };
 function add(a: number, b: number): number { return a + b; }
 const x: number = add(u.id, 1);
@@ -207,7 +207,7 @@ The type checker (`packages/zts/src/type_checker.zig`) validates annotations rec
 - Argument count of a call to a function you declare (ZTS202): too few or too many, counted against the declared parameter list
 - Virtual module function signatures (argument types, and a call with too few arguments; a call with too many arguments is not yet refused)
 - Discriminated union narrowing in `match` expressions and `if` conditions
-- Nominal type safety for `nominal` declarations
+- Nominal type safety for `Nominal` aliases
 - Template literal type pattern matching
 - Type guard narrowing (`x is T`) in `if` branches and `assert` statements
 
@@ -215,7 +215,7 @@ The type checker (`packages/zts/src/type_checker.zig`) validates annotations rec
 
 Object literals are structurally matched against declared alias types. A `{ message: string, count: number }` literal passes as a `ResponseData` alias if the fields match.
 
-A record alias is transparent, whatever the keyword. Nominal identity comes only from a `nominal` declaration, and only over `string`, `number`, or `boolean`. `interface` used to be the exception - one whose members were all functions became nominal by a heuristic no declaration expressed - and both the form and the heuristic are gone.
+A record alias is transparent. Use `Nominal` with a unique-symbol brand for scalar identity over `string`, `number`, or `boolean`.
 
 ### Optional Narrowing
 
@@ -242,7 +242,7 @@ if (val === undefined) {
 Discriminated unions narrow through `if` conditions on tag fields:
 
 ```typescript
-structural Result = { kind: "ok"; value: string } | { kind: "err"; error: string };
+type Result = { kind: "ok"; value: string } | { kind: "err"; error: string };
 
 if (r.kind === "err") {
     return Response.json({ error: r.error }, { status: 400 });
@@ -255,9 +255,11 @@ r.value.toUpperCase();
 
 ### Type Guards and Assert
 
-Type guard functions narrow in `if` branches. The `assert` statement installs permanent forward narrowing:
+Type guard functions narrow in `if` branches. The imported `assert` intrinsic narrows the value on the successful path.
 
 ```typescript
+import { assert } from "zttp:core";
+
 function isString(x: unknown): x is string {
     return typeof x === "string";
 }
@@ -266,11 +268,11 @@ if (isString(val)) {
     val.toUpperCase();   // narrowed in then-branch
 }
 
-assert isString(val);
+assert(isString(val));
 val.toUpperCase();       // narrowed from here forward
 ```
 
-When `assert` fails, the handler halts.
+Call `assert(predicate);` as a standalone statement. A false predicate halts the handler. Use an explicit `if` and `return` when the caller can handle the failure.
 
 The checker reads the body of a type guard before it uses the guard. A guard narrows only when all of these are true:
 
@@ -283,53 +285,49 @@ Any other guard gets ZTS211 and narrows nothing. For example, `return typeof x =
 
 ### Nominal Types
 
-`nominal` creates types that prevent accidental cross-assignment:
+A nominal alias gives scalar data a declaration-specific identity.
 
-```typescript
-nominal UserId = string;
-nominal SessionId = string;
+```ts
+import { nominal } from "zttp:core";
+import type { Nominal } from "zttp:core";
 
-const uid: UserId = "usr_123";             // the annotation brands the value
-const sid: SessionId = "sess";
+declare const userIdBrand: unique symbol;
+declare const sessionIdBrand: unique symbol;
+type UserId = Nominal<string, typeof userIdBrand>;
+type SessionId = Nominal<string, typeof sessionIdBrand>;
+
+const uid: UserId = nominal<UserId>("usr_123");
+const sid: SessionId = nominal<SessionId>("sess");
 
 function lookup(id: UserId): UserId {
     return id;
 }
-lookup(uid);    // OK
-lookup(sid);    // ERROR: SessionId is not assignable to UserId
-lookup("raw");  // ERROR: string is not assignable to UserId
 
-uid.toUpperCase();  // operations unwrap to base type
+function displayUser(): string {
+    return lookup(uid).toUpperCase();
+}
 ```
 
-The base must be `string`, `number`, or `boolean`. A nominal declaration over a record, a
-union, or a function is refused with ZTS048: nominal identity is scalar, and a
-record that needs a name is a `structural` alias.
+Passing `sid` or an unbranded string to `lookup` fails with ZTS203.
 
-### Structural And Nominal
+The base must be the unbranded type `string`, `number`, or `boolean`.
+Use a transparent `type` alias for records, unions, tuples, and functions.
 
-`structural` and `nominal` are the only declaration keywords. They replaced
-`type` and `distinct type`, which are refused with ZTS050 and ZTS051 and carry
-the exact repair. `import type` and `export type { ... }` keep the keyword:
-each names a declaration made elsewhere rather than making one.
+Run `zts check handler.ts --types` to generate `zttp.d.ts` for your editor.
+Include that file in your TypeScript project and set its library list to
+`["ES2022"]` so the handler uses the zttp `Request` and `Response`
+declarations. Use `zts check` to check the restricted profile and proofs.
 
-```typescript
-structural Point = { x: number; y: number };
-structural Boxed<T> = { value: T };
-
-nominal OrderId = string;
-nominal RetryCount = number;
-```
-
-The older spellings still work. They are removed when the profile cuts over,
-and `interface` goes with them.
+For an existing handler that uses retired declarations or brace matches,
+run `zts normalize handler.ts` to preview the migration and
+`zts normalize handler.ts --write` to apply it.
 
 ### Readonly Fields
 
 The `readonly` modifier prevents assignment to record fields:
 
 ```typescript
-structural Config = { readonly port: number; host: string };
+type Config = { readonly port: number; host: string };
 const cfg: Config = { port: 3000, host: "localhost" };
 cfg.host = "other";  // OK
 cfg.port = 8080;     // ERROR: cannot assign to readonly property
@@ -341,12 +339,12 @@ The profile has no `Readonly<T>`. Mark each field `readonly`, or write
 ### No Utility Types
 
 The profile has no utility types. `Pick`, `Omit`, `Partial`, `Required`, and
-`Readonly` are refused with ZTS065. Declare each shape with `structural`:
+`Readonly` are refused with ZTS065. Declare each shape with `type`:
 
 ```typescript
-structural User = { id: number; name: string; email: string };
-structural Summary = { id: number; name: string };
-structural UserPatch = { id?: number; name?: string; email?: string };
+type User = { id: number; name: string; email: string };
+type Summary = { id: number; name: string };
+type UserPatch = { id?: number; name?: string; email?: string };
 ```
 
 ### Ambient Type Names
@@ -355,22 +353,21 @@ The ambient type names are `boolean`, `Bytes`, `never`, `null`, `number`,
 `string`, `undefined`, `unknown`, `Dict`, `DictKey`, `Effects`, `Proof`,
 `Request`, and `Response`. The `meta` operation of `zttp agent --stdin-json`
 publishes the list as `payload.ambient_names.types`. `DictKey` is the bound of
-every `Dict` key: `string`, `number`, or a `nominal` type over one of them.
+every `Dict` key: `string`, `number`, or a branded type over one of them.
 
 `Result`, `JsonValue`, and `HtmlNode` are not ambient. A handler that names
-`JsonValue` declares it with `structural`. A module type, such as
+`JsonValue` declares it with `type`. A module type, such as
 `FetchOptions`, `FetchError`, or `Result`, is imported with `import type {
 FetchOptions } from "zttp:fetch";` or `import type { Result } from
-"zttp:result";`, and an unimported one gets ZTS065. A `structural` or
-`nominal` declaration cannot redefine an ambient type name or a name that an
-`import type` binds: `structural Request = number;` gets ZTS019.
+"zttp:result";`, and an unimported one gets ZTS065. A `type` declaration cannot redefine an ambient type name or a name that an
+`import type` binds: `type Request = number;` gets ZTS019.
 
 ### Template Literal Types
 
 Template literal types validate string patterns at build time:
 
 ```typescript
-structural ApiRoute = `/api/${string}`;
+type ApiRoute = `/api/${string}`;
 const good: ApiRoute = "/api/users";   // OK
 const bad: ApiRoute = "/other";        // ERROR
 ```
@@ -392,7 +389,7 @@ A number literal type is an integer in -32768..32767, such as `404` or `"a" | -1
 
 ### Generic Type Aliases
 
-Generic type aliases (`structural Result<T> = { ok: boolean; value: T }`) are instantiated when used in annotations. `Result<string>` resolves to `{ ok: boolean; value: string }` for structural checking. Up to 8 type parameters per alias.
+Generic type aliases (`type Result<T> = { ok: boolean; value: T }`) are instantiated when used in annotations. `Result<string>` resolves to `{ ok: boolean; value: string }` for structural checking. Up to 8 type parameters per alias.
 
 ### Builtin Result Types
 
@@ -691,7 +688,7 @@ predicate callbacks face the same rule at runtime.
 | `const x = expr; ... x` | same as expr |
 | reassigned `let x = expr; ... x` | same as expr until reassignment invalidates it |
 | `cond ? a : b` | unified type of a and b |
-| `match (...) { ... }` | unified arm type (if compatible) |
+| `match(value).with(...).exhaustive()` | unified arm type (if compatible) |
 | `function f(x: number): boolean { return x > 0; } f(1)` | return type of f (boolean) |
 | imported virtual-module call | known return type when modeled |
 | optional virtual-module return | optional string/object |
@@ -856,10 +853,10 @@ proof it buys, see [Restrictions to Proofs](restrictions-to-proofs.md).
 | 3 | Prefer `satisfies` over `as` | Adapted | both rejected; annotate the declaration -> [annotate-not-assert.ts](../examples/patterns/annotate-not-assert.ts) |
 | 4 | Derive types from values | Partial | `typeof`-extraction absent by design; declare the alias, `const` keeps literals -> [annotate-not-assert.ts](../examples/patterns/annotate-not-assert.ts) |
 | 5 | Discriminated unions for impossible states | Direct fit (core) | tagged unions plus `match` narrowing; `undefined`-only sentinel -> [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts) |
-| 6 | Exhaustive checks with `never` | Adapted (native) | `match` exhaustiveness is native; a closed union is covered member by member with no `default` (ZTS216), and an open type needs one; the `never`-helper is unneeded -> [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts) |
+| 6 | Exhaustive checks with `never` | Adapted (native) | `match` exhaustiveness is native; use `.exhaustive()` for complete coverage and `.otherwise(callback)` for remaining cases; the `never`-helper is unneeded -> [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts) |
 | 7 | `as const` for config and constants | Adapted | `const` bindings preserve literals automatically; no `as const` -> [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts) |
 | 8 | Type predicates for reusable narrowing | Direct fit | `x is T` guards; pairs with `assert` -> [unknown-and-guards.ts](../examples/patterns/unknown-and-guards.ts) |
-| 9 | Build new types from existing (`Pick`/`Omit`/`Partial`) | Adapted | the profile has no utility types (ZTS065); declare each shape with `structural` -> [derive-types.ts](../examples/patterns/derive-types.ts) |
+| 9 | Build new types from existing (`Pick`/`Omit`/`Partial`) | Adapted | the profile has no utility types (ZTS065); declare each shape with `type` -> [derive-types.ts](../examples/patterns/derive-types.ts) |
 | 10 | Validate external data at runtime | Direct fit (built-in) | `zttp:validate` plus `zttp:decode` replace Zod -> [validate-external.ts](../examples/patterns/validate-external.ts) |
 | 11 | Avoid `enum` | Enforced | `enum` is a hard error; literal unions only -> [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts) |
 | 12 | Generics that infer automatically | Direct fit | generics plus inference (up to 8 params) -> [infer-and-generics.ts](../examples/patterns/infer-and-generics.ts) |
@@ -892,11 +889,13 @@ unknown shape is to narrow it. A type-guard function plus an `assert` statement
 installs that narrowing:
 
 ```typescript
+import { assert } from "zttp:core";
+
 function isString(x: unknown): x is string {
     return typeof x === "string";
 }
 
-assert isString(val);
+assert(isString(val));
 val.toUpperCase();       // narrowed from here forward
 ```
 
@@ -912,7 +911,7 @@ finite set of values is a union of string literals joined with `|`, which the
 compiler can check for exhaustiveness in a `match`.
 
 ```typescript
-structural Method = "GET" | "POST" | "DELETE";
+type Method = "GET" | "POST" | "DELETE";
 
 const defaultMethod: Method = "GET";
 ```
@@ -944,7 +943,7 @@ states unrepresentable. There is one absent-value sentinel, `undefined`, never
 `null`.
 
 ```typescript
-structural Result = { kind: "ok"; value: string } | { kind: "err"; error: string };
+type Result = { kind: "ok"; value: string } | { kind: "err"; error: string };
 
 if (r.kind === "err") {
     return Response.json({ error: r.error }, { status: 400 });
@@ -1032,7 +1031,7 @@ Idiom: constrain a string to a pattern with a template literal type, checked at
 build time.
 
 ```typescript
-structural ApiRoute = `/api/${string}`;
+type ApiRoute = `/api/${string}`;
 
 const defaultRoute: ApiRoute = "/api/health";
 ```
@@ -1060,7 +1059,7 @@ checks the literal against `Config` and keeps its narrow type, which is what
 `satisfies` was for.
 
 ```typescript
-structural Config = { port: number; host: string; readonly version: string };
+type Config = { port: number; host: string; readonly version: string };
 const config: Config = { port: 8080, host: "0.0.0.0", version: "1.0" };
 ```
 
@@ -1085,42 +1084,23 @@ below.
 
 #### 6. Exhaustive checks with `never`
 
-Idiom: `match` exhaustiveness is native, so the `never`-typed `assertNever`
-trick is unnecessary.
+Import `match` from `zttp:core`. Add each arm with
+`.with(pattern, callback)`, then finish with `.exhaustive()` if the
+arms cover every value. Several arms may split one case. For example,
+`{ x: true, y: true }`, `{ x: true, y: false }`, and `{ x: false }`
+cover a record with two boolean fields.
 
-In plain TypeScript the standard exhaustiveness guard is a `default` branch that
-assigns the discriminant to a `never`-typed parameter (`assertNever(x: never)`),
-which stops compiling when a new variant is added. zts checks `match`
-exhaustiveness directly, so the `never`-parameter helper buys nothing.
+End with `.otherwise(callback)` when cases remain. For example, literal
+arms leave cases open on `string`, `number`, and arrays of unbounded length.
+Use `P.array` to cover arrays of any length.
 
-The rule depends on the type of the matched value (spec 5.5):
-
-- A closed type is covered by its arms and has no `default`. A closed type is a
-  union of literals, `boolean`, a union of records told apart by a literal field,
-  `null` and `undefined`, a fixed tuple, or a union of value kinds covered by the
-  type tests (`boolean`, `number`, `string`, `array`, `Dict`, `Bytes`). Several
-  arms may split one case, for example `{ x: true, y: true }`,
-  `{ x: true, y: false }`, and `{ x: false }`. A `default` after full coverage
-  is unreachable, and the check reports it as the error ZTS216.
-- An open type needs a `default`. Open types are `string`, `number`, `unknown`,
-  an array `T[]` (its length has no bound), a type the checker cannot enumerate,
-  and a function. Literal arms never cover them. The `array` type test covers
-  every array.
-- A record pattern matches only a record, and an array pattern matches only an
-  array of its exact length. A binding-only arm such as `when { w }` therefore
-  does not cover a `string` member of the type.
-
-When the arms are not proved to cover the type, the strict check reports ZTS603
-and the type checker reports ZTS205. Both name the first missing case in their
-help text, for example `missing case: when { kind: "c" }`. A match that is not
-proved exhaustive evaluates to `undefined` when no arm matches, so its type is
-the union of the arm types and `undefined`. ZTS216 reports the first arm that no
-value can reach.
+The strict check reports an uncovered case as ZTS603 and the type checker
+reports ZTS205. The help can name a missing pattern such as `{ kind: "c" }`.
+ZTS216 reports an unreachable arm or an `.otherwise()` after full coverage.
 
 The companion
 [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts)
-dispatches on a parameter, covers a closed union member by member with no
-`default`, and checks with every property proven and no warnings.
+example covers a closed union with `.exhaustive()`.
 
 #### 7. `as const` for config and constants
 
@@ -1145,17 +1125,17 @@ Idiom: the utility-type family derives a related shape from one source type, so
 each field stays declared in a single place.
 
 The profile has no utility types. `Pick`, `Omit`, `Partial`, `Required`, and
-`Readonly` are refused with ZTS065. Declare each shape with `structural`, so
+`Readonly` are refused with ZTS065. Declare each shape with `type`, so
 that each type that a reader sees is written out in full:
 
 ```typescript
-structural User = { id: number; name: string; email: string; age: number };
-structural Summary = { id: number; name: string };
-structural UserPatch = { id?: number; name?: string; email?: string; age?: number };
+type User = { id: number; name: string; email: string; age: number };
+type Summary = { id: number; name: string };
+type UserPatch = { id?: number; name?: string; email?: string; age?: number };
 ```
 
 See [derive-types.ts](../examples/patterns/derive-types.ts). Intersection (`&`)
-composes a narrower type: `structural WithMeta = Base & { createdAt: string }`.
+composes a narrower type: `type WithMeta = Base & { createdAt: string }`.
 
 #### 13. Strict compiler options
 

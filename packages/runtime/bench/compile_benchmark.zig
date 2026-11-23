@@ -258,7 +258,7 @@ const GeneratedFixture = enum {
             },
             .typed_declarations => {
                 for (0..128) |i| {
-                    try w.print("structural Row{d} = {{ value: number; label: string }};\n", .{i});
+                    try w.print("type Row{d} = {{ value: number; label: string }};\n", .{i});
                     try w.print("function read{d}(row: Row{d}): number {{ return row.value; }}\n", .{ i, i });
                 }
                 try w.writeAll("function handler(req: Request): Response { return Response.text(String(read0({value: 1, label: \"ok\"}))); }\n");

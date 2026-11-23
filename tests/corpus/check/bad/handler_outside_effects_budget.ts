@@ -1,7 +1,7 @@
 // Proves: a handler that calls a capability outside its declared Effects budget is refused (ZTS506).
 import { logInfo } from "zttp:log";
 
-structural Narrow<T> = Proof<T,
+type Narrow<T> = Proof<T,
     | "deterministic"
     | "state_isolated"
     | "result_safe"

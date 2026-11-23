@@ -481,6 +481,7 @@ const Builder = struct {
             .lbracket => if (callLike(head, property)) .index else .array,
             else => blk: {
                 if (isMatchBody(before)) break :blk .match_body;
+                if (head == .kw_import) break :blk .object;
                 if (holdsStatements(kids)) break :blk .block;
                 break :blk .object;
             },
@@ -1849,6 +1850,11 @@ test "a fluent match arm binds to its call" {
         "import { match as m } from \"zttp:core\";\nconst x = m(v).with(true, () => 1).otherwise(() => 0);\n",
         "import { match as m } from \"zttp:core\";\nconst x = m(v).with(true, () => 1).otherwise(() => 0);\n",
     );
+}
+
+test "a core import accepts assert beside another name" {
+    const source = "import { match, assert } from \"zttp:core\";\n";
+    try expectPrints(source, source);
 }
 
 test "a blank line between record fields is kept" {

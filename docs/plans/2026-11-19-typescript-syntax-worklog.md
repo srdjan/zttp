@@ -778,3 +778,135 @@ Unfiltered contract goldens and the generic intersection matrix pass.
 The main unfiltered proof ratchet passes 56 tests and reports 96 re-derived certificates without differences.
 The logs are `/tmp/zttp-syntax-u6-tool-fixtures-main.log` and `/tmp/zttp-syntax-u6-tool-proof-main.log`.
 The earlier interrupted combined worker run supplies no additional gate verdict.
+
+Corpus review finds a lost test condition: formatting separates an unannotated function header from its same-line annotated arrow.
+A bounded repair worker restores that condition and removes unrelated formatting from plain alias fixtures.
+The main agent will repeat the named corpus gate with an explicit summary and actual exit status.
+The prior worker reports exit one, but its log names no failed test. That run supplies no passing named-gate verdict.
+
+The analysis fixture worker introduces a compiler-tier import into the engine tier.
+The Zig compiler rejects that duplicate module ownership and blocks the runtime and expert checks.
+The main agent requires immediate restoration of a coherent build before further fixture integration.
+Affected source tests may need a compiler-tier owner that calls the public engine analysis API.
+No upward tier edge, new raw parse mode, or weaker admission boundary is authorized.
+
+## Phase-two verification resume
+
+The clean-cache baseline kept all 202 diagnostic corpus cases green and exposed 21 failures in the gate's embedded tests. The same baseline confirmed 11 stale expert cassettes and a policy hash mismatch.
+
+A loopback request reproduced a response selected by URL when the fluent match used the request method. Fluent match callbacks now stay on the interpreter path. The same request returns the expected fallback after the fix.
+
+The multi-file compiler now recognizes an exact core intrinsic import before applying the runtime global reservation. The test generator lowers intrinsic calls through the analysis session before enumerating paths. The CLI emits the expected GET, POST, and fallback requests for the migrated routing fixture. Direct URL guards retain their existing dispatch evidence.
+
+The flow interpreter applies a match callback's heap summary without dropping the caller's local bindings. Fluent callback field reads retain possible absence for fields that an unknown record does not establish. Four public probes now report ZTS309 at their expected reads.
+
+Normalization emits the pattern descriptor import only when a converted pattern uses it. A descriptor-free match normalizes without ZTS306 and has byte-identical output on a second pass. The two legacy match advisory seeds now verify that normalization salvages them and the policy records the corresponding repair until the rules retire.
+
+The unfiltered compiler and runtime batch passed 4,352 tests with four skips. Both CLI smoke paths passed. The unfiltered stand-in gate passed 56 tests and reproduced all 62 seed verdicts. The bytecode golden changed only for 16 migrated sources. The public features golden changes only the name of the type-alias row.
+
+The matching compiler and runtime rerun after the policy change passed 3,234 tests with three skips. The unfiltered CLI suite passed 737 tests with one skip, and the expert goldens passed. Only the policy hash changes in the five updated expert goldens. Substituting the prior policy hash reproduces the earlier contract and certificate digests for the direct CLI fixtures.
+
+The final phase-two batch passed 44 build steps and 1,457 tests. It covered precompile, canonicalization, the diagnostic corpus, source restrictions, agent protocol, flow census, module governance, both goldens, and the agent spine. All 202 diagnostic cases and 640 flow verdicts matched.
+
+The aggregate run found eight failures. The unfiltered CLI and expert golden reruns cleared the six deterministic failures. Offline expert replay passed 1,132 tests with one skip and one failure. The failed test reports 11 stale cassettes. The policy drift gate also reports a mismatch with the committed policy pin. U8 owns both updates.
+
+The owner chose to pause after phase-two verification. Legacy execution admission and advisory codes ZTS625 and ZTS626 remain active. The local cohort commits and the admission cutover are pending.
+
+## U6 admission cutover
+
+The owner resumed U6 on local main. The mixed-source regression first failed because legacy syntax still returned executable capabilities. Admission now collects every legacy declaration, assertion, and match record before refusing the source. Execution receives no accepted root. The normalizer uses the same parser and retained records.
+
+The public checker reported ZTS001 at each of the four legacy forms. Compile and dev refused that source. Normalization applied two declaration edits, an assertion edit, a match edit, and an explicit nominal initializer wrap. The normalized source checked clean and served `Ada` over loopback. The subsequent formatter check exposed a refusal in the named core import.
+
+The printer classified a named import containing `assert` as a statement block. The import regression failed before the fix. The same public fixture now passes `normalize --write` and `normalize --check`, keeps identical bytes on the second write, and compiles to a standalone executable.
+
+The cutover retires ZTS625 and ZTS626. The grammar and idiom drift gates agree with the updated specification. The restriction gate passed all 223 rows and 796 probes. The raw nominal initializer produces ZTS200 with explicit construction as its repair.
+
+The final cutover batch passed 5,144 tests with one skip, including the compiler, canonicalizer, and all 202 diagnostic cases. Precompile and agent protocol passed their unfiltered rerun. The CLI passed 737 tests with one skip. Benchmark census, expert goldens, documentation drift, spine, CLI smoke, panic isolation, and standalone runtime checks passed.
+
+The diagnostic corpus replacements are staged so the tracked-file gates see the new parse cases. The rest of the work stays unstaged on local main.
+
+Offline expert replay still needs 11 refreshed cassettes. The committed policy pin still differs from the measured policy hash. With the legacy recordings, the proof ratchet certifies 90 files against its existing floor of 93 and reports zero re-derivation differences. These checks remain open for U8.
+
+The final unfiltered aggregate exited one with exactly those three failures. It completed 216 of 221 build steps. All 640 flow verdicts and 202 diagnostic corpus cases matched. The compiled standalone handler returned HTTP 200 and `Ada`. No local cohort commits were made.
+
+## U7 authoring surfaces
+
+The compiler and agent examples use transparent aliases, explicit scalar
+construction, fluent matches, and an imported assertion. Missing patterns
+render with the fluent pattern syntax, and fallback help names
+`.otherwise(callback)`. The unknown-type diagnostic recommends `type`.
+Agent discovery no longer advertises `assert` as an ambient value. The
+CLI and agent agree on `Nominal`, four core intrinsics, all eight descriptors,
+six rule records, and the ZTS001 refusal for each retired form. The generated
+module catalog passes its renderer check.
+
+TypeScript 7.0.2 checked ten positive fixtures against a declaration file
+generated by `zts check --types`. All seventeen negative fixtures kept
+their exact expected diagnostics. The shipped match, assert, and nominal
+examples also checked with ZTS and zero diagnostics. The external check
+exposed missing `Proof` and `Effects` declarations and a match over a
+constant whose active branch TypeScript narrowed ahead of the match. The
+generator now emits the transparent capsules, and the example matches a
+typed function parameter.
+TypeScript accepts a binding initialized by `assert(predicate)`. ZTS
+refuses the same source with ZTS001 because the intrinsic must be a
+standalone statement.
+
+The sibling website describes this syntax as development work and retains
+the version and commit of its recorded proof example. All fourteen Deno
+tests passed. Playwright MCP verified the visible note on desktop and mobile,
+the proof attribution, and zero JavaScript errors. The browser closed and
+port 8000 was free. The website commit is `1cca8b8`.
+
+The U8 source-profile comparison used all eleven frozen final handlers from
+U1 and the recorded SQL schema. Five still pass and six now refuse retired
+syntax with ZTS001. The two active recordings without final handlers were
+outside the source comparison. The measured policy hash is
+`49c1edfa085eded886ae472380282a072e372987398358d41418c13c7060b23b`.
+The stored policy pin, empirical corpus, convergence, and coverage remain
+pending the owner recording.
+
+The standalone runtime suite passed 325 tests. Its unanswered-connect case
+skipped because the host's listen queue never filled.
+
+The direct CLI, contract golden, module governance, expert golden, and spine
+batch passed all 53 build steps. Updating the rule text changed the
+deterministic rule search reply from 1,017 to 1,048 bytes. It also changed the
+policy identity in the direct-source contract and its two certificates.
+Restoring the previous help text in an isolated copy reproduced every prior
+digest. The updated expectations keep both certificate lengths and their proof
+node counts.
+
+The final unfiltered aggregate completed 216 of 221 build steps. Its three
+failures are the 11 stale cassettes, the old policy pin, and the proof
+ratchet's 90 certificates against its floor of 93. All 90 re-derivations agree.
+Agent protocol, precompile, compiler, CLI, diagnostic corpus, and restriction
+checks passed. Normalization passed for all 33 examples. The semantics gate
+passed all ten differential cases. U6 and U7 remain in the compiler worktree
+for the U8 recording and final verification.
+
+## U8 offline replay and evidence
+
+The owner recording replaced all thirteen active DeepSeek cassette generations.
+Offline replay reproduced all thirteen. Six first drafts passed the veto, and
+eleven cases applied an edit and passed their runtime intent check. The median
+was four round trips. Both sibling-helper cases exhausted their tool-call
+budgets and failed their runtime intent checks.
+
+The first replay failed because `validate-body` now passes its runtime check.
+The first-attempt pins also changed for `cache-counter`, `egress-options`,
+`log-timestamp`, and `sql-users`. With those pins updated, replay measured
+ZTS400, ZTS500, and ZTS502 against 56 registered rules. The policy pin matches
+the CLI's `describe-rule --hash` output.
+
+After the coverage baseline was pinned to that observation, the unfiltered
+publication-mode replay passed 1,133 tests with one skip. The proof ratchet
+certified 97 files against its floor of 93. All 97 re-derivations agreed, and 21
+certificates carried Result events. The spine, meta drift, and getting-started
+smoke checks passed.
+
+The source cutover, recording, and pins form the clean input commit for the
+convergence publisher. The coverage publisher runs from the clean convergence
+commit. The canonical gate checks the resulting tree after both evidence
+commits.

@@ -12,7 +12,7 @@ Add a SQL query using `zttp:sql`:
 ```ts
 import { sql, sqlOne, sqlExec } from "zttp:sql";
 
-structural SqlWriteProof<T> = Proof<T, "deterministic" | "state_isolated" | "fault_covered" | "canonical">;
+type SqlWriteProof<T> = Proof<T, "deterministic" | "state_isolated" | "fault_covered" | "canonical">;
 
 sql("getUser", "SELECT id, name FROM users WHERE id = :id");
 sql("touchUser", "UPDATE users SET seen = 1 WHERE id = :id");

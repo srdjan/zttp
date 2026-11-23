@@ -12,7 +12,10 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | Local callback | Arrow function only when passed directly as a call argument |
 | Binding | `const` by default; `let` only when reassigned |
 | Absent value | `undefined` only |
-| Branching | `if`/`else` for guards, `match` for closed alternatives, `c ? a : b` for a two-way choice between pure values |
+| Branching | `if`/`else` for guards, imported `match` for patterns, `c ? a : b` for a two-way choice between pure values |
+| Type alias | `type Name = Shape;` or `export type Name = Shape;` |
+| Scalar identity | Import `Nominal` as a type and `nominal` as a value from `zttp:core`. Declare `declare const brand: unique symbol;`, write `type Name = Nominal<Base, typeof brand>;`, and construct the value with `nominal<Name>(value)` |
+| Invariant | Standalone `assert(predicate);` with `assert` imported from `zttp:core`. Use an explicit `if` with a return for a recoverable error |
 | Iteration | `for (const item of items)` over a finite collection |
 | Errors | `Result<T>` values plus explicit `.ok` checks. See "Result checks" below |
 | External effects | `Effects<T, "...">` on public helpers that touch capabilities |
@@ -28,7 +31,7 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | Optional parameter | `(a: T | undefined)`, not `(a?: T)` |
 | Array type | `T[]` or `readonly T[]`, never `Array<T>` or `ReadonlyArray<T>` |
 | Ignored result | Evaluate the call as a statement; use `undefined` for absence, never `void` |
-| Match catch-all | `default:`, never `when _:` |
+| Match arms and terminal | Import `match` and `P` when the pattern uses descriptors from `zttp:core`. Use `match(subject).with(pattern, (selected) => ...).exhaustive()` for complete coverage or end with `.otherwise(callback)` for remaining cases |
 | Inert statements | Remove `debugger;` and standalone `;` statements |
 | Text construction | Refused: template interpolation and string `+`. Build a string array with explicit `String(...)` conversions and call `.join("")` |
 | Fallback | `??` for nullish defaults. Never `||` unless both operands are boolean |
@@ -36,6 +39,12 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | Parsed request body | `decodeJson(schema, req.body ?? "")`. Or `isDict(v)`, then `dictGet(v, key)` from `zttp:collections`. Never `v.name` on a parsed JSON value |
 
 Most rows have a corresponding diagnostic and the compiler rejects violations. Truthy `||` fallback is already rejected by the boolean-only operator contract.
+
+Match callbacks receive the narrowed value. Use literal or fixed record and
+tuple patterns. The subject type tests are `P.boolean`, `P.number`,
+`P.string`, `P.array`, `P.Dict` and `P.Bytes`. Use `P.present` for a record
+field whose value must differ from `undefined` and `P.any` for an
+unconstrained tuple element.
 
 ## Before / after pairs
 

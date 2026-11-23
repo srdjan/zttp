@@ -189,7 +189,7 @@ const AssignmentPosition = enum { refused, statement, statement_paren };
 const block_import_message = "`import` and `export` are not supported inside a block; move them to the top level of the module";
 const late_import_message = "an `import` after a declaration is not supported; move each `import` above the first declaration";
 const module_specifier_message = "a module specifier must be a string literal, such as \"./lib.ts\"";
-const nested_type_message = "a `structural` or `nominal` declaration is not supported inside a block; declare the type at the top level";
+const nested_type_message = "a type declaration is not supported inside a block; declare the type at the top level";
 const bitwise_message = "bitwise operators are not supported; use arithmetic or a comparison";
 const top_level_statement_message = "a top-level statement must be a declaration, or a registration call with literal arguments; move the statement into a function";
 
@@ -503,7 +503,45 @@ pub const Parser = struct {
                 else => return err,
             }
         };
+        try self.recordLegacyAdmission();
+        if (self.terminalAdmissionFailure()) |failure| return .{ .terminal_admission_refused = failure };
+        if (self.admissionSelected()) return .recovered_admission_refused;
         return .{ .accepted = root };
+    }
+
+    /// Wait for the complete parse so a refusal keeps every migration span,
+    /// including nested matches and declarations that follow an old form.
+    fn recordLegacyAdmission(self: *Parser) !void {
+        const sink = (self.admissionSink() orelse return).physicalPositions();
+        var diagnostics: std.ArrayList(type_syntax.AdmissionDiagnostic) = .empty;
+        defer diagnostics.deinit(self.allocator);
+        for (self.type_store.declarations.items) |declaration| {
+            const keyword = declaration.keyword_span.text(self.source);
+            const kind: type_syntax.AdmissionKind = if (std.mem.eql(u8, keyword, "structural"))
+                .legacy_structural_declaration
+            else if (std.mem.eql(u8, keyword, "nominal"))
+                .legacy_nominal_declaration
+            else
+                continue;
+            try diagnostics.append(self.allocator, .{ .kind = kind, .span = declaration.keyword_span });
+        }
+        for (self.type_store.legacy_match_repairs.items) |record| {
+            const start = record.full_span.start;
+            try diagnostics.append(self.allocator, .{ .kind = .legacy_match_expression, .span = .{ .start = start, .end = start + @as(u32, "match".len) } });
+        }
+        for (self.type_store.legacy_assert_repairs.items) |assertion| {
+            const start = assertion.full_span.start;
+            try diagnostics.append(self.allocator, .{ .kind = .legacy_assert_statement, .span = .{ .start = start, .end = start + @as(u32, "assert".len) } });
+        }
+        std.mem.sort(type_syntax.AdmissionDiagnostic, diagnostics.items, {}, struct {
+            fn before(_: void, first: type_syntax.AdmissionDiagnostic, second: type_syntax.AdmissionDiagnostic) bool {
+                return first.span.start < second.span.start;
+            }
+        }.before);
+        for (diagnostics.items) |diagnostic| {
+            try sink.recordRecoverable(diagnostic);
+            if (sink.shouldStop()) break;
+        }
     }
 
     fn replaySourceAdmission(self: *Parser) !void {
@@ -2196,7 +2234,8 @@ pub const Parser = struct {
                         return error.ParseError;
                     };
                     // The top level consumes a type declaration before this arm.
-                    const type_keyword = std.mem.eql(u8, name, "structural") or std.mem.eql(u8, name, "nominal");
+                    const type_keyword = std.mem.eql(u8, name, "type") or
+                        std.mem.eql(u8, name, "structural") or std.mem.eql(u8, name, "nominal");
                     if (type_keyword and self.brace_depth > 0 and self.peekIsNameOrKeyword()) {
                         self.errors.addErrorAt(.unexpected_token, self.current, nested_type_message);
                         self.advance();
@@ -4943,10 +4982,8 @@ pub const Parser = struct {
 
             // Identifiers and keywords
             .identifier => self.parseIdentifier(),
-            // `assert` remains a legacy statement keyword until U6. A named
-            // import can also bind it as a value. Parsing only a real binding
-            // here gives semantic lowering the identity without granting the
-            // spelling intrinsic authority.
+            // A named import can bind `assert` as a value. The binding gives
+            // lowering the identity without giving the spelling authority.
             .kw_assert => if (self.keywordHasBinding("assert"))
                 self.parseIdentifier()
             else blk: {
@@ -7177,6 +7214,10 @@ test "admission parser reaches each syntax-owned refusal producer" {
         .{ .source = "const value = source satisfies string;\n", .kind = .satisfies_assertion },
         .{ .source = "const value = \"open\nconst after = 1;\n", .kind = .unterminated_string },
         .{ .source = "nominal Box = T;\n", .kind = .nominal_base_not_scalar },
+        .{ .source = "structural Box = number;\n", .kind = .legacy_structural_declaration },
+        .{ .source = "nominal Box = number;\n", .kind = .legacy_nominal_declaration },
+        .{ .source = "function f(x: number): number { return match (x) { default: 0 }; }", .kind = .legacy_match_expression },
+        .{ .source = "function f(x: boolean): number { assert x; return 0; }", .kind = .legacy_assert_statement },
         .{ .source = "interface Box { value: string }\n", .kind = .interface_declaration },
         .{ .source = "distinct type Box = string;\n", .kind = .distinct_type_declaration },
         .{ .source = "import type { Value } from \"" ++ retired_types_module ++ "\";\n", .kind = .retired_types_import },
@@ -7188,7 +7229,7 @@ test "admission parser reaches each syntax-owned refusal producer" {
         .{ .source = "structural Box = ReadonlyArray<string>;\n", .kind = .readonly_array_type_alias },
         .{ .source = "structural Box = void;\n", .kind = .void_type },
     };
-    try std.testing.expectEqual(@as(usize, 15), cases.len);
+    try std.testing.expectEqual(@as(usize, 19), cases.len);
     var seen = std.EnumSet(type_syntax.AdmissionKind).empty;
     for (cases) |case| try expectAdmissionKindFromSource(case.source, case.kind, &seen);
 
@@ -8890,15 +8931,20 @@ test "unsupported: switch statement" {
     try std.testing.expect(false);
 }
 
-test "assert statement parses" {
+test "legacy assertion refusal keeps the predicate span" {
     const allocator = std.testing.allocator;
-    var parser = try Parser.initAdmission(allocator, allocator, "function f(val) { assert isString(val); }", .compile);
+    const source = "function f(val) { assert isString(val); }";
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
-    _ = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-    try std.testing.expect(!parser.hasErrors());
+    try expectLegacyRefusal(&parser, .legacy_assert_statement);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.legacy_assert_repairs.items.len);
+    try std.testing.expectEqualStrings("isString(val)", parser.type_store.legacy_assert_repairs.items[0].predicate_span.text(source));
+}
+
+fn expectLegacyRefusal(parser: *Parser, kind: type_syntax.AdmissionKind) !void {
+    try std.testing.expectError(error.AdmissionRefused, parser.parse());
+    const diagnostic = parser.getLastAdmissionObservation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(kind, diagnostic.kind);
 }
 
 test "break in for-of" {
@@ -10081,7 +10127,7 @@ test "keyword as property name: obj.enum" {
     _ = result catch unreachable;
 }
 
-test "parse match expression with literals" {
+test "legacy match repair retains literal arms" {
     var parser = try Parser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
@@ -10095,16 +10141,12 @@ test "parse match expression with literals" {
     );
     defer parser.deinit();
 
-    const result = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-
-    try std.testing.expect(result != null_node);
+    try expectLegacyRefusal(&parser, .legacy_match_expression);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.legacy_match_repairs.items.len);
     try std.testing.expect(!parser.hasErrors());
 }
 
-test "parse match expression with object pattern" {
+test "legacy match repair retains object pattern arms" {
     var parser = try Parser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
@@ -10117,12 +10159,8 @@ test "parse match expression with object pattern" {
     );
     defer parser.deinit();
 
-    const result = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-
-    try std.testing.expect(result != null_node);
+    try expectLegacyRefusal(&parser, .legacy_match_expression);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.legacy_match_repairs.items.len);
     try std.testing.expect(!parser.hasErrors());
 }
 
@@ -10194,10 +10232,10 @@ test "parse match expression refuses a second default arm" {
     try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "at most one") != null);
 }
 
-test "parse match expression accepts default as the only or the last arm" {
+test "legacy match repair retains a sole or final default" {
     var only = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const x = match (v) { default: 0 };", .compile);
     defer only.deinit();
-    _ = try only.parse();
+    try expectLegacyRefusal(&only, .legacy_match_expression);
     try std.testing.expect(!only.hasErrors());
 
     var last = try Parser.initAdmission(
@@ -10212,7 +10250,7 @@ test "parse match expression accepts default as the only or the last arm" {
         .compile,
     );
     defer last.deinit();
-    _ = try last.parse();
+    try expectLegacyRefusal(&last, .legacy_match_expression);
     try std.testing.expect(!last.hasErrors());
 }
 
@@ -10253,31 +10291,31 @@ test "parse match expression refuses a type-test name as an array element" {
     try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "nested type tests are not supported") != null);
 }
 
-test "parse match expression keeps shorthand bindings and top-level type tests" {
+test "legacy match repair retains shorthand bindings and top-level type tests" {
     // `{ string }` binds a field literally named `string`; only the renamed
     // and array-element spellings are the trap.
     var shorthand = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const x = match (v) { when { string }: string, default: 0 };", .compile);
     defer shorthand.deinit();
-    _ = try shorthand.parse();
+    try expectLegacyRefusal(&shorthand, .legacy_match_expression);
     try std.testing.expect(!shorthand.hasErrors());
 
     var mixed = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const x = match (v) { when { kind: \"a\", Dict }: Dict, default: 0 };", .compile);
     defer mixed.deinit();
-    _ = try mixed.parse();
+    try expectLegacyRefusal(&mixed, .legacy_match_expression);
     try std.testing.expect(!mixed.hasErrors());
 
     var top_level = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const x = match (v) { when string: 1, when Dict: 2, default: 0 };", .compile);
     defer top_level.deinit();
-    _ = try top_level.parse();
+    try expectLegacyRefusal(&top_level, .legacy_match_expression);
     try std.testing.expect(!top_level.hasErrors());
 
     var renamed = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const x = match (v) { when { k: other }: other, default: 0 };", .compile);
     defer renamed.deinit();
-    _ = try renamed.parse();
+    try expectLegacyRefusal(&renamed, .legacy_match_expression);
     try std.testing.expect(!renamed.hasErrors());
 }
 
-test "parse match expression with nested object and array patterns" {
+test "legacy match repair retains nested object and array patterns" {
     var parser = try Parser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
@@ -10290,12 +10328,8 @@ test "parse match expression with nested object and array patterns" {
     );
     defer parser.deinit();
 
-    const result = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-
-    try std.testing.expect(result != null_node);
+    try expectLegacyRefusal(&parser, .legacy_match_expression);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.legacy_match_repairs.items.len);
     try std.testing.expect(!parser.hasErrors());
 }
 
@@ -10315,7 +10349,7 @@ test "null literal parses as explicit data" {
     try std.testing.expect(!parser.hasErrors());
 }
 
-test "null is a match pattern" {
+test "legacy match repair retains a null pattern" {
     const allocator = std.testing.allocator;
     const source =
         \\const x = match (val) {
@@ -10327,16 +10361,12 @@ test "null is a match pattern" {
     var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
-    const result = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-
-    try std.testing.expect(result != null_node);
+    try expectLegacyRefusal(&parser, .legacy_match_expression);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.legacy_match_repairs.items.len);
     try std.testing.expect(!parser.hasErrors());
 }
 
-test "the six admitted type-test patterns parse" {
+test "legacy match repair retains each of the six type tests" {
     // Six is the whole of spec 5.5's list. A seventh identifier is not a type
     // test - it is a binding - so this count is the closed set, not a sample.
     var parser = try Parser.initAdmission(
@@ -10355,11 +10385,8 @@ test "the six admitted type-test patterns parse" {
     );
     defer parser.deinit();
 
-    const result = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-    try std.testing.expect(result != null_node);
+    try expectLegacyRefusal(&parser, .legacy_match_expression);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.legacy_match_repairs.items.len);
     try std.testing.expect(!parser.hasErrors());
 
     const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -10371,7 +10398,7 @@ test "the six admitted type-test patterns parse" {
     try std.testing.expectEqual(@as(usize, 6), tests_found);
 }
 
-test "the Bytes type test lowers to an isBytes call" {
+test "legacy match repair retains the Bytes predicate" {
     // The test that pinned the refusal now pins the lowering. `when Bytes:`
     // reads the scrutinee a second time through the intrinsic guard, which is
     // the same shape `when Dict:` uses and the reason `isBytes` has to be a
@@ -10381,11 +10408,8 @@ test "the Bytes type test lowers to an isBytes call" {
     var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
 
-    const result = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-    try std.testing.expect(result != null_node);
+    try expectLegacyRefusal(&parser, .legacy_match_expression);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.legacy_match_repairs.items.len);
     try std.testing.expect(!parser.hasErrors());
 
     const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -10402,7 +10426,7 @@ test "the Bytes type test lowers to an isBytes call" {
     try std.testing.expect(found);
 }
 
-test "the Dict type test parses now that Dict exists" {
+test "legacy match repair retains the Dict pattern" {
     var parser = try Parser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
@@ -10415,18 +10439,15 @@ test "the Dict type test parses now that Dict exists" {
     );
     defer parser.deinit();
 
-    const result = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-    try std.testing.expect(result != null_node);
+    try expectLegacyRefusal(&parser, .legacy_match_expression);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.legacy_match_repairs.items.len);
     try std.testing.expect(!parser.hasErrors());
 }
 
-fn expectScrutineeAdmitted(source: []const u8) !void {
+fn expectLegacyScrutinee(source: []const u8) !void {
     var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
-    _ = try parser.parse();
+    try expectLegacyRefusal(&parser, .legacy_match_expression);
     try std.testing.expectEqual(@as(usize, 0), parser.getErrors().len);
 }
 
@@ -10440,12 +10461,12 @@ fn expectScrutineeRefused(source: []const u8) !void {
     try std.testing.expectEqualStrings("a match scrutinee is a name or a member path; bind the value to a const first and match on that", errors[0].message);
 }
 
-test "a match scrutinee that is a name or a member path is admitted" {
-    try expectScrutineeAdmitted("const r = match (x) { when 1: 1, default: 2 };");
-    try expectScrutineeAdmitted("const r = match (a.b.c) { when 1: 1, default: 2 };");
-    try expectScrutineeAdmitted("const r = match (a.b) { when string: 1, default: 2 };");
+test "legacy match repair retains name and member path subjects" {
+    try expectLegacyScrutinee("const r = match (x) { when 1: 1, default: 2 };");
+    try expectLegacyScrutinee("const r = match (a.b.c) { when 1: 1, default: 2 };");
+    try expectLegacyScrutinee("const r = match (a.b) { when string: 1, default: 2 };");
     // The parser drops the parentheses, so `(x)` is the name `x`.
-    try expectScrutineeAdmitted("const r = match ((x)) { when 1: 1, default: 2 };");
+    try expectLegacyScrutinee("const r = match ((x)) { when 1: 1, default: 2 };");
 }
 
 test "a match scrutinee that is not a name or a member path is refused" {
@@ -10456,7 +10477,7 @@ test "a match scrutinee that is not a name or a member path is refused" {
     try expectScrutineeRefused("const r = match (g()) { when string: 1, default: 2 };");
 }
 
-test "a match binding is scoped to its arm" {
+test "legacy match repair retains each arm's binding scope" {
     // The binding is declared in a scope opened per arm, so the name is a
     // local inside its own arm and is not one anywhere else. Without the
     // per-arm scope the second arm would resolve `text` to the first arm's
@@ -10474,11 +10495,8 @@ test "a match binding is scoped to its arm" {
     );
     defer parser.deinit();
 
-    const result = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-    try std.testing.expect(result != null_node);
+    try expectLegacyRefusal(&parser, .legacy_match_expression);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.legacy_match_repairs.items.len);
     try std.testing.expect(!parser.hasErrors());
 
     const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -11626,23 +11644,9 @@ test "admission captures absent structural aliases before comments" {
         for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
             var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, mode);
             defer parser.deinit();
-            const root = switch (try parser.parseAdmission()) {
-                .accepted => |value| value,
-                else => return error.TestUnexpectedResult,
-            };
-            const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
-            const program = view.getBlock(root).?;
-            try std.testing.expectEqual(NodeTag.program, view.getTag(root).?);
-            try std.testing.expectEqual(@as(u16, 1), program.stmts_count);
-            const surviving_index = parser.nodes.getListIndex(program.stmts_start, 0);
-            try std.testing.expectEqual(NodeTag.var_decl, view.getTag(surviving_index).?);
-            try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOf(u8, source, "const live").?)), view.getLoc(surviving_index).?.offset);
-            const initializer = view.getVarDecl(surviving_index).?.init;
-            try std.testing.expectEqual(NodeTag.lit_int, view.getTag(initializer).?);
-            try std.testing.expectEqual(@as(i32, 1), view.getIntValue(initializer).?);
-
-            try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
-            try std.testing.expect(parser.getLastAdmissionObservation() == null);
+            try std.testing.expectError(error.AdmissionRefused, parser.parse());
+            const diagnostic = parser.getLastAdmissionObservation() orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(type_syntax.AdmissionKind.legacy_structural_declaration, diagnostic.kind);
             try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
             const declaration = parser.type_store.declarations.items[0];
             switch (declaration.body) {
@@ -11899,7 +11903,7 @@ test "admission declaration names retain the existing keyword vocabulary" {
     const names = [_][]const u8{ "true", "null", "undefined", "function" };
     try std.testing.expectEqual(@as(usize, 4), names.len);
     for (names) |name| {
-        const source = try std.testing.allocator.print("structural {s} = number;\nconst live = 1;\n", .{name});
+        const source = try std.testing.allocator.print("type {s} = number;\nconst live = 1;\n", .{name});
         defer std.testing.allocator.free(source);
         for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
             var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, mode);
@@ -11920,7 +11924,7 @@ test "admission declaration names retain the existing keyword vocabulary" {
 }
 
 test "spaced function allocation failures preserve the prior declaration" {
-    const source = "structural Seed = number;\nfunction id <T>(x) { return x; }\n";
+    const source = "type Seed = number;\nfunction id <T>(x) { return x; }\n";
     const Context = struct {
         fn run(type_allocator: std.mem.Allocator, mode: type_syntax.AdmissionMode, seed: type_syntax.Store.Checkpoint, function_start: u32, later_failures: *usize) !void {
             var parser = try Parser.initAdmission(std.testing.allocator, type_allocator, source, mode);

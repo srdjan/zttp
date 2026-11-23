@@ -182,6 +182,11 @@ pub fn parserCode(kind: ParserKind) []const u8 {
 
 pub fn stripCode(kind: StripKind) []const u8 {
     return switch (kind) {
+        .legacy_structural_declaration,
+        .legacy_nominal_declaration,
+        .legacy_match_expression,
+        .legacy_assert_statement,
+        => "ZTS001",
         .nesting_too_deep => "ZTS044",
         .any_type => "ZTS041",
         .as_assertion => "ZTS042",
@@ -300,8 +305,6 @@ pub fn strictCode(kind: strict_checker.DiagnosticKind) []const u8 {
         .mutable_live_iteration => "ZTS622",
         .canonical_internal_helper_effects => "ZTS623",
         .nullish_operator_on_null => "ZTS624",
-        .canonical_redundant_pattern_rename => "ZTS625",
-        .canonical_unbound_field_read => "ZTS626",
         .canonical_dict_entry_round_trip => "ZTS627",
         .canonical_dict_entries_reduce => "ZTS628",
         .effectful_module_initializer => "ZTS630",
@@ -633,7 +636,8 @@ test "only explicitly shared semantic faults have multiple producers" {
     // and type-position admission. ZTS044 is shared by the compatibility
     // diagnostic family and the parser's depth check. ZTS042 is shared by the
     // admission of `x as T` and the parser's refusal of `<T>x`.
-    // ZTS001 is shared by the parser and the typed intrinsic reference check.
+    // ZTS001 has six producers across parsing, legacy admission, and the
+    // typed intrinsic reference check.
     // ZTS207 is shared by the virtual-import check of a value import and the
     // parser-tier check of an `import type` name that the module does not
     // export.
@@ -652,7 +656,7 @@ test "only explicitly shared semantic faults have multiple producers" {
             try std.testing.expectEqual(entry.risk, other.risk);
         }
     }
-    try std.testing.expectEqual(shared_codes.len, duplicate_count);
+    try std.testing.expectEqual(@as(usize, 19), duplicate_count);
 }
 
 test "lower contract tier spec codes match the compiler catalog" {

@@ -75,7 +75,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "TopDecl",
-        .rhs = "[\"export\"] TypeAliasDecl | [\"export\"] UniqueSymbolDecl | [\"export\"] StructuralDecl | [\"export\"] NominalDecl | [\"export\"] FunctionDecl | [\"export\"] TopBindingDecl | RegistrationCall",
+        .rhs = "[\"export\"] TypeAliasDecl | [\"export\"] UniqueSymbolDecl | [\"export\"] FunctionDecl | [\"export\"] TopBindingDecl | RegistrationCall",
     },
     .{
         .name = "TypeAliasDecl",
@@ -86,16 +86,6 @@ pub const productions = [_]Production{
     .{
         .name = "UniqueSymbolDecl",
         .rhs = "\"declare\" \"const\" Ident \":\" \"unique\" \"symbol\" \";\"",
-    },
-    .{
-        .name = "StructuralDecl",
-        .rhs = "\"structural\" Ident TypeParams? \"=\" Type \";\"",
-        .enforcement = .check_time,
-        .note = "ZTS212, the type-checker band, which is outside the policy-hashed registry: a recursive structural alias must be contractive and the grammar admits one that is not",
-    },
-    .{
-        .name = "NominalDecl",
-        .rhs = "\"nominal\" Ident \"=\" ScalarType \";\"",
     },
     .{
         .name = "TypeParams",
@@ -163,7 +153,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "Stmt",
-        .rhs = "BindingDecl | LValue \"=\" Expr \";\" | Expr \";\" | IfStmt | \"for\" \"(\" (\"const\" | \"let\") Bind \"of\" Expr \")\" Block | \"assert\" Expr \";\" | \"return\" [Expr] \";\" | \"break\" \";\" | \"continue\" \";\"",
+        .rhs = "BindingDecl | LValue \"=\" Expr \";\" | Expr \";\" | IfStmt | \"for\" \"(\" (\"const\" | \"let\") Bind \"of\" Expr \")\" Block | \"return\" [Expr] \";\" | \"break\" \";\" | \"continue\" \";\"",
         .enforcement = .check_time,
         .rule_code = "ZTS613",
     },
@@ -209,7 +199,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "PrimaryExpr",
-        .rhs = "Literal | Ident | ArrayExpr | RecordExpr | MatchExpr | \"(\" Expr \")\"",
+        .rhs = "Literal | Ident | ArrayExpr | RecordExpr | \"(\" Expr \")\"",
     },
     .{
         .name = "UnaryOp",
@@ -240,10 +230,6 @@ pub const productions = [_]Production{
         .rhs = "Ident \":\" Expr | String \":\" Expr",
     },
     .{
-        .name = "PropertyName",
-        .rhs = "Ident | String",
-    },
-    .{
         .name = "Args",
         .rhs = "Arg (\",\" Arg)* [\",\"]",
     },
@@ -266,40 +252,6 @@ pub const productions = [_]Production{
     .{
         .name = "ArrowParam",
         .rhs = "Ident [\":\" Type]",
-    },
-    .{
-        .name = "MatchExpr",
-        .rhs = "\"match\" \"(\" Scrutinee \")\" \"{\" MatchArm+ [DefaultArm] \"}\"",
-        .enforcement = .check_time,
-        .rule_code = "ZTS603",
-    },
-    .{
-        .name = "Scrutinee",
-        .rhs = "Ident (\".\" Ident)*",
-    },
-    .{
-        .name = "MatchArm",
-        .rhs = "\"when\" Pattern \":\" Expr",
-    },
-    .{
-        .name = "DefaultArm",
-        .rhs = "\"default\" \":\" Expr",
-    },
-    .{
-        .name = "Pattern",
-        .rhs = "Literal | TypeTestPattern | \"{\" PatternFields \"}\"",
-    },
-    .{
-        .name = "TypeTestPattern",
-        .rhs = "\"boolean\" | \"number\" | \"string\" | \"array\" | \"Dict\" | \"Bytes\"",
-    },
-    .{
-        .name = "PatternFields",
-        .rhs = "PatternField (\",\" PatternField)* [\",\"]",
-    },
-    .{
-        .name = "PatternField",
-        .rhs = "PropertyName \":\" Literal | PropertyName \":\" Ident | Ident",
     },
     .{
         .name = "Type",
@@ -358,10 +310,6 @@ pub const productions = [_]Production{
     .{
         .name = "FunctionType",
         .rhs = "\"(\" [ValueParams] \")\" \"=>\" ReturnType",
-    },
-    .{
-        .name = "ScalarType",
-        .rhs = "\"boolean\" | \"number\" | \"string\"",
     },
 };
 
@@ -468,14 +416,11 @@ test "every check_time row names either a registry rule or the band that answers
     // The floor. A table where every row said parse_time would satisfy the loop
     // above while publishing the over-approximation the section preamble warns
     // about as if it were exact.
-    // The set holds nine rows. This exact floor catches a registry that
-    // silently relabels a wider
-    // production as parser-exact.
-    try testing.expect(check_rows >= 9);
+    try testing.expectEqual(@as(usize, 9), check_rows);
 }
 
 test "every noted row names a code the projection really emits" {
-    // The note is prose, and prose is where a claim rots. `StructuralDecl`
+    // The note is prose, and prose is where a claim rots. `TypeAliasDecl`
     // admits a recursive alias no data constructor guards, and the refusal is
     // ZTS212 from the type-checker band. `RegistrationCall` admits any identifier as
     // a callee, and the refusal is ZTS074 from the parser band. Neither band is
@@ -484,7 +429,7 @@ test "every noted row names a code the projection really emits" {
     // the projection here so a renamed code fails the build rather than
     // leaving a client chasing a code nothing emits.
     //
-    // Four rows carry a note today. A note that names some other code needs its
+    // Three rows carry a note today. A note that names some other code needs its
     // own binding added here; the count assertion is what makes that a build
     // failure rather than an unchecked sentence.
     const type_code = diagnostic_projection.code(.type, .non_contractive_alias);
@@ -498,8 +443,7 @@ test "every noted row names a code the projection really emits" {
     for (&productions) |p| {
         if (p.note != null) noted += 1;
     }
-    try testing.expectEqual(@as(usize, 4), noted);
-    try testing.expect(std.mem.indexOf(u8, findByName("StructuralDecl").?.note.?, type_code) != null);
+    try testing.expectEqual(@as(usize, 3), noted);
     try testing.expect(std.mem.indexOf(u8, findByName("RegistrationCall").?.note.?, parser_code) != null);
     const alias = findByName("TypeAliasDecl") orelse return error.TestExpectedEqual;
     const alias_note = alias.note orelse return error.TestExpectedEqual;
@@ -518,7 +462,7 @@ test "the production names are unique, so a client can key on them" {
             }
         }
     }
-    try testing.expect(findByName("MatchExpr") != null);
+    try testing.expect(findByName("MatchExpr") == null);
     try testing.expect(findByName("NotAProduction") == null);
 }
 
@@ -560,11 +504,13 @@ test "the grammar derives no form that the compiler refuses" {
     try testing.expect(!has("BinaryOp", "\"&\""));
     try testing.expect(!has("BinaryOp", "\"^\""));
     try testing.expect(!has("BinaryOp", "\"|\""));
-    // The registration call is the one top-level statement (ZTS074), and
-    // `nominal` admits `boolean` (Decision 6).
+    // The registration call is the one top-level statement (ZTS074).
     try testing.expect(has("TopDecl", "RegistrationCall"));
     try testing.expect(has("TopDecl", "TypeAliasDecl"));
     try testing.expect(has("TopDecl", "UniqueSymbolDecl"));
     try testing.expect(has("NonTuplePrimaryType", "BrandQuery"));
-    try testing.expect(has("ScalarType", "\"boolean\""));
+    try testing.expect(!has("TopDecl", "StructuralDecl"));
+    try testing.expect(!has("TopDecl", "NominalDecl"));
+    try testing.expect(!has("Stmt", "\"assert\""));
+    try testing.expect(!has("PrimaryExpr", "MatchExpr"));
 }

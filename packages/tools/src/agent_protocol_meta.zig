@@ -2114,6 +2114,7 @@ test "meta publishes the ambient value names as the known-globals list itself" {
     try testing.expectEqual(known.len, values.items.len);
     for (known, 0..) |name, i| {
         try testing.expectEqualStrings(name, values.items[i].string);
+        try testing.expect(!std.mem.eql(u8, values.items[i].string, "assert"));
     }
 }
 

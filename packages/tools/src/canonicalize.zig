@@ -2111,6 +2111,11 @@ fn nodeSource(source: []const u8, view: zts.IrView, node: zts.parser.NodeIndex) 
     return source[span.start..span.end];
 }
 
+const PatternDescriptor = struct {
+    alias: []const u8,
+    used: bool = false,
+};
+
 fn appendStructuredPattern(
     allocator: std.mem.Allocator,
     output: *std.ArrayListUnmanaged(u8),
@@ -2118,7 +2123,7 @@ fn appendStructuredPattern(
     capabilities: MigrationParseAuthority,
     node: zts.parser.NodeIndex,
     path: []const u8,
-    pattern_alias: []const u8,
+    descriptor: *PatternDescriptor,
 ) !void {
     const view = capabilities.ir_view;
     switch (view.getTag(node) orelse return error.UnsupportedRefactor) {
@@ -2142,9 +2147,10 @@ fn appendStructuredPattern(
                 emitted = true;
                 try output.print(allocator, "{s}: ", .{key});
                 if (property.value == zts.parser.null_node) {
-                    try output.print(allocator, "{s}.present", .{pattern_alias});
+                    descriptor.used = true;
+                    try output.print(allocator, "{s}.present", .{descriptor.alias});
                 } else {
-                    try appendStructuredPattern(allocator, output, bindings, capabilities, property.value, field_path, pattern_alias);
+                    try appendStructuredPattern(allocator, output, bindings, capabilities, property.value, field_path, descriptor);
                 }
             }
             try output.appendSlice(allocator, " }");
@@ -2156,11 +2162,12 @@ fn appendStructuredPattern(
                 if (offset > 0) try output.appendSlice(allocator, ", ");
                 const element = view.getListIndex(array.elements_start, @intCast(offset));
                 if (element == zts.parser.null_node) {
-                    try output.print(allocator, "{s}.any", .{pattern_alias});
+                    descriptor.used = true;
+                    try output.print(allocator, "{s}.any", .{descriptor.alias});
                 } else {
                     const item_path = try allocator.print("{s}[{d}]", .{ path, offset });
                     defer allocator.free(item_path);
-                    try appendStructuredPattern(allocator, output, bindings, capabilities, element, item_path, pattern_alias);
+                    try appendStructuredPattern(allocator, output, bindings, capabilities, element, item_path, descriptor);
                 }
             }
             try output.append(allocator, ']');
@@ -2175,7 +2182,8 @@ fn appendStructuredPattern(
                 .dict => "Dict",
                 .bytes => "Bytes",
             };
-            try output.print(allocator, "{s}.{s}", .{ pattern_alias, name });
+            descriptor.used = true;
+            try output.print(allocator, "{s}.{s}", .{ descriptor.alias, name });
         },
         .lit_int, .lit_float, .lit_string, .lit_bool, .lit_null, .lit_undefined => {
             try output.appendSlice(allocator, nodeSource(capabilities.type_store.source, view, node) orelse return error.UnsupportedRefactor);
@@ -2207,7 +2215,7 @@ fn appendLegacyMatchReplacement(
     all_arms: []const zts.parser.type_syntax.LegacyMatchArmRepair,
     record: zts.parser.type_syntax.LegacyMatchRepair,
     match_alias: []const u8,
-    pattern_alias: []const u8,
+    descriptor: *PatternDescriptor,
     capabilities: MigrationParseAuthority,
     next_callback_suffix: *usize,
 ) anyerror![]u8 {
@@ -2221,7 +2229,7 @@ fn appendLegacyMatchReplacement(
     if (arms_end > all_arms.len) return error.UnsupportedRefactor;
     for (all_arms[arms_start..arms_end]) |arm| {
         if (arm.pattern_span == null) {
-            default_body = try renderNestedMatches(allocator, source, all_arms, arm.body_span, match_alias, pattern_alias, capabilities, next_callback_suffix);
+            default_body = try renderNestedMatches(allocator, source, all_arms, arm.body_span, match_alias, descriptor, capabilities, next_callback_suffix);
             continue;
         }
         var pattern = PatternMigration{ .text = &.{} };
@@ -2230,10 +2238,10 @@ fn appendLegacyMatchReplacement(
         errdefer pattern_output.deinit(allocator);
         const callback_name = try freshCallbackName(allocator, capabilities, next_callback_suffix);
         defer allocator.free(callback_name);
-        try appendStructuredPattern(allocator, &pattern_output, &pattern.bindings, capabilities, arm.pattern_node, callback_name, pattern_alias);
+        try appendStructuredPattern(allocator, &pattern_output, &pattern.bindings, capabilities, arm.pattern_node, callback_name, descriptor);
         pattern.text = try pattern_output.toOwnedSlice(allocator);
         try output.print(allocator, ".with({s}, ", .{pattern.text});
-        const body = try renderNestedMatches(allocator, source, all_arms, arm.body_span, match_alias, pattern_alias, capabilities, next_callback_suffix);
+        const body = try renderNestedMatches(allocator, source, all_arms, arm.body_span, match_alias, descriptor, capabilities, next_callback_suffix);
         defer allocator.free(body);
         if (pattern.bindings.items.len == 0) {
             try output.print(allocator, "() => {s})", .{body});
@@ -2259,7 +2267,7 @@ fn renderNestedMatches(
     all_arms: []const zts.parser.type_syntax.LegacyMatchArmRepair,
     span: zts.parser.type_syntax.Span,
     match_alias: []const u8,
-    pattern_alias: []const u8,
+    descriptor: *PatternDescriptor,
     capabilities: MigrationParseAuthority,
     next_callback_suffix: *usize,
 ) anyerror![]u8 {
@@ -2290,7 +2298,7 @@ fn renderNestedMatches(
                 all_arms,
                 record,
                 match_alias,
-                pattern_alias,
+                descriptor,
                 capabilities,
                 next_callback_suffix,
             ),
@@ -2415,12 +2423,11 @@ fn migrateLegacyBatch(
     var need_nominal_type = false;
     const need_match = records.matches.len > 0;
     const need_assert = records.asserts.len > 0;
-    const need_patterns = records.matches.len > 0;
 
     const nominal_type_alias = resolvedCoreAlias(original_authority, "Nominal", true) orelse "Nominal";
     const match_alias = resolvedCoreAlias(original_authority, "match", false) orelse "match";
     const assert_alias = resolvedCoreAlias(original_authority, "assert", false) orelse "assert";
-    const pattern_alias = resolvedCoreAlias(original_authority, "P", false) orelse "P";
+    var descriptor: PatternDescriptor = .{ .alias = resolvedCoreAlias(original_authority, "P", false) orelse "P" };
     var next_callback_suffix: usize = 1;
 
     for (records.declarations) |declaration| {
@@ -2497,7 +2504,7 @@ fn migrateLegacyBatch(
             records.match_arms,
             record,
             match_alias,
-            pattern_alias,
+            &descriptor,
             original_authority,
             &next_callback_suffix,
         );
@@ -2516,7 +2523,7 @@ fn migrateLegacyBatch(
         if (hasModuleParsedBinding(original_authority, "Nominal")) return .refused;
         try prefix.appendSlice(allocator, "import type { Nominal } from \"zttp:core\";\n");
     }
-    if (need_match or need_assert or need_patterns) {
+    if (need_match or need_assert or descriptor.used) {
         var missing: std.ArrayListUnmanaged(u8) = .empty;
         defer missing.deinit(allocator);
         if (need_match and resolvedCoreAlias(original_authority, "match", false) == null) {
@@ -2528,7 +2535,7 @@ fn migrateLegacyBatch(
             if (missing.items.len > 0) try missing.appendSlice(allocator, ", ");
             try missing.appendSlice(allocator, "assert");
         }
-        if (need_patterns and resolvedCoreAlias(original_authority, "P", false) == null) {
+        if (descriptor.used and resolvedCoreAlias(original_authority, "P", false) == null) {
             if (hasModuleParsedBinding(original_authority, "P")) return .refused;
             if (missing.items.len > 0) try missing.appendSlice(allocator, ", ");
             try missing.appendSlice(allocator, "P");
@@ -4129,7 +4136,7 @@ test "M4 accepts an exact mixed batch and refuses unrelated candidate bytes" {
         "  return match (command) { when { kind: \"echo\" }: \"yes\", default: \"no\" };\n" ++
         "}\n";
     const exact =
-        "import { match, assert, P } from \"zttp:core\";\n" ++
+        "import { match, assert } from \"zttp:core\";\n" ++
         "type Command = { kind: string };\n" ++
         "function choose(command: Command): string {\n" ++
         "  assert(command.kind !== \"\");\n" ++
@@ -4153,7 +4160,7 @@ test "normalizeSource migrates legacy declarations assertions and match callback
         "}\n";
     const expected =
         "import type { Nominal } from \"zttp:core\";\n" ++
-        "import { match, assert, P } from \"zttp:core\";\n" ++
+        "import { match, assert } from \"zttp:core\";\n" ++
         "type Command = { kind: string; text: string };\n" ++
         "declare const userIdBrand: unique symbol;\n" ++
         "type UserId = Nominal<string, typeof userIdBrand>;\n" ++
@@ -4437,7 +4444,7 @@ test "normalizeSource preserves renamed and nested legacy binding snapshots" {
         "  return match (box) { when { item, payload: { text: label } }: [combine(item.text, change(item), item.text), label].join(\"\") };\n" ++
         "}\n";
     const expected =
-        "import { match, P } from \"zttp:core\";\n" ++
+        "import { match } from \"zttp:core\";\n" ++
         "type Item = { text: string };\n" ++
         "type Box = { item: Item; payload: { text: string } };\n" ++
         "function change(item: Item): string { item.text = \"new\"; return item.text; }\n" ++

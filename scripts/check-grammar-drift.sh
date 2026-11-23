@@ -29,9 +29,8 @@ cd "$(dirname "$0")/.."
 spec_doc="docs/spec/zts-model-1.md"
 registry_file="packages/zts/src/grammar_registry.zig"
 
-# The production count measured on 2026-11-16, after U4b-6b deleted
-# AssignableExpr.
-MIN_ROWS=65
+# The production count after legacy source admission was removed.
+MIN_ROWS=59
 
 fail() {
   printf 'grammar drift: %s\n' "$1" >&2

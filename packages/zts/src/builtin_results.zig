@@ -329,7 +329,6 @@ pub const skips =
     skipsOf("range", "out of scope: the iterator that range returns is untyped, so its length is too", &.{"length"}) ++
     skipsOf("global", "out of scope: h returns a vnode, a runtime object with no type", &.{"h"}) ++
     skipsOf("global", "out of scope: a call of the constructor returns a runtime object with no type", &.{"Request"}) ++
-    skipsOf("global", "out of scope: assert is a statement, not a callable value", &.{"assert"}) ++
     skipsOf("global", refused_in_handler, &.{
         "Error",           "Fragment",    "RangeError", "ReferenceError", "Result",      "SyntaxError", "TypeError",
         "_processRequest", "httpRequest", "isFinite",   "isNaN",          "performance", "fetchSync",
@@ -481,8 +480,11 @@ test "census: every installed builtin has a result row or a stated reason" {
         "builtin result census: {d} members, {d} rows, {d} skips ({d} typed in U1b)\n",
         .{ counts.members, counts.rows, counts.skips, counts.u1b_skips },
     );
+    // The former ambient assertion was counted without an installed value.
+    // The imported intrinsic is lowered before runtime builtin dispatch.
+    try std.testing.expect(ctx.getGlobal(try ctx.atoms.intern("assert")) == null);
     // A floor on the input: a census that enumerated nothing would pass.
-    try std.testing.expect(counts.members >= 122);
+    try std.testing.expect(counts.members >= 121);
     // Each member has a row or a skip, never both.
     try std.testing.expectEqual(counts.members, counts.rows + counts.skips);
 

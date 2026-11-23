@@ -1,6 +1,6 @@
 // Proves: a handler whose every path returns passes every stage.
 
-structural Guardrails<T> = Proof<T, "result_safe">;
+type Guardrails<T> = Proof<T, "result_safe">;
 
 function handler(req: Request): Guardrails<Response> {
     const url = req.url;

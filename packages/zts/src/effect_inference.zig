@@ -19,6 +19,7 @@ const module_binding = @import("zts-engine").module_binding;
 const builtin_modules = @import("zts-engine").builtin_modules;
 const manifest_registry_mod = @import("manifest_registry.zig");
 const module_facts_mod = @import("module_facts.zig");
+const intrinsic_lowering = @import("intrinsic_lowering.zig");
 const route_resolution = @import("route_resolution.zig");
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
@@ -3152,6 +3153,17 @@ fn analyzeNamedRow(source: []const u8, name: []const u8) !EffectRow {
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
+    var pool = type_pool_mod.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = type_env_mod.TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .module_path = "/app/effect-inference-test.ts",
+        .store = &parser.type_store,
+        .ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants),
+        .atoms = &atoms,
+    } });
+    try intrinsic_lowering.validateSource(allocator, &parser, &atoms, &env);
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     var analyzer = Analyzer.init(allocator, view, &atoms);
     defer analyzer.deinit();
@@ -4701,55 +4713,33 @@ test "an effectful arm contributes its effect to the row" {
     // idiomatic effectful selection form. Every arm is walked into the same
     // row, so a call in the second arm is not lost because the first arm is
     // pure - taking the first arm's row would report a pure function.
-    const allocator = testing.allocator;
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
     const source =
+        \\import { match } from "zttp:core";
         \\import { logInfo } from "zttp:log";
         \\function choose(tag) {
-        \\  return match (tag) {
-        \\    when "quiet": 0,
-        \\    when "loud": logInfo("hi")
-        \\  };
+        \\  return match(tag)
+        \\    .with("quiet", () => 0)
+        \\    .with("loud", () => logInfo("hi"))
+        \\    .exhaustive();
         \\}
     ;
-    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
-    parser.setAtomTable(&atoms);
-    defer parser.deinit();
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var analyzer = Analyzer.init(allocator, view, &atoms);
-    defer analyzer.deinit();
-    try analyzer.analyze(root);
-
-    const choose = analyzer.lookup("choose") orelse return error.FunctionNotFound;
+    const choose = try analyzeNamedRow(source, "choose");
     try testing.expect(!choose.pure);
 }
 
 test "a match whose arms are all pure keeps a pure row" {
     // The control: without it the test above passes for a checker that calls
     // every match impure.
-    const allocator = testing.allocator;
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
     const source =
+        \\import { match } from "zttp:core";
         \\function choose(tag) {
-        \\  return match (tag) {
-        \\    when "quiet": 0,
-        \\    when "loud": 1
-        \\  };
+        \\  return match(tag)
+        \\    .with("quiet", () => 0)
+        \\    .with("loud", () => 1)
+        \\    .exhaustive();
         \\}
     ;
-    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
-    parser.setAtomTable(&atoms);
-    defer parser.deinit();
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var analyzer = Analyzer.init(allocator, view, &atoms);
-    defer analyzer.deinit();
-    try analyzer.analyze(root);
-
-    const choose = analyzer.lookup("choose") orelse return error.FunctionNotFound;
+    const choose = try analyzeNamedRow(source, "choose");
     try testing.expect(choose.pure);
 }
 

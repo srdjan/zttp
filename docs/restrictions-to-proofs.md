@@ -40,6 +40,10 @@ reach clients through the version-2 `restrictions` operation.
 |-------------|--------------------|--------|-------------|
 | eval, dynamic import, reflection, Proxy | closed program and semantics coverage | `essential` | `ZTS001`, `ZTS002` |
 | mutable live iteration | loop finiteness and stable cost | `replaced` | `ZTS622` |
+| legacy structural declaration | one syntax for transparent aliases | `language_simplicity` | `ZTS001` |
+| legacy nominal declaration | explicit brand identity and construction | `language_simplicity` | `ZTS001` |
+| legacy brace match | one syntax for pattern matching | `language_simplicity` | `ZTS001` |
+| legacy assert statement | one syntax for invariant checks | `language_simplicity` | `ZTS001` |
 | unchecked recursive cycle | totality and bounded cost | `essential` | no diagnostic |
 | native module with unbound contract | effect and authority integrity | `essential` | no diagnostic |
 | `any`, type assertions (`as` and angle-bracket forms), `satisfies` | type evidence integrity | `essential` | `ZTS041`, `ZTS042`, `ZTS043` |
@@ -111,7 +115,7 @@ Per-restriction rationale, one sentence each.
 - **unchecked recursive cycle** - recursion runs, but these claims require evidence
 - **native module with unbound contract** - essential
 - **`any`, type assertions (`as` and angle-bracket forms), `satisfies`** - essential to the selected checker model
-- **raw built-in type in an exported function signature** - exported parameter and return types name a nominal or structural declaration instead of an open built-in type
+- **raw built-in type in an exported function signature** - exported parameter and return types name a named scalar brand or transparent alias instead of an open built-in type
 - **effectful `?:`** - language-simplicity choice, provisional pending the 14.2 paired-task measurement
 - **compound assignment** - language-simplicity choice, provisional pending the 14.2 paired-task measurement
 - **rest parameters** - language-simplicity choice, provisional pending the 14.2 paired-task measurement
@@ -119,8 +123,8 @@ Per-restriction rationale, one sentence each.
 - **numeric record keys** - canonical simplicity; use a string key, or an array when the keys are dense indices
 - **multiple record spreads** - canonical simplicity; write explicit fields over one base
 - **fallback `assert`** - use `if` plus `return`
-- **interface** - write `structural Name = { ... };`
-- **`distinct type` declaration** - write `nominal Name = string;`
+- **interface** - write `type Name = { ... };`
+- **`distinct type` declaration** - declare a unique-symbol brand and use `Nominal<string, typeof brand>` from `zttp:core`
 - **`\|>`, `pipe()`, `guard()`** - write the call directly; run guards by explicit early return
 - **object methods, getters, setters** - language-simplicity choice
 - **`.js`, `.jsx`, and `.tsx` source files** - source identity admits only TypeScript source

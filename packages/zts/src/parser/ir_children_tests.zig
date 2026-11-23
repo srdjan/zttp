@@ -111,7 +111,17 @@ fn expectChildren(source: []const u8, tag: NodeTag, nth: usize, expected: []cons
     const allocator = std.testing.allocator;
     var parser = try parse.Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
-    _ = try parser.parse();
+    switch (tag) {
+        .match_expr, .match_arm, .match_pattern, .match_type_test, .array_pattern => {
+            try std.testing.expectError(error.AdmissionRefused, parser.parse());
+            try std.testing.expectEqual(.legacy_match_expression, (parser.getLastAdmissionObservation() orelse return error.TestUnexpectedResult).kind);
+        },
+        .assert_stmt => {
+            try std.testing.expectError(error.AdmissionRefused, parser.parse());
+            try std.testing.expectEqual(.legacy_assert_statement, (parser.getLastAdmissionObservation() orelse return error.TestUnexpectedResult).kind);
+        },
+        else => _ = try parser.parse(),
+    }
     if (parser.errors.hasErrors()) {
         std.debug.print("witness for {s} does not parse: {s}\n", .{ @tagName(tag), source });
         return error.TestWitnessRefused;

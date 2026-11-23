@@ -162,8 +162,8 @@ this revision:
 
 - Standard `type` aliases and exact unique-symbol brand declarations are
   admitted;
-- legacy `structural` and `nominal` declarations remain admitted during the
-  approved migration window;
+- compiler-owned `Nominal`, `nominal`, `match`, `P`, and `assert` resolve from
+  `zttp:core`;
 - boolean-only conditions, boolean operators, and predicates have no
   JavaScript truthiness or operand-returning behavior;
 - text construction uses double-quoted literals, explicit `String(value)`
@@ -313,7 +313,7 @@ registry-generated and drift-gated; this document is its readable view.
 
 | Operation | Idiomatic spelling | Non-idiomatic | Rewrite precondition |
 |---|---|---|---|
-| absence default | `x ?? d` | `x === undefined ? d : x`, `x !== undefined ? x : d`, `match (x) { when undefined: d default: x }` | operand type excludes `null` and is neither a generic parameter nor `unknown` |
+| absence default | `x ?? d` | `x === undefined ? d : x`, `x !== undefined ? x : d`, `match(x).with(undefined, () => d).otherwise(() => x)` | operand type excludes `null` and is neither a generic parameter nor `unknown` |
 | absent member read | `x?.f` | `x === undefined ? undefined : x.f` | same as above |
 | two-way pure selection | `c ? a : b` | a two-arm `match` over a `boolean` scrutinee whose arms are both pure | none |
 | record update | an explicit literal | a leading spread that overrides every field | the spread operand is pure |
@@ -327,8 +327,6 @@ registry-generated and drift-gated; this document is its readable view.
 | dictionary fold | `dictFold(d, f, init)` | `dictEntries(d).reduce(...)` | the fold has one accumulator |
 | pure single-accumulator fold | `map`, then `filter`, then `some`, then `every`, then `find`, then `findIndex`, then `reduce`: the first that fits | `let` plus `for...of` with no `break`, `continue`, or effect | the body is pure and the loop head is already idiomatic under the element-iteration row |
 | pure search loop | `find`, `findIndex`, `some`, or `every`, by what the loop yields and whether its flag starts `false` or `true` | `let` plus `for...of` whose only early exit is `break` | the body is pure, carries one accumulator, uses no `continue`, and the loop head is already idiomatic under the element-iteration row |
-| matched field read | a binding pattern field | a `match` arm that reads the field off the scrutinee | none |
-| match binding field name | match shorthand `{ value }` | match pattern `{ value: value }` | none |
 | element iteration | `for (const item of items)` | `for...of` over `range(items.length)` whose body only indexes `items` | none |
 
 The exclusion registry, not this table, owns declaration destructuring,
@@ -1109,62 +1107,30 @@ They are top-level tests. `P.any` is an unconstrained array position.
 `P.present` is a record-field test that refuses missing and `undefined` values;
 it accepts `null`. Descriptors are not runtime values.
 
-Legacy brace syntax remains admitted until the syntax cutover. Its field
-bindings are constant snapshots. The migration preserves those snapshots with
-local constants inside the generated callbacks.
-
-`match` is the only multi-way selection over one scrutinee:
+Brace matches are refused with ZTS001. Normalization preserves the old
+field bindings by taking local snapshots inside generated callbacks.
 
 ```ts
-structural Command =
+import { match } from "zttp:core";
+
+type Command =
   | { kind: "echo"; text: string }
   | { kind: "ping" };
 
 function run(command: Command): string {
-  return match (command) {
-    when { kind: "echo", text }:
-      text
-    when { kind: "ping" }:
-      "pong"
-  };
+  return match(command)
+    .with({ kind: "echo" }, (selected) => selected.text)
+    .with({ kind: "ping" }, () => "pong")
+    .exhaustive();
 }
 ```
 
-Rules:
-
-- The scrutinee MUST be an identifier or a member path, so every arm has a
-  named referent to narrow. A call or other complex expression is bound to a
-  `const` first; the diagnostic carries that exact repair.
-- Arms are checked in source order. Exactly one arm's expression is
-  evaluated.
-- Arm expressions MAY be effectful. `match` with effectful named calls in its
-  arms is the idiomatic effectful selection form, including for initializing
-  a `const` from a two-way effectful choice.
-- Patterns are literals, type-test patterns, or fixed record patterns.
-- A type-test pattern is one of `boolean`, `number`, `string`, `array`,
-  `Dict`, or `Bytes`, covering the closed core value kinds; `null` and
-  `undefined` are matched by their literal patterns. Each test lowers to the
-  corresponding narrowing test from the Section 5.4 closed list (`typeof`
-  for the scalars, `Array.isArray`, `isDict`, or `isBytes`), so
-  heterogeneous unions such as `JsonValue` dispatch through `match`.
-- A record pattern field is either a discriminant test
-  (`kind: "echo"`), a binding of the field under its own name (`text`), or a
-  binding under a new name (`value: v`). A binding introduces an arm-scoped
-  `const` of the narrowed field type; no double read of the scrutinee is
-  needed.
-- The binding pattern is the idiomatic way for an arm to read a field of the
-  scrutinee: an arm that reads the field off the scrutinee instead is
-  rewritten to a binding, and a rename whose new name equals the field name
-  is rewritten to the shorthand (Section 4.2.1).
-- A closed literal or discriminated union MUST be covered exactly and MUST NOT
-  include `default` (ZTS216).
-- An open domain such as `string`, `number`, or `unknown` MUST include
-  `default`.
-- Duplicate, unreachable, and non-exhaustive arms are errors. A `default` arm
-  after full coverage of a closed union and a duplicate `when` arm are errors
-  (ZTS216, an error and not an advisory); a `match` that does not cover every
-  case is ZTS603.
-- Each arm narrows the scrutinee binding for its expression.
+Arms are checked in source order and may invoke effectful named calls.
+A closed domain must be covered exactly. An open domain such as `string`,
+`number`, or `unknown` must end in `.otherwise(callback)`. The compiler
+reports duplicate or unreachable arms with ZTS216 and missing coverage
+with ZTS603. Type descriptors lower to the corresponding narrowing test
+from Section 5.4.
 
 #### `assert`
 
@@ -1179,7 +1145,7 @@ import { assert } from "zttp:core";
 assert(predicate);
 ```
 
-Legacy `assert predicate;` remains admitted until the syntax cutover.
+The legacy statement `assert predicate;` is refused with ZTS001.
 
 `assert` has no fallback form. Expected early return uses explicit ordinary
 control flow:
@@ -1336,31 +1302,10 @@ A brand declaration cannot be read at runtime.
 The general `symbol` type, symbol values, and other unique-symbol types remain
 excluded. The exact brand declaration is the only symbol-related admission.
 
-The legacy declarations remain admitted during this migration window:
-
-```ts
-structural Name<T> = Type;
-nominal UserId = string;
-```
-
-The legacy `nominal` form keeps annotated construction during this window.
-The later source cutover removes the legacy admission. This section does not
-claim that the cutover has happened.
-
-A `nominal` declaration is over `string`, `number`, or `boolean`. A `nominal`
-declaration over a record, tuple, union, or function type is refused (ZTS048).
-A type declaration MUST NOT redefine an ambient type name or an imported type
-name (ZTS019). This rule applies to standard and legacy declaration forms.
-
-During the migration window, `nominal UserId = string;` defines one identity
-over `string`. An annotated declaration is its implicit construction point:
-
-```ts
-const id: UserId = "u1";
-```
-
-The compiler refuses `UserId("u1")`. Construction is pure, total, and keeps the
-unchanged base value. A different nominal type is not assignable to `UserId`.
+Legacy `structural` and scalar `nominal` declarations are refused with
+ZTS001. A declaration cannot redefine an ambient or imported type name
+(ZTS019). An annotation never creates a brand. Assigning the raw base to
+a nominal type reports ZTS200, and calling the type name reports ZTS214.
 
 Admitted types are:
 
@@ -1371,8 +1316,8 @@ Admitted types are:
 - fixed records with readonly and optional fields
 - function types
 - unions and intersections
-- named `type` and legacy `structural` aliases
-- explicit `Nominal` identities and legacy scalar `nominal` identities
+- named `type` aliases
+- explicit `Nominal` identities
 - generic applications and constrained generic parameters
 - template literal types
 - `Proof` and `Effects` capsules
@@ -1398,7 +1343,7 @@ A recursive alias is contractive when every cycle passes through a record,
 tuple, array, or `Dict` constructor:
 
 ```ts
-structural JsonValue =
+type JsonValue =
   | null
   | boolean
   | number
@@ -1408,7 +1353,7 @@ structural JsonValue =
 ```
 
 Union and intersection edges do not guard recursion. Direct cycles such as
-`structural Loop = Loop`, negative recursion through a function parameter, and
+`type Loop = Loop`, negative recursion through a function parameter, and
 recursive conditional expansion are errors. Recursive aliases are represented
 as a finite named type graph. Assignability unfolds guarded nodes with
 memoized pair comparison and never expands a cycle into an infinite type.
@@ -1464,7 +1409,7 @@ memorized:
   imported, and a declaration MUST NOT redefine one (ZTS019). `Result` and
   `JsonValue` are not ambient. `Result` comes from `zttp:result` through
   `import type { Result } from "zttp:result";`, and a handler that names
-  `JsonValue` declares it with `structural`, because `zttp:json` exports no
+  `JsonValue` declares it with a `type` alias, because `zttp:json` exports no
   type. `HtmlNode` is not a type of the profile. A module-defined type is
   named through an ordinary `import type` from its module: `FetchOptions` and
   `FetchError` come from `zttp:fetch`, and an unimported one is refused
@@ -1492,7 +1437,7 @@ The complete ambient table (types and values) is published through
 `Result` is the one recoverable-failure representation:
 
 ```ts
-structural Result<T, E> =
+type Result<T, E> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: E };
 ```
@@ -1520,7 +1465,7 @@ collectAll<T, E>(
 
 The type is not ambient, and `zttp:result` exports it: a handler names
 `Result<T, E>` with `import type { Result } from "zttp:result";` (`Result<...>`
-with no import is refused with ZTS065, and a `structural` declaration of the
+with no import is refused with ZTS065, and a `type` declaration of the
 imported name is refused with ZTS019). Constructors and combinators are
 statically named imports from the zero-capability `zttp:result` module. `collectAll` is
 first-error: it returns the first `err` in order, matching `andThen`
@@ -1574,7 +1519,7 @@ named programmer or resource fault, not a recoverable application error.
 `Dict` supplies dynamic keyed data without dynamic record shapes:
 
 ```ts
-structural DuplicateKey<K> = {
+type DuplicateKey<K> = {
   readonly kind: "duplicate-key";
   readonly key: K;
 };
@@ -1651,7 +1596,7 @@ Its pure surface includes length, indexing, slicing, concatenation, equality,
 hex, Base64, and UTF-8 codecs.
 
 ```ts
-structural BytesError =
+type BytesError =
   | { kind: "invalid-octet"; index: number; value: number }
   | { kind: "invalid-encoding"; encoding: string; offset: number }
   | { kind: "invalid-bounds"; start: number; end: number }
@@ -1685,7 +1630,7 @@ JSON uses the recursive `JsonValue` type from Section 5.7. Object nodes are
 The JSON boundary is:
 
 ```ts
-structural JsonError =
+type JsonError =
   | { kind: "invalid-syntax"; offset: number }
   | { kind: "duplicate-key"; key: string; offset: number }
   | { kind: "depth-limit"; limit: number }
@@ -1830,9 +1775,9 @@ contracts.
 #### HTTP
 
 ```ts
-structural HttpHandler = (request: Request) => Response;
+type HttpHandler = (request: Request) => Response;
 
-structural FetchOptions = {
+type FetchOptions = {
   readonly method?:
     | "GET"
     | "POST"
@@ -1880,18 +1825,21 @@ trusted `unknown`.
 #### WebSocket
 
 ```ts
-nominal SocketId = string;
+import type { Nominal } from "zttp:core";
 
-structural WebSocketEvent =
+declare const socketIdBrand: unique symbol;
+type SocketId = Nominal<string, typeof socketIdBrand>;
+
+type WebSocketEvent =
   | { kind: "open"; socket: SocketId }
   | { kind: "message"; socket: SocketId; data: string | Bytes }
   | { kind: "close"; socket: SocketId; code: number; reason: string };
 
-structural WebSocketCommand =
+type WebSocketCommand =
   | { kind: "send"; socket: SocketId; data: string | Bytes }
   | { kind: "close"; socket: SocketId; code: number; reason: string };
 
-structural WebSocketHandler<E> = (
+type WebSocketHandler<E> = (
   event: WebSocketEvent,
 ) => Result<readonly WebSocketCommand[], E>;
 ```
@@ -1926,16 +1874,12 @@ ImportName   ::= Ident ["as" Ident]
 
 TopDecl      ::= ["export"] TypeAliasDecl
                | ["export"] UniqueSymbolDecl
-               | ["export"] StructuralDecl
-               | ["export"] NominalDecl
                | ["export"] FunctionDecl
                | ["export"] TopBindingDecl
                | RegistrationCall
 
 TypeAliasDecl ::= "type" Ident TypeParams? "=" Type ";"
 UniqueSymbolDecl ::= "declare" "const" Ident ":" "unique" "symbol" ";"
-StructuralDecl ::= "structural" Ident TypeParams? "=" Type ";"
-NominalDecl  ::= "nominal" Ident "=" ScalarType ";"
 TypeParams   ::= "<" TypeParam ("," TypeParam)* ">"
 TypeParam    ::= Ident ["extends" Type]
 
@@ -1960,7 +1904,6 @@ Stmt         ::= BindingDecl
                | Expr ";"
                | IfStmt
                | "for" "(" ("const" | "let") Bind "of" Expr ")" Block
-               | "assert" Expr ";"
                | "return" [Expr] ";"
                | "break" ";"
                | "continue" ";"
@@ -1982,7 +1925,6 @@ PrimaryExpr  ::= Literal
                | Ident
                | ArrayExpr
                | RecordExpr
-               | MatchExpr
                | "(" Expr ")"
 UnaryOp      ::= "!" | "-" | "typeof"
 BinaryOp     ::= "*" | "/" | "%"
@@ -1998,26 +1940,12 @@ RecordExpr   ::= "{" "}"
                | "{" "..." Expr "," RecordField
                   ("," RecordField)* [","] "}"
 RecordField  ::= Ident ":" Expr | String ":" Expr
-PropertyName ::= Ident | String
 Args         ::= Arg ("," Arg)* [","]
 Arg          ::= Expr | ArrowExpr
 TypeArgs     ::= "<" Type ("," Type)* ">"
 ArrowExpr    ::= "(" [ArrowParams] ")" "=>" (Expr | Block)
 ArrowParams  ::= ArrowParam ("," ArrowParam)* [","]
 ArrowParam   ::= Ident [":" Type]
-MatchExpr    ::= "match" "(" Scrutinee ")" "{"
-                  MatchArm+ [DefaultArm] "}"
-Scrutinee    ::= Ident ("." Ident)*
-MatchArm     ::= "when" Pattern ":" Expr
-DefaultArm   ::= "default" ":" Expr
-Pattern      ::= Literal | TypeTestPattern | "{" PatternFields "}"
-TypeTestPattern ::= "boolean" | "number" | "string"
-                  | "array" | "Dict" | "Bytes"
-PatternFields ::= PatternField ("," PatternField)* [","]
-PatternField ::= PropertyName ":" Literal
-               | PropertyName ":" Ident
-               | Ident
-
 Type         ::= UnionType
 UnionType    ::= IntersectionType ("|" IntersectionType)*
 IntersectionType ::= PostfixType ("&" PostfixType)*
@@ -2043,7 +1971,6 @@ TupleType    ::= ["readonly"] "[" [Type ("," Type)* [","]] "]"
 RecordType   ::= "{" [RecordTypeField (";" RecordTypeField)* [";"]] "}"
 RecordTypeField ::= ["readonly"] PropertyName ["?"] ":" Type
 FunctionType ::= "(" [ValueParams] ")" "=>" ReturnType
-ScalarType   ::= "boolean" | "number" | "string"
 ```
 
 Postfix operations bind most tightly. Binary precedence, from tightest to
@@ -2066,13 +1993,12 @@ The advanced surface is intentionally richer than the executable kernel.
 
 | Surface form | Canonical elaboration |
 |---|---|
-| type annotations, `type` aliases, and legacy `structural` aliases | erased after producing checked type evidence |
+| type annotations and `type` aliases | erased after producing checked type evidence |
 | unique-symbol brand declaration | erased identity keyed by its module and declaration location |
 | constrained generics | checker instantiation, then erasure |
 | contractive recursive aliases | finite named type graph, then erasure |
 | `Nominal<Base, typeof brand>` | explicit nominal checker identity plus specified scalar base |
 | `nominal<T>(value)` | checked transparent construction of an explicit nominal identity |
-| legacy `nominal` | nominal checker identity plus specified scalar base during migration |
 | optional member access | evaluate receiver once, branch on `null` or `undefined` |
 | nullish coalescing | evaluate left once, branch on `null` or `undefined` |
 | pure conditional expression | evaluate the boolean condition and exactly one branch |
@@ -2668,35 +2594,34 @@ shape rather than a second delivery backlog.
 ### 16.1 Typed error flow
 
 ```ts
-import { err, ok } from "zttp:result";
-import type { Result } from "zttp:result";
+import { match } from "zttp:core";
 
-structural DivideError = { kind: "division-by-zero" };
+type DivideOutcome =
+  | { kind: "quotient"; value: number }
+  | { kind: "division-by-zero" };
 
 function divide(
   numerator: number,
   denominator: number,
-): Result<number, DivideError> {
+): DivideOutcome {
   if (denominator === 0) {
-    return err({ kind: "division-by-zero" });
+    return { kind: "division-by-zero" };
   }
 
-  return ok(numerator / denominator);
+  return { kind: "quotient", value: numerator / denominator };
 }
 
 function describeRatio(numerator: number, denominator: number): string {
   const result = divide(numerator, denominator);
-  return match (result) {
-    when { ok: true, value }:
-      ["ratio ", String(value)].join("")
-    when { ok: false }:
-      "undefined ratio"
-  };
+  return match(result)
+    .with({ kind: "quotient" }, (selected) => ["ratio ", String(selected.value)].join(""))
+    .with({ kind: "division-by-zero" }, () => "undefined ratio")
+    .exhaustive();
 }
 ```
 
-The binding field `value` removes the scrutinee double-read, and the numeric
-conversion is explicit at the text-construction site.
+The first callback reads the narrowed quotient and converts the number
+explicitly at the text-construction site.
 
 ### 16.2 Keyed aggregation
 
@@ -2725,9 +2650,10 @@ count rather than fail as a duplicate key, and that is the one behavior
 ### 16.3 Recursive application data
 
 ```ts
+import { match, P } from "zttp:core";
 import { dictFold } from "zttp:collections";
 
-structural JsonValue =
+type JsonValue =
   | null
   | boolean
   | number
@@ -2736,35 +2662,33 @@ structural JsonValue =
   | Dict<string, JsonValue>;
 
 function depth(value: JsonValue): number {
-  return match (value) {
-    when null: 1
-    when boolean: 1
-    when number: 1
-    when string: 1
-    when array:
-      value.reduce(
+  return match(value)
+    .with(null, () => 1)
+    .with(P.boolean, () => 1)
+    .with(P.number, () => 1)
+    .with(P.string, () => 1)
+    .with(P.array, (items) =>
+      items.reduce(
         (maximum, child) => {
           const childDepth = depth(child);
           return childDepth > maximum ? childDepth : maximum;
         },
         0,
-      ) + 1
-    when Dict:
+      ) + 1)
+    .with(P.Dict, (fields) =>
       dictFold(
-        value,
+        fields,
         (maximum, child) => {
           const childDepth = depth(child);
           return childDepth > maximum ? childDepth : maximum;
         },
         0,
-      ) + 1
-  };
+      ) + 1)
+    .exhaustive();
 }
 ```
 
-The `null` literal pattern and the five type-test patterns cover the six
-value kinds of `JsonValue` exactly, so the `match` is exhaustive without
-`default` and each arm narrows `value`.
+The `null` literal and five descriptors cover all six value kinds.
 This function is accepted as source. The shipped artifact checker does not
 prove decreasing recursion. A target totality certificate for this example
 depends on proving that recursive calls receive strict subvalues of a finite
@@ -2779,7 +2703,7 @@ import { err } from "zttp:result";
 import type { FetchError } from "zttp:fetch";
 import type { Result } from "zttp:result";
 
-structural LoadError =
+type LoadError =
   | FetchError
   | { kind: "missing-config"; name: string };
 

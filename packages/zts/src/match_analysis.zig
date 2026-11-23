@@ -91,8 +91,8 @@ pub const Coverage = struct {
     /// Set when the analysis could not decide. Then `exhaustive` is false
     /// unless a `default:` arm exists, and `redundant` is null.
     incomplete: ?Incomplete = null,
-    /// The first missing case in source syntax, for example
-    /// `when { kind: "c" }` or `default`. Owned by the allocator given to
+    /// The first missing pattern, such as `{ kind: "c" }`, or the
+    /// `.otherwise()` terminal for an open domain. Owned by the allocator given to
     /// `analyze`. Null when the match is exhaustive or no witness was found.
     witness: ?[]u8 = null,
     /// The first arm that no value can reach. Null when the analysis was
@@ -110,17 +110,17 @@ pub const Coverage = struct {
 pub fn missingCaseHelp(allocator: std.mem.Allocator, coverage: Coverage) std.mem.Allocator.Error![]u8 {
     if (coverage.incomplete) |why| {
         return allocator.dupe(u8, switch (why) {
-            .budget => "the analysis budget ran out before the arms were proved exhaustive. Add a 'default:' arm.",
-            .unmodelled => "an arm uses a pattern the analysis does not model, so the arms were not proved exhaustive. Add a 'default:' arm.",
-            .untyped => "the type of the matched value is not known, so the arms were not proved exhaustive. Add a 'default:' arm.",
+            .budget => "the analysis budget ran out before the arms were proved exhaustive. End the match with .otherwise(callback).",
+            .unmodelled => "an arm uses a pattern the analysis does not model, so the arms were not proved exhaustive. End the match with .otherwise(callback).",
+            .untyped => "the type of the matched value is not known, so the arms were not proved exhaustive. End the match with .otherwise(callback).",
         });
     }
     const witness = coverage.witness orelse
-        return allocator.dupe(u8, "add a 'default:' arm, or cover every case of the matched type.");
-    if (std.mem.eql(u8, witness, "default")) {
-        return allocator.dupe(u8, "missing case: default. The matched type has values that no arm lists, so add a 'default:' arm.");
+        return allocator.dupe(u8, "cover every case of the matched type, or end the match with .otherwise(callback).");
+    if (std.mem.eql(u8, witness, ".otherwise()")) {
+        return allocator.dupe(u8, "uncovered values remain. End the match with .otherwise(callback).");
     }
-    return allocator.print("missing case: {s}. Add an arm for it, or add a 'default:' arm.", .{witness});
+    return allocator.print("missing pattern: {s}. Add a .with(pattern, callback) arm, or end the match with .otherwise(callback).", .{witness});
 }
 
 pub const MatchAnalysis = struct {
@@ -911,8 +911,8 @@ pub const MatchAnalysis = struct {
     // Witness rendering
     // ---------------------------------------------------------------------
 
-    /// Render the witness of the whole scrutinee as an arm: `when ...`, or
-    /// `default` where no pattern names the missing values.
+    /// Render a pattern for the whole scrutinee, or the fallback terminal
+    /// where no pattern names the missing values.
     fn renderTop(self: *const MatchAnalysis, allocator: std.mem.Allocator, w: Witness, disc_type: TypeIndex) std.mem.Allocator.Error![]u8 {
         var list = std.ArrayList(u8).empty;
         errdefer list.deinit(allocator);
@@ -930,18 +930,14 @@ pub const MatchAnalysis = struct {
         const families = familyCount(members.items);
 
         switch (w) {
-            .any, .other => try list.appendSlice(allocator, "default"),
-            .other_string => try list.appendSlice(allocator, if (open or families <= 1) "default" else "when string"),
-            .other_number => try list.appendSlice(allocator, if (open or families <= 1) "default" else "when number"),
-            .other_array => try list.appendSlice(allocator, if (open or families <= 1) "default" else "when array"),
-            else => {
-                if (open) {
-                    try list.appendSlice(allocator, "default");
-                } else {
-                    try list.appendSlice(allocator, "when ");
-                    try writeWitness(allocator, &list, w, true);
-                }
-            },
+            .any, .other => try list.appendSlice(allocator, ".otherwise()"),
+            .other_string => try list.appendSlice(allocator, if (open or families <= 1) ".otherwise()" else "P.string"),
+            .other_number => try list.appendSlice(allocator, if (open or families <= 1) ".otherwise()" else "P.number"),
+            .other_array => try list.appendSlice(allocator, if (open or families <= 1) ".otherwise()" else "P.array"),
+            else => if (open)
+                try list.appendSlice(allocator, ".otherwise()")
+            else
+                try writeWitness(allocator, &list, w, .subject),
         }
         return list.toOwnedSlice(allocator);
     }
@@ -1143,7 +1139,7 @@ fn headEql(a: Head, b: Head) bool {
 
 /// How many kinds of value a member list holds: the kinds a type test or a
 /// literal names. One kind means a `default:` arm and a type test cover the
-/// same values, so the witness says `default`.
+/// same values, so the witness calls for `.otherwise()`.
 fn familyCount(members: []const Member) usize {
     var seen = @as([10]bool, @splat(false));
     for (members) |m| {
@@ -1235,18 +1231,19 @@ fn writeString(a: std.mem.Allocator, list: *std.ArrayList(u8), s: []const u8) st
     try list.append(a, '"');
 }
 
-/// Write a witness as a pattern. `top` is true for the outermost pattern of an
-/// arm, the only place a type test may stand.
-fn writeWitness(a: std.mem.Allocator, list: *std.ArrayList(u8), w: Witness, top: bool) std.mem.Allocator.Error!void {
+const WitnessPosition = enum { subject, field, element };
+
+fn writeWitness(a: std.mem.Allocator, list: *std.ArrayList(u8), w: Witness, position: WitnessPosition) std.mem.Allocator.Error!void {
+    const wildcard = if (position == .element) "P.any" else "P.present";
     switch (w) {
-        .any, .other, .other_string, .other_number, .other_array => try list.append(a, '_'),
+        .any, .other, .other_string, .other_number, .other_array => try list.appendSlice(a, wildcard),
         .lit_str => |s| try writeString(a, list, s),
         .lit_num => |n| try writeNumber(a, list, n),
         .lit_bool => |b| try list.appendSlice(a, if (b) "true" else "false"),
         .null_ => try list.appendSlice(a, "null"),
         .undef => try list.appendSlice(a, "undefined"),
-        .kind_dict => try list.appendSlice(a, if (top) "Dict" else "_"),
-        .kind_bytes => try list.appendSlice(a, if (top) "Bytes" else "_"),
+        .kind_dict => try list.appendSlice(a, if (position == .subject) "P.Dict" else wildcard),
+        .kind_bytes => try list.appendSlice(a, if (position == .subject) "P.Bytes" else wildcard),
         .record => |fields| {
             var first = true;
             try list.append(a, '{');
@@ -1256,7 +1253,7 @@ fn writeWitness(a: std.mem.Allocator, list: *std.ArrayList(u8), w: Witness, top:
                 first = false;
                 try list.appendSlice(a, f.name);
                 try list.appendSlice(a, ": ");
-                try writeWitness(a, list, f.w, false);
+                try writeWitness(a, list, f.w, .field);
             }
             try list.appendSlice(a, if (first) "}" else " }");
         },
@@ -1264,7 +1261,7 @@ fn writeWitness(a: std.mem.Allocator, list: *std.ArrayList(u8), w: Witness, top:
             try list.append(a, '[');
             for (elems, 0..) |e, i| {
                 if (i > 0) try list.appendSlice(a, ", ");
-                try writeWitness(a, list, e, false);
+                try writeWitness(a, list, e, .element);
             }
             try list.append(a, ']');
         },
@@ -1728,7 +1725,7 @@ const Expect = struct {
 /// first `match` expression in `decls ++ function` is the one analyzed.
 fn expectCoverage(decls: []const u8, param_type: []const u8, arms: []const u8, want: Expect) !void {
     const allocator = std.testing.allocator;
-    const source = try allocator.print("{s}\nfunction f(v: {s}): number {{\n  const o = match (v) {{\n{s}\n  }};\n  return 0;\n}}\n", .{ decls, param_type, arms });
+    const source = try allocator.print("import {{ match, P }} from \"zttp:core\";\n{s}\nfunction f(v: {s}): number {{\n  return match(v)\n{s};\n}}\n", .{ decls, param_type, arms });
     defer allocator.free(source);
 
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
@@ -1737,7 +1734,7 @@ fn expectCoverage(decls: []const u8, param_type: []const u8, arms: []const u8, w
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const parsed_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -1746,9 +1743,12 @@ fn expectCoverage(decls: []const u8, param_type: []const u8, arms: []const u8, w
     try env.populateSourceTypes(.{ .direct = .{
         .module_path = "match-analysis-test.ts",
         .store = &parser.type_store,
-        .ir_view = view,
+        .ir_view = parsed_view,
         .atoms = &atoms,
     } });
+
+    try @import("intrinsic_lowering.zig").validateSource(allocator, &parser, &atoms, &env);
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
     var match_node: NodeIndex = null_node;
     var i: NodeIndex = 0;
@@ -1780,291 +1780,332 @@ fn expectCoverage(decls: []const u8, param_type: []const u8, arms: []const u8, w
     try std.testing.expectEqual(want.redundant, cov.redundant);
 }
 
-const abc = "structural C = { kind: \"a\"; n: number } | { kind: \"b\" } | { kind: \"c\"; t: string };";
+const abc = "type C = { kind: \"a\"; n: number } | { kind: \"b\" } | { kind: \"c\"; t: string };";
 
 test "split coverage across arms of a discriminated union is exhaustive" {
     try expectCoverage(abc, "C",
-        \\    when { kind: "a" }: 1
-        \\    when { kind: "b" }: 2
-        \\    when { kind: "c" }: 3
+        \\    .with({ kind: "a" }, () => 1)
+        \\    .with({ kind: "b" }, () => 2)
+        \\    .with({ kind: "c" }, () => 3)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
 }
 
 test "a missing record case names its discriminant" {
     try expectCoverage(abc, "C",
-        \\    when { kind: "a", n }: n
-        \\    when { kind: "b" }: 2
-    , .{ .exhaustive = false, .witness = "when { kind: \"c\" }" });
+        \\    .with({ kind: "a" }, (selected) => selected.n)
+        \\    .with({ kind: "b" }, () => 2)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "{ kind: \"c\" }" });
 }
 
 test "an arm that binds every field of one member covers that member only" {
     try expectCoverage(abc, "C",
-        \\    when { kind: "a", n }: n
-        \\    when { kind: "c", t }: 1
-    , .{ .exhaustive = false, .witness = "when { kind: \"b\" }" });
+        \\    .with({ kind: "a" }, (selected) => selected.n)
+        \\    .with({ kind: "c" }, () => 1)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "{ kind: \"b\" }" });
 }
 
 test "nested discriminants must be covered at every depth" {
-    const decls = "structural N = { k: \"x\"; inner: { t: \"p\" } | { t: \"q\" } } | { k: \"y\" };";
+    const decls = "type N = { k: \"x\"; inner: { t: \"p\" } | { t: \"q\" } } | { k: \"y\" };";
     try expectCoverage(decls, "N",
-        \\    when { k: "x", inner: { t: "p" } }: 1
-        \\    when { k: "x", inner: { t: "q" } }: 2
-        \\    when { k: "y" }: 3
+        \\    .with({ k: "x", inner: { t: "p" } }, () => 1)
+        \\    .with({ k: "x", inner: { t: "q" } }, () => 2)
+        \\    .with({ k: "y" }, () => 3)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
     try expectCoverage(decls, "N",
-        \\    when { k: "x", inner: { t: "p" } }: 1
-        \\    when { k: "y" }: 3
-    , .{ .exhaustive = false, .witness = "when { k: \"x\", inner: { t: \"q\" } }" });
+        \\    .with({ k: "x", inner: { t: "p" } }, () => 1)
+        \\    .with({ k: "y" }, () => 3)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "{ k: \"x\", inner: { t: \"q\" } }" });
 }
 
 test "booleans have two constructors and fields split on them" {
     try expectCoverage("", "boolean",
-        \\    when true: 1
-        \\    when false: 2
+        \\    .with(true, () => 1)
+        \\    .with(false, () => 2)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
     try expectCoverage("", "boolean",
-        \\    when true: 1
-    , .{ .exhaustive = false, .witness = "when false" });
+        \\    .with(true, () => 1)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "false" });
 
-    const decls = "structural Flags = { x: boolean; y: boolean };";
+    const decls = "type Flags = { x: boolean; y: boolean };";
     try expectCoverage(decls, "Flags",
-        \\    when { x: true, y: true }: 1
-        \\    when { x: true, y: false }: 2
-        \\    when { x: false }: 3
+        \\    .with({ x: true, y: true }, () => 1)
+        \\    .with({ x: true, y: false }, () => 2)
+        \\    .with({ x: false }, () => 3)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
     try expectCoverage(decls, "Flags",
-        \\    when { x: true, y: true }: 1
-        \\    when { x: true, y: false }: 2
-        \\    when { x: false, y: true }: 3
-    , .{ .exhaustive = false, .witness = "when { x: false, y: false }" });
+        \\    .with({ x: true, y: true }, () => 1)
+        \\    .with({ x: true, y: false }, () => 2)
+        \\    .with({ x: false, y: true }, () => 3)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "{ x: false, y: false }" });
 }
 
 test "a nullable type is its inner type plus undefined" {
     try expectCoverage("", "\"a\" | undefined",
-        \\    when "a": 1
-    , .{ .exhaustive = false, .witness = "when undefined" });
+        \\    .with("a", () => 1)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "undefined" });
     try expectCoverage("", "\"a\" | undefined",
-        \\    when "a": 1
-        \\    when undefined: 2
+        \\    .with("a", () => 1)
+        \\    .with(undefined, () => 2)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
     try expectCoverage("", "string | null",
-        \\    when string: 1
-        \\    when null: 2
+        \\    .with(P.string, () => 1)
+        \\    .with(null, () => 2)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
 }
 
 test "number literal types are closed and number is open" {
-    try expectCoverage("structural One = 1 | 2;", "One",
-        \\    when 1: 1
-        \\    when 2: 2
+    try expectCoverage("type One = 1 | 2;", "One",
+        \\    .with(1, () => 1)
+        \\    .with(2, () => 2)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
-    try expectCoverage("structural One = 1 | 2;", "One",
-        \\    when 1: 1
-    , .{ .exhaustive = false, .witness = "when 2" });
+    try expectCoverage("type One = 1 | 2;", "One",
+        \\    .with(1, () => 1)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "2" });
     try expectCoverage("", "number",
-        \\    when 1: 1
-        \\    when 2: 2
-    , .{ .exhaustive = false, .witness = "default" });
+        \\    .with(1, () => 1)
+        \\    .with(2, () => 2)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = ".otherwise()" });
     try expectCoverage("", "number",
-        \\    when 1.5: 1
-        \\    default: 2
+        \\    .with(1.5, () => 1)
+        \\    .otherwise(() => 2)
     , .{ .exhaustive = true });
 }
 
 test "literals over an open type need a default" {
     try expectCoverage("", "string",
-        \\    when "a": 1
-        \\    when "b": 2
-    , .{ .exhaustive = false, .witness = "default" });
+        \\    .with("a", () => 1)
+        \\    .with("b", () => 2)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = ".otherwise()" });
     try expectCoverage("", "string",
-        \\    when "a": 1
-        \\    default: 2
+        \\    .with("a", () => 1)
+        \\    .otherwise(() => 2)
     , .{ .exhaustive = true });
     try expectCoverage("", "unknown",
-        \\    when string: 1
-        \\    when number: 2
-    , .{ .exhaustive = false, .witness = "default" });
+        \\    .with(P.string, () => 1)
+        \\    .with(P.number, () => 2)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = ".otherwise()" });
 }
 
 test "an array of unbounded length needs a default or the array test" {
     try expectCoverage("", "number[]",
-        \\    when []: 1
-        \\    when [_]: 2
-    , .{ .exhaustive = false, .witness = "default" });
+        \\    .with([], () => 1)
+        \\    .with([P.any], () => 2)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = ".otherwise()" });
     try expectCoverage("", "number[]",
-        \\    when []: 1
-        \\    when array: 2
+        \\    .with([], () => 1)
+        \\    .with(P.array, () => 2)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
 }
 
 test "a tuple has one length and each element is a column" {
-    const decls = "structural Pair = [boolean, \"p\" | \"q\"];";
+    const decls = "type Pair = [boolean, \"p\" | \"q\"];";
     try expectCoverage(decls, "Pair",
-        \\    when [true, "p"]: 1
-        \\    when [true, "q"]: 2
-        \\    when [false, _]: 3
+        \\    .with([true, "p"], () => 1)
+        \\    .with([true, "q"], () => 2)
+        \\    .with([false, P.any], () => 3)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
     try expectCoverage(decls, "Pair",
-        \\    when [true, "p"]: 1
-        \\    when [false, _]: 3
-    , .{ .exhaustive = false, .witness = "when [true, \"q\"]" });
+        \\    .with([true, "p"], () => 1)
+        \\    .with([false, P.any], () => 3)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "[true, \"q\"]" });
     // An array pattern of another length never matches a tuple of this one.
     try expectCoverage(decls, "Pair",
-        \\    when [_, _]: 1
-        \\    when [_]: 2
+        \\    .with([P.any, P.any], () => 1)
+        \\    .with([P.any], () => 2)
+        \\    .exhaustive()
     , .{ .exhaustive = true, .redundant = .{ .arm = 1, .is_default = false } });
 }
 
 test "an optional field admits undefined, and a field underscore does not" {
-    const decls = "structural Opt = { a?: string };";
+    const decls = "type Opt = { a?: string };";
     try expectCoverage(decls, "Opt",
-        \\    when { a: "x" }: 1
-        \\    when { a: _ }: 2
-    , .{ .exhaustive = false, .witness = "when { a: undefined }" });
+        \\    .with({ a: "x" }, () => 1)
+        \\    .with({ a: P.present }, () => 2)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "{ a: undefined }" });
     try expectCoverage(decls, "Opt",
-        \\    when { a: "x" }: 1
-        \\    when { a }: 2
+        \\    .with({ a: "x" }, () => 1)
+        \\    .with({}, () => 2)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
     try expectCoverage(decls, "Opt",
-        \\    when { a: undefined }: 1
-        \\    when { a: _ }: 2
+        \\    .with({ a: undefined }, () => 1)
+        \\    .with({ a: P.present }, () => 2)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
 }
 
 test "a field underscore on a required field is the same as a binding" {
-    try expectCoverage("structural R = { a: string };", "R",
-        \\    when { a: _ }: 1
+    try expectCoverage("type R = { a: string };", "R",
+        \\    .with({ a: P.present }, () => 1)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
 }
 
 test "an array element underscore is a plain wildcard" {
     try expectCoverage("", "[number, number]",
-        \\    when [_, _]: 1
+        \\    .with([P.any, P.any], () => 1)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
     try expectCoverage("", "[number, number]",
-        \\    when [1, _]: 1
-    , .{ .exhaustive = false, .witness = "when [_, _]" });
+        \\    .with([1, P.any], () => 1)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "[P.any, P.any]" });
     try expectCoverage("", "[number | undefined, number]",
-        \\    when [_, _]: 1
+        \\    .with([P.any, P.any], () => 1)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
 }
 
 test "a record pattern with no literal does not cover a string member" {
-    const decls = "structural M = string | { w: number };";
+    const decls = "type M = string | { w: number };";
     try expectCoverage(decls, "M",
-        \\    when { w }: 1
-    , .{ .exhaustive = false, .witness = "when string" });
+        \\    .with({}, () => 1)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "P.string" });
     try expectCoverage(decls, "M",
-        \\    when { w }: 1
-        \\    when string: 2
+        \\    .with({}, () => 1)
+        \\    .with(P.string, () => 2)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
     try expectCoverage(decls, "M",
-        \\    when {}: 1
-        \\    default: 2
+        \\    .with({}, () => 1)
+        \\    .otherwise(() => 2)
     , .{ .exhaustive = true });
 }
 
 test "type tests partition the value kinds" {
     try expectCoverage("", "boolean | number | string | Bytes",
-        \\    when boolean: 1
-        \\    when number: 2
-        \\    when string: 3
-        \\    when Bytes: 4
+        \\    .with(P.boolean, () => 1)
+        \\    .with(P.number, () => 2)
+        \\    .with(P.string, () => 3)
+        \\    .with(P.Bytes, () => 4)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
     try expectCoverage("", "boolean | number | string | Bytes",
-        \\    when boolean: 1
-        \\    when number: 2
-        \\    when string: 3
-    , .{ .exhaustive = false, .witness = "when Bytes" });
+        \\    .with(P.boolean, () => 1)
+        \\    .with(P.number, () => 2)
+        \\    .with(P.string, () => 3)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "P.Bytes" });
     try expectCoverage("", "string | number",
-        \\    when "a": 1
-        \\    when number: 2
-    , .{ .exhaustive = false, .witness = "when string" });
+        \\    .with("a", () => 1)
+        \\    .with(P.number, () => 2)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "P.string" });
     const json =
-        "structural J = null | boolean | number | string | readonly J[] | Dict<string, J>;";
+        "type J = null | boolean | number | string | readonly J[] | Dict<string, J>;";
     try expectCoverage(json, "J",
-        \\    when null: 1
-        \\    when boolean: 2
-        \\    when number: 3
-        \\    when string: 4
-        \\    when array: 5
-        \\    when Dict: 6
+        \\    .with(null, () => 1)
+        \\    .with(P.boolean, () => 2)
+        \\    .with(P.number, () => 3)
+        \\    .with(P.string, () => 4)
+        \\    .with(P.array, () => 5)
+        \\    .with(P.Dict, () => 6)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
     try expectCoverage(json, "J",
-        \\    when null: 1
-        \\    when boolean: 2
-        \\    when number: 3
-        \\    when string: 4
-        \\    when array: 5
-    , .{ .exhaustive = false, .witness = "when Dict" });
+        \\    .with(null, () => 1)
+        \\    .with(P.boolean, () => 2)
+        \\    .with(P.number, () => 3)
+        \\    .with(P.string, () => 4)
+        \\    .with(P.array, () => 5)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "P.Dict" });
 }
 
 test "a record is not covered by a type test" {
-    try expectCoverage("structural M = string | { w: number };", "M",
-        \\    when string: 1
-        \\    when number: 2
-    , .{ .exhaustive = false, .witness = "when {}", .redundant = .{ .arm = 1, .is_default = false } });
+    try expectCoverage("type M = string | { w: number };", "M",
+        \\    .with(P.string, () => 1)
+        \\    .with(P.number, () => 2)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = "{}", .redundant = .{ .arm = 1, .is_default = false } });
 }
 
 test "aliases resolve and a name with no definition is open" {
-    try expectCoverage("structural A = B;\nstructural B = \"x\" | \"y\";", "A",
-        \\    when "x": 1
-        \\    when "y": 2
+    try expectCoverage("type A = B;\ntype B = \"x\" | \"y\";", "A",
+        \\    .with("x", () => 1)
+        \\    .with("y", () => 2)
+        \\    .exhaustive()
     , .{ .exhaustive = true });
     try expectCoverage("", "Nothing",
-        \\    when "x": 1
-    , .{ .exhaustive = false, .witness = "default" });
+        \\    .with("x", () => 1)
+        \\    .exhaustive()
+    , .{ .exhaustive = false, .witness = ".otherwise()" });
 }
 
 test "a redundant arm is reported with its index" {
     try expectCoverage("", "\"a\" | \"b\"",
-        \\    when "a": 1
-        \\    when "a": 2
-        \\    when "b": 3
+        \\    .with("a", () => 1)
+        \\    .with("a", () => 2)
+        \\    .with("b", () => 3)
+        \\    .exhaustive()
     , .{ .exhaustive = true, .redundant = .{ .arm = 1, .is_default = false } });
     try expectCoverage("", "string",
-        \\    when string: 1
-        \\    when "a": 2
+        \\    .with(P.string, () => 1)
+        \\    .with("a", () => 2)
+        \\    .exhaustive()
     , .{ .exhaustive = true, .redundant = .{ .arm = 1, .is_default = false } });
     try expectCoverage(abc, "C",
-        \\    when { kind: "a" }: 1
-        \\    when { kind: "a", n }: 2
-        \\    default: 3
+        \\    .with({ kind: "a" }, () => 1)
+        \\    .with({ kind: "a" }, () => 2)
+        \\    .otherwise(() => 3)
     , .{ .exhaustive = true, .redundant = .{ .arm = 1, .is_default = false } });
 }
 
 test "an arm the type excludes is reported as unreachable" {
     try expectCoverage("", "\"a\" | \"b\"",
-        \\    when "z": 1
-        \\    default: 2
+        \\    .with("z", () => 1)
+        \\    .otherwise(() => 2)
     , .{ .exhaustive = true, .redundant = .{ .arm = 0, .is_default = false } });
-    try expectCoverage("structural S = { w: number };", "S",
-        \\    when "z": 1
-        \\    default: 2
+    try expectCoverage("type S = { w: number };", "S",
+        \\    .with("z", () => 1)
+        \\    .otherwise(() => 2)
     , .{ .exhaustive = true, .redundant = .{ .arm = 0, .is_default = false } });
 }
 
 test "a default after full coverage of a closed type is redundant" {
     try expectCoverage("", "\"a\" | \"b\"",
-        \\    when "a": 1
-        \\    when "b": 2
-        \\    default: 3
+        \\    .with("a", () => 1)
+        \\    .with("b", () => 2)
+        \\    .otherwise(() => 3)
     , .{ .exhaustive = true, .redundant = .{ .arm = 2, .is_default = true } });
     try expectCoverage("", "boolean",
-        \\    when true: 1
-        \\    when false: 2
-        \\    default: 3
+        \\    .with(true, () => 1)
+        \\    .with(false, () => 2)
+        \\    .otherwise(() => 3)
     , .{ .exhaustive = true, .redundant = .{ .arm = 2, .is_default = true } });
 }
 
 test "a default over an open type is not redundant" {
     try expectCoverage("", "string",
-        \\    when "a": 1
-        \\    default: 2
+        \\    .with("a", () => 1)
+        \\    .otherwise(() => 2)
     , .{ .exhaustive = true });
-    try expectCoverage("structural M = string | { w: number };", "M",
-        \\    when { w }: 1
-        \\    default: 2
+    try expectCoverage("type M = string | { w: number };", "M",
+        \\    .with({}, () => 1)
+        \\    .otherwise(() => 2)
     , .{ .exhaustive = true });
 }
 
@@ -2072,9 +2113,10 @@ test "an exhausted budget is not exhaustive and gives no redundancy verdict" {
     // With the arms below, an unbounded budget finds the match exhaustive and
     // the second arm redundant. A budget of one unit finds neither.
     const arms =
-        \\    when "a": 1
-        \\    when "a": 2
-        \\    when "b": 3
+        \\    .with("a", () => 1)
+        \\    .with("a", () => 2)
+        \\    .with("b", () => 3)
+        \\    .exhaustive()
     ;
     try expectCoverage("", "\"a\" | \"b\"", arms, .{
         .exhaustive = true,
@@ -2089,22 +2131,23 @@ test "an exhausted budget is not exhaustive and gives no redundancy verdict" {
 
 test "a field named twice in one pattern is not modelled" {
     try expectCoverage(abc, "C",
-        \\    when { kind: "a", kind: "b" }: 1
+        \\    .with({ kind: "a", kind: "b" }, () => 1)
+        \\    .exhaustive()
     , .{ .exhaustive = false, .incomplete = .unmodelled });
     try expectCoverage(abc, "C",
-        \\    when { kind: "a", kind: "b" }: 1
-        \\    default: 2
+        \\    .with({ kind: "a", kind: "b" }, () => 1)
+        \\    .otherwise(() => 2)
     , .{ .exhaustive = true });
 }
 
 test "the help text names the missing case or the reason" {
     const allocator = std.testing.allocator;
-    const witness = try allocator.dupe(u8, "when { kind: \"c\" }");
+    const witness = try allocator.dupe(u8, "{ kind: \"c\" }");
     var cov = Coverage{ .witness = witness };
     defer cov.deinit(allocator);
     const help = try missingCaseHelp(allocator, cov);
     defer allocator.free(help);
-    try std.testing.expectEqualStrings("missing case: when { kind: \"c\" }. Add an arm for it, or add a 'default:' arm.", help);
+    try std.testing.expectEqualStrings("missing pattern: { kind: \"c\" }. Add a .with(pattern, callback) arm, or end the match with .otherwise(callback).", help);
 
     const budget = try missingCaseHelp(allocator, .{ .incomplete = .budget });
     defer allocator.free(budget);

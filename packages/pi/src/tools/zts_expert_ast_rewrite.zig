@@ -532,7 +532,9 @@ test "ast rewrite: replace_export_arrow_with_function clears veto" {
     // test asserts the veto clears, so the fixture has to be a handler whose
     // only defect is the one the rewrite fixes.
     const source =
-        \\nominal DocId = string;
+        \\import type { Nominal } from "zttp:core";
+        \\declare const docIdBrand: unique symbol;
+        \\type DocId = Nominal<string, typeof docIdBrand>;
         \\export const load = (id: DocId): Response => Response.text(id);
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  return Response.text("x");
@@ -543,9 +545,9 @@ test "ast rewrite: replace_export_arrow_with_function clears veto" {
     const path = try writeFixture(tmp.sub_path, source);
     defer testing.allocator.free(path);
 
-    // Line 2: the alias declaration takes line 1, and the intent is located by
+    // Line 4: the type declarations take lines 1 through 3. The intent is located by
     // line.
-    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_export_arrow_with_function\"}}", .{path});
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":4,\"intent\":\"replace_export_arrow_with_function\"}}", .{path});
     defer testing.allocator.free(input);
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
@@ -625,9 +627,7 @@ test "ast rewrite: replace_chained_ternary_with_match lifts a chained ternary" {
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
 
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "match (") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "?") == null or
-        std.mem.indexOf(u8, result.llm_text, "when true:") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "matchTernary(cond).with(true, () => 1).otherwise(() =>") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
 }
 

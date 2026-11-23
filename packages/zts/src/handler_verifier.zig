@@ -26,6 +26,7 @@ const type_pool_mod = @import("type_pool.zig");
 const type_checker_mod = @import("type_checker.zig");
 const route_resolution = @import("route_resolution.zig");
 const repair_intent_mod = @import("repair_intent.zig");
+const intrinsic_lowering = @import("intrinsic_lowering.zig");
 
 pub const RepairIntent = repair_intent_mod.RepairIntent;
 
@@ -2789,17 +2790,37 @@ fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32) !void {
         .ir_view = ir_view,
         .atoms = &atoms,
     } });
+    try intrinsic_lowering.validateSource(allocator, &parser, &atoms, &env);
+    const lowered_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    var type_checker = type_checker_mod.TypeChecker.init(allocator, ir_view, &atoms, &env);
+    var type_checker = type_checker_mod.TypeChecker.init(allocator, lowered_view, &atoms, &env);
     defer type_checker.deinit();
     type_checker.scopes = &parser.scopes;
     _ = try type_checker.check(root);
 
-    var verifier = HandlerVerifier.init(allocator, ir_view, &atoms, &env, &type_checker);
+    var verifier = HandlerVerifier.init(allocator, lowered_view, &atoms, &env, &type_checker);
     defer verifier.deinit();
 
     const errors = try verifier.verify(handler_fn);
     try std.testing.expectEqual(expect_errors, errors);
+}
+
+fn lowerTestIntrinsics(
+    allocator: std.mem.Allocator,
+    parser: *@import("zts-engine").parser.JsParser,
+    atoms: *context.AtomTable,
+) !void {
+    var pool = type_pool_mod.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = type_env_mod.TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .module_path = "/app/handler-verifier-test.ts",
+        .store = &parser.type_store,
+        .ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants),
+        .atoms = atoms,
+    } });
+    try intrinsic_lowering.validateSource(allocator, parser, atoms, &env);
 }
 
 /// Count the `unused_variable` warnings `source` produces. Untyped: the rule
@@ -2813,6 +2834,7 @@ fn countUnusedVariableWarnings(source: []const u8) !u32 {
     parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
+    try lowerTestIntrinsics(allocator, &parser, &atoms);
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler_fn = findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
 
@@ -2844,6 +2866,7 @@ fn routeVerifierCounts(source: []const u8) !RouteVerifierCounts {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
+    try lowerTestIntrinsics(allocator, &parser, &atoms);
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler = findHandlerFunction(view, root) orelse return error.HandlerNotFound;
 
@@ -3344,12 +3367,13 @@ test "a binding read only by a closure is not reported unused" {
 
 test "HandlerVerifier accepts exhaustive literal union match without default" {
     try verifyTypedHandlerSource(
+        \\import { match } from "zttp:core";
         \\const value: "a" | "b" = "a";
         \\function handler(req) {
-        \\  const out = match (value) {
-        \\    when "a": 1,
-        \\    when "b": 2,
-        \\  };
+        \\  const out = match(value)
+        \\    .with("a", () => 1)
+        \\    .with("b", () => 2)
+        \\    .exhaustive();
         \\  return Response.json({ out: out });
         \\}
     , 0);
@@ -3548,7 +3572,7 @@ test "ZTS309 stays silent once the optional is narrowed" {
     }
 }
 
-const result_import = "import { jwtVerify } from \"zttp:auth\";\n";
+const result_import = "import { jwtVerify } from \"zttp:auth\"; import { assert } from \"zttp:core\";\n";
 const optional_import = "import { cacheGet } from \"zttp:cache\";\n";
 
 test "ZTS303 guard inside a nested block does not clear the code after the block" {
@@ -3795,7 +3819,7 @@ test "ZTS303 reports an unchecked Result read inside an assert condition" {
     const source = result_import ++
         \\function handler(req) {
         \\  const result = jwtVerify("token", "key");
-        \\  assert result.value !== undefined;
+        \\  assert(result.value !== undefined);
         \\  return Response.text("ok");
         \\}
     ;
@@ -3897,9 +3921,13 @@ const import_corpus = @import("tests/import_corpus.zig");
 /// so the totality classification can be probed per tag.
 fn totalityOfFirstNode(source: []const u8, tag: NodeTag) !bool {
     const allocator = std.testing.allocator;
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
     var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
     _ = try parser.parse();
+    try lowerTestIntrinsics(allocator, &parser, &atoms);
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     for (0..view.nodeCount()) |idx| {
         const i: NodeIndex = @intCast(idx);
@@ -3919,6 +3947,7 @@ fn resultRefusals(source: []const u8) !ResultRefusals {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
+    try lowerTestIntrinsics(allocator, &parser, &atoms);
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler = findHandlerFunction(view, root) orelse return error.HandlerNotFound;
 
@@ -3940,7 +3969,7 @@ const validate_prefix =
     \\schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
     \\
 ;
-const json_prefix = "import { parseJson } from \"zttp:json\";\n";
+const json_prefix = "import { parseJson } from \"zttp:json\"; import { assert, match } from \"zttp:core\";\n";
 const result_prefix = "import { ok, err, unwrapOr, collectAll, andThen, mapResult } from \"zttp:result\";\n";
 
 test "ZTS303 p_helper: a Result passed to a helper that reads it is refused" {
@@ -4154,7 +4183,7 @@ test "ZTS303 a match on a Result is refused" {
     const refusals = try resultRefusals(json_prefix ++
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const r = parseJson("1");
-        \\  const v = match (r) { when { ok: true, value: x }: x default: 0 };
+        \\  const v = match(r).with({ ok: true }, (selected) => { const x = selected.value; return x; }).otherwise(() => 0);
         \\  return Response.json({ v: v });
         \\}
     );
@@ -4341,7 +4370,7 @@ test "an assert statement is not a total function body" {
     // than a silent `true`. This test is the runtime half: it fails if a
     // catch-all returning `true` is ever reintroduced.
     try std.testing.expect(!try totalityOfFirstNode(
-        "function handler(req) { assert req; return Response.text(\"ok\"); }",
+        "import { assert } from \"zttp:core\"; function handler(req) { assert(req); return Response.text(\"ok\"); }",
         .assert_stmt,
     ));
 }
@@ -4468,6 +4497,7 @@ fn firstResultShape(source: []const u8) !FirstShape {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
+    try lowerTestIntrinsics(allocator, &parser, &atoms);
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler = findHandlerFunction(view, root) orelse return error.HandlerNotFound;
 
@@ -4544,7 +4574,7 @@ test "ZTS303 shape: a closure reads a Result without its own check" {
 
 test "ZTS303 shape: a read inside an assert statement" {
     const first = try firstResultShape(shape_head ++
-        \\  assert r.value !== undefined;
+        \\  assert(r.value !== undefined);
         \\  return Response.text("ok");
         \\}
     );
@@ -4648,7 +4678,7 @@ test "ZTS303 shape: a spread Result" {
 
 test "ZTS303 shape: a match on a Result" {
     const first = try firstResultShape(shape_head ++
-        \\  const v = match (r) { when { ok: true, value: x }: x default: 0 };
+        \\  const v = match(r).with({ ok: true }, (selected) => { const x = selected.value; return x; }).otherwise(() => 0);
         \\  return Response.json({ v: v });
         \\}
     );

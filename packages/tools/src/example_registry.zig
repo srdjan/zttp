@@ -52,7 +52,7 @@ pub const Evidence = union(enum) {
     /// Neither trace exists. `needle` must appear in the source, and `reason`
     /// says why nothing stronger is available - a text match is the weakest
     /// evidence here and is used only where the alternative is none.
-    source_text: struct { needle: []const u8, reason: []const u8 },
+    source_text: struct { needles: []const []const u8, reason: []const u8 },
 };
 
 pub const Example = struct {
@@ -70,7 +70,7 @@ pub const examples = [_]Example{
         .evidence = .{ .var_kind = .@"const" },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const limit: number = 10;
@@ -84,7 +84,7 @@ pub const examples = [_]Example{
         .evidence = .{ .var_kind = .let },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  let total: number = 0;
@@ -101,7 +101,7 @@ pub const examples = [_]Example{
         .evidence = .{ .node = .function_decl },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
         \\function double(n: number): number {
         \\  return n * 2;
@@ -118,7 +118,7 @@ pub const examples = [_]Example{
         .evidence = .{ .node = .arrow_function },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const doubled: number[] = [1, 2, 3].map((n: number): number => n * 2);
@@ -132,9 +132,9 @@ pub const examples = [_]Example{
         .evidence = .{ .node = .object_spread },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Config = { host: string; port: number };
+        \\type Config = { host: string; port: number };
         \\
         \\function defaults(): Config {
         \\  return { host: "localhost", port: 80 };
@@ -152,7 +152,7 @@ pub const examples = [_]Example{
         .evidence = .{ .node = .if_stmt },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const n: number = 3;
@@ -170,7 +170,7 @@ pub const examples = [_]Example{
         .evidence = .{ .node = .for_of_stmt },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  let total: number = 0;
@@ -187,7 +187,7 @@ pub const examples = [_]Example{
         .evidence = .{ .node = .ternary },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const n: number = 3;
@@ -202,9 +202,9 @@ pub const examples = [_]Example{
         .evidence = .{ .node = .optional_chain },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Profile = { name: string; city?: string };
+        \\type Profile = { name: string; city?: string };
         \\
         \\function profile(): Profile {
         \\  return { name: "ada" };
@@ -223,9 +223,9 @@ pub const examples = [_]Example{
         .evidence = .{ .binary_operator = .nullish },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Profile = { name: string; city?: string };
+        \\type Profile = { name: string; city?: string };
         \\
         \\function profile(): Profile {
         \\  return { name: "ada" };
@@ -243,18 +243,25 @@ pub const examples = [_]Example{
         .feature = "match expression",
         .evidence = .{ .node = .match_expr },
         .source =
+        \\import { match, P } from "zttp:core";
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Command = { kind: "echo"; text: string } | { kind: "ping" };
+        \\type Command = { kind: "echo"; text?: string } | { kind: "ping" };
+        \\
+        \\function reply(command: Command): string {
+        \\  return match(command)
+        \\    .with({ kind: "echo", text: P.present }, (selected) => {
+        \\      const text = selected.text;
+        \\      return text;
+        \\    })
+        \\    .with({ kind: "echo", text: undefined }, () => "")
+        \\    .with({ kind: "ping" }, () => "pong")
+        \\    .exhaustive();
+        \\}
         \\
         \\export function handler(req: Request): Guard<Response> {
-        \\  const command: Command = { kind: "ping" };
-        \\  const reply: string = match (command) {
-        \\    when { kind: "echo", text }: text,
-        \\    when { kind: "ping" }: "pong",
-        \\  };
-        \\  return Response.text(reply);
+        \\  return Response.text(reply({ kind: "ping" }));
         \\}
         \\
         ,
@@ -263,13 +270,15 @@ pub const examples = [_]Example{
         .feature = "assert statement",
         .evidence = .{ .node = .assert_stmt },
         .source =
+        \\import { assert } from "zttp:core";
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const items: number[] = [1, 2, 3];
-        \\  assert items.length > 0;
-        \\  return Response.json({ first: items[0] });
+        \\  const first = items[0];
+        \\  assert(first !== undefined);
+        \\  return Response.json({ first: first });
         \\}
         \\
         ,
@@ -280,7 +289,7 @@ pub const examples = [_]Example{
         .source =
         \\import { ok } from "zttp:result";
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const parsed = ok(42);
@@ -297,7 +306,7 @@ pub const examples = [_]Example{
         .evidence = .{ .syntax = .parameter_annotation },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
         \\function area(width: number, height: number): number {
         \\  return width * height;
@@ -310,16 +319,16 @@ pub const examples = [_]Example{
         ,
     },
     .{
-        .feature = "structural",
+        .feature = "type aliases",
         .evidence = .{ .source_text = .{
-            .needle = "structural Point",
-            .reason = "`structural` and `type` share the `type_alias` map kind by construction - the keyword is the whole difference and the map records neither, so a kind-based row here would be satisfied by an example that writes `type` throughout and teaches nothing",
+            .needles = &.{"type Point"},
+            .reason = "the type map records an alias without its source keyword, so source text confirms the standard type declaration",
         } },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Point = { x: number; y: number };
+        \\type Point = { x: number; y: number };
         \\
         \\function sum(point: Point): number {
         \\  return point.x + point.y;
@@ -335,21 +344,24 @@ pub const examples = [_]Example{
     .{
         .feature = "nominal",
         .evidence = .{ .source_text = .{
-            .needle = "nominal OrderId",
-            .reason = "the same reason the `structural` row gives: the map kind is `distinct_type` whatever the source spelled, so a kind-based row would be satisfied by an example that never wrote the keyword",
+            .needles = &.{ "Nominal<string, typeof orderIdBrand>", "nominal<OrderId>(\"o-1\")" },
+            .reason = "the type map does not retain the Nominal source form or the explicit compiler-owned construction call",
         } },
         .source =
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\nominal OrderId = string;
+        \\declare const orderIdBrand: unique symbol;
+        \\type OrderId = Nominal<string, typeof orderIdBrand>;
         \\
         \\function label(id: OrderId): string {
         \\  return id;
         \\}
         \\
         \\export function handler(req: Request): Guard<Response> {
-        \\  const id: OrderId = "o-1";
+        \\  const id: OrderId = nominal<OrderId>("o-1");
         \\  return Response.text(label(id));
         \\}
         \\
@@ -358,14 +370,14 @@ pub const examples = [_]Example{
     .{
         .feature = "readonly fields",
         .evidence = .{ .source_text = .{
-            .needle = "readonly port",
+            .needles = &.{"readonly port"},
             .reason = "`readonly` is a modifier inside a type alias, and the type map records the alias as one annotation without a kind of its own for the modifier",
         } },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Config = { readonly port: number; host: string };
+        \\type Config = { readonly port: number; host: string };
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const config: Config = { port: 3000, host: "localhost" };
@@ -379,7 +391,7 @@ pub const examples = [_]Example{
         .evidence = .{ .syntax = .predicate_return },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
         \\function isString(value: string | number): value is string {
         \\  return typeof value === "string";
@@ -398,14 +410,14 @@ pub const examples = [_]Example{
     .{
         .feature = "template literal types",
         .evidence = .{ .source_text = .{
-            .needle = "`/api/${string}`",
+            .needles = &.{"`/api/${string}`"},
             .reason = "the pattern is the body of a type alias, and the type map records the alias without distinguishing a pattern body from any other",
         } },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Route = `/api/${string}`;
+        \\type Route = `/api/${string}`;
         \\
         \\function path(route: Route): string {
         \\  return route;
@@ -423,9 +435,9 @@ pub const examples = [_]Example{
         .evidence = .{ .node = .lit_null },
         .source =
         \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\structural Row = { id: number; note: string | null };
+        \\type Row = { id: number; note: string | null };
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const row: Row = { id: 1, note: null };
@@ -462,7 +474,7 @@ pub const module_examples = [_]ModuleExample{
         \\
         \\import { logInfo } from "zttp:log";
         \\
-        \\structural LoggedResponse<T> = Proof<T, "deterministic" | "state_isolated">;
+        \\type LoggedResponse<T> = Proof<T, "deterministic" | "state_isolated">;
         \\
         \\export function handler(req: Request): LoggedResponse<Response> {
         \\  const at = Date.now();

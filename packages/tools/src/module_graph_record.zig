@@ -564,7 +564,7 @@ test "graph hash includes a dependency reached only through import type" {
     });
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "types.ts",
-        .data = "export structural Label = string;\n",
+        .data = "export type Label = string;\n",
     });
     const root = try tmpRoot(&tmp, a);
     defer a.free(root);
@@ -575,7 +575,7 @@ test "graph hash includes a dependency reached only through import type" {
 
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "types.ts",
-        .data = "export structural Label = number;\n",
+        .data = "export type Label = number;\n",
     });
     var after = try build(a, std.testing.io, root, "handler.ts");
     defer after.deinit(a);
@@ -753,7 +753,7 @@ test "tolerant graph observation preserves imports before failed top-level state
         .{ .source = "const value: any = 1; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{}, .rejected = &.{parse_failed} },
         .{ .source = "import { env } from \"zttp:env\"; import type { A } /* ; */ from \"./dep\"; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{parse_failed} },
         .{ .source = "import { a } from \"unknown\"; import { b } from \"zttp-ext:missing\"; import { c } from \"../outside\"; import { answer } from \"./dep\";", .modules = 2, .imports = &.{ .{ .specifier = "unknown", .kind = .unresolved, .target = "" }, .{ .specifier = "zttp-ext:missing", .kind = .extension, .target = "" }, .{ .specifier = "../outside", .kind = .relative, .target = "" }, .{ .specifier = "./dep", .kind = .relative, .target = "dep.ts" } }, .rejected = &.{ .{ .specifier = "../outside", .importer = "entry.ts", .reason = "path_outside_project_root" }, .{ .specifier = "unknown", .importer = "entry.ts", .reason = "unknown_specifier" }, .{ .specifier = "zttp-ext:missing", .importer = "entry.ts", .reason = "extension_manifest_unavailable" } } },
-        .{ .source = "structural Broken = number |; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{}, .rejected = &.{parse_failed} },
+        .{ .source = "type Broken = number |; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{}, .rejected = &.{parse_failed} },
         .{ .source = "import { env } from \"zttp:env\"; function wrapper() { const broken = ; const value: number = 1; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{parse_failed} },
         .{ .source = "function wrapper() { import { env } from \"zttp:env\"; const broken = ; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{}, .rejected = &.{parse_failed} },
         .{ .source = "import { env } from \"zttp:env\"; /* open", .modules = 1, .imports = &.{}, .rejected = &.{parse_failed} },

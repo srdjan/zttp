@@ -38,7 +38,7 @@ registry_file="packages/zts/src/idiom_registry.zig"
 
 # The row count measured on 2026-11-19, after the array concatenation row left
 # the table. Removed forms are restrictions, not non-idiomatic alternatives.
-MIN_ROWS=17
+MIN_ROWS=15
 
 fail() {
   printf 'idiom table drift: %s\n' "$1" >&2

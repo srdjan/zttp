@@ -19,6 +19,7 @@ const SourceView = @import("zts-base").source_diagnostics.SourceView;
 const handler_verifier = @import("handler_verifier.zig");
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const diagnostic_projection = @import("diagnostic_projection.zig");
+const intrinsic_lowering = @import("intrinsic_lowering.zig");
 const ir = @import("zts-engine").parser.ir;
 const ScopeAnalyzer = @import("zts-engine").parser.ScopeAnalyzer;
 const json_utils = @import("zts-base").json_utils;
@@ -1613,9 +1614,7 @@ pub const TypeChecker = struct {
                     const key = bindingKey(binding);
 
                     if (declared != null_type_idx and inferred != null_type_idx and !self.holdsAliasBreach(declared)) {
-                        if (!self.env.isAssignableTo(inferred, declared) and
-                            !self.brandsAtDeclaration(declared, inferred))
-                        {
+                        if (!self.env.isAssignableTo(inferred, declared)) {
                             const migration = self.implicitNominalMigrationEvidence(node, declared, inferred);
                             self.addTypeMismatchWithIntent(
                                 node,
@@ -4134,7 +4133,7 @@ pub const TypeChecker = struct {
         );
         if (!has_unknown_fields) return null;
         return switch (field_types.items.len) {
-            0 => self.env.pool.idx_unknown,
+            0 => self.nullableUnknownType(),
             1 => field_types.items[0],
             else => self.env.pool.addIntersection(self.allocator, field_types.items),
         };
@@ -4220,7 +4219,7 @@ pub const TypeChecker = struct {
         if (tag == .t_record and member.computed != null_node) {
             const key = self.getLiteralString(member.computed) orelse return null_type_idx;
             const field = pool.lookupRecordField(obj, key) orelse
-                return if (pool.hasUnknownFields(obj)) pool.idx_unknown else null_type_idx;
+                return if (pool.hasUnknownFields(obj)) self.nullableUnknownType() else null_type_idx;
             return self.recordFieldReadType(obj, field);
         }
         if (tag == .t_union) {
@@ -4274,7 +4273,7 @@ pub const TypeChecker = struct {
         if (pool.getTag(obj) != .t_record) return null_type_idx;
         const prop_name = self.resolveAtomName(member.property) orelse return null_type_idx;
         const field = pool.lookupRecordField(obj, prop_name) orelse
-            return if (pool.hasUnknownFields(obj)) pool.idx_unknown else null_type_idx;
+            return if (pool.hasUnknownFields(obj)) self.nullableUnknownType() else null_type_idx;
         const ft = self.recordFieldReadType(obj, field);
         if (ft == null_type_idx or self.admitsUndefined(ft)) return ft;
         return pool.addNullable(self.allocator, ft);
@@ -4299,7 +4298,7 @@ pub const TypeChecker = struct {
             if (self.env.pool.lookupRecordField(obj_type, prop_name)) |field| {
                 return self.recordFieldReadType(obj_type, field);
             }
-            if (self.env.pool.hasUnknownFields(obj_type)) return self.env.pool.idx_unknown;
+            if (self.env.pool.hasUnknownFields(obj_type)) return self.nullableUnknownType();
             const result_subject = if (self.env.pool.isResultRecord(obj_type)) self.identifierName(member.object) else null;
             self.addInferenceDiagnostic(.{
                 .severity = .err,
@@ -4335,7 +4334,7 @@ pub const TypeChecker = struct {
                     field_types[count] = self.fieldReadType(field);
                     any_field = true;
                 } else if (self.env.pool.hasUnknownFields(resolved_member)) {
-                    field_types[count] = self.env.pool.idx_unknown;
+                    field_types[count] = self.nullableUnknownType();
                     any_field = true;
                 } else if (self.unionMemberIsRecord(member_type)) {
                     // A member of the union has no such field: reading it
@@ -6219,7 +6218,7 @@ pub const TypeChecker = struct {
                 .kind = .redundant_match_arm,
                 .node = arm_idx,
                 .message = if (redundant.is_default)
-                    "default arm is unreachable"
+                    ".otherwise() is unreachable"
                 else
                     "match arm is unreachable",
                 .help = if (redundant.is_default)
@@ -9530,7 +9529,7 @@ pub const TypeChecker = struct {
                 .kind = .nominal_constructor_call,
                 .node = node,
                 .message = "a nominal type is not a constructor",
-                .help = "brand at an annotated declaration: `const x: Name = value;`",
+                .help = "import `nominal` from `zttp:core` and call `nominal<Name>(value)`",
             });
             return;
         };
@@ -9539,34 +9538,13 @@ pub const TypeChecker = struct {
             .kind = .nominal_constructor_call,
             .node = node,
             .message = msg,
-            .help = "brand at an annotated declaration: `const x: Name = value;`",
+            .help = "import `nominal` from `zttp:core` and call `nominal<Name>(value)`",
             .allocated = true,
         });
     }
 
     /// Whether an explicitly annotated declaration brands its initializer.
     ///
-    /// A nominal type has to be creatable or it is a type no program can
-    /// produce a value of, and the annotated declaration is the site chosen for
-    /// it: `const id: UserId = "u-1";` brands, and nothing else does. The
-    /// admission deliberately stops here rather than living in
-    /// `isAssignableTo`, because a general rule would also admit
-    /// `takesUserId("u-1")` at every call site and leave the brand describing
-    /// nothing.
-    ///
-    /// The initializer must be assignable to the brand's own base. That keeps a
-    /// `nominal Port = number` from accepting a string, and keeps one brand
-    /// from accepting another - `unwrapNominal` answers the base, and a
-    /// different nominal is not assignable to it.
-    fn brandsAtDeclaration(self: *TypeChecker, declared: TypeIndex, inferred: TypeIndex) bool {
-        if (!self.env.pool.isNominal(declared)) return false;
-        if (self.env.pool.nominalConstruction(declared) != .legacy_implicit) return false;
-        if (self.env.pool.isNominal(inferred)) return false;
-        const base = self.env.pool.unwrapNominal(declared);
-        if (base == declared) return false;
-        return self.env.isAssignableTo(inferred, base);
-    }
-
     fn isImplicitNominalMigrationMismatch(self: *TypeChecker, declared: TypeIndex, inferred: TypeIndex) bool {
         if (!self.env.pool.isNominal(declared)) return false;
         if (self.env.pool.nominalConstruction(declared) != .explicit_only) return false;
@@ -9925,6 +9903,23 @@ test "TypeChecker ensureHealthy propagates TypePool capacity exhaustion" {
     try std.testing.expectError(error.TypePoolCapacityExceeded, checker.ensureHealthy());
 }
 
+fn populateAndLowerTestSource(
+    allocator: std.mem.Allocator,
+    parser: *@import("zts-engine").parser.JsParser,
+    atoms: *@import("zts-engine").atom_table.AtomTable,
+    env: *TypeEnv,
+) !IrView {
+    const admitted_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = admitted_view,
+        .atoms = atoms,
+        .module_path = "test://direct",
+    } });
+    try intrinsic_lowering.validateSource(allocator, parser, atoms, env);
+    return IrView.fromIRStore(&parser.nodes, &parser.constants);
+}
+
 fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u32) !void {
     const allocator = std.testing.allocator;
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
@@ -9933,19 +9928,13 @@ fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u3
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    try env.populateSourceTypes(.{ .direct = .{
-        .store = &parser.type_store,
-        .ir_view = ir_view,
-        .atoms = &atoms,
-        .module_path = "test://direct",
-    } });
+    const ir_view = try populateAndLowerTestSource(allocator, &parser, &atoms, &env);
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     checker.scopes = &parser.scopes;
     defer checker.deinit();
@@ -9978,8 +9967,6 @@ fn checkTypedSourceHelping(source: []const u8, expect_errors: u32, needle: []con
     parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
@@ -9987,12 +9974,7 @@ fn checkTypedSourceHelping(source: []const u8, expect_errors: u32, needle: []con
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    try env.populateSourceTypes(.{ .direct = .{
-        .store = &parser.type_store,
-        .ir_view = ir_view,
-        .atoms = &atoms,
-        .module_path = "test://direct",
-    } });
+    const ir_view = try populateAndLowerTestSource(allocator, &parser, &atoms, &env);
 
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     checker.scopes = &parser.scopes;
@@ -10025,8 +10007,6 @@ fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
     parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
@@ -10034,12 +10014,7 @@ fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    try env.populateSourceTypes(.{ .direct = .{
-        .store = &parser.type_store,
-        .ir_view = ir_view,
-        .atoms = &atoms,
-        .module_path = "test://direct",
-    } });
+    const ir_view = try populateAndLowerTestSource(allocator, &parser, &atoms, &env);
 
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     checker.scopes = &parser.scopes;
@@ -10165,7 +10140,7 @@ test "an object spread contributes the spread record's fields" {
     // spread object therefore failed to satisfy the record type it was written
     // to produce, which is the whole use of the form.
     try checkTypedSource(
-        \\structural Config = { host: string; port: number };
+        \\type Config = { host: string; port: number };
         \\function defaults(): Config {
         \\  return { host: "localhost", port: 80 };
         \\}
@@ -10181,7 +10156,7 @@ test "an object spread does not invent fields the spread record lacks" {
     // field the target type requires and neither side provides is still a
     // mismatch.
     try checkTypedSourceSaying(
-        \\structural Config = { host: string; port: number };
+        \\type Config = { host: string; port: number };
         \\function partial(): { port: number } {
         \\  return { port: 80 };
         \\}
@@ -10228,11 +10203,10 @@ test "an annotated const still keeps the narrower literal type" {
     // a default; widening it to `string` would make the same match
     // non-exhaustive and warn.
     try checkTypedSource(
+        \\import { match } from "zttp:core";
         \\function label(): number {
         \\  const k: string = "a";
-        \\  return match (k) {
-        \\    when "a": 1,
-        \\  };
+        \\  return match(k).with("a", () => 1).exhaustive();
         \\}
     , 0, 0);
 }
@@ -10661,32 +10635,27 @@ test "normalization does not drop a branded or obligation-carrying member" {
 
 test "TypeChecker proves literal union match exhaustiveness" {
     try checkTypedSource(
+        \\import { match } from "zttp:core";
         \\const value: "a" | "b" = "a";
-        \\const out = match (value) {
-        \\  when "a": 1,
-        \\  when "b": 2,
-        \\};
+        \\const out = match(value).with("a", () => 1).with("b", () => 2).exhaustive();
     , 0, 0);
 }
 
 test "TypeChecker proves discriminated union match exhaustiveness" {
     try checkTypedSource(
+        \\import { match } from "zttp:core";
         \\const ok = { kind: "ok", value: "x" };
         \\const err = { kind: "err", error: "bad" };
         \\const result = true ? ok : err;
-        \\const out = match (result) {
-        \\  when { kind: "ok" }: result.value,
-        \\  when { kind: "err" }: result.error,
-        \\};
+        \\const out = match(result).with({ kind: "ok" }, (selected) => selected.value).with({ kind: "err" }, (selected) => selected.error).exhaustive();
     , 0, 0);
 }
 
 test "TypeChecker warns on non-exhaustive match over union" {
     try checkTypedSource(
+        \\import { match } from "zttp:core";
         \\const value: "a" | "b" = "a";
-        \\const out = match (value) {
-        \\  when "a": 1,
-        \\};
+        \\const out = match(value).with("a", () => 1).exhaustive();
     , 0, 1);
 }
 
@@ -10733,8 +10702,6 @@ fn typedDiagnosticsImpl(
     parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
@@ -10742,12 +10709,7 @@ fn typedDiagnosticsImpl(
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    try env.populateSourceTypes(.{ .direct = .{
-        .store = &parser.type_store,
-        .ir_view = ir_view,
-        .atoms = &atoms,
-        .module_path = "test://direct",
-    } });
+    const ir_view = try populateAndLowerTestSource(allocator, &parser, &atoms, &env);
 
     var import_facts: ?module_facts_mod.ModuleFacts = if (borrow_imports)
         try module_facts_mod.ModuleFacts.build(allocator, ir_view, &atoms, null)
@@ -10790,12 +10752,10 @@ fn countKind(seen: []const SeenDiagnostic, kind: DiagnosticKind) usize {
 test "TypeChecker: ZTS205 names the first missing case in its help" {
     const allocator = std.testing.allocator;
     const seen = try typedDiagnostics(allocator,
-        \\structural C = { kind: "a" } | { kind: "b" } | { kind: "c" };
+        \\import { match } from "zttp:core";
+        \\type C = { kind: "a" } | { kind: "b" } | { kind: "c" };
         \\function run(c: C): number {
-        \\  const out = match (c) {
-        \\    when { kind: "a" }: 1,
-        \\    when { kind: "b" }: 2,
-        \\  };
+        \\  const out = match(c).with({ kind: "a" }, () => 1).with({ kind: "b" }, () => 2).exhaustive();
         \\  return 0;
         \\}
     , false);
@@ -10807,7 +10767,7 @@ test "TypeChecker: ZTS205 names the first missing case in its help" {
     // witness, so a partial fix does not turn a diagnostic into a new one.
     try std.testing.expectEqualStrings("match expression is not provably exhaustive", seen[0].message);
     try std.testing.expectEqualStrings(
-        "missing case: when { kind: \"c\" }. Add an arm for it, or add a 'default:' arm.",
+        "missing pattern: { kind: \"c\" }. Add a .with(pattern, callback) arm, or end the match with .otherwise(callback).",
         seen[0].help.?,
     );
 }
@@ -10815,11 +10775,10 @@ test "TypeChecker: ZTS205 names the first missing case in its help" {
 test "TypeChecker: ZTS205 stays out of the way of the strict checker" {
     const allocator = std.testing.allocator;
     const source =
-        \\structural C = { kind: "a" } | { kind: "b" };
+        \\import { match } from "zttp:core";
+        \\type C = { kind: "a" } | { kind: "b" };
         \\function run(c: C): number {
-        \\  const out = match (c) {
-        \\    when { kind: "a" }: 1,
-        \\  };
+        \\  const out = match(c).with({ kind: "a" }, () => 1).exhaustive();
         \\  return 0;
         \\}
     ;
@@ -10837,11 +10796,10 @@ test "TypeChecker: ZTS205 stays out of the way of the strict checker" {
 test "TypeChecker: a partial match in a return leaves ZTS603 to the strict checker" {
     const allocator = std.testing.allocator;
     const source =
-        \\structural C = { kind: "a" } | { kind: "b" };
+        \\import { match } from "zttp:core";
+        \\type C = { kind: "a" } | { kind: "b" };
         \\function run(c: C): string {
-        \\  return match (c) {
-        \\    when { kind: "a" }: "a",
-        \\  };
+        \\  return match(c).with({ kind: "a" }, () => "a").exhaustive();
         \\}
     ;
     // The strict checker follows and refuses the match as ZTS603 in every
@@ -10861,11 +10819,10 @@ test "TypeChecker: a partial match in a return leaves ZTS603 to the strict check
 test "TypeChecker: ZTS205 stays beside another type error when strict follows" {
     const allocator = std.testing.allocator;
     const seen = try typedDiagnostics(allocator,
-        \\structural C = { kind: "a" } | { kind: "b" };
+        \\import { match } from "zttp:core";
+        \\type C = { kind: "a" } | { kind: "b" };
         \\function run(c: C): string {
-        \\  return match (c) {
-        \\    when { kind: "a" }: "a",
-        \\  };
+        \\  return match(c).with({ kind: "a" }, () => "a").exhaustive();
         \\}
         \\function other(): number {
         \\  return "x";
@@ -10879,42 +10836,36 @@ test "TypeChecker: ZTS205 stays beside another type error when strict follows" {
 test "TypeChecker: a match not proved exhaustive has type T or undefined" {
     // Partial: the arms give `number`, and the missing case gives undefined.
     try checkTypedSource(
-        \\structural C = { kind: "a" } | { kind: "b" };
+        \\import { match } from "zttp:core";
+        \\type C = { kind: "a" } | { kind: "b" };
         \\function run(c: C): number {
-        \\  const out: number = match (c) {
-        \\    when { kind: "a" }: 1,
-        \\  };
+        \\  const out: number = match(c).with({ kind: "a" }, () => 1).exhaustive();
         \\  return out;
         \\}
     , 1, null);
     // The honest declaration takes it: the type is `number | undefined`.
     try checkTypedSource(
-        \\structural C = { kind: "a" } | { kind: "b" };
+        \\import { match } from "zttp:core";
+        \\type C = { kind: "a" } | { kind: "b" };
         \\function run(c: C): number | undefined {
-        \\  const out: number | undefined = match (c) {
-        \\    when { kind: "a" }: 1,
-        \\  };
+        \\  const out: number | undefined = match(c).with({ kind: "a" }, () => 1).exhaustive();
         \\  return out;
         \\}
     , 0, 1);
     // Total: the same declaration is fine once every case is covered.
     try checkTypedSource(
-        \\structural C = { kind: "a" } | { kind: "b" };
+        \\import { match } from "zttp:core";
+        \\type C = { kind: "a" } | { kind: "b" };
         \\function run(c: C): number {
-        \\  const out: number = match (c) {
-        \\    when { kind: "a" }: 1,
-        \\    when { kind: "b" }: 2,
-        \\  };
+        \\  const out: number = match(c).with({ kind: "a" }, () => 1).with({ kind: "b" }, () => 2).exhaustive();
         \\  return out;
         \\}
     , 0, 0);
     // A default arm makes it total regardless of the discriminant type.
     try checkTypedSource(
+        \\import { match } from "zttp:core";
         \\function run(s: string): number {
-        \\  const out: number = match (s) {
-        \\    when "a": 1,
-        \\    default: 2,
-        \\  };
+        \\  const out: number = match(s).with("a", () => 1).otherwise(() => 2);
         \\  return out;
         \\}
     , 0, 0);
@@ -10923,13 +10874,9 @@ test "TypeChecker: a match not proved exhaustive has type T or undefined" {
 test "TypeChecker: a redundant arm is a ZTS216 error at the first such arm" {
     const allocator = std.testing.allocator;
     const seen = try typedDiagnostics(allocator,
+        \\import { match } from "zttp:core";
         \\function run(s: "a" | "b"): number {
-        \\  const out = match (s) {
-        \\    when "a": 1,
-        \\    when "b": 2,
-        \\    when "a": 3,
-        \\    when "b": 4,
-        \\  };
+        \\  const out = match(s).with("a", () => 1).with("b", () => 2).with("a", () => 3).with("b", () => 4).exhaustive();
         \\  return out;
         \\}
     , false);
@@ -10943,12 +10890,9 @@ test "TypeChecker: a redundant arm is a ZTS216 error at the first such arm" {
 test "TypeChecker: a default arm after full coverage is a ZTS216 error about the default" {
     const allocator = std.testing.allocator;
     const seen = try typedDiagnostics(allocator,
+        \\import { match } from "zttp:core";
         \\function run(s: "a" | "b"): number {
-        \\  const out = match (s) {
-        \\    when "a": 1,
-        \\    when "b": 2,
-        \\    default: 3,
-        \\  };
+        \\  const out = match(s).with("a", () => 1).with("b", () => 2).otherwise(() => 3);
         \\  return out;
         \\}
     , true);
@@ -10956,7 +10900,7 @@ test "TypeChecker: a default arm after full coverage is a ZTS216 error about the
     try std.testing.expectEqual(@as(usize, 1), seen.len);
     try std.testing.expectEqual(DiagnosticKind.redundant_match_arm, seen[0].kind);
     try std.testing.expectEqual(Severity.err, seen[0].severity);
-    try std.testing.expectEqualStrings("default arm is unreachable", seen[0].message);
+    try std.testing.expectEqualStrings(".otherwise() is unreachable", seen[0].message);
 }
 
 test "TypeChecker: param-discriminant match with default arm is exhaustive (no warning)" {
@@ -10966,13 +10910,10 @@ test "TypeChecker: param-discriminant match with default arm is exhaustive (no w
     // regardless of discriminant type, and it is not redundant when a member of
     // the union (`kind: string`) is wider than the arms above it.
     try checkTypedSource(
-        \\structural C = { kind: "echo"; text: string } | { kind: "ping"; text: string } | { kind: string; text: string };
+        \\import { match } from "zttp:core";
+        \\type C = { kind: "echo"; text: string } | { kind: "ping"; text: string } | { kind: string; text: string };
         \\function run(c: C): string {
-        \\  return match (c) {
-        \\    when { kind: "echo" }: c.text,
-        \\    when { kind: "ping" }: "pong",
-        \\    default: "u",
-        \\  };
+        \\  return match(c).with({ kind: "echo" }, () => c.text).with({ kind: "ping" }, () => "pong").otherwise(() => "u");
         \\}
     , 0, 0);
 }
@@ -10981,13 +10922,10 @@ test "TypeChecker: a default arm after full coverage of a closed union is redund
     // Spec 5.5: a closed union MUST NOT include `default`. ZTS216 is an
     // error, so it stops a build.
     try checkTypedSource(
-        \\structural C = { kind: "echo"; text: string } | { kind: "ping"; text: string };
+        \\import { match } from "zttp:core";
+        \\type C = { kind: "echo"; text: string } | { kind: "ping"; text: string };
         \\function run(c: C): string {
-        \\  return match (c) {
-        \\    when { kind: "echo" }: c.text,
-        \\    when { kind: "ping" }: "pong",
-        \\    default: "u",
-        \\  };
+        \\  return match(c).with({ kind: "echo" }, () => c.text).with({ kind: "ping" }, () => "pong").otherwise(() => "u");
         \\}
     , 1, 0);
 }
@@ -11023,12 +10961,10 @@ test "TypeChecker: full-variant param-discriminant match without a default is ex
     // warning. (The canonical profile still separately requires a default arm
     // on every match; this only fixes the type-checker layer's false warn.)
     try checkTypedSource(
-        \\structural C = { kind: "echo"; text: string } | { kind: "ping"; text: string };
+        \\import { match } from "zttp:core";
+        \\type C = { kind: "echo"; text: string } | { kind: "ping"; text: string };
         \\function run(c: C): string {
-        \\  return match (c) {
-        \\    when { kind: "echo" }: c.text,
-        \\    when { kind: "ping" }: "pong",
-        \\  };
+        \\  return match(c).with({ kind: "echo" }, () => c.text).with({ kind: "ping" }, () => "pong").exhaustive();
         \\}
     , 0, 0);
 }
@@ -11038,11 +10974,10 @@ test "TypeChecker: partial param-discriminant match without a default still warn
     // two variants covered, no default - warn. The match is returned from a
     // `string` function, so its `string | undefined` type is also a ZTS204.
     try checkTypedSource(
-        \\structural C = { kind: "echo"; text: string } | { kind: "ping"; text: string };
+        \\import { match } from "zttp:core";
+        \\type C = { kind: "echo"; text: string } | { kind: "ping"; text: string };
         \\function run(c: C): string {
-        \\  return match (c) {
-        \\    when { kind: "echo" }: c.text,
-        \\  };
+        \\  return match(c).with({ kind: "echo" }, () => c.text).exhaustive();
         \\}
     , 1, 1);
 }
@@ -11737,7 +11672,7 @@ test "TypeChecker: undefined nullish coalescing returns fallback type" {
 
 test "TypeChecker: rejects assignment to readonly property" {
     try checkTypedSource(
-        \\structural Config = { readonly port: number; host: string };
+        \\type Config = { readonly port: number; host: string };
         \\const cfg: Config = { port: 3000, host: "localhost" };
         \\function update() { cfg.port = 8080; }
     , 1, 0);
@@ -11745,7 +11680,7 @@ test "TypeChecker: rejects assignment to readonly property" {
 
 test "TypeChecker: allows assignment to non-readonly property" {
     try checkTypedSource(
-        \\structural Config = { readonly port: number; host: string };
+        \\type Config = { readonly port: number; host: string };
         \\const cfg: Config = { port: 3000, host: "localhost" };
         \\function update() { cfg.host = "other"; }
     , 0, 0);
@@ -11807,13 +11742,13 @@ test "TypeChecker: a readonly parameter refuses mutation in the body" {
     , 1, "readonly");
 }
 
-test "TypeChecker: nominal construction is the annotated declaration" {
-    // The construction path, and the only one. A base-typed value becomes
-    // branded at an explicitly annotated declaration, which is the single
-    // visible widening point the brand allows.
+test "TypeChecker: the nominal intrinsic constructs the explicit brand" {
     try checkTypedSource(
-        \\nominal UserId = string;
-        \\const uid: UserId = "usr_123";
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
+        \\declare const userIdBrand: unique symbol;
+        \\type UserId = Nominal<string, typeof userIdBrand>;
+        \\const uid: UserId = nominal<UserId>("usr_123");
     , 0, 0);
 }
 
@@ -11824,9 +11759,12 @@ test "TypeChecker: the branded binding keeps its brand" {
     // over string as a plain string and would drop the brand silently. Without
     // the guard this fails on the last line, and for the wrong reason.
     try checkTypedSource(
-        \\nominal UserId = string;
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
+        \\declare const userIdBrand: unique symbol;
+        \\type UserId = Nominal<string, typeof userIdBrand>;
         \\function widen(id: UserId): string { return id; }
-        \\const uid: UserId = "usr_123";
+        \\const uid: UserId = nominal<UserId>("usr_123");
         \\const out: string = widen(uid);
     , 0, 0);
 }
@@ -11839,17 +11777,19 @@ test "TypeChecker: a nominal constructor call is refused" {
     // generator on the precompile path only - so the refusal is what converts
     // a 500 into a compile error.
     try checkTypedSourceSaying(
-        \\nominal UserId = string;
+        \\import type { Nominal } from "zttp:core";
+        \\declare const userIdBrand: unique symbol;
+        \\type UserId = Nominal<string, typeof userIdBrand>;
         \\const uid: UserId = UserId("usr_123");
     , 1, "not a constructor");
 }
 
 test "TypeChecker: a raw value is still refused at a call site" {
-    // The admission is scoped to an annotated declaration on purpose. Widening
-    // it to every position where the expected type is known would admit this
-    // line and leave the brand doing nothing at all.
+    // A base value must be branded before passing it to a nominal parameter.
     try checkTypedSource(
-        \\nominal UserId = string;
+        \\import type { Nominal } from "zttp:core";
+        \\declare const userIdBrand: unique symbol;
+        \\type UserId = Nominal<string, typeof userIdBrand>;
         \\function widen(id: UserId): string { return id; }
         \\const out: string = widen("usr_123");
     , 1, 0);
@@ -11857,55 +11797,64 @@ test "TypeChecker: a raw value is still refused at a call site" {
 
 test "TypeChecker: nominal rejects cross-nominal assignment" {
     try checkTypedSource(
-        \\nominal UserId = string;
-        \\nominal SessionId = string;
-        \\const sid: SessionId = "sess_456";
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
+        \\declare const userIdBrand: unique symbol;
+        \\declare const sessionIdBrand: unique symbol;
+        \\type UserId = Nominal<string, typeof userIdBrand>;
+        \\type SessionId = Nominal<string, typeof sessionIdBrand>;
+        \\const sid: SessionId = nominal<SessionId>("sess_456");
         \\const uid: UserId = sid;
     , 1, 0);
 }
 
 test "TypeChecker: a nominal admits its own base and no other" {
     try checkTypedSource(
-        \\nominal Port = number;
-        \\const p: Port = 8080;
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
+        \\declare const portBrand: unique symbol;
+        \\type Port = Nominal<number, typeof portBrand>;
+        \\const p: Port = nominal<Port>(8080);
     , 0, 0);
     try checkTypedSource(
-        \\nominal Port = number;
+        \\import type { Nominal } from "zttp:core";
+        \\declare const portBrand: unique symbol;
+        \\type Port = Nominal<number, typeof portBrand>;
         \\const p: Port = "8080";
     , 1, 0);
 }
 
 test "TypeChecker: structural is a transparent alias" {
     try checkTypedSource(
-        \\structural Config = { port: number; host: string };
+        \\type Config = { port: number; host: string };
         \\const cfg: Config = { port: 3000, host: "localhost" };
     , 0, 0);
 }
 
 test "TypeChecker: structural carries type parameters" {
     try checkTypedSource(
-        \\structural Box<T> = { value: T };
+        \\type Box<T> = { value: T };
         \\const boxed: Box<number> = { value: 1 };
     , 0, 0);
 }
 
 test "TypeChecker: structural rejects a mismatched member" {
     try checkTypedSource(
-        \\structural Config = { port: number };
+        \\type Config = { port: number };
         \\const cfg: Config = { port: "3000" };
     , 1, 0);
 }
 
 test "TypeChecker: template literal type accepts matching string" {
     try checkTypedSource(
-        \\structural ApiRoute = `/api/${string}`;
+        \\type ApiRoute = `/api/${string}`;
         \\const good: ApiRoute = "/api/users";
     , 0, 0);
 }
 
 test "TypeChecker: template literal type rejects non-matching string" {
     try checkTypedSource(
-        \\structural ApiRoute = `/api/${string}`;
+        \\type ApiRoute = `/api/${string}`;
         \\const bad: ApiRoute = "/other";
     , 1, 0);
 }
@@ -12615,26 +12564,27 @@ test "a null guard over an optional type narrows nothing" {
 }
 
 // ---------------------------------------------------------------------------
-// `match` field bindings (spec 5.5 / phase 3 task 5)
+// Fields of a narrowed match callback argument.
 // ---------------------------------------------------------------------------
 
 const command_union =
-    \\structural Command =
+    \\import { match } from "zttp:core";
+    \\type Command =
     \\  | { kind: "echo"; text: string }
     \\  | { kind: "ping" };
 ;
 
-test "a shorthand binding carries the field type" {
+test "a narrowed callback carries the matched field type" {
     try checkTypedSource(
         command_union ++
             \\function take(s: string): number {
             \\    return s.length;
             \\}
             \\function run(command: Command): number {
-            \\    return match (command) {
-            \\        when { kind: "echo", text }: take(text)
-            \\        when { kind: "ping" }: 0
-            \\    };
+            \\    return match(command)
+            \\        .with({ kind: "echo" }, (selected) => take(selected.text))
+            \\        .with({ kind: "ping" }, () => 0)
+            \\        .exhaustive();
             \\}
             \\function handler(req: Request): Response {
             \\    return Response.json({ n: run({ kind: "ping" }) });
@@ -12645,7 +12595,7 @@ test "a shorthand binding carries the field type" {
     );
 }
 
-test "a binding used against the wrong type is refused" {
+test "a narrowed field used against the wrong type is refused" {
     // The positive control: with no type on the binding, every use of it is
     // checked against nothing and this program passes too.
     try checkTypedSourceSaying(
@@ -12654,10 +12604,10 @@ test "a binding used against the wrong type is refused" {
             \\    return n;
             \\}
             \\function run(command: Command): number {
-            \\    return match (command) {
-            \\        when { kind: "echo", text }: take(text)
-            \\        when { kind: "ping" }: 0
-            \\    };
+            \\    return match(command)
+            \\        .with({ kind: "echo" }, (selected) => take(selected.text))
+            \\        .with({ kind: "ping" }, () => 0)
+            \\        .exhaustive();
             \\}
             \\function handler(req: Request): Response {
             \\    return Response.json({ n: run({ kind: "ping" }) });
@@ -12668,14 +12618,17 @@ test "a binding used against the wrong type is refused" {
     );
 }
 
-test "a rename binds the field under the new name" {
+test "a narrowed field can be bound to a new name in the callback" {
     try checkTypedSource(
         command_union ++
             \\function run(command: Command): string {
-            \\    return match (command) {
-            \\        when { kind: "echo", text: message }: message
-            \\        when { kind: "ping" }: "pong"
-            \\    };
+            \\    return match(command)
+            \\        .with({ kind: "echo" }, (selected) => {
+            \\            const message = selected.text;
+            \\            return message;
+            \\        })
+            \\        .with({ kind: "ping" }, () => "pong")
+            \\        .exhaustive();
             \\}
             \\function handler(req: Request): Response {
             \\    return Response.json({ s: run({ kind: "ping" }) });
@@ -12692,14 +12645,15 @@ test "a rename binds the field under the new name" {
 
 test "a type test narrows its arm" {
     try checkTypedSource(
+        \\import { match, P } from "zttp:core";
         \\function take(s: string): number {
         \\    return s.length;
         \\}
         \\function label(value: string | number): number {
-        \\    return match (value) {
-        \\        when string: take(value)
-        \\        when number: 0
-        \\    };
+        \\    return match(value)
+        \\        .with(P.string, (selected) => take(selected))
+        \\        .with(P.number, () => 0)
+        \\        .exhaustive();
         \\}
         \\function handler(req: Request): Response {
         \\    return Response.json({ n: label(1) });
@@ -12711,17 +12665,18 @@ test "a type test narrows its arm" {
 }
 
 test "a type test does not narrow the arm it does not name" {
-    // The positive control for the test above: if `when number:` narrowed to
+    // The positive control for the test above: if `P.number` narrowed to
     // `string` too, or narrowed nothing, this program would pass.
     try checkTypedSourceSaying(
+        \\import { match, P } from "zttp:core";
         \\function take(s: string): number {
         \\    return s.length;
         \\}
         \\function label(value: string | number): number {
-        \\    return match (value) {
-        \\        when string: 0
-        \\        when number: take(value)
-        \\    };
+        \\    return match(value)
+        \\        .with(P.string, () => 0)
+        \\        .with(P.number, (selected) => take(selected))
+        \\        .exhaustive();
         \\}
         \\function handler(req: Request): Response {
         \\    return Response.json({ n: label(1) });
@@ -12734,20 +12689,21 @@ test "a type test does not narrow the arm it does not name" {
 
 test "the null literal and the four type tests exhaust JsonValue without a default" {
     try checkTypedSource(
-        \\structural JsonValue =
+        \\import { match, P } from "zttp:core";
+        \\type JsonValue =
         \\  | null
         \\  | boolean
         \\  | number
         \\  | string
         \\  | readonly JsonValue[];
         \\function depth(value: JsonValue): number {
-        \\    return match (value) {
-        \\        when null: 1
-        \\        when boolean: 1
-        \\        when number: 1
-        \\        when string: 1
-        \\        when array: 2
-        \\    };
+        \\    return match(value)
+        \\        .with(null, () => 1)
+        \\        .with(P.boolean, () => 1)
+        \\        .with(P.number, () => 1)
+        \\        .with(P.string, () => 1)
+        \\        .with(P.array, () => 2)
+        \\        .exhaustive();
         \\}
         \\function handler(req: Request): Response {
         \\    return Response.json({ d: depth([1, "a"]) });
@@ -12763,7 +12719,8 @@ test "the six arms cover JsonValue with its Dict arm" {
     // cover the six value kinds exactly, so the match is exhaustive without a
     // `default` - which a closed union is required to do without.
     try checkTypedSource(
-        \\structural JsonValue =
+        \\import { match, P } from "zttp:core";
+        \\type JsonValue =
         \\  | null
         \\  | boolean
         \\  | number
@@ -12771,14 +12728,14 @@ test "the six arms cover JsonValue with its Dict arm" {
         \\  | readonly JsonValue[]
         \\  | Dict<string, JsonValue>;
         \\function kindOf(value: JsonValue): string {
-        \\    return match (value) {
-        \\        when null: "null"
-        \\        when boolean: "boolean"
-        \\        when number: "number"
-        \\        when string: "string"
-        \\        when array: "array"
-        \\        when Dict: "dict"
-        \\    };
+        \\    return match(value)
+        \\        .with(null, () => "null")
+        \\        .with(P.boolean, () => "boolean")
+        \\        .with(P.number, () => "number")
+        \\        .with(P.string, () => "string")
+        \\        .with(P.array, () => "array")
+        \\        .with(P.Dict, () => "dict")
+        \\        .exhaustive();
         \\}
         \\function handler(req: Request): Response {
         \\    return Response.json({ k: kindOf(1) });
@@ -12829,14 +12786,15 @@ test "a Bytes arm narrows in the arm it guards and not in the others" {
     // accepts it there; in a sibling arm the same name is still the union, and
     // the same call is refused. One program, both halves.
     try checkTypedSource(
+        \\import { match, P } from "zttp:core";
         \\function take(b: Bytes): number {
         \\    return 1;
         \\}
         \\function sizeOf(value: string | Bytes): number {
-        \\    return match (value) {
-        \\        when Bytes: take(value)
-        \\        when string: 0
-        \\    };
+        \\    return match(value)
+        \\        .with(P.Bytes, (selected) => take(selected))
+        \\        .with(P.string, () => 0)
+        \\        .exhaustive();
         \\}
         \\function handler(req: Request): Response {
         \\    return Response.json({ n: sizeOf("x") });
@@ -12847,14 +12805,15 @@ test "a Bytes arm narrows in the arm it guards and not in the others" {
     );
 
     try checkTypedSourceSaying(
+        \\import { match, P } from "zttp:core";
         \\function take(b: Bytes): number {
         \\    return 1;
         \\}
         \\function sizeOf(value: string | Bytes): number {
-        \\    return match (value) {
-        \\        when Bytes: 0
-        \\        when string: take(value)
-        \\    };
+        \\    return match(value)
+        \\        .with(P.Bytes, () => 0)
+        \\        .with(P.string, (selected) => take(selected))
+        \\        .exhaustive();
         \\}
         \\function handler(req: Request): Response {
         \\    return Response.json({ n: sizeOf("x") });
@@ -13101,7 +13060,8 @@ test "the recursive fold over JsonValue type-checks" {
     // Spec 16.3 minus its Dict arm: the array arm recurses through the same
     // alias, which is what the contractive rule exists to admit.
     try checkTypedSource(
-        \\structural JsonValue =
+        \\import { match, P } from "zttp:core";
+        \\type JsonValue =
         \\  | null
         \\  | boolean
         \\  | number
@@ -13112,13 +13072,13 @@ test "the recursive fold over JsonValue type-checks" {
         \\    return childDepth > maximum ? childDepth : maximum;
         \\}
         \\function depth(value: JsonValue): number {
-        \\    return match (value) {
-        \\        when null: 1
-        \\        when boolean: 1
-        \\        when number: 1
-        \\        when string: 1
-        \\        when array: value.reduce(deeper, 0) + 1
-        \\    };
+        \\    return match(value)
+        \\        .with(null, () => 1)
+        \\        .with(P.boolean, () => 1)
+        \\        .with(P.number, () => 1)
+        \\        .with(P.string, () => 1)
+        \\        .with(P.array, (selected) => selected.reduce(deeper, 0) + 1)
+        \\        .exhaustive();
         \\}
         \\function handler(req: Request): Response {
         \\    return Response.json({ d: depth([1, "a"]) });
@@ -13135,7 +13095,7 @@ test "the recursive fold over JsonValue type-checks" {
 
 test "a recursive alias guarded by an array is accepted" {
     try checkTypedSource(
-        \\structural JsonValue =
+        \\type JsonValue =
         \\  | null
         \\  | boolean
         \\  | number
@@ -13153,7 +13113,7 @@ test "a recursive alias guarded by an array is accepted" {
 
 test "a recursive alias guarded by a record is accepted" {
     try checkTypedSource(
-        \\structural Tree = { value: number; children: readonly Tree[] };
+        \\type Tree = { value: number; children: readonly Tree[] };
         \\function handler(req: Request): Response {
         \\    const t: Tree = { value: 1, children: [] };
         \\    return Response.json({ v: t.value });
@@ -13166,7 +13126,7 @@ test "a recursive alias guarded by a record is accepted" {
 
 test "a direct cycle is refused" {
     try checkTypedSourceSaying(
-        \\structural Loop = Loop;
+        \\type Loop = Loop;
         \\function handler(req: Request): Response {
         \\    const v: Loop = 1;
         \\    return Response.json({ ok: true });
@@ -13181,7 +13141,7 @@ test "a union edge does not guard a cycle" {
     // The union member is where the recursion sits, and a union is not a data
     // constructor. `type U = number | U` describes no finite value.
     try checkTypedSourceSaying(
-        \\structural U = number | U;
+        \\type U = number | U;
         \\function handler(req: Request): Response {
         \\    const v: U = 1;
         \\    return Response.json({ ok: true });
@@ -13203,7 +13163,7 @@ test "a Bytes member does not disturb a recursive alias either way" {
     // A record guards, so the alias is contractive and the Bytes field rides
     // along.
     try checkTypedSource(
-        \\structural Chunk = { data: Bytes; next: Chunk | null };
+        \\type Chunk = { data: Bytes; next: Chunk | null };
         \\function handler(req: Request): Response {
         \\    return Response.json({ ok: true });
         \\}
@@ -13216,7 +13176,7 @@ test "a Bytes member does not disturb a recursive alias either way" {
     // where a declared annotation names the alias, which is why the binding is
     // here and not just the alias.
     try checkTypedSourceSaying(
-        \\structural B = Bytes | B;
+        \\type B = Bytes | B;
         \\function handler(req: Request): Response {
         \\    const v: B = 1;
         \\    return Response.json({ ok: true });
@@ -13229,8 +13189,8 @@ test "a Bytes member does not disturb a recursive alias either way" {
 
 test "a cycle through two names is refused" {
     try checkTypedSourceSaying(
-        \\structural A = B;
-        \\structural B = A;
+        \\type A = B;
+        \\type B = A;
         \\function handler(req: Request): Response {
         \\    const v: A = 1;
         \\    return Response.json({ ok: true });
@@ -13245,7 +13205,7 @@ test "negative recursion through a function parameter is refused" {
     // A declaration of a bare function alias is also ZTS217 (Decision 20), so the
     // alias is a union with `string`. The cycle still passes through a parameter.
     try checkTypedSourceSaying(
-        \\structural Neg = ((value: Neg) => number) | string;
+        \\type Neg = ((value: Neg) => number) | string;
         \\function handler(req: Request): Response {
         \\    const v: Neg = "x";
         \\    return Response.json({ ok: true });
@@ -13746,50 +13706,46 @@ test "capture: a closure over a for...of binding reads that binding, not a sibli
     , accepted);
 }
 
-test "capture: a closure over a match pattern binding reads that binding" {
-    // p2_unsound.ts and p2_match_binding.ts. A name search did not see the
-    // pattern binding `text`, so the capture resolved to the `text` of a
-    // sibling match arm.
+test "capture: a closure reads its own match callback argument" {
     const source =
+        \\import { match } from "zttp:core";
         \\function needS(s: string): number {
         \\  return s.length;
         \\}
         \\function run(m: { kind: "a"; text: FIELD } | { kind: "b" }, o: { kind: "a"; text: OUTER } | { kind: "b" }): number {
-        \\  const first = match (o) {
-        \\    when { kind: "a", text }: 1
-        \\    default: 0
-        \\  };
-        \\  const second = match (m) {
-        \\    when { kind: "a", text }: [0].map((k: number): number => needS(text)).length
-        \\    default: 0
-        \\  };
+        \\  const first = match(o)
+        \\    .with({ kind: "a" }, (selected) => selected.text === undefined ? 0 : 1)
+        \\    .otherwise(() => 0);
+        \\  const second = match(m)
+        \\    .with({ kind: "a" }, (selected) => [0].map((k: number): number => needS(selected.text)).length)
+        \\    .otherwise(() => 0);
         \\  return first + second;
         \\}
     ;
     try expectKindCounts(withMarker(withMarker(source, "FIELD", "string | undefined"), "OUTER", "string"), refused_once);
     try expectKindCounts(withMarker(withMarker(source, "FIELD", "string"), "OUTER", "number"), accepted);
-    // Control p2_unsound_direct.ts: the same call outside the closure.
+    // The same call outside the nested closure.
     try expectKindCounts(
+        \\import { match } from "zttp:core";
         \\function needS(s: string): number {
         \\  return s.length;
         \\}
         \\function run(m: { kind: "a"; text: string | undefined } | { kind: "b" }): number {
-        \\  return match (m) {
-        \\    when { kind: "a", text }: needS(text)
-        \\    default: 0
-        \\  };
+        \\  return match(m)
+        \\    .with({ kind: "a" }, (selected) => needS(selected.text))
+        \\    .otherwise(() => 0);
         \\}
     , refused_once);
-    // Control p2_ctrl.ts: no outer name to confuse it with.
+    // The same nested closure with a single match.
     try expectKindCounts(
+        \\import { match } from "zttp:core";
         \\function needS(s: string): number {
         \\  return s.length;
         \\}
         \\function run(m: { kind: "a"; text: string } | { kind: "b" }): number {
-        \\  return match (m) {
-        \\    when { kind: "a", text }: [0].map((k: number): number => needS(text)).length
-        \\    default: 0
-        \\  };
+        \\  return match(m)
+        \\    .with({ kind: "a" }, (selected) => [0].map((k: number): number => needS(selected.text)).length)
+        \\    .otherwise(() => 0);
         \\}
     , accepted);
 }
@@ -14032,8 +13988,8 @@ test "a 2500-alias chain reports no ZTS200" {
     const allocator = std.testing.allocator;
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
-    try buf.appendSlice(allocator, "structural T0 = { a: number };\n");
-    for (1..2500) |i| try buf.print(allocator, "structural T{d} = T{d};\n", .{ i, i - 1 });
+    try buf.appendSlice(allocator, "type T0 = { a: number };\n");
+    for (1..2500) |i| try buf.print(allocator, "type T{d} = T{d};\n", .{ i, i - 1 });
     try buf.appendSlice(allocator, "function handler(req: Request): Response {\n  const v: T1 = { a: 1 };\n  return Response.text(String(v.a));\n}\n");
     var nodes: usize = 0;
     try std.testing.expectEqual(@as(u32, 0), try checkTypedSourceNodes(buf.items, &nodes));
@@ -14042,22 +13998,22 @@ test "a 2500-alias chain reports no ZTS200" {
 
 test "an intersection over an alias reference reports no ZTS200" {
     try expectTypeMismatches(
-        \\structural A = { a: number };
-        \\structural B = A & { b: number };
+        \\type A = { a: number };
+        \\type B = A & { b: number };
         \\const value: B = { a: 1, b: 2 };
     , 0);
     try expectTypeMismatches(
-        \\structural A = { a: number };
-        \\structural B = A & { b: number };
+        \\type A = { a: number };
+        \\type B = A & { b: number };
         \\const value: B = { b: 2 };
     , 1);
     try expectTypeMismatches(
-        \\structural A = { a: number };
-        \\structural B = A & { b: number };
+        \\type A = { a: number };
+        \\type B = A & { b: number };
         \\const value: B = { a: "x", b: 2 };
     , 1);
     try expectTypeMismatches(
-        \\structural B = Missing & { b: number };
+        \\type B = Missing & { b: number };
         \\const value: B = { b: 2 };
     , 1);
 }
@@ -14070,8 +14026,8 @@ test "field names that differ after byte 255 are distinct types" {
     var xs: [45]u8 = @splat('x');
     var ys: [45]u8 = @splat('y');
     const source = try std.fmt.allocPrint(allocator,
-        \\structural A = {{ {s}{s}: number }};
-        \\structural B = {{ {s}{s}: number }};
+        \\type A = {{ {s}{s}: number }};
+        \\type B = {{ {s}{s}: number }};
         \\function f(a: A): B {{
         \\  const b: B = a;
         \\  return b;
@@ -14179,7 +14135,7 @@ test "TypeChecker: each type refusal carries a fixed help string" {
         \\}
     , 1, "argument type does not match", "Pass a value of the parameter type, or change the parameter type.");
     try checkTypedSourceHelping(
-        \\structural Point = { x: number; y: number };
+        \\type Point = { x: number; y: number };
         \\function handler(req: Request): Response {
         \\  const p: Point = { x: 1, y: 2 };
         \\  const z = p.z;
@@ -14265,7 +14221,7 @@ test "function value: assigning a named function to a number variable is ZTS200"
 
 test "function value: a named function in a number record field is ZTS200" {
     try expectOnlyDiagnostic(
-        \\structural Box = { n: number };
+        \\type Box = { n: number };
         \\function g(x: number): number { return x; }
         \\function f(): number {
         \\  const b: Box = { n: g };
@@ -14315,7 +14271,7 @@ test "function value: an arrow passed as a number argument is ZTS203" {
 
 test "function value: a named function nested in a record argument is ZTS203" {
     try expectOnlyDiagnostic(
-        \\structural Box = { n: number };
+        \\type Box = { n: number };
         \\function g(x: number): number { return x; }
         \\function take2(b: Box): number { return 1; }
         \\function f(): number {
@@ -14353,7 +14309,7 @@ test "function value: a function stays assignable to a function type" {
     );
     // The record form that the two refusals below use, with a matching function.
     try expectNoDiagnostics(
-        \\structural Ops = { k: (x: number) => number };
+        \\type Ops = { k: (x: number) => number };
         \\function g(x: number): number { return x; }
         \\function r(): number {
         \\  const o: Ops = { k: g };
@@ -14400,7 +14356,7 @@ test "function value: an unannotated function in a shadowing JSON object takes i
 
 test "function value: a function with an extra parameter is refused at a function type" {
     try expectOnlyDiagnostic(
-        \\structural Ops = { k: (x: number) => number };
+        \\type Ops = { k: (x: number) => number };
         \\function g(x: number, y: number): number { return x; }
         \\function r(): number {
         \\  const o: Ops = { k: g };
@@ -14411,7 +14367,7 @@ test "function value: a function with an extra parameter is refused at a functio
 
 test "function value: a function with a wrong parameter type is refused at a function type" {
     try expectOnlyDiagnostic(
-        \\structural Ops = { k: (x: number) => number };
+        \\type Ops = { k: (x: number) => number };
         \\function g(x: string): number { return 1; }
         \\function r(): number {
         \\  const o: Ops = { k: g };
@@ -14422,7 +14378,7 @@ test "function value: a function with a wrong parameter type is refused at a fun
 
 test "function value: a record holding a function is refused at a number field" {
     try expectOnlyDiagnostic(
-        \\structural Box = { n: number };
+        \\type Box = { n: number };
         \\function g(x: number): number { return x; }
         \\function r(): number {
         \\  const o = { n: g };
@@ -14461,7 +14417,7 @@ test "predicate claim: a test that proves string backs a string claim over unkno
 
 test "predicate claim: a discriminant test for the other member does not back the claim" {
     try expectOnlyDiagnostic(
-        \\structural A = { kind: "a"; n: number };
+        \\type A = { kind: "a"; n: number };
         \\function isA(v: { kind: "a"; n: number } | { kind: "b"; s: string }): v is A {
         \\    return v.kind === "b";
         \\}
@@ -14470,7 +14426,7 @@ test "predicate claim: a discriminant test for the other member does not back th
 
 test "predicate claim: a discriminant test for the claimed member is admitted and narrows" {
     try expectNoDiagnostics(
-        \\structural A = { kind: "a"; n: number };
+        \\type A = { kind: "a"; n: number };
         \\function isA(v: { kind: "a"; n: number } | { kind: "b"; s: string }): v is A {
         \\    return v.kind === "a";
         \\}
@@ -14585,8 +14541,8 @@ test "discriminant guard: a member with an optional discriminant stays in the el
 
 test "discriminant guard: named records narrow in the then-branch" {
     try expectNoDiagnostics(
-        \\structural A = { kind: "a"; n: number };
-        \\structural B = { kind: "b"; s: string };
+        \\type A = { kind: "a"; n: number };
+        \\type B = { kind: "b"; s: string };
         \\function f(v: A | B): number {
         \\    if (v.kind === "a") {
         \\        const a: A = v;
@@ -14599,8 +14555,8 @@ test "discriminant guard: named records narrow in the then-branch" {
 
 test "discriminant guard: named records narrow after an early return" {
     try expectNoDiagnostics(
-        \\structural A = { kind: "a"; n: number };
-        \\structural B = { kind: "b"; s: string };
+        \\type A = { kind: "a"; n: number };
+        \\type B = { kind: "b"; s: string };
         \\function f(v: A | B): number {
         \\    if (v.kind === "a") {
         \\        return 1;
@@ -14613,9 +14569,9 @@ test "discriminant guard: named records narrow after an early return" {
 
 test "discriminant guard: an alias of a union of named records narrows" {
     try expectNoDiagnostics(
-        \\structural A = { kind: "a"; n: number };
-        \\structural B = { kind: "b"; s: string };
-        \\structural AB = A | B;
+        \\type A = { kind: "a"; n: number };
+        \\type B = { kind: "b"; s: string };
+        \\type AB = A | B;
         \\function f(v: AB): number {
         \\    if (v.kind === "a") {
         \\        const a: A = v;
@@ -14628,8 +14584,8 @@ test "discriminant guard: an alias of a union of named records narrows" {
 
 test "predicate claim: a discriminant test over named records is admitted and narrows" {
     try expectNoDiagnostics(
-        \\structural A = { kind: "a"; n: number };
-        \\structural B = { kind: "b"; s: string };
+        \\type A = { kind: "a"; n: number };
+        \\type B = { kind: "b"; s: string };
         \\function isA(v: A | B): v is A {
         \\    return v.kind === "a";
         \\}
@@ -14646,8 +14602,8 @@ test "predicate claim: a discriminant test over named records is admitted and na
 
 test "predicate claim: a discriminant shared by two members does not back a one-member claim" {
     try expectOnlyDiagnostic(
-        \\structural A1 = { kind: "a"; n: number };
-        \\structural A2 = { kind: "a"; s: string };
+        \\type A1 = { kind: "a"; n: number };
+        \\type A2 = { kind: "a"; s: string };
         \\function isA1(v: A1 | A2): v is A1 {
         \\    return v.kind === "a";
         \\}
@@ -14785,8 +14741,8 @@ test "builtin argument: an argument with no type is admitted" {
 test "a write to a readonly field is caught through a nested receiver" {
     const allocator = std.testing.allocator;
     const seen = try typedDiagnostics(allocator,
-        \\structural In = { readonly a: number };
-        \\structural Out = { inner: In };
+        \\type In = { readonly a: number };
+        \\type Out = { inner: In };
         \\function g(o: Out): number {
         \\  o.inner.a = 2;
         \\  return o.inner.a;

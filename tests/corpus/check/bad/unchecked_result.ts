@@ -3,7 +3,7 @@ import { validateJson, schemaCompile } from "zttp:validate";
 
 schemaCompile("test", '{"type":"object"}');
 
-structural Guardrails<T> = Proof<T, "result_safe">;
+type Guardrails<T> = Proof<T, "result_safe">;
 
 function handler(req: Request): Guardrails<Response> {
     const result = validateJson("test", req.body ?? "");

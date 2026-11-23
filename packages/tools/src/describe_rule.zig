@@ -240,7 +240,7 @@ const type_checker_rules = [_]TypeCheckerRule{
             "so the line to change is the callback's own return.",
     },
     .{ .name = "non_exhaustive_match", .code = "ZTS205", .description = "A match expression does not cover every possible case of the matched value." },
-    .{ .name = "redundant_match_arm", .code = "ZTS216", .description = "A match arm that no value can reach: earlier arms already match every value it matches, the matched type excludes them, or a default arm follows full coverage of a closed type. An error." },
+    .{ .name = "redundant_match_arm", .code = "ZTS216", .description = "A match arm that no value can reach: earlier arms already match every value it matches, the matched type excludes them, or .otherwise() follows full coverage. An error." },
     .{ .name = "function_value_binding", .code = "ZTS217", .description = "A `const` or `let` whose type is a function type. A named function is a module-level `function`, and an arrow is a direct call argument, so a local name never holds a function value." },
     .{ .name = "non_iterable_loop", .code = "ZTS218", .description = "A `for...of` over a value that is not an array, a tuple, or `range(n)`, such as a record, a number, a string, a `Dict`, a value with no type, or an array that may be `null`. The loop runs zero times at run time. Iterate `Object.keys(r)`, `dictEntries(d)`, `s.split(\"\")`, or `range(n)`." },
     .{ .name = "unknown_virtual_module", .code = "ZTS206", .description = "An import names a zttp virtual module that the active module catalog does not publish." },

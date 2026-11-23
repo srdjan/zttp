@@ -212,14 +212,14 @@ test "an early return guard answers with the guard response" {
     try std.testing.expectEqualStrings("method not allowed", resp.body);
 }
 
-test "a failed assert without a message answers without the frame's values" {
-    // `halt` returns the stack top. Before the fix a failed bare assert sent
+test "a failed assert call without a message answers without the frame's values" {
+    // `halt` returns the stack top. Before the fix a failed assert call sent
     // whatever the frame left there, here the local `s`, as a 200 body.
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
         .{},
-        "function handler(req) { const s = 'held-in-a-local'; assert req.method === 'POST'; return Response.text(s.length > 0 ? 'ok' : 'empty'); }",
+        "import { assert } from 'zttp:core'; function handler(req) { const s = 'held-in-a-local'; assert(req.method === 'POST'); return Response.text(s.length > 0 ? 'ok' : 'empty'); }",
         "<server-test>",
         1,
         0,

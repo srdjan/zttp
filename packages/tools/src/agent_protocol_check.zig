@@ -366,7 +366,7 @@ test "check on a clean handler succeeds with no diagnostics" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
         \\
-        \\structural Guardrails<T> = Proof<T, "state_isolated" | "injection_safe">;
+        \\type Guardrails<T> = Proof<T, "state_isolated" | "injection_safe">;
         \\
         \\export function handler(req: Request): Guardrails<Response> {
         \\    return Response.json({ ok: true });
@@ -666,7 +666,7 @@ test "success is exactly no error diagnostic, not no diagnostic" {
     // handler carries a diagnostic and still succeeds - spec 4.8's success rule.
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
         \\
-        \\structural Guardrails<T> = Proof<T, "state_isolated" | "injection_safe">;
+        \\type Guardrails<T> = Proof<T, "state_isolated" | "injection_safe">;
         \\
         \\export function handler(req: Request): Guardrails<Response> {
         \\    const unused = 1;
@@ -711,7 +711,7 @@ test "check publishes the path-coverage cause, not only a bool" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
         \\
-        \\structural Guardrails<T> = Proof<T, "state_isolated" | "injection_safe">;
+        \\type Guardrails<T> = Proof<T, "state_isolated" | "injection_safe">;
         \\
         \\export function handler(req: Request): Guardrails<Response> {
         \\    return Response.json({ ok: true });
@@ -756,7 +756,7 @@ test "check never answers success false with an empty diagnostics array" {
         "export function handler(req) { return Response.json({ ok: true }); }\n",
         // And one that does not fail at all, so the assertion below is about
         // the pairing rather than about everything being broken.
-        "structural G<T> = Proof<T, \"state_isolated\">;\nexport function handler(req: Request): G<Response> {\n  return Response.json({ ok: true });\n}\n",
+        "type G<T> = Proof<T, \"state_isolated\">;\nexport function handler(req: Request): G<Response> {\n  return Response.json({ ok: true });\n}\n",
     };
 
     var saw_failure = false;

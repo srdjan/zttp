@@ -1,5 +1,5 @@
 // Proves: a field write on an element that a module array holds is a shared-state write (ZTS310).
-structural Row = { n: number };
+type Row = { n: number };
 const rows: Row[] = [{ n: 0 }];
 
 function handler(req: Request): Proof<Response, "deterministic"> {

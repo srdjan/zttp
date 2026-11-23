@@ -229,6 +229,9 @@ pub const HandlerAnalyzer = struct {
             const arm_idx = self.ir.getListIndex(match_e.arms_start, i);
             const arm = self.ir.getMatchArm(arm_idx) orelse continue;
             if (arm.pattern == null_node) continue; // default arm
+            // Fluent arms evaluate callbacks under a selected pattern. The
+            // native table only represents a static response keyed by URL.
+            if (arm.kind != .value) return;
 
             const pattern_tag = self.ir.getTag(arm.pattern) orelse continue;
 
@@ -780,122 +783,9 @@ test "HandlerAnalyzer init and deinit" {
     try std.testing.expect(analyzer.route_binding_slot == null);
 }
 
-fn findHandlerFunctionForTest(ir_view: IrView, root: NodeIndex) ?NodeIndex {
-    const tag = ir_view.getTag(root) orelse return null;
-    if (tag != .program and tag != .block) return null;
-    const block = ir_view.getBlock(root) orelse return null;
-
-    var i: u16 = 0;
-    while (i < block.stmts_count) : (i += 1) {
-        const stmt_idx = ir_view.getListIndex(block.stmts_start, i);
-        const stmt_tag = ir_view.getTag(stmt_idx) orelse continue;
-        if (stmt_tag != .function_decl and stmt_tag != .var_decl) continue;
-
-        const decl = ir_view.getVarDecl(stmt_idx) orelse continue;
-        if (decl.binding.kind != .global) continue;
-        if (decl.binding.name_atom != @backingInt(object.Atom.handler)) continue;
-
-        const init_tag = ir_view.getTag(decl.init) orelse continue;
-        if (init_tag == .function_expr or init_tag == .arrow_function) {
-            return decl.init;
-        }
-    }
-
-    return null;
-}
-
 fn bindingSlotIfBindable(binding: anytype) ?u16 {
     return switch (binding.kind) {
         .local, .argument => binding.slot,
         else => null,
     };
-}
-
-test "HandlerAnalyzer extracts match route patterns" {
-    const allocator = std.testing.allocator;
-
-    var atoms = context.AtomTable.init(allocator);
-    defer atoms.deinit();
-
-    const source =
-        \\function handler(request) {
-        \\  const url = request.url;
-        \\  return match (url) {
-        \\    when '/api/a': Response.json({ ok: true }),
-        \\    when '/api/b': Response.text('plain'),
-        \\    default: Response.json({ error: 'nf' }, { status: 404 }),
-        \\  };
-        \\}
-    ;
-
-    var js_parser = try @import("parser/parse.zig").Parser.initAdmission(allocator, allocator, source, .compile);
-    defer js_parser.deinit();
-    js_parser.setAtomTable(&atoms);
-
-    const root = try js_parser.parse();
-    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const handler_fn = findHandlerFunctionForTest(ir_view, root) orelse return error.InvalidRequest;
-
-    var analyzer = HandlerAnalyzer.init(allocator, ir_view, &atoms);
-    defer analyzer.deinit();
-
-    const dispatch_opt = try analyzer.analyze(handler_fn);
-    try std.testing.expect(dispatch_opt != null);
-
-    const dispatch = dispatch_opt.?;
-    defer {
-        dispatch.deinit();
-        allocator.destroy(dispatch);
-    }
-
-    try std.testing.expectEqual(@as(usize, 2), dispatch.patterns.len);
-    try std.testing.expectEqual(PatternType.exact, dispatch.patterns[0].pattern_type);
-    try std.testing.expectEqualStrings("/api/a", dispatch.patterns[0].url_bytes);
-    try std.testing.expectEqualStrings("{\"ok\":true}", dispatch.patterns[0].static_body);
-    try std.testing.expectEqual(PatternType.exact, dispatch.patterns[1].pattern_type);
-    try std.testing.expectEqualStrings("/api/b", dispatch.patterns[1].url_bytes);
-    try std.testing.expectEqualStrings("plain", dispatch.patterns[1].static_body);
-}
-
-test "HandlerAnalyzer does not fast-path match-object arms that constrain method" {
-    const allocator = std.testing.allocator;
-
-    var atoms = context.AtomTable.init(allocator);
-    defer atoms.deinit();
-
-    // The native fast path matches on URL only. A `{ method: "POST", path: ... }`
-    // arm dispatches on method too, so turning it into a URL-only exact pattern
-    // would serve the POST body to a GET, diverging from the interpreter which
-    // enforces the method. No pattern may be built for that path.
-    const source =
-        \\function handler(request) {
-        \\  const url = request.url;
-        \\  return match (request) {
-        \\    when { method: "POST", path: "/echo" }: Response.json({ ok: true }),
-        \\    default: Response.json({ error: "nf" }, { status: 404 }),
-        \\  };
-        \\}
-    ;
-
-    var js_parser = try @import("parser/parse.zig").Parser.initAdmission(allocator, allocator, source, .compile);
-    defer js_parser.deinit();
-    js_parser.setAtomTable(&atoms);
-
-    const root = try js_parser.parse();
-    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const handler_fn = findHandlerFunctionForTest(ir_view, root) orelse return error.InvalidRequest;
-
-    var analyzer = HandlerAnalyzer.init(allocator, ir_view, &atoms);
-    defer analyzer.deinit();
-
-    const dispatch_opt = try analyzer.analyze(handler_fn);
-    if (dispatch_opt) |dispatch| {
-        defer {
-            dispatch.deinit();
-            allocator.destroy(dispatch);
-        }
-        for (dispatch.patterns) |p| {
-            try std.testing.expect(!std.mem.eql(u8, p.url_bytes, "/echo"));
-        }
-    }
 }

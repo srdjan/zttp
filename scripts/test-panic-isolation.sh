@@ -90,7 +90,7 @@ step "init test app"
 
 cat > "$APP_DIR/src/handler.ts" <<'HANDLER'
 
-structural Guardrails<T> = Proof<T,
+type Guardrails<T> = Proof<T,
     | "deterministic"
     | "no_secret_leakage"
     | "injection_safe"
@@ -220,7 +220,7 @@ LEAF_DIR="$TMP_DIR/json-leaf-app"
 make_stack_app "$LEAF_DIR"
 cat > "$LEAF_DIR/src/handler.ts" <<'HANDLER'
 import { stringifyJson } from "zttp:json";
-structural Tree = number | Tree[];
+type Tree = number | Tree[];
 function build(k: number): Tree { let o: Tree = 1; for (const i of range(k)) { o = [o]; } return o; }
 function leaf(): number { const t = build(500); const r = stringifyJson(t); if (!r.ok) { return 0; } const s = r.value; if (typeof s !== "string") { return 0; } return s.length; }
 function down(n: number): number { if (n === 0) { return leaf(); } return down(n - 1) + 1; }
@@ -269,7 +269,7 @@ level_leaf_case() {
 }
 level_leaf_case json <<'LEAF'
 import { stringifyJson } from "zttp:json";
-structural Tree = number | Tree[];
+type Tree = number | Tree[];
 function build(k: number): Tree { let o: Tree = 1; for (const i of range(k)) { o = [o]; } return o; }
 function leaf(): number { const t = build(500); const r = stringifyJson(t); if (!r.ok) { return 0; } const s = r.value; if (typeof s !== "string") { return 0; } return s.length; }
 LEAF

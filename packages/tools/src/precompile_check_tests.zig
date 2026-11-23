@@ -23,8 +23,10 @@ const runCheckOnlyFromSourceWithOptions = check_run_mod.runCheckOnlyFromSourceWi
 const runCheckOnlyFromSourceWithPathAllocator = check_run_mod.runCheckOnlyFromSourceWithPathAllocator;
 const runCheckOnlyWithOptions = check_run_mod.runCheckOnlyWithOptions;
 
+const match_import = "import { match } from \"zttp:core\";\n";
+
 const shared_analysis_clean_source =
-    \\structural Guardrails<T> = Proof<T, "result_safe">;
+    \\type Guardrails<T> = Proof<T, "result_safe">;
     \\
     \\function handler(req: Request): Guardrails<Response> {
     \\  return Response.json({ ok: true });
@@ -316,17 +318,20 @@ test "an arrow function bound to a const is refused with ZTS072" {
 test "runCheckOnlyFromSource: one-way public helper effects diagnostic" {
     const allocator = std.testing.allocator;
     const source =
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\nominal Digest = string;
+        \\declare const digestBrand: unique symbol;
+        \\type Digest = Nominal<string, typeof digestBrand>;
         \\
         \\export function digest(s: Digest): Digest {
-        \\  const out: Digest = sha256(s);
+        \\  const out: Digest = nominal<Digest>(sha256(s));
         \\  return out;
         \\}
         \\
         \\function handler(req: Request): Effects<Response, "crypto"> {
-        \\  const seed: Digest = "x";
+        \\  const seed: Digest = nominal<Digest>("x");
         \\  return Response.text(digest(seed));
         \\}
     ;
@@ -355,14 +360,17 @@ test "runCheckOnlyFromSource: one-way public helper effects diagnostic" {
 test "runCheckOnlyFromSource: one-way public helper proof diagnostic" {
     const allocator = std.testing.allocator;
     const source =
-        \\nominal Stable = string;
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
+        \\declare const stableBrand: unique symbol;
+        \\type Stable = Nominal<string, typeof stableBrand>;
         \\
         \\export function stable(s: Stable): Stable {
         \\  return s;
         \\}
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const seed: Stable = "x";
+        \\  const seed: Stable = nominal<Stable>("x");
         \\  return Response.text(stable(seed));
         \\}
     ;
@@ -390,7 +398,9 @@ test "runCheckOnlyFromSource: proof capsule diagnostic covers an unreachable exp
     // the rule conditions on: the module's public surface owes its callers a
     // capsule whether or not this handler is one of them.
     const source =
-        \\nominal Unrelated = string;
+        \\import type { Nominal } from "zttp:core";
+        \\declare const unrelatedBrand: unique symbol;
+        \\type Unrelated = Nominal<string, typeof unrelatedBrand>;
         \\
         \\export function unrelated(s: Unrelated): Unrelated {
         \\  return s;
@@ -421,14 +431,17 @@ test "runCheckOnlyFromSource: proof capsule diagnostic covers an unreachable exp
 test "runCheckOnlyFromSource: proof capsule diagnostic ignores non-capsule specs" {
     const allocator = std.testing.allocator;
     const source =
-        \\nominal Stable = string;
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
+        \\declare const stableBrand: unique symbol;
+        \\type Stable = Nominal<string, typeof stableBrand>;
         \\
         \\export function stable(s: Stable): Stable {
         \\  return s;
         \\}
         \\
         \\function handler(req: Request): Proof<Response, "result_safe"> {
-        \\  const seed: Stable = "x";
+        \\  const seed: Stable = nominal<Stable>("x");
         \\  return Response.text(stable(seed));
         \\}
     ;
@@ -468,17 +481,20 @@ test "formatProofCard: a parse failure marks the stages that did not run as skip
 test "formatProofCard: canonical public helper diagnostics are visible in text mode" {
     const allocator = std.testing.allocator;
     const source =
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\nominal Digest = string;
+        \\declare const digestBrand: unique symbol;
+        \\type Digest = Nominal<string, typeof digestBrand>;
         \\
         \\export function digest(s: Digest): Digest {
-        \\  const out: Digest = sha256(s);
+        \\  const out: Digest = nominal<Digest>(sha256(s));
         \\  return out;
         \\}
         \\
         \\function handler(req: Request): Effects<Response, "crypto"> {
-        \\  const seed: Digest = "x";
+        \\  const seed: Digest = nominal<Digest>("x");
         \\  return Response.text(digest(seed));
         \\}
     ;
@@ -1194,12 +1210,15 @@ test "appendExportCapsuleDiagnostics: the docs mode asks only for a Proof capsul
     // This mode covers the proof half alone: ZTS610 already refuses exactly the
     // helpers an effects warning would ask about.
     const source =
+        \\import type { Nominal } from "zttp:core";
+        \\import { nominal } from "zttp:core";
         \\import { env } from "zttp:env";
         \\
-        \\nominal Region = string;
+        \\declare const regionBrand: unique symbol;
+        \\type Region = Nominal<string, typeof regionBrand>;
         \\
         \\export function region(): Region {
-        \\  const value: Region = env("REGION") ?? "unknown";
+        \\  const value: Region = nominal<Region>(env("REGION") ?? "unknown");
         \\  return value;
         \\}
         \\
@@ -1324,7 +1343,9 @@ test "a pure-typed callback parameter contributes the empty row" {
     // row - spec 6.5's "its callback MUST be pure" made representable. The
     // call through `f` does not report ZTS512.
     const source =
-        \\nominal Count = number;
+        \\import type { Nominal } from "zttp:core";
+        \\declare const countBrand: unique symbol;
+        \\type Count = Nominal<number, typeof countBrand>;
         \\
         \\export function apply(f: (n: number) => number, x: Count): Effects<number, "clock"> {
         \\  return f(x);
@@ -1359,7 +1380,7 @@ test "an unreached exported helper with a nonempty row reports ZTS610" {
     const source =
         \\import { env } from "zttp:env";
         \\
-        \\structural OptionalSecret = string | undefined;
+        \\type OptionalSecret = string | undefined;
         \\
         \\export function unused(): OptionalSecret {
         \\  return env("API_KEY");
@@ -2429,8 +2450,8 @@ test "check records unreachable code in the contract verification" {
 // members written without `Box<string>` reject under the truncating implementation
 // too, and would have stood here as a permanent false pass.
 const wide_intersection_members =
-    \\structural Box<T> = { boxed: T };
-    \\structural Wide =
+    \\type Box<T> = { boxed: T };
+    \\type Wide =
     \\  Box<string> &
     \\  { f01: string } & { f02: string } & { f03: string } & { f04: string } &
     \\  { f05: string } & { f06: string } & { f07: string } & { f08: string } &
@@ -2517,9 +2538,9 @@ test "zts check accepts the same value once the seventeenth member is satisfied"
 // that reopens the fail-open moves `named` back to 0 while leaving `inlined`
 // green, and only the contrast catches that.
 const named_intersection_members =
-    \\structural A = { a: string };
-    \\structural B = { b: string };
-    \\structural AB = A & B;
+    \\type A = { a: string };
+    \\type B = { b: string };
+    \\type AB = A & B;
     \\function handler(req: Request): Response {
     \\  const v: AB = { a: "x" };
     \\  return Response.json(v);
@@ -2528,7 +2549,7 @@ const named_intersection_members =
 ;
 
 const inline_intersection_members =
-    \\structural AB = { a: string } & { b: string };
+    \\type AB = { a: string } & { b: string };
     \\function handler(req: Request): Response {
     \\  const v: AB = { a: "x" };
     \\  return Response.json(v);
@@ -2573,8 +2594,8 @@ test "check keeps typed imported builtin methods deterministic" {
         \\
     });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "label.ts", .data =
-        \\export structural LabelText = string;
-        \\export structural NormalizedLabel = string;
+        \\export type LabelText = string;
+        \\export type NormalizedLabel = string;
         \\export function normalizeLabel(text: LabelText): NormalizedLabel {
         \\  return text.trim().toLowerCase();
         \\}
@@ -5874,7 +5895,7 @@ test "CHECK preserves preparation diagnostics and recovery boundaries" {
                 .message = "`interface` is not a declaration form in this profile",
                 .line = 1,
                 .column = 1,
-                .suggestion = "write `structural Name = { ... };`",
+                .suggestion = "write `type Name = { ... };`",
             }},
         },
         .{
@@ -6265,7 +6286,7 @@ test "CHECK refuses text left after a parenthesized type" {
 
 test "CHECK refuses an empty parenthesized type as an alias body" {
     const source =
-        "structural Empty<T> = ();\n" ++
+        "type Empty<T> = ();\n" ++
         "const bare: Empty = \"x\";\n" ++
         "const applied: Empty<string> = \"x\";\n" ++
         "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
@@ -6279,7 +6300,7 @@ test "CHECK refuses an empty parenthesized type as an alias body" {
         .code = "ZTS001",
         .message = "this type syntax is not supported",
         .line = 1,
-        .column = 23,
+        .column = 17,
         .suggestion = "write an admitted type from section 5.7 of the specification",
     });
 }
@@ -6293,28 +6314,28 @@ test "CHECK preserves declaration admission and named type outcomes" {
         stage: FailureStage,
         diagnostic: CompoundDiagnostic,
     }{
-        .{ .name = "root", .source = "structural Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
-        .{ .name = "leading_spaces", .source = "  structural Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 3, .suggestion = null } },
-        .{ .name = "after_newline", .source = "const seed = 1;\n  structural Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 3, .suggestion = null } },
-        .{ .name = "after_semicolon", .source = "const seed = 1; structural Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 17, .suggestion = null } },
-        .{ .name = "nested_left", .source = "function handler(req: Request): Response {\nstructural Alias = number;\nconst value: Alias = \"x\";\nreturn Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "a `structural` or `nominal` declaration is not supported inside a block; declare the type at the top level", .line = 2, .column = 1, .suggestion = null } },
-        .{ .name = "nested_indented", .source = "function handler(req: Request): Response {\n  structural Alias = number;\n  const value: Alias = \"x\";\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "a `structural` or `nominal` declaration is not supported inside a block; declare the type at the top level", .line = 2, .column = 3, .suggestion = null } },
-        .{ .name = "nominal_runtime_collision", .source = "nominal UserId = string;\nfunction UserId(value: string): string {\n  return value;\n}\nfunction handler(req: Request): Response {\n  const value = UserId(\"x\");\n  return Response.text(value);\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS214", .message = "`UserId` is a nominal type, not a constructor", .line = 6, .column = 23, .suggestion = "brand at an annotated declaration: `const x: Name = value;`" } },
-        .{ .name = "structural_runtime_collision", .source = "structural UserId = string;\nfunction UserId(value: string): string {\n  return value;\n}\nfunction handler(req: Request): Response {\n  const value = UserId(\"x\");\n  return Response.json({ value: value, now: Date.now() });\n}\n", .stage = .contract, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 5, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
-        .{ .name = "eager_alias", .source = "structural A = string;\nstructural B = A;\nstructural A = number;\nconst value: B = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 4, .column = 1, .suggestion = null } },
-        .{ .name = "forward_alias", .source = "structural B = A;\nstructural A = string;\nstructural A = number;\nconst value: B = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'A'", .line = 4, .column = 1, .suggestion = null } },
-        .{ .name = "nested_alias_global", .source = "function define(): number {\nstructural A = string;\nreturn 1;\n}\nconst value: A = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "a `structural` or `nominal` declaration is not supported inside a block; declare the type at the top level", .line = 2, .column = 1, .suggestion = null } },
-        .{ .name = "unused_cycle", .source = "structural A = A | number;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .contract, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
-        .{ .name = "used_cycle", .source = "structural A = A | number;\nconst value: A = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS212", .message = "recursive type alias 'A' has a cycle no data constructor guards", .line = 2, .column = 1, .suggestion = "route the recursion through a record, a tuple, or an array, the way `type JsonValue = ... | readonly JsonValue[]` does; a union or intersection edge does not guard it" } },
-        .{ .name = "forward_alias_number", .source = "structural B = A;\nstructural A = string;\nstructural A = number;\nconst value: B = 1;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .contract, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 5, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
-        .{ .name = "suffixed_alias", .source = "structural A = string;\nstructural B = A tolerated_suffix;\nstructural A = number;\nconst value: B = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 18, .suggestion = "write an admitted type from section 5.7 of the specification" } },
-        .{ .name = "primitive_declaration", .source = "structural string = number;\nstructural B = string;\nconst value: B = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS019", .message = "type name `string` is ambient and cannot be declared again", .line = 1, .column = 12, .suggestion = "write a different name" } },
-        .{ .name = "named_arrays", .source = "structural Alias = number;\nstructural Items = string[];\nconst value: Alias[][] = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'Alias[][]'", .line = 3, .column = 1, .suggestion = null } },
-        .{ .name = "grouped_arrays", .source = "structural Alias = number;\nstructural Items = string[];\nconst value: (Alias)[][] = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'Alias[][]'", .line = 3, .column = 1, .suggestion = null } },
-        .{ .name = "readonly_root", .source = "structural Alias = number;\nstructural Items = string[];\nconst value: readonly Items = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'readonly string[]'", .line = 3, .column = 1, .suggestion = null } },
-        .{ .name = "readonly_record", .source = "structural Alias = number;\nstructural Items = string[];\nconst value: { field: readonly Items } = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type '{ field: Readonly<Items> }'", .line = 3, .column = 1, .suggestion = null } },
-        .{ .name = "readonly_tuple", .source = "structural Alias = number;\nstructural Items = string[];\nconst value: [readonly Items] = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type '[Readonly<Items>]'", .line = 3, .column = 1, .suggestion = null } },
-        .{ .name = "readonly_nullable", .source = "structural Alias = number;\nstructural Items = string[];\nconst value: readonly Items | undefined = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'readonly string[] | undefined'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "root", .source = "type Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
+        .{ .name = "leading_spaces", .source = "  type Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 3, .suggestion = null } },
+        .{ .name = "after_newline", .source = "const seed = 1;\n  type Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 3, .suggestion = null } },
+        .{ .name = "after_semicolon", .source = "const seed = 1; type Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 17, .suggestion = null } },
+        .{ .name = "nested_left", .source = "function handler(req: Request): Response {\ntype Alias = number;\nconst value: Alias = \"x\";\nreturn Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "a type declaration is not supported inside a block; declare the type at the top level", .line = 2, .column = 1, .suggestion = null } },
+        .{ .name = "nested_indented", .source = "function handler(req: Request): Response {\n  type Alias = number;\n  const value: Alias = \"x\";\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "a type declaration is not supported inside a block; declare the type at the top level", .line = 2, .column = 3, .suggestion = null } },
+        .{ .name = "nominal_runtime_collision", .source = "import type { Nominal } from \"zttp:core\";\ndeclare const userIdBrand: unique symbol;\ntype UserId = Nominal<string, typeof userIdBrand>;\nfunction UserId(value: string): string {\n  return value;\n}\nfunction handler(req: Request): Response {\n  const value = UserId(\"x\");\n  return Response.text(value);\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS214", .message = "`UserId` is a nominal type, not a constructor", .line = 8, .column = 23, .suggestion = "import `nominal` from `zttp:core` and call `nominal<Name>(value)`" } },
+        .{ .name = "structural_runtime_collision", .source = "type UserId = string;\nfunction UserId(value: string): string {\n  return value;\n}\nfunction handler(req: Request): Response {\n  const value = UserId(\"x\");\n  return Response.json({ value: value, now: Date.now() });\n}\n", .stage = .contract, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 5, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
+        .{ .name = "eager_alias", .source = "type A = string;\ntype B = A;\ntype A = number;\nconst value: B = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 4, .column = 1, .suggestion = null } },
+        .{ .name = "forward_alias", .source = "type B = A;\ntype A = string;\ntype A = number;\nconst value: B = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'A'", .line = 4, .column = 1, .suggestion = null } },
+        .{ .name = "nested_alias_global", .source = "function define(): number {\ntype A = string;\nreturn 1;\n}\nconst value: A = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "a type declaration is not supported inside a block; declare the type at the top level", .line = 2, .column = 1, .suggestion = null } },
+        .{ .name = "unused_cycle", .source = "type A = A | number;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .contract, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
+        .{ .name = "used_cycle", .source = "type A = A | number;\nconst value: A = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS212", .message = "recursive type alias 'A' has a cycle no data constructor guards", .line = 2, .column = 1, .suggestion = "route the recursion through a record, a tuple, or an array, the way `type JsonValue = ... | readonly JsonValue[]` does; a union or intersection edge does not guard it" } },
+        .{ .name = "forward_alias_number", .source = "type B = A;\ntype A = string;\ntype A = number;\nconst value: B = 1;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .contract, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 5, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
+        .{ .name = "suffixed_alias", .source = "type A = string;\ntype B = A tolerated_suffix;\ntype A = number;\nconst value: B = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 12, .suggestion = "write an admitted type from section 5.7 of the specification" } },
+        .{ .name = "primitive_declaration", .source = "type string = number;\ntype B = string;\nconst value: B = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS019", .message = "type name `string` is ambient and cannot be declared again", .line = 1, .column = 6, .suggestion = "write a different name" } },
+        .{ .name = "named_arrays", .source = "type Alias = number;\ntype Items = string[];\nconst value: Alias[][] = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'Alias[][]'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "grouped_arrays", .source = "type Alias = number;\ntype Items = string[];\nconst value: (Alias)[][] = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'Alias[][]'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "readonly_root", .source = "type Alias = number;\ntype Items = string[];\nconst value: readonly Items = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'readonly string[]'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "readonly_record", .source = "type Alias = number;\ntype Items = string[];\nconst value: { field: readonly Items } = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type '{ field: Readonly<Items> }'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "readonly_tuple", .source = "type Alias = number;\ntype Items = string[];\nconst value: [readonly Items] = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type '[Readonly<Items>]'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "readonly_nullable", .source = "type Alias = number;\ntype Items = string[];\nconst value: readonly Items | undefined = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'readonly string[] | undefined'", .line = 3, .column = 1, .suggestion = null } },
     };
     const types_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
     const full_stages = StageSet.initMany(&.{
@@ -6364,10 +6385,10 @@ test "CHECK preserves declaration suffix refusals and empty bodies" {
         strip_refusal: bool,
         diagnostic: CompoundDiagnostic,
     }{
-        .{ .source = "structural Alias = number any;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, a record type) or union types instead" } },
-        .{ .source = "structural Alias = number void;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 27, .suggestion = "write `undefined`" } },
-        .{ .source = "structural Alias = number Array<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS058", .message = "`Array<T>` is not a type spelling in this profile", .line = 1, .column = 27, .suggestion = "write `T[]`" } },
-        .{ .source = "structural Alias = number ReadonlyArray<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS059", .message = "`ReadonlyArray<T>` is not a type spelling in this profile", .line = 1, .column = 27, .suggestion = "write `readonly T[]`" } },
+        .{ .source = "type Alias = number any;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 21, .suggestion = "use specific types (string, number, a record type) or union types instead" } },
+        .{ .source = "type Alias = number void;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 21, .suggestion = "write `undefined`" } },
+        .{ .source = "type Alias = number Array<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS058", .message = "`Array<T>` is not a type spelling in this profile", .line = 1, .column = 21, .suggestion = "write `T[]`" } },
+        .{ .source = "type Alias = number ReadonlyArray<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS059", .message = "`ReadonlyArray<T>` is not a type spelling in this profile", .line = 1, .column = 21, .suggestion = "write `readonly T[]`" } },
     };
     const full_stages = StageSet.initMany(&.{
         .strip, .parse,    .imports, .boolean, .types, .strict,    .verifier,
@@ -6398,9 +6419,9 @@ test "CHECK preserves declaration suffix refusals and empty bodies" {
     try std.testing.expectEqual(cases.len, observed);
 }
 
-test "CHECK refuses an empty structural declaration body" {
+test "CHECK refuses an empty type alias body" {
     const source =
-        "structural Alias = ;\n" ++
+        "type Alias = ;\n" ++
         "function handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n";
     var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
         .json_mode = true,
@@ -6415,7 +6436,7 @@ test "CHECK refuses an empty structural declaration body" {
         .code = "ZTS001",
         .message = "this type syntax is not supported",
         .line = 1,
-        .column = 20,
+        .column = 14,
         .suggestion = "write an admitted type from section 5.7 of the specification",
     });
     try std.testing.expect(result.contract == null);
@@ -6436,8 +6457,8 @@ test "CHECK preserves nominal refusals and keyword alias names" {
         .{ .source = "nominal Bad = ;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
         .{ .source = "nominal Bad;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 12, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
         .{ .source = "nominal Bad   ;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
-        .{ .source = "structural true = number;\nconst value: true = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
-        .{ .source = "structural function = number;\nconst value: function = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
+        .{ .source = "type true = number;\nconst value: true = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
+        .{ .source = "type function = number;\nconst value: function = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
     };
     var observed: usize = 0;
     for (cases) |case| {
@@ -6749,10 +6770,10 @@ test "CHECK retains distinct nominal any and scalar refusal positions" {
 test "CHECK admits declaration literals and blank-line continuations" {
     const allocator = std.testing.allocator;
     const cases = [_]struct { source: []const u8, message: []const u8, line: u32 }{
-        .{ .source = "structural N = 1;\nconst value: N = 2;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .message = "type '2' is not assignable to type '1'", .line = 2 },
-        .{ .source = "structural U = | number | string;\nconst value: U = true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .message = "type 'true' is not assignable to type 'number | string'", .line = 2 },
-        .{ .source = "structural A = number |\n\nstring;\nconst value: A = true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .message = "type 'true' is not assignable to type 'number | string'", .line = 4 },
-        .{ .source = "structural A = { id: number } &\n\n{ tag: string };\nconst value: A = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .message = "type '1' is not assignable to type '{ id: number } & { tag: string }'", .line = 4 },
+        .{ .source = "type N = 1;\nconst value: N = 2;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .message = "type '2' is not assignable to type '1'", .line = 2 },
+        .{ .source = "type U = | number | string;\nconst value: U = true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .message = "type 'true' is not assignable to type 'number | string'", .line = 2 },
+        .{ .source = "type A = number |\n\nstring;\nconst value: A = true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .message = "type 'true' is not assignable to type 'number | string'", .line = 4 },
+        .{ .source = "type A = { id: number } &\n\n{ tag: string };\nconst value: A = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .message = "type '1' is not assignable to type '{ id: number } & { tag: string }'", .line = 4 },
     };
     var observed: usize = 0;
     for (cases) |case| {
@@ -6786,7 +6807,7 @@ test "CHECK preserves comment gaps around type declarations" {
     }{
         .{ .source = "structural /*c*/ A = number;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 1, .suggestion = null } },
         .{ .source = "structural A /*c*/ = number;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 20, .suggestion = null } },
-        .{ .source = "structural A = number\n/*c*/;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .diagnostic = .{ .code = "ZTS001", .message = "empty statements are not supported", .line = 2, .column = 6, .suggestion = "remove the standalone `;`" } },
+        .{ .source = "type A = number\n/*c*/;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .diagnostic = .{ .code = "ZTS001", .message = "empty statements are not supported", .line = 2, .column = 6, .suggestion = "remove the standalone `;`" } },
     };
     for (cases) |case| {
         var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{ .json_mode = true });
@@ -6812,50 +6833,50 @@ test "CHECK preserves generic admission and projection outcomes" {
     }{
         .{ .name = "adjacent_function", .source = "function id<T>(x: T): T { return x; }\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "spaced_function", .source = "function id <T>(x: T): T { return x; }\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 18, .suggestion = "')'" }} },
-        .{ .name = "spaced_alias", .source = "structural Box <T> = { value: T };\nconst probe: Box<string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: string }'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "spaced_alias", .source = "type Box <T> = { value: T };\nconst probe: Box<string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: string }'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "function_default", .source = "function make<T = string>(x: T): T { return x; }\nconst probe: number = make(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "a generic default is not supported", .line = 1, .column = 17, .suggestion = "remove the default and pass the type argument at each use" }} },
         .{ .name = "eight_parameters", .source = "function f<A,B,C,D,E,F,G,H>(x: H): H { return x; }\nconst probe: number = f<string,string,string,string,string,string,string,string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "nine_parameters_eight_arguments", .source = "function f<A,B,C,D,E,F,G,H,I>(x: I): I { return x; }\nconst probe: number = f<string,string,string,string,string,string,string,string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS028", .message = "a generic declaration has at most eight type parameters", .line = 1, .column = 28, .suggestion = "remove a type parameter" }} },
         .{ .name = "nine_parameters_nine_arguments", .source = "function f<A,B,C,D,E,F,G,H,I>(x: I): I { return x; }\nconst probe: number = f<string,string,string,string,string,string,string,string,string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS028", .message = "a generic declaration has at most eight type parameters", .line = 1, .column = 28, .suggestion = "remove a type parameter" }} },
-        .{ .name = "nine_alias_parameters", .source = "structural N<A,B,C,D,E,F,G,H,I> = I;\nconst probe: N<string,string,string,string,string,string,string,string,number> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS028", .message = "a generic declaration has at most eight type parameters", .line = 1, .column = 30, .suggestion = "remove a type parameter" }} },
-        .{ .name = "nongeneric_then_generic", .source = "structural Box = number;\nstructural Box<T> = T;\nconst bare: Box = \"x\";\nconst applied: Box<string> = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null }, .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 4, .column = 1, .suggestion = null } } },
-        .{ .name = "generic_then_nongeneric", .source = "structural Box<T> = T;\nstructural Box = number;\nconst bare: Box = \"x\";\nconst applied: Box<string> = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null }, .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 4, .column = 1, .suggestion = null } } },
-        .{ .name = "alias_before_parameter", .source = "structural T = number;\nfunction f<T>(x: T): T { return x; }\nconst probe: string = f(1);\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS208", .message = "no argument determines type parameter 'T'", .line = 3, .column = 24, .suggestion = "Name the type argument at the call site." }, .{ .code = "ZTS200", .message = "type 'number' is not assignable to type 'string'", .line = 3, .column = 1, .suggestion = null } } },
+        .{ .name = "nine_alias_parameters", .source = "type N<A,B,C,D,E,F,G,H,I> = I;\nconst probe: N<string,string,string,string,string,string,string,string,number> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS028", .message = "a generic declaration has at most eight type parameters", .line = 1, .column = 24, .suggestion = "remove a type parameter" }} },
+        .{ .name = "nongeneric_then_generic", .source = "type Box = number;\ntype Box<T> = T;\nconst bare: Box = \"x\";\nconst applied: Box<string> = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null }, .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 4, .column = 1, .suggestion = null } } },
+        .{ .name = "generic_then_nongeneric", .source = "type Box<T> = T;\ntype Box = number;\nconst bare: Box = \"x\";\nconst applied: Box<string> = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null }, .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 4, .column = 1, .suggestion = null } } },
+        .{ .name = "alias_before_parameter", .source = "type T = number;\nfunction f<T>(x: T): T { return x; }\nconst probe: string = f(1);\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS208", .message = "no argument determines type parameter 'T'", .line = 3, .column = 24, .suggestion = "Name the type argument at the call site." }, .{ .code = "ZTS200", .message = "type 'number' is not assignable to type 'string'", .line = 3, .column = 1, .suggestion = null } } },
         .{ .name = "duplicate_parameters", .source = "function f<T,T>(x: T): T { return x; }\nconst probe: string = f(1);\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS018", .message = "this type parameter name is already declared", .line = 1, .column = 14, .suggestion = "Write a different name." }} },
-        .{ .name = "repeated_generic_alias", .source = "structural Box<T> = { value: T };\nstructural Box<T> = T;\nconst probe: Box<string> = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 3, .column = 1, .suggestion = null }} },
-        .{ .name = "repeated_nongeneric_alias", .source = "structural Box = string;\nstructural Box = number;\nconst probe: Box = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null }} },
-        .{ .name = "application_array", .source = "structural Box<T> = { value: T };\nconst probe: Box<string>[] = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Box<string>[]'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "grouped_application_array", .source = "structural Box<T> = { value: T };\nconst probe: (Box<string>)[] = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Box<string>[]'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "nested_application", .source = "structural Box<T> = { value: T };\nconst probe: Box<Box<string>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: { value: string } }'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "readonly_application", .source = "structural Box<T> = { value: T };\nconst probe: Readonly<Box<string>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Readonly` is not declared", .line = 2, .column = 14, .suggestion = "write the type itself, or `readonly T[]` for an array" }} },
-        .{ .name = "union_application", .source = "structural Box<T> = { value: T };\nconst probe: Box<string> | number = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: string } | number'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "record_application", .source = "structural Box<T> = { value: T };\nconst probe: { field: Box<string> } = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ field: Box<string> }'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "tuple_application", .source = "structural Box<T> = { value: T };\nconst probe: [Box<string>] = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '[Box<string>]'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "repeated_generic_alias", .source = "type Box<T> = { value: T };\ntype Box<T> = T;\nconst probe: Box<string> = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 3, .column = 1, .suggestion = null }} },
+        .{ .name = "repeated_nongeneric_alias", .source = "type Box = string;\ntype Box = number;\nconst probe: Box = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null }} },
+        .{ .name = "application_array", .source = "type Box<T> = { value: T };\nconst probe: Box<string>[] = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Box<string>[]'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "grouped_application_array", .source = "type Box<T> = { value: T };\nconst probe: (Box<string>)[] = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Box<string>[]'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "nested_application", .source = "type Box<T> = { value: T };\nconst probe: Box<Box<string>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: { value: string } }'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "readonly_application", .source = "type Box<T> = { value: T };\nconst probe: Readonly<Box<string>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Readonly` is not declared", .line = 2, .column = 14, .suggestion = "write the type itself, or `readonly T[]` for an array" }} },
+        .{ .name = "union_application", .source = "type Box<T> = { value: T };\nconst probe: Box<string> | number = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: string } | number'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "record_application", .source = "type Box<T> = { value: T };\nconst probe: { field: Box<string> } = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ field: Box<string> }'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "tuple_application", .source = "type Box<T> = { value: T };\nconst probe: [Box<string>] = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '[Box<string>]'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "adjacent_call", .source = "function id<T>(x: T): T { return x; }\nconst probe: number = id<string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "spaced_call", .source = "function id<T>(x: T): T { return x; }\nconst probe: number = id<string> (\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'boolean' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "comparison_control", .source = "const cond = true;\nconst left = 1;\nconst right = 2;\nconst value = cond ? left < right : right > left;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .contract, .diagnostics = &.{.{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 5, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." }} },
         .{ .name = "shift_control", .source = "const value = 8 >> 1;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "bitwise operators are not supported", .line = 1, .column = 17, .suggestion = "use arithmetic or a comparison" }} },
         .{ .name = "comparison_shift_control", .source = "const a = 1;\nconst b = 2;\nconst c = 1;\nconst value = a < b >> c;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "bitwise operators are not supported", .line = 4, .column = 21, .suggestion = "use arithmetic or a comparison" }} },
         .{ .name = "comparison_unsigned_shift_control", .source = "const a = 1;\nconst b = 2;\nconst c = 1;\nconst value = a < b >>> c;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "bitwise operators are not supported", .line = 4, .column = 21, .suggestion = "use arithmetic or a comparison" }} },
-        .{ .name = "triple_closer", .source = "structural Box<T> = { value: T };\nconst probe: Box<Box<Box<string>>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: { value: { value: string } } }'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "application_missing_comma", .source = "structural Box<T> = { value: T };\nconst probe: Box<string number> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 25, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
-        .{ .name = "application_missing_close", .source = "structural Box<T> = { value: T };\nconst probe: Box<string = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{ .{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 25, .suggestion = "write an admitted type from section 5.7 of the specification" }, .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 6, .column = 1, .suggestion = null }, .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 7, .suggestion = null } } },
+        .{ .name = "triple_closer", .source = "type Box<T> = { value: T };\nconst probe: Box<Box<Box<string>>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: { value: { value: string } } }'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "application_missing_comma", .source = "type Box<T> = { value: T };\nconst probe: Box<string number> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 25, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
+        .{ .name = "application_missing_close", .source = "type Box<T> = { value: T };\nconst probe: Box<string = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{ .{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 25, .suggestion = "write an admitted type from section 5.7 of the specification" }, .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 6, .column = 1, .suggestion = null }, .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 7, .suggestion = null } } },
         .{ .name = "call_missing_comma", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<string number>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 33, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
         .{ .name = "call_missing_close", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<string(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'boolean' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "user_alias_too_few", .source = "structural Duo<A,B> = { first: A; second: B };\nconst probe: Duo<string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Duo<string>'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "user_alias_too_many", .source = "structural Duo<A,B> = { first: A; second: B };\nconst probe: Duo<string,number,boolean> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Duo<string, number, boolean>'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "partial_surplus", .source = "structural User = { id: number };\nconst probe: Partial<User,string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Partial` is not declared", .line = 2, .column = 14, .suggestion = "declare the record type with `structural`" }} },
-        .{ .name = "partial_missing", .source = "structural User = { id: number };\nconst probe: Partial<> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Partial` is not declared", .line = 2, .column = 14, .suggestion = "declare the record type with `structural`" }} },
+        .{ .name = "user_alias_too_few", .source = "type Duo<A,B> = { first: A; second: B };\nconst probe: Duo<string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Duo<string>'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "user_alias_too_many", .source = "type Duo<A,B> = { first: A; second: B };\nconst probe: Duo<string,number,boolean> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Duo<string, number, boolean>'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "partial_surplus", .source = "type User = { id: number };\nconst probe: Partial<User,string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Partial` is not declared", .line = 2, .column = 14, .suggestion = "declare the record type with `structural`" }} },
+        .{ .name = "partial_missing", .source = "type User = { id: number };\nconst probe: Partial<> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Partial` is not declared", .line = 2, .column = 14, .suggestion = "declare the record type with `structural`" }} },
         .{ .name = "dict_one", .source = "const probe: Dict<string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Dict<string>'", .line = 1, .column = 1, .suggestion = null }} },
         .{ .name = "dict_three", .source = "const probe: Dict<string,number,boolean> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Dict<string, number, boolean>'", .line = 1, .column = 1, .suggestion = null }} },
-        .{ .name = "proof_replacement", .source = "structural Proof<T,P> = T;\nconst probe: Proof<number,\"pure\"> = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS019", .message = "type name `Proof` is ambient and cannot be declared again", .line = 1, .column = 12, .suggestion = "write a different name" }} },
-        .{ .name = "effects_replacement", .source = "structural Effects<T,E> = T;\nconst probe: Effects<number,\"env\"> = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS019", .message = "type name `Effects` is ambient and cannot be declared again", .line = 1, .column = 12, .suggestion = "write a different name" }} },
+        .{ .name = "proof_replacement", .source = "type Proof<T,P> = T;\nconst probe: Proof<number,\"pure\"> = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS019", .message = "type name `Proof` is ambient and cannot be declared again", .line = 1, .column = 6, .suggestion = "write a different name" }} },
+        .{ .name = "effects_replacement", .source = "type Effects<T,E> = T;\nconst probe: Effects<number,\"env\"> = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS019", .message = "type name `Effects` is ambient and cannot be declared again", .line = 1, .column = 6, .suggestion = "write a different name" }} },
         .{ .name = "forward_constraint", .source = "function f<T,U extends T>(a: T,b: U): U { return b; }\nconst probe: string = f(1,2);\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS209", .message = "type argument 2 for 'U' does not satisfy constraint T", .line = 2, .column = 24, .suggestion = null }, .{ .code = "ZTS200", .message = "type 'U' is not assignable to type 'string'", .line = 2, .column = 1, .suggestion = null } } },
         .{ .name = "nested_comma_constraint", .source = "function f<T extends Dict<string,number>>(value: T): T { return value; }\nconst probe: number = f({ id: \"x\" });\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS209", .message = "type argument { id: \"x\" } for 'T' does not satisfy constraint Dict<string, number>", .line = 2, .column = 24, .suggestion = null }, .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
         .{ .name = "removed_constraint", .source = "function f<T extends any>(value: T): T { return value; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `any` is not declared", .line = 1, .column = 22, .suggestion = "write `unknown` and narrow it, or write a precise type" }} },
         .{ .name = "removed_call_argument", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<any>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `any` is not declared", .line = 2, .column = 26, .suggestion = "write `unknown` and narrow it, or write a precise type" }} },
         .{ .name = "unclosed_function_angles", .source = "function f<T(value: T): T { return value; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 11, .suggestion = "'('" }} },
-        .{ .name = "utility_collision", .source = "structural Partial<T> = number;\nstructural User = { id: string };\nconst probe: Partial<User> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ id?: string }'", .line = 3, .column = 1, .suggestion = null }} },
+        .{ .name = "utility_collision", .source = "type Partial<T> = number;\ntype User = { id: string };\nconst probe: Partial<User> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ id?: string }'", .line = 3, .column = 1, .suggestion = null }} },
         .{ .name = "void_constraint", .source = "function f<T extends void>(value: T): T { return value; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strip, .diagnostics = &.{.{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 22, .suggestion = "write `undefined`" }} },
         .{ .name = "array_call_argument", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<Array<string>>(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strip, .diagnostics = &.{.{ .code = "ZTS058", .message = "`Array<T>` is not a type spelling in this profile", .line = 2, .column = 26, .suggestion = "write `T[]`" }} },
         .{ .name = "quoted_comma_one_call", .source = "function f<T>(x: T): T { return x; }\nconst probe: number = f<\"a,b\">(\"a\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected \"a,b\", got \"a\"", .line = 2, .column = 32, .suggestion = null }, .{ .code = "ZTS200", .message = "type '\"a,b\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
@@ -6869,11 +6890,11 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "name32_array", .source = "function f<TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT>(x: TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT[]): TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT[] { return x; }\nconst probe: number[] = f([\"x\"]);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string[]' is not assignable to type 'number[]'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "name33_array", .source = "function f<TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT>(x: TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT[]): TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT[] { return x; }\nconst probe: number[] = f([\"x\"]);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string[]' is not assignable to type 'number[]'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "constraint_control", .source = "function f<T extends number>(x: T): T { return x; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS209", .message = "type argument \"x\" for 'T' does not satisfy constraint number", .line = 2, .column = 24, .suggestion = null }, .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
-        .{ .name = "empty_alias_parameters", .source = "structural Box<> = number;\nconst bare: Box = \"x\";\nconst applied: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'Box'", .line = 2, .column = 1, .suggestion = null }, .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null } } },
-        .{ .name = "empty_generic_alias_body", .source = "structural Box<> = ;\nconst bare: Box = \"x\";\nconst applied: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 1, .column = 20, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
-        .{ .name = "undeclared_name", .source = "function g(a: Widget): number { return 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Widget` is not declared", .line = 1, .column = 15, .suggestion = "declare it with `structural`, import it, or use a type name from `meta` ambient_names" }} },
+        .{ .name = "empty_alias_parameters", .source = "type Box<> = number;\nconst bare: Box = \"x\";\nconst applied: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'Box'", .line = 2, .column = 1, .suggestion = null }, .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null } } },
+        .{ .name = "empty_generic_alias_body", .source = "type Box<> = ;\nconst bare: Box = \"x\";\nconst applied: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 1, .column = 14, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
+        .{ .name = "undeclared_name", .source = "function g(a: Widget): number { return 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Widget` is not declared", .line = 1, .column = 15, .suggestion = "declare it with `type`, import it, or use a type name from `meta` ambient_names" }} },
         .{ .name = "undeclared_record", .source = "function g(a: Record<string, number>): number { return 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Record` is not declared", .line = 1, .column = 15, .suggestion = "write `Dict<K, V>`" }} },
-        .{ .name = "undeclared_readonly", .source = "structural U = { id: number };\nfunction g(a: Readonly<U>): number { return 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Readonly` is not declared", .line = 2, .column = 15, .suggestion = "write the type itself, or `readonly T[]` for an array" }} },
+        .{ .name = "undeclared_readonly", .source = "type U = { id: number };\nfunction g(a: Readonly<U>): number { return 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Readonly` is not declared", .line = 2, .column = 15, .suggestion = "write the type itself, or `readonly T[]` for an array" }} },
         .{ .name = "undeclared_bigint", .source = "function g(a: bigint): number { return 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `bigint` is not declared", .line = 1, .column = 15, .suggestion = "write `number`" }} },
         .{ .name = "readonly_inline_record", .source = "const probe: { field: Readonly<{ id: number }> } = undefined;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Readonly` is not declared", .line = 1, .column = 23, .suggestion = "write the type itself, or `readonly T[]` for an array" }} },
         .{ .name = "readonly_inline_tuple", .source = "const probe: [Readonly<{ id: number }>] = undefined;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Readonly` is not declared", .line = 1, .column = 15, .suggestion = "write the type itself, or `readonly T[]` for an array" }} },
@@ -6931,12 +6952,12 @@ test "CHECK preserves generic admission and projection outcomes" {
 
 test "CHECK preserves ignored generic syntax and raw semantic projection" {
     const cases = [_][]const u8{
-        "structural Box<T>=T;\nconst value: Box<number> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-        "structural Box<T> = T;\nconst value: Box<number>=\"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-        "structural Box<T extends { value: Missing < }> = number;\nconst value: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-        "structural Box<T extends Wrap<{ value: Missing < }, string>> = number;\nconst value: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-        "structural Box<T extends Dict<string, number>> = number;\nconst value: Box<Dict<string, number>> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-        "structural Box<T extends \"a=b\"> = number;\nconst value: Box<\"a=b\"> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "type Box<T>=T;\nconst value: Box<number> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "type Box<T> = T;\nconst value: Box<number>=\"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "type Box<T extends { value: Missing < }> = number;\nconst value: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "type Box<T extends Wrap<{ value: Missing < }, string>> = number;\nconst value: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "type Box<T extends Dict<string, number>> = number;\nconst value: Box<Dict<string, number>> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "type Box<T extends \"a=b\"> = number;\nconst value: Box<\"a=b\"> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
     };
     const stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
     var observed: usize = 0;
@@ -6966,7 +6987,7 @@ test "CHECK preserves ignored generic syntax and raw semantic projection" {
 
 test "CHECK preserves a caught generic string diagnostic" {
     const source =
-        "structural Box<T = (\"x\n)> = number;\n" ++
+        "type Box<T = (\"x\n)> = number;\n" ++
         "const value: Box<string> = \"x\";\n" ++
         "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
     var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
@@ -6983,14 +7004,14 @@ test "CHECK preserves a caught generic string diagnostic" {
         .code = "ZTS008",
         .message = "unterminated string literal",
         .line = 1,
-        .column = 23,
+        .column = 17,
         .suggestion = "close the quote, or write the newline as \\n",
     });
 }
 
 test "CHECK preserves the any suffix refusal in a generic alias name" {
     const source =
-        "structural Many<A,B,C,D,E,F,G,H> = H;\n" ++
+        "type Many<A,B,C,D,E,F,G,H> = H;\n" ++
         "const value: Many<string,string,string,string,string,string,string,number> = undefined;\n";
     var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
         .json_mode = true,
@@ -7077,14 +7098,14 @@ test "CHECK classifies predicate targets and quoted return types" {
     try std.testing.expectEqual(@as(usize, 3), cases.len);
 }
 
-test "CHECK preserves nominal declarations with ignored generic lists" {
+test "CHECK refuses legacy nominal declarations with generic lists" {
     const allocator = std.testing.allocator;
     const cases = [_]struct {
         source: []const u8,
         strip_refusal: bool,
         diagnostic: CompoundDiagnostic,
     }{
-        .{ .source = "nominal Id<T> = string;\nconst value: Id = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'Id'", .line = 2, .column = 1, .suggestion = null } },
+        .{ .source = "nominal Id<T> = string;\nconst value: Id = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS001", .message = "`nominal` declarations are no longer supported", .line = 1, .column = 1, .suggestion = "import `Nominal` from `zttp:core` and write `declare const brand: unique symbol;` and `type Name = Nominal<Base, typeof brand>;`" } },
         .{ .source = "nominal Id<T> = T;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 17, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
     };
     for (cases) |case| {
@@ -7339,7 +7360,7 @@ test "CHECK preserves type-only module admission and refusal diagnostics" {
     const FailureStage = enum { strip, parse, contract };
     const proof_diagnostic: CompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." };
     const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostic: CompoundDiagnostic }{
-        .{ .source = "import type { A } from \"./a\";\nexport type { B }\nexport structural Shape = { value: string };\nexport nominal Id = string;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 6, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "import type { A } from \"./a\";\nimport type { Nominal } from \"zttp:core\";\nexport type { B }\nexport type Shape = { value: string };\nexport declare const idBrand: unique symbol;\nexport type Id = Nominal<string, typeof idBrand>;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 8, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
         .{ .source = "function helper(): number { import type { A } from \"./a\"; return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 29, .suggestion = null } },
         .{ .source = "function helper(): number { export type { A }; return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 29, .suggestion = null } },
         .{ .source = "function helper(): number { if (true) { import type { A } from \"./a\"; const live = 1; } return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 41, .suggestion = null } },
@@ -7723,7 +7744,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
         .message = "`interface` is not a declaration form in this profile",
         .line = 1,
         .column = 1,
-        .suggestion = "write `structural Name = { ... };`",
+        .suggestion = "write `type Name = { ... };`",
     };
     const default_diagnostic: CompoundDiagnostic = .{
         .code = "ZTS054",
@@ -8193,7 +8214,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 21, .suggestion = "use specific types (string, number, a record type) or union types instead" },
-                .{ .code = "ZTS049", .message = "`interface` is not a declaration form in this profile", .line = 1, .column = 1, .suggestion = "write `structural Name = { ... };`" },
+                .{ .code = "ZTS049", .message = "`interface` is not a declaration form in this profile", .line = 1, .column = 1, .suggestion = "write `type Name = { ... };`" },
             },
         },
         .{
@@ -8313,7 +8334,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 28, .suggestion = "use specific types (string, number, a record type) or union types instead" },
-                .{ .code = "ZTS049", .message = "`interface` is not a declaration form in this profile", .line = 1, .column = 1, .suggestion = "write `structural Name = { ... };`" },
+                .{ .code = "ZTS049", .message = "`interface` is not a declaration form in this profile", .line = 1, .column = 1, .suggestion = "write `type Name = { ... };`" },
             },
         },
         .{
@@ -8523,33 +8544,25 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
     }
 }
 
-test "CHECK preserves absent structural aliases at comment boundaries" {
-    const cases = [_]struct {
-        source: []const u8,
-        diagnostics: []const CompoundDiagnostic,
-    }{
-        .{ .source = "structural X/* c */\nfunction handler(req: Request): Proof<Response, \"pure\"> { return Response.text(\"ok\"); }\n", .diagnostics = &.{} },
-        .{ .source = "structural X/* c */\nfunction handler(req: Request): Proof<Response, \"pure\"> { const x: X = 1; return Response.text(\"ok\"); }\n", .diagnostics = &.{
-            .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'X'", .line = 2, .column = 59 },
-        } },
-        .{ .source = "structural X<T>/* c */\nfunction handler(req: Request): Proof<Response, \"pure\"> { const x: X<number> = 1; return Response.text(\"ok\"); }\n", .diagnostics = &.{
-            .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'X<number>'", .line = 2, .column = 59 },
-        } },
-        .{ .source = "structural X\r /* c */\nfunction handler(req: Request): Proof<Response, \"pure\"> { return Response.text(\"ok\"); }\n", .diagnostics = &.{} },
+test "CHECK refuses absent legacy aliases at comment boundaries" {
+    const cases = [_][]const u8{
+        "structural X/* c */\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "structural X<T>/* c */\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "structural X\r /* c */\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
     };
-    try std.testing.expectEqual(@as(usize, 4), cases.len);
-    for (cases) |case| {
-        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{ .json_mode = true });
+    for (cases) |source| {
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{ .json_mode = true });
         defer result.deinit(std.testing.allocator);
-        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
-        try std.testing.expect(result.stages_run.contains(.types));
-        try std.testing.expectEqual(@as(u32, @intCast(case.diagnostics.len)), result.type_errors);
-        try std.testing.expectEqual(result.type_errors, result.totalErrors());
-        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
-        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectCompoundDiagnostic(actual, expected);
-        }
-        try std.testing.expectEqual(case.diagnostics.len == 0, result.contract != null);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
+            .code = "ZTS001",
+            .message = "`structural` declarations are no longer supported",
+            .line = 1,
+            .column = 1,
+            .suggestion = "write `type Name = ...;`",
+        });
+        try std.testing.expect(result.contract == null);
     }
 }
 
@@ -8632,10 +8645,10 @@ test "CHECK observes every admission kind after the measured recovery divergence
             .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 2, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" },
         } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\ninterface Box { value: string }\n", .kind = .interface_declaration, .diagnostics = &.{
-            .{ .code = "ZTS049", .message = "`interface` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "write `structural Name = { ... };`" },
+            .{ .code = "ZTS049", .message = "`interface` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "write `type Name = { ... };`" },
         } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\ndistinct type Box = string;\n", .kind = .distinct_type_declaration, .diagnostics = &.{
-            .{ .code = "ZTS051", .message = "`distinct type` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "write `nominal Name = string;`" },
+            .{ .code = "ZTS051", .message = "`distinct type` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "import `Nominal` from `zttp:core` and write `declare const brand: unique symbol;` and `type Name = Nominal<string, typeof brand>;`" },
         } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\nimport type { Value } from 'zttp:types';\n", .kind = .retired_types_import, .diagnostics = &.{
             .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 2, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" },
@@ -8652,21 +8665,33 @@ test "CHECK observes every admission kind after the measured recovery divergence
         .{ .source = "import type { A } /* ; */ from \"./a\";\nexport let value = 1;\n", .kind = .mutable_export, .diagnostics = &.{
             .{ .code = "ZTS057", .message = "mutable exports are not part of this profile", .line = 2, .column = 1, .suggestion = "use `export const` for module values and keep reassignment inside a function activation" },
         } },
-        .{ .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = Array<string>;\n", .kind = .array_type_alias, .diagnostics = &.{
-            .{ .code = "ZTS058", .message = "`Array<T>` is not a type spelling in this profile", .line = 2, .column = 18, .suggestion = "write `T[]`" },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\ntype Box = Array<string>;\n", .kind = .array_type_alias, .diagnostics = &.{
+            .{ .code = "ZTS058", .message = "`Array<T>` is not a type spelling in this profile", .line = 2, .column = 12, .suggestion = "write `T[]`" },
         } },
-        .{ .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = ReadonlyArray<string>;\n", .kind = .readonly_array_type_alias, .diagnostics = &.{
-            .{ .code = "ZTS059", .message = "`ReadonlyArray<T>` is not a type spelling in this profile", .line = 2, .column = 18, .suggestion = "write `readonly T[]`" },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\ntype Box = ReadonlyArray<string>;\n", .kind = .readonly_array_type_alias, .diagnostics = &.{
+            .{ .code = "ZTS059", .message = "`ReadonlyArray<T>` is not a type spelling in this profile", .line = 2, .column = 12, .suggestion = "write `readonly T[]`" },
         } },
-        .{ .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = void;\n", .kind = .void_type, .diagnostics = &.{
-            .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 2, .column = 18, .suggestion = "write `undefined`" },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\ntype Box = void;\n", .kind = .void_type, .diagnostics = &.{
+            .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 2, .column = 12, .suggestion = "write `undefined`" },
         } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\nconst value: {{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{ string;\n", .kind = .nesting_too_deep, .diagnostics = &.{
             .{ .code = "ZTS044", .message = "type syntax nests too deeply", .line = 2, .column = 526, .suggestion = "simplify or split it (nesting limit is 512)" },
         } },
+        .{ .source = "structural T = string;", .kind = .legacy_structural_declaration, .diagnostics = &.{
+            .{ .code = "ZTS001", .message = "`structural` declarations are no longer supported", .line = 1, .column = 1, .suggestion = "write `type Name = ...;`" },
+        } },
+        .{ .source = "nominal T = string;", .kind = .legacy_nominal_declaration, .diagnostics = &.{
+            .{ .code = "ZTS001", .message = "`nominal` declarations are no longer supported", .line = 1, .column = 1, .suggestion = "import `Nominal` from `zttp:core` and write `declare const brand: unique symbol;` and `type Name = Nominal<Base, typeof brand>;`" },
+        } },
+        .{ .source = "function f(x: number): number { return match (x) { default: 0 }; }", .kind = .legacy_match_expression, .diagnostics = &.{
+            .{ .code = "ZTS001", .message = "brace `match` is no longer supported", .line = 1, .column = 40, .suggestion = "import `match` from `zttp:core` and use `match(value).with(pattern, callback).exhaustive()` or end with `.otherwise(callback)`" },
+        } },
+        .{ .source = "function f(x: boolean): number { assert x; return 0; }", .kind = .legacy_assert_statement, .diagnostics = &.{
+            .{ .code = "ZTS001", .message = "the `assert` statement is no longer supported", .line = 1, .column = 34, .suggestion = "import `assert` from `zttp:core` and write `assert(predicate);`" },
+        } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\n/* unfinished\n", .kind = null, .diagnostics = &.{} },
     };
-    try std.testing.expectEqual(@as(usize, 17), cases.len);
+    try std.testing.expectEqual(@as(usize, 21), cases.len);
     try std.testing.expectEqual(@typeInfo(Kind).@"enum".field_names.len + 1, cases.len);
     var seen = std.EnumSet(Kind).empty;
     var location_free: usize = 0;
@@ -8773,8 +8798,8 @@ test "CHECK refuses termination claims when a function value recurses without en
     const probes = [_]TerminationProbe{
         // A returned or stored value.
         .{ .name = "p2g", .total_refused = true, .source =
-        \\structural Fn = (n: number) => number;
-        \\structural Ops = { a: Fn };
+        \\type Fn = (n: number) => number;
+        \\type Ops = { a: Fn };
         \\function wrap(o: Ops): Ops {
         \\  return o;
         \\}
@@ -8796,7 +8821,7 @@ test "CHECK refuses termination claims when a function value recurses without en
         },
         // A callback.
         .{ .name = "r1", .total_refused = true, .source =
-        \\structural Fn = (n: number) => number;
+        \\type Fn = (n: number) => number;
         \\function apply(f: Fn, n: number): number {
         \\  return f(n);
         \\}
@@ -8816,7 +8841,7 @@ test "CHECK refuses termination claims when a function value recurses without en
         \\}
         },
         .{ .name = "r6", .total_refused = true, .source =
-        \\structural Step = (n: number, self: Step) => number;
+        \\type Step = (n: number, self: Step) => number;
         \\function down(n: number, self: Step): Proof<number, "total"> {
         \\  return self(n, self);
         \\}
@@ -8826,7 +8851,7 @@ test "CHECK refuses termination claims when a function value recurses without en
         },
         // A holder.
         .{ .name = "p2c", .total_refused = true, .source =
-        \\structural Ops = { a: (n: number) => number };
+        \\type Ops = { a: (n: number) => number };
         \\function down(n: number): Proof<number, "total"> {
         \\  const ops: Ops = { a: down };
         \\  return ops.a(n);
@@ -8837,8 +8862,8 @@ test "CHECK refuses termination claims when a function value recurses without en
         },
         // Local or module state.
         .{ .name = "f3", .total_refused = false, .source =
-        \\structural Fn = (n: number) => number;
-        \\structural Slot = { f: Fn };
+        \\type Fn = (n: number) => number;
+        \\type Slot = { f: Fn };
         \\function inc(x: number): number {
         \\  return x + 1;
         \\}
@@ -8856,8 +8881,8 @@ test "CHECK refuses termination claims when a function value recurses without en
         \\}
         },
         .{ .name = "fc1", .total_refused = true, .source =
-        \\structural Fn = (n: number) => number;
-        \\structural Slot = { f: Fn };
+        \\type Fn = (n: number) => number;
+        \\type Slot = { f: Fn };
         \\function same(n: number): number {
         \\  return n;
         \\}
@@ -8874,8 +8899,8 @@ test "CHECK refuses termination claims when a function value recurses without en
         \\}
         },
         .{ .name = "g1", .total_refused = true, .source =
-        \\structural Fn = (n: number) => number;
-        \\structural Slot = { f: Fn };
+        \\type Fn = (n: number) => number;
+        \\type Slot = { f: Fn };
         \\function same(n: number): number {
         \\  return n;
         \\}
@@ -8896,7 +8921,7 @@ test "CHECK refuses termination claims when a function value recurses without en
         },
         // Bindings with no initializer to read.
         .{ .name = "g2", .total_refused = false, .source =
-        \\structural Ops = { f: (n: number) => number };
+        \\type Ops = { f: (n: number) => number };
         \\function down(n: number): number {
         \\  return down(n);
         \\}
@@ -8909,7 +8934,7 @@ test "CHECK refuses termination claims when a function value recurses without en
         \\}
         },
         .{ .name = "g3b", .total_refused = true, .source =
-        \\structural Fn = (n: number) => number;
+        \\type Fn = (n: number) => number;
         \\function down(n: number): Proof<number, "total"> {
         \\  const fs: Fn[] = [down];
         \\  for (const f of fs) {
@@ -8921,22 +8946,22 @@ test "CHECK refuses termination claims when a function value recurses without en
         \\  return Response.json({ v: down(3) });
         \\}
         },
-        .{ .name = "g3c", .total_refused = true, .source =
-        \\structural Fn = (n: number) => number;
-        \\structural Ops = { a: Fn };
-        \\function down(n: number): Proof<number, "total"> {
-        \\  const o: Ops = { a: down };
-        \\  return match (o) {
-        \\    when { a: g }: [1].map(g)[0] ?? n
-        \\  };
-        \\}
-        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
-        \\  return Response.json({ v: down(3) });
-        \\}
+        .{ .name = "g3c", .total_refused = true, .source = match_import ++
+            \\type Fn = (n: number) => number;
+            \\type Ops = { a: Fn };
+            \\function down(n: number): Proof<number, "total"> {
+            \\  const o: Ops = { a: down };
+            \\  return match(o).with({}, (selected) => {
+            \\    return [1].map(selected.a)[0] ?? n;
+            \\  }).exhaustive();
+            \\}
+            \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+            \\  return Response.json({ v: down(3) });
+            \\}
         },
         // A function value that is only the second argument of a builtin.
         .{ .name = "h4", .total_refused = true, .source =
-        \\structural Fn = (n: number) => number;
+        \\type Fn = (n: number) => number;
         \\function down(n: number): Proof<number, "total"> {
         \\  const xs: number[] = [n];
         \\  return xs.reduce((acc: Fn, x: number): Fn => acc, down)(n);
@@ -8947,7 +8972,7 @@ test "CHECK refuses termination claims when a function value recurses without en
         },
         // An inline arrow handed to a named helper.
         .{ .name = "p4", .total_refused = false, .source =
-        \\structural Step = (g: Step) => number;
+        \\type Step = (g: Step) => number;
         \\function loop(f: Step): number {
         \\  return f(f);
         \\}
@@ -9376,27 +9401,27 @@ const io_for_b =
 ;
 
 const io_match_a =
+    \\import { match } from "zttp:core";
     \\import { cacheSet } from "zttp:cache";
     \\export function handler(req: Request): Response {
     \\  cacheSet("items", "k", "v", 60);
     \\  const flag = String(cacheSet("items", "k2", "v", 60));
-    \\  const out = match (flag) {
-    \\    when "true": "yes"
-    \\    default: "no"
-    \\  };
+    \\  const out = match(flag)
+    \\    .with("true", () => "yes")
+    \\    .otherwise(() => "no");
     \\  return Response.text(out);
     \\}
 ;
 
 const io_match_b =
+    \\import { match } from "zttp:core";
     \\import { cacheSet } from "zttp:cache";
     \\export function handler(req: Request): Response {
     \\  cacheSet("items", "k", "v", 60);
     \\  const flag = String(true);
-    \\  const out = match (flag) {
-    \\    when "true": "yes"
-    \\    default: "no"
-    \\  };
+    \\  const out = match(flag)
+    \\    .with("true", () => "yes")
+    \\    .otherwise(() => "no");
     \\  return Response.text(out);
     \\}
 ;
@@ -9729,33 +9754,33 @@ test "prove-behavior: changing the status of an explicit guard response reports 
 }
 
 const match_return_a =
+    \\import { match } from "zttp:core";
     \\export function handler(req: Request): Response {
     \\  const m = req.method;
-    \\  return match (m) {
-    \\    when "GET": Response.text("get")
-    \\    default: Response.text("other", { status: 405 })
-    \\  };
+    \\  return match(m)
+    \\    .with("GET", () => Response.text("get"))
+    \\    .otherwise(() => Response.text("other", { status: 405 }));
     \\}
 ;
 
 const match_return_added_arm =
+    \\import { match } from "zttp:core";
     \\export function handler(req: Request): Response {
     \\  const m = req.method;
-    \\  return match (m) {
-    \\    when "GET": Response.text("get")
-    \\    when "POST": Response.text("post", { status: 201 })
-    \\    default: Response.text("other", { status: 405 })
-    \\  };
+    \\  return match(m)
+    \\    .with("GET", () => Response.text("get"))
+    \\    .with("POST", () => Response.text("post", { status: 201 }))
+    \\    .otherwise(() => Response.text("other", { status: 405 }));
     \\}
 ;
 
 const match_return_changed_status =
+    \\import { match } from "zttp:core";
     \\export function handler(req: Request): Response {
     \\  const m = req.method;
-    \\  return match (m) {
-    \\    when "GET": Response.text("get")
-    \\    default: Response.text("other", { status: 500 })
-    \\  };
+    \\  return match(m)
+    \\    .with("GET", () => Response.text("get"))
+    \\    .otherwise(() => Response.text("other", { status: 500 }));
     \\}
 ;
 
@@ -10125,250 +10150,225 @@ test "gen-tests: the expect line of an unknown status holds no status key" {
 // 4a and 4d: the arms of a `match` carry the request constraints of the
 // equal `if` chain, and a `match` bound to a name forks at its declaration.
 
-const arm_methods_a =
+const arm_methods_a = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  return match (req.method) {
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    when "POST": Response.json({ a: 2 }, { status: 201 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
+    \\  return match(req.method)
+    \\    .with("GET", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .with("POST", () => Response.json({ a: 2 }, { status: 201 }))
+    \\    .otherwise(() => Response.json({ a: 3 }, { status: 404 }));
     \\}
 ;
 
-const arm_methods_put =
+const arm_methods_put = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  return match (req.method) {
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    when "PUT": Response.json({ a: 2 }, { status: 201 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
+    \\  return match(req.method)
+    \\    .with("GET", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .with("PUT", () => Response.json({ a: 2 }, { status: 201 }))
+    \\    .otherwise(() => Response.json({ a: 3 }, { status: 404 }));
     \\}
 ;
 
-const arm_methods_reordered =
+const arm_methods_reordered = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  return match (req.method) {
-    \\    when "POST": Response.json({ a: 2 }, { status: 201 })
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
+    \\  return match(req.method)
+    \\    .with("POST", () => Response.json({ a: 2 }, { status: 201 }))
+    \\    .with("GET", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .otherwise(() => Response.json({ a: 3 }, { status: 404 }));
     \\}
 ;
 
-const arm_method_only =
+const arm_method_only = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  return match (req.method) {
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
+    \\  return match(req.method)
+    \\    .with("GET", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .otherwise(() => Response.json({ a: 3 }, { status: 404 }));
     \\}
 ;
 
-const arm_url_only =
+const arm_url_only = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  return match (req.url) {
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
+    \\  return match(req.url)
+    \\    .with("GET", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .otherwise(() => Response.json({ a: 3 }, { status: 404 }));
     \\}
 ;
 
-const arm_header_echo =
+const arm_header_echo = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const k = req.headers.get("x-kind") ?? "";
-    \\  return match (k) {
-    \\    when "echo": Response.json({ a: 1 }, { status: 200 })
-    \\    default: Response.json({ a: 2 }, { status: 404 })
-    \\  };
+    \\  return match(k)
+    \\    .with("echo", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .otherwise(() => Response.json({ a: 2 }, { status: 404 }));
     \\}
 ;
 
-const arm_header_other =
+const arm_header_other = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const k = req.headers.get("x-kind") ?? "";
-    \\  return match (k) {
-    \\    when "other": Response.json({ a: 1 }, { status: 200 })
-    \\    default: Response.json({ a: 2 }, { status: 404 })
-    \\  };
+    \\  return match(k)
+    \\    .with("other", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .otherwise(() => Response.json({ a: 2 }, { status: 404 }));
     \\}
 ;
 
-const arm_record_health =
+const arm_record_health = match_import ++
     \\function handler(req: Request): Response {
-    \\  return match (req) {
-    \\    when { method: "GET", path: "/health" }: Response.json({ ok: true })
-    \\    when { method: "GET", path: "/version" }:
-    \\      Response.json({ version: "1.0.0" })
-    \\    when { method: "POST", path: "/echo" }: Response.json(req.body)
-    \\    default: Response.text("Not Found", { status: 404 })
-    \\  };
+    \\  return match(req)
+    \\    .with({ method: "GET", path: "/health" }, () => Response.json({ ok: true }))
+    \\    .with({ method: "GET", path: "/version" }, () => Response.json({ version: "1.0.0" }))
+    \\    .with({ method: "POST", path: "/echo" }, (selected) => Response.json(selected.body))
+    \\    .otherwise(() => Response.text("Not Found", { status: 404 }));
     \\}
 ;
 
-const arm_record_healthz =
+const arm_record_healthz = match_import ++
     \\function handler(req: Request): Response {
-    \\  return match (req) {
-    \\    when { method: "GET", path: "/healthz" }: Response.json({ ok: true })
-    \\    when { method: "GET", path: "/version" }:
-    \\      Response.json({ version: "1.0.0" })
-    \\    when { method: "POST", path: "/echo" }: Response.json(req.body)
-    \\    default: Response.text("Not Found", { status: 404 })
-    \\  };
+    \\  return match(req)
+    \\    .with({ method: "GET", path: "/healthz" }, () => Response.json({ ok: true }))
+    \\    .with({ method: "GET", path: "/version" }, () => Response.json({ version: "1.0.0" }))
+    \\    .with({ method: "POST", path: "/echo" }, (selected) => Response.json(selected.body))
+    \\    .otherwise(() => Response.text("Not Found", { status: 404 }));
     \\}
 ;
 
-const bound_methods_a =
+const bound_methods_a = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const r = match (req.method) {
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    when "POST": Response.json({ a: 2 }, { status: 201 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
+    \\  const r = match(req.method)
+    \\    .with("GET", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .with("POST", () => Response.json({ a: 2 }, { status: 201 }))
+    \\    .otherwise(() => Response.json({ a: 3 }, { status: 404 }));
     \\  return r;
     \\}
 ;
 
-const bound_methods_status =
+const bound_methods_status = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const r = match (req.method) {
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    when "POST": Response.json({ a: 2 }, { status: 202 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
+    \\  const r = match(req.method)
+    \\    .with("GET", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .with("POST", () => Response.json({ a: 2 }, { status: 202 }))
+    \\    .otherwise(() => Response.json({ a: 3 }, { status: 404 }));
     \\  return r;
     \\}
 ;
 
-const bound_methods_put =
+const bound_methods_put = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const r = match (req.method) {
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    when "PUT": Response.json({ a: 2 }, { status: 201 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
+    \\  const r = match(req.method)
+    \\    .with("GET", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .with("PUT", () => Response.json({ a: 2 }, { status: 201 }))
+    \\    .otherwise(() => Response.json({ a: 3 }, { status: 404 }));
     \\  return r;
     \\}
 ;
 
-const bound_status_get_200 =
+const bound_status_get_200 = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const s = match (req.method) {
-    \\    when "GET": 200
-    \\    default: 200
-    \\  };
+    \\  const s = match(req.method)
+    \\    .with("GET", () => 200)
+    \\    .otherwise(() => 200);
     \\  return Response.json({ a: 1 }, { status: s });
     \\}
 ;
 
-const bound_status_get_404 =
+const bound_status_get_404 = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const s = match (req.method) {
-    \\    when "GET": 200
-    \\    default: 404
-    \\  };
+    \\  const s = match(req.method)
+    \\    .with("GET", () => 200)
+    \\    .otherwise(() => 404);
     \\  return Response.json({ a: 1 }, { status: s });
     \\}
 ;
 
-const bound_call_in_get =
+const bound_call_in_get = match_import ++
     \\import { sha256 } from "zttp:crypto";
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const r = match (req.method) {
-    \\    when "GET": Response.text(sha256("a"))
-    \\    default: Response.text("none")
-    \\  };
+    \\  const r = match(req.method)
+    \\    .with("GET", () => Response.text(sha256("a")))
+    \\    .otherwise(() => Response.text("none"));
     \\  return r;
     \\}
 ;
 
-const bound_call_in_default =
+const bound_call_in_default = match_import ++
     \\import { sha256 } from "zttp:crypto";
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const r = match (req.method) {
-    \\    when "GET": Response.text("none")
-    \\    default: Response.text(sha256("a"))
-    \\  };
+    \\  const r = match(req.method)
+    \\    .with("GET", () => Response.text("none"))
+    \\    .otherwise(() => Response.text(sha256("a")));
     \\  return r;
     \\}
 ;
 
-const bound_never_returned_a =
+const bound_never_returned_a = match_import ++
     \\import { sha256 } from "zttp:crypto";
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const unused = match (req.method) {
-    \\    when "GET": Response.text(sha256("a"))
-    \\    default: Response.text("none")
-    \\  };
+    \\  const unused = match(req.method)
+    \\    .with("GET", () => Response.text(sha256("a")))
+    \\    .otherwise(() => Response.text("none"));
     \\  return Response.text("ok");
     \\}
 ;
 
-const bound_never_returned_b =
+const bound_never_returned_b = match_import ++
     \\import { sha256 } from "zttp:crypto";
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const unused = match (req.method) {
-    \\    when "GET": Response.text("none")
-    \\    default: Response.text(sha256("a"))
-    \\  };
+    \\  const unused = match(req.method)
+    \\    .with("GET", () => Response.text("none"))
+    \\    .otherwise(() => Response.text(sha256("a")));
     \\  return Response.text("ok");
     \\}
 ;
 
-const bound_property_written =
+const bound_property_written = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const r = match (req.method) {
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
+    \\  const r = match(req.method)
+    \\    .with("GET", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .otherwise(() => Response.json({ a: 3 }, { status: 404 }));
     \\  r.status = 500;
     \\  return r;
     \\}
 ;
 
-const bound_let_reassigned =
+const bound_let_reassigned = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  let r = match (req.method) {
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
+    \\  let r = match(req.method)
+    \\    .with("GET", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .otherwise(() => Response.json({ a: 3 }, { status: 404 }));
     \\  r = Response.text("x", { status: 500 });
     \\  return r;
     \\}
 ;
 
-const bound_written_through_alias =
+const bound_written_through_alias = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const r = match (req.method) {
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
+    \\  const r = match(req.method)
+    \\    .with("GET", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .otherwise(() => Response.json({ a: 3 }, { status: 404 }));
     \\  const q = r;
     \\  q.status = 500;
     \\  return r;
     \\}
 ;
 
-const bound_passed_to_helper =
+const bound_passed_to_helper = match_import ++
     \\function setStatus(res: Response): number {
     \\  res.status = 500;
     \\  return 1;
     \\}
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const r = match (req.method) {
-    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
-    \\    default: Response.json({ a: 3 }, { status: 404 })
-    \\  };
+    \\  const r = match(req.method)
+    \\    .with("GET", () => Response.json({ a: 1 }, { status: 200 }))
+    \\    .otherwise(() => Response.json({ a: 3 }, { status: 404 }));
     \\  const n = setStatus(r);
     \\  return r;
     \\}
 ;
 
-const bound_pure_arms =
+const bound_pure_arms = match_import ++
     \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const label = match (req.method) {
-    \\    when "GET": "read"
-    \\    default: "other"
-    \\  };
+    \\  const label = match(req.method)
+    \\    .with("GET", () => "read")
+    \\    .otherwise(() => "other");
     \\  return Response.json({ label: label });
     \\}
 ;
@@ -11227,8 +11227,8 @@ fn expectAbsentReadCases(cases: []const AbsentReadCase) !void {
 
 const absent_read_refused = [_]AbsentReadCase{
     .{ .name = "user_structural_with_the_exact_result_shape", .expect = "ZTS309@6,ZTS500@4", .source =
-    \\structural X = { x: number };
-    \\structural R = { ok: boolean; value?: X; error?: string; errors?: string };
+    \\type X = { x: number };
+    \\type R = { ok: boolean; value?: X; error?: string; errors?: string };
     \\function mk(): R { return { ok: false }; }
     \\function handler(req: Request): Response {
     \\  const r = mk();
@@ -11236,7 +11236,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n19_typed_decl", .expect = "ZTS200@4", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p: P = ps[0];
@@ -11244,42 +11244,42 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "p01_optchain_bind", .expect = "ZTS309@6,ZTS500@3", .source =
-    \\structural Q = { age: number };
-    \\structural P = { q: Q };
+    \\type Q = { age: number };
+    \\type P = { q: Q };
     \\function handler(req: Request): Response {
     \\  const p: P | undefined = undefined;
     \\  const q = p?.q;
     \\  return Response.json({ a: q.age });
     \\}
     },
-    .{ .name = "p03_match_arm_nullable_field", .expect = "ZTS309@6,ZTS500@3", .source =
-    \\structural Q = { age: number };
-    \\structural P = { q: Q | undefined };
-    \\function handler(req: Request, p: P | undefined): Response {
-    \\  return match (p) {
-    \\    when undefined: Response.json({ a: 0 })
-    \\    when { q: v }: Response.json({ a: v.age })
-    \\  };
-    \\}
+    .{ .name = "p03_match_arm_nullable_field", .expect = "ZTS309@7,ZTS500@4", .source = match_import ++
+        \\type Q = { age: number };
+        \\type P = { q: Q | undefined };
+        \\function handler(req: Request, p: P | undefined): Response {
+        \\  return match(p)
+        \\    .with(undefined, () => Response.json({ a: 0 }))
+        \\    .with({}, (selected) => { const v = selected.q; return Response.json({ a: v.age }); })
+        \\    .exhaustive();
+        \\}
     },
     .{ .name = "p04_optional_field", .expect = "ZTS309@5,ZTS500@3", .source =
-    \\structural P = { age: number };
-    \\structural W = { p?: P };
+    \\type P = { age: number };
+    \\type W = { p?: P };
     \\function handler(req: Request): Response {
     \\  const w: W = {};
     \\  return Response.json({ a: w.p.age });
     \\}
     },
     .{ .name = "p05_callback_param_unannotated", .expect = "ZTS309@4,ZTS500@2", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: (P | undefined)[] = [undefined];
     \\  return Response.json({ a: ps.map((x) => x.age) });
     \\}
     },
     .{ .name = "p06_typed_decl_from_untyped_init", .expect = "ZTS200@5", .source =
-    \\structural Q = { age: number };
-    \\structural P = { q: Q };
+    \\type Q = { age: number };
+    \\type P = { q: Q };
     \\function handler(req: Request): Response {
     \\  const p: P | undefined = undefined;
     \\  const q: Q = p?.q;
@@ -11287,23 +11287,23 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "p10_union_of_arrays", .expect = "ZTS309@5,ZTS500@3", .source =
-    \\structural P = { age: number };
-    \\structural Q = { age: number };
+    \\type P = { age: number };
+    \\type Q = { age: number };
     \\function handler(req: Request): Response {
     \\  const xs: P[] | Q[] = [];
     \\  return Response.json({ a: xs[0].age });
     \\}
     },
     .{ .name = "p11_optchain_then_member", .expect = "ZTS309@5,ZTS500@3", .source =
-    \\structural Q = { age: number };
-    \\structural P = { q: Q | undefined };
+    \\type Q = { age: number };
+    \\type P = { q: Q | undefined };
     \\function handler(req: Request): Response {
     \\  const p: P | undefined = { q: undefined };
     \\  return Response.json({ a: p?.q.age });
     \\}
     },
     .{ .name = "p38_both_branches_assign", .expect = "ZTS309@6,ZTS500@2", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  let p: P | undefined = ps[0];
@@ -11311,99 +11311,96 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  return Response.json({ a: p.age });
     \\}
     },
-    .{ .name = "p42_match_nullable_scrutinee", .expect = "ZTS309@8,ZTS500@3", .source =
-    \\structural Q = { age: number };
-    \\structural P = { q: Q | undefined };
-    \\function handler(req: Request): Response {
-    \\  const ps: P[] = [{ q: undefined }];
-    \\  const p = ps[0];
-    \\  return match (p) {
-    \\    when undefined: Response.json({ a: 0 })
-    \\    when { q: v }: Response.json({ a: v.age })
-    \\  };
-    \\}
+    .{ .name = "p42_match_nullable_scrutinee", .expect = "ZTS309@9,ZTS500@4", .source = match_import ++
+        \\type Q = { age: number };
+        \\type P = { q: Q | undefined };
+        \\function handler(req: Request): Response {
+        \\  const ps: P[] = [{ q: undefined }];
+        \\  const p = ps[0];
+        \\  return match(p)
+        \\    .with(undefined, () => Response.json({ a: 0 }))
+        \\    .with({}, (selected) => { const v = selected.q; return Response.json({ a: v.age }); })
+        \\    .exhaustive();
+        \\}
     },
-    .{ .name = "q10_match_call_result", .expect = "ZTS309@11,ZTS500@6", .source =
-    \\structural Q = { age: number };
-    \\structural P = { q: Q | undefined };
-    \\function first(ps: P[]): P | undefined {
-    \\  return ps[0];
-    \\}
-    \\function handler(req: Request): Response {
-    \\  const ps: P[] = [{ q: undefined }];
-    \\  const p = first(ps);
-    \\  return match (p) {
-    \\    when undefined: Response.json({ a: 0 })
-    \\    when { q: v }: Response.json({ a: v.age })
-    \\  };
-    \\}
+    .{ .name = "q10_match_call_result", .expect = "ZTS309@12,ZTS500@7", .source = match_import ++
+        \\type Q = { age: number };
+        \\type P = { q: Q | undefined };
+        \\function first(ps: P[]): P | undefined {
+        \\  return ps[0];
+        \\}
+        \\function handler(req: Request): Response {
+        \\  const ps: P[] = [{ q: undefined }];
+        \\  const p = first(ps);
+        \\  return match(p)
+        \\    .with(undefined, () => Response.json({ a: 0 }))
+        \\    .with({}, (selected) => { const v = selected.q; return Response.json({ a: v.age }); })
+        \\    .exhaustive();
+        \\}
     },
-    .{ .name = "q13_nested_match_default_read", .expect = "ZTS309@10,ZTS500@3", .source =
-    \\structural Q = { age: number };
-    \\structural P = { q: Q | undefined };
-    \\function handler(req: Request): Response {
-    \\  const ps: P[] = [];
-    \\  const p = ps[0];
-    \\  return match (p) {
-    \\    when undefined: Response.json({ a: 0 })
-    \\    when { q: v }: match (v) {
-    \\      when undefined: Response.json({ a: 0 })
-    \\      default: Response.json({ a: v.age })
-    \\    }
-    \\  };
-    \\}
+    .{ .name = "q13_nested_match_default_read", .expect = "ZTS309@11,ZTS500@4", .source = match_import ++
+        \\type Q = { age: number };
+        \\type P = { q: Q | undefined };
+        \\function handler(req: Request): Response {
+        \\  const ps: P[] = [];
+        \\  const p = ps[0];
+        \\  return match(p)
+        \\    .with(undefined, () => Response.json({ a: 0 }))
+        \\    .with({}, (selected) => { const v = selected.q; return match(v)
+        \\      .with(undefined, () => Response.json({ a: 0 }))
+        \\      .otherwise(() => Response.json({ a: v.age })); })
+        \\    .exhaustive();
+        \\}
     },
-    .{ .name = "q14_undefined_arm_reads", .expect = "ZTS309@6,ZTS500@2", .source =
-    \\structural P = { age: number };
-    \\function handler(req: Request): Response {
-    \\  const ps: P[] = [];
-    \\  const p = ps[0];
-    \\  return match (p) {
-    \\    when undefined: Response.json({ a: p.age })
-    \\    when { age: a }: Response.json({ a: a })
-    \\  };
-    \\}
+    .{ .name = "q14_undefined_arm_reads", .expect = "ZTS309@7,ZTS500@3", .source = match_import ++
+        \\type P = { age: number };
+        \\function handler(req: Request): Response {
+        \\  const ps: P[] = [];
+        \\  const p = ps[0];
+        \\  return match(p)
+        \\    .with(undefined, () => Response.json({ a: p.age }))
+        \\    .with({}, (selected) => { const a = selected.age; return Response.json({ a: a }); })
+        \\    .exhaustive();
+        \\}
     },
-    .{ .name = "q15_default_after_undefined_arm", .expect = "ZTS309@7,ZTS500@2", .source =
-    \\structural P = { age: number };
-    \\function handler(req: Request): Response {
-    \\  const ps: P[] = [];
-    \\  const p = ps[0];
-    \\  return match (p) {
-    \\    when undefined: Response.json({ a: 0 })
-    \\    default: Response.json({ a: p.age })
-    \\  };
-    \\}
+    .{ .name = "q15_default_after_undefined_arm", .expect = "ZTS309@8,ZTS500@3", .source = match_import ++
+        \\type P = { age: number };
+        \\function handler(req: Request): Response {
+        \\  const ps: P[] = [];
+        \\  const p = ps[0];
+        \\  return match(p)
+        \\    .with(undefined, () => Response.json({ a: 0 }))
+        \\    .otherwise(() => Response.json({ a: p.age }));
+        \\}
     },
-    .{ .name = "q16_read_after_match", .expect = "ZTS309@9,ZTS500@2", .source =
-    \\structural P = { age: number };
-    \\function handler(req: Request): Response {
-    \\  const ps: P[] = [];
-    \\  const p = ps[0];
-    \\  const a: number = match (p) {
-    \\    when undefined: 0
-    \\    default: 1
-    \\  };
-    \\  return Response.json({ a: a, b: p.age });
-    \\}
+    .{ .name = "q16_read_after_match", .expect = "ZTS309@9,ZTS500@3", .source = match_import ++
+        \\type P = { age: number };
+        \\function handler(req: Request): Response {
+        \\  const ps: P[] = [];
+        \\  const p = ps[0];
+        \\  const a: number = match(p)
+        \\    .with(undefined, () => 0)
+        \\    .otherwise(() => 1);
+        \\  return Response.json({ a: a, b: p.age });
+        \\}
     },
     .{ .name = "q20_result_shaped_record", .expect = "ZTS309@5,ZTS500@3", .source =
-    \\structural P = { age: number };
-    \\structural R = { ok: boolean; value?: P; error?: string };
+    \\type P = { age: number };
+    \\type R = { ok: boolean; value?: P; error?: string };
     \\function handler(req: Request): Response {
     \\  const r: R = { ok: false };
     \\  return Response.json({ a: r.value.age });
     \\}
     },
     .{ .name = "r01_decl", .expect = "ZTS309@4,ZTS500@2", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const p: P | undefined = undefined;
     \\  return Response.json({ a: p.age });
     \\}
     },
     .{ .name = "r02_empty_index", .expect = "ZTS309@5,ZTS500@2", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
@@ -11411,7 +11408,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r03_helper_param", .expect = "ZTS309@3,ZTS500@5", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function f(p: P | undefined): number {
     \\  return p.age;
     \\}
@@ -11420,7 +11417,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r04_direct_index", .expect = "ZTS309@4,ZTS500@2", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  return Response.json({ a: ps[0].age });
@@ -11461,8 +11458,8 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r10_union3", .expect = "ZTS309@5,ZTS500@3", .source =
-    \\structural P = { age: number };
-    \\structural Q = { age: number; name: string };
+    \\type P = { age: number };
+    \\type Q = { age: number; name: string };
     \\function handler(req: Request): Response {
     \\  const p: P | Q | undefined = undefined;
     \\  return Response.json({ a: p.age });
@@ -11476,8 +11473,8 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r12_field_nullable", .expect = "ZTS309@5,ZTS500@3", .source =
-    \\structural P = { age: number };
-    \\structural W = { p: P | undefined };
+    \\type P = { age: number };
+    \\type W = { p: P | undefined };
     \\function handler(req: Request): Response {
     \\  const w: W = { p: undefined };
     \\  return Response.json({ a: w.p.age });
@@ -11489,7 +11486,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r17_assign_through", .expect = "ZTS309@4,ZTS500@2", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const p: P | undefined = undefined;
     \\  p.age = 3;
@@ -11497,7 +11494,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r18_find", .expect = "ZTS309@5,ZTS500@2", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps.find((x: P): boolean => x.age > 1);
@@ -11512,7 +11509,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r22_length_guard", .expect = "ZTS309@4,ZTS500@2", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const a: number = ps.length > 0 ? ps[0].age : 0;
@@ -11520,7 +11517,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r24_tuple_oob", .expect = "ZTS309@4,ZTS500@2", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const t: [P, P] = [{ age: 1 }, { age: 2 }];
     \\  return Response.json({ a: t[2].age });
@@ -11537,14 +11534,14 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r30_capsule", .expect = "ZTS309@4", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const ps: P[] = [];
     \\  return Response.json({ a: ps[0].age });
     \\}
     },
     .{ .name = "r31_reassign_to_index", .expect = "ZTS309@6,ZTS500@2", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  let p: P | undefined = { age: 1 };
@@ -11553,7 +11550,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r32_closure_unguarded", .expect = "ZTS309@5,ZTS500@2", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
@@ -11562,8 +11559,8 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "s01_union_result_unnarrowed", .expect = "ZTS309@6,ZTS500@4", .source =
-    \\structural P = { age: number };
-    \\structural R = { ok: true; value: P } | { ok: false; error: string };
+    \\type P = { age: number };
+    \\type R = { ok: true; value: P } | { ok: false; error: string };
     \\function mk(): R { return { ok: false, error: "x" }; }
     \\function handler(req: Request): Response {
     \\  const r = mk();
@@ -11572,8 +11569,8 @@ const absent_read_refused = [_]AbsentReadCase{
     },
     .{ .name = "s05_upvalue_name_collision", .expect = "ZTS303@11,ZTS500@9,ZTS606@4", .source =
     \\import { parseJson } from "zttp:json";
-    \\structural P = { age: number };
-    \\structural R = { ok: boolean; value?: P; error?: string };
+    \\type P = { age: number };
+    \\type R = { ok: boolean; value?: P; error?: string };
     \\function other(): number {
     \\  const r = parseJson("{}");
     \\  if (!r.ok) { return 0; }
@@ -11586,58 +11583,54 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "s05b_upvalue_no_collision", .expect = "ZTS309@5,ZTS500@3", .source =
-    \\structural P = { age: number };
-    \\structural R = { ok: boolean; value?: P; error?: string };
+    \\type P = { age: number };
+    \\type R = { ok: boolean; value?: P; error?: string };
     \\function handler(req: Request): Response {
     \\  const r: R = { ok: false };
     \\  const read = [0].map((n: number): number => r.value.age);
     \\  return Response.json({ a: read });
     \\}
     },
-    .{ .name = "u01_match_on_unknown_binding", .expect = "ZTS309@7,ZTS500@3", .source =
-    \\import { parseJson } from "zttp:json";
-    \\structural N = { first: string };
-    \\function handler(req: Request): Response {
-    \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
-    \\  return match (parsed.value) {
-    \\    when { name: n }: Response.json({ a: n.first })
-    \\    default: Response.json({ a: "none" })
-    \\  };
-    \\}
+    .{ .name = "u01_match_on_unknown_binding", .expect = "ZTS309@8,ZTS500@4", .source = match_import ++
+        \\import { parseJson } from "zttp:json";
+        \\type N = { first: string };
+        \\function handler(req: Request): Response {
+        \\  const parsed = parseJson("{}");
+        \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
+        \\  return match(parsed.value)
+        \\    .with({}, (selected) => { const n = selected.name; return Response.json({ a: n.first }); })
+        \\    .otherwise(() => Response.json({ a: "none" }));
+        \\}
     },
-    .{ .name = "u08_match_unknown_nested_pattern", .expect = "ZTS309@6,ZTS500@2", .source =
-    \\import { parseJson } from "zttp:json";
-    \\function handler(req: Request): Response {
-    \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
-    \\  return match (parsed.value) {
-    \\    when { name: { first: f } }: Response.json({ a: f.len })
-    \\    default: Response.json({ a: "none" })
-    \\  };
-    \\}
+    .{ .name = "u08_match_unknown_nested_pattern", .expect = "ZTS309@7,ZTS500@3", .source = match_import ++
+        \\import { parseJson } from "zttp:json";
+        \\function handler(req: Request): Response {
+        \\  const parsed = parseJson("{}");
+        \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
+        \\  return match(parsed.value)
+        \\    .with({ name: {} }, (selected) => { const f = selected.name.first; return Response.json({ a: f.len }); })
+        \\    .otherwise(() => Response.json({ a: "none" }));
+        \\}
     },
-    .{ .name = "u09_match_unknown_shorthand", .expect = "ZTS309@6,ZTS500@2", .source =
-    \\import { parseJson } from "zttp:json";
-    \\function handler(req: Request): Response {
-    \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
-    \\  return match (parsed.value) {
-    \\    when { name }: Response.json({ a: name.first })
-    \\    default: Response.json({ a: "none" })
-    \\  };
-    \\}
+    .{ .name = "u09_match_unknown_shorthand", .expect = "ZTS309@7,ZTS500@3", .source = match_import ++
+        \\import { parseJson } from "zttp:json";
+        \\function handler(req: Request): Response {
+        \\  const parsed = parseJson("{}");
+        \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
+        \\  return match(parsed.value)
+        \\    .with({}, (selected) => { const name = selected.name; return Response.json({ a: name.first }); })
+        \\    .otherwise(() => Response.json({ a: "none" }));
+        \\}
     },
-    .{ .name = "u08b_record_in_array_pattern_on_unknown", .expect = "ZTS309@6,ZTS500@2", .source =
-    \\import { parseJson } from "zttp:json";
-    \\function handler(req: Request): Response {
-    \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
-    \\  return match (parsed.value) {
-    \\    when [{ name: n }]: Response.json({ a: n.len })
-    \\    default: Response.json({ a: "none" })
-    \\  };
-    \\}
+    .{ .name = "u08b_record_in_array_pattern_on_unknown", .expect = "ZTS309@7,ZTS500@3", .source = match_import ++
+        \\import { parseJson } from "zttp:json";
+        \\function handler(req: Request): Response {
+        \\  const parsed = parseJson("{}");
+        \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
+        \\  return match(parsed.value)
+        \\    .with([{}], (selected) => { const n = selected[0].name; return Response.json({ a: n.len }); })
+        \\    .otherwise(() => Response.json({ a: "none" }));
+        \\}
     },
     .{ .name = "r21_arith", .expect = "ZTS106@3", .source =
     \\function handler(req: Request): Response {
@@ -11646,7 +11639,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "t1_object_values_element_call", .expect = "ZTS309@4,ZTS500@2", .source =
-    \\structural P = { f: number };
+    \\type P = { f: number };
     \\function handler(req: Request): Response {
     \\  const o: P = { f: 1 };
     \\  Object.values(o)[0].f(1);
@@ -11657,8 +11650,8 @@ const absent_read_refused = [_]AbsentReadCase{
 
 const absent_read_accepted = [_]AbsentReadCase{
     .{ .name = "union_annotation_present_initializer_narrows", .expect = "clean", .source =
-    \\structural P = { age: number };
-    \\structural Q = { age: number; n: number };
+    \\type P = { age: number };
+    \\type Q = { age: number; n: number };
     \\function handler(req: Request): Response {
     \\  const p: P | Q | undefined = { age: 1 };
     \\  return Response.json({ a: p.age });
@@ -11694,7 +11687,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n01_eq_return", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
@@ -11705,7 +11698,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n02_neq_block", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
@@ -11716,14 +11709,14 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n05_chain", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  return Response.json({ a: ps[0]?.age ?? 0 });
     \\}
     },
     .{ .name = "n06_nullish_obj", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const d: P = { age: 0 };
@@ -11732,16 +11725,17 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n07_assert", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\import { assert } from "zttp:core";
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
-    \\  assert p !== undefined;
+    \\  assert(p !== undefined);
     \\  return Response.json({ a: p.age });
     \\}
     },
     .{ .name = "n08_and", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
@@ -11750,7 +11744,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n09_or", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
@@ -11759,7 +11753,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n10_ternary", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
@@ -11768,7 +11762,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n13b_helper_guard_proof", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function f(p: P | undefined): number {
     \\  if (p === undefined) { return 0; }
     \\  return p.age;
@@ -11777,16 +11771,16 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\  return Response.json({ a: f(undefined) });
     \\}
     },
-    .{ .name = "n15_match", .expect = "clean", .source =
-    \\structural P = { age: number };
-    \\function handler(req: Request): Response {
-    \\  const ps: P[] = [];
-    \\  const p = ps[0];
-    \\  return match (p) {
-    \\    when undefined: Response.json({ a: 0 })
-    \\    when { age }: Response.json({ a: age })
-    \\  };
-    \\}
+    .{ .name = "n15_match", .expect = "clean", .source = match_import ++
+        \\type P = { age: number };
+        \\function handler(req: Request): Response {
+        \\  const ps: P[] = [];
+        \\  const p = ps[0];
+        \\  return match(p)
+        \\    .with(undefined, () => Response.json({ a: 0 }))
+        \\    .with({}, (selected) => { const age = selected.age; return Response.json({ a: age }); })
+        \\    .exhaustive();
+        \\}
     },
     .{ .name = "n16_req_body_guard", .expect = "clean", .source =
     \\function handler(req: Request): Response {
@@ -11796,7 +11790,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n21_reassign_straight", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  let p: P | undefined = ps[0];
@@ -11805,14 +11799,14 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n26_decl_present_init", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const p: P | undefined = { age: 1 };
     \\  return Response.json({ a: p.age });
     \\}
     },
     .{ .name = "n28_closure_capture_const", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
@@ -11822,7 +11816,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n29_closure_in_block", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const q = ps[0];
@@ -11840,7 +11834,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "p27_assert_then_ternary_else", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
@@ -11849,7 +11843,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "p39_ternary_both_senses", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p: P | undefined = ps[0];
@@ -11859,7 +11853,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "p41_decl_narrow_then_guard", .expect = "ZTS107@4", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const p: P | undefined = { age: 1 };
     \\  if (p === undefined) { return Response.json({ a: 0 }); }
@@ -11867,43 +11861,42 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "p44_decl_narrow_then_ternary_guard", .expect = "ZTS107@4", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const p: P | undefined = { age: 1 };
     \\  const a: number = p === undefined ? 0 : p.age;
     \\  return Response.json({ a: a });
     \\}
     },
-    .{ .name = "q12_nested_match_ok", .expect = "clean", .source =
-    \\structural Q = { age: number };
-    \\structural P = { q: Q | undefined };
-    \\function handler(req: Request): Response {
-    \\  const ps: P[] = [];
-    \\  const p = ps[0];
-    \\  return match (p) {
-    \\    when undefined: Response.json({ a: 0 })
-    \\    when { q: v }: match (v) {
-    \\      when undefined: Response.json({ a: 0 })
-    \\      when { age: a }: Response.json({ a: a })
-    \\    }
-    \\  };
-    \\}
+    .{ .name = "q12_nested_match_ok", .expect = "clean", .source = match_import ++
+        \\type Q = { age: number };
+        \\type P = { q: Q | undefined };
+        \\function handler(req: Request): Response {
+        \\  const ps: P[] = [];
+        \\  const p = ps[0];
+        \\  return match(p)
+        \\    .with(undefined, () => Response.json({ a: 0 }))
+        \\    .with({}, (selected) => { const v = selected.q; return match(v)
+        \\      .with(undefined, () => Response.json({ a: 0 }))
+        \\      .with({}, (inner) => { const a = inner.age; return Response.json({ a: a }); })
+        \\      .exhaustive(); })
+        \\    .exhaustive();
+        \\}
     },
-    .{ .name = "q17_guard_after_match_ok", .expect = "clean", .source =
-    \\structural P = { age: number };
-    \\function handler(req: Request): Response {
-    \\  const ps: P[] = [];
-    \\  const p = ps[0];
-    \\  const a: number = match (p) {
-    \\    when undefined: 0
-    \\    default: 1
-    \\  };
-    \\  if (p === undefined) { return Response.json({ a: a }); }
-    \\  return Response.json({ a: a, b: p.age });
-    \\}
+    .{ .name = "q17_guard_after_match_ok", .expect = "clean", .source = match_import ++
+        \\type P = { age: number };
+        \\function handler(req: Request): Response {
+        \\  const ps: P[] = [];
+        \\  const p = ps[0];
+        \\  const a: number = match(p)
+        \\    .with(undefined, () => 0)
+        \\    .otherwise(() => 1);
+        \\  if (p === undefined) { return Response.json({ a: a }); }
+        \\  return Response.json({ a: a, b: p.age });
+        \\}
     },
     .{ .name = "q33_ternary_guard_const", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
@@ -11913,7 +11906,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r13_null", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const p: P | null = null;
     \\  return Response.json({ a: p.age });
@@ -11930,22 +11923,22 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r23_tuple_in_range", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const t: [P, P] = [{ age: 1 }, { age: 2 }];
     \\  return Response.json({ a: t[0].age });
     \\}
     },
     .{ .name = "r27_object_spread", .expect = "clean", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const p: P | undefined = undefined;
     \\  return Response.json({ ...p, b: 1 });
     \\}
     },
     .{ .name = "s01b_union_result_if_narrowed", .expect = "clean", .source =
-    \\structural P = { age: number };
-    \\structural R = { ok: true; value: P } | { ok: false; error: string };
+    \\type P = { age: number };
+    \\type R = { ok: true; value: P } | { ok: false; error: string };
     \\function mk(): R { return { ok: false, error: "x" }; }
     \\function handler(req: Request): Response {
     \\  const r = mk();
@@ -11954,8 +11947,8 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "s01c_union_narrowed_assign", .expect = "clean", .source =
-    \\structural P = { age: number };
-    \\structural R = { ok: true; value: P } | { ok: false; error: string };
+    \\type P = { age: number };
+    \\type R = { ok: true; value: P } | { ok: false; error: string };
     \\function mk(): R { return { ok: false, error: "x" }; }
     \\function handler(req: Request): Response {
     \\  const r = mk();
@@ -11965,8 +11958,8 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "s01d_union_unnarrowed_assign_is_a_type_error", .expect = "ZTS200@6", .source =
-    \\structural P = { age: number };
-    \\structural R = { ok: true; value: P } | { ok: false; error: string };
+    \\type P = { age: number };
+    \\type R = { ok: true; value: P } | { ok: false; error: string };
     \\function mk(): R { return { ok: false, error: "x" }; }
     \\function handler(req: Request): Response {
     \\  const r = mk();
@@ -12092,7 +12085,7 @@ const absent_read_dict = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n25_dict_guard", .expect = "ZTS201@4", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const d: Dict<string, P> = {};
     \\  const p = d["k"];
@@ -12108,7 +12101,7 @@ const absent_read_dict = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "p31_dict_nullable_value", .expect = "ZTS201@4", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const d: Dict<string, P | undefined> = {};
     \\  return Response.json({ a: d["k"].age });
@@ -12161,7 +12154,7 @@ const absent_read_dict = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "r25_dict", .expect = "ZTS201@4", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Response {
     \\  const d: Dict<string, P> = {};
     \\  return Response.json({ a: d["k"].age });
@@ -12279,7 +12272,7 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "json_value_with_a_record", .expect = "ZTS201@7", .source =
-    \\structural R = { n: number };
+    \\type R = { n: number };
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
     \\  if (!parsed.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
@@ -12289,8 +12282,8 @@ const absent_read_json_value = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "control_union_of_plain_records", .expect = "clean", .source =
-    \\structural A = { n: number };
-    \\structural B = { n: number; m: number };
+    \\type A = { n: number };
+    \\type B = { n: number; m: number };
     \\function handler(req: Request): Response {
     \\  const a: A = { n: 1 };
     \\  const b: B = { n: 2, m: 3 };
@@ -12398,7 +12391,7 @@ test "A3: a member or index read on a Dict is refused as ZTS201 and dictGet is a
 
 test "A3: one ZTS309 for each read, with its own line and column" {
     const source =
-        \\structural P = { age: number };
+        \\type P = { age: number };
         \\function handler(req: Request): Response {
         \\  const ps: P[] = [];
         \\  const a = ps[0].age + ps[1].age;
@@ -12482,7 +12475,7 @@ const absent_read_member_access = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "q8_union_record_and_string", .expect = "ZTS309@4", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function show(x: P | string): string {
     \\  const a = x.age;
     \\  return a.toFixed(1);
@@ -12492,8 +12485,8 @@ const absent_read_member_access = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "q11_call_through_a_member_a_union_member_lacks", .expect = "ZTS201@4", .source =
-    \\structural A = { kind: "a"; f: (n: number) => number };
-    \\structural B = { kind: "b"; g: number };
+    \\type A = { kind: "a"; f: (n: number) => number };
+    \\type B = { kind: "b"; g: number };
     \\function run(x: A | B): number {
     \\  return x.f(2);
     \\}
@@ -12503,7 +12496,7 @@ const absent_read_member_access = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "control_string_array_and_record_function_members", .expect = "clean", .source =
-    \\structural A = { f: (n: number) => number };
+    \\type A = { f: (n: number) => number };
     \\function double(n: number): number {
     \\  return n * 2;
     \\}
@@ -12730,7 +12723,7 @@ const absent_read_untyped_operand = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "u3_index_then_member_read_keeps_zts309", .expect = "ZTS309@4", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const ps: P[] = [];
     \\  return Response.text(String(ps[0].age + 1));
@@ -12805,7 +12798,7 @@ test "untyped operand: strict code refuses an arithmetic operand with no type an
 
 const container_writes = [_]AbsentReadCase{
     .{ .name = "w1_q17_record_field_write", .expect = "ZTS200@4", .source =
-    \\structural P = { name: string };
+    \\type P = { name: string };
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const p: P = { name: "a" };
     \\  p.name = 5;
@@ -12813,7 +12806,7 @@ const container_writes = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "w1_q19_record_string_key_write", .expect = "ZTS200@4", .source =
-    \\structural P = { name: string };
+    \\type P = { name: string };
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const p: P = { name: "a" };
     \\  p["name"] = 5;
@@ -12821,8 +12814,8 @@ const container_writes = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "w1_q20_nested_record_write", .expect = "ZTS200@5", .source =
-    \\structural P = { name: string };
-    \\structural Q = { a: P };
+    \\type P = { name: string };
+    \\type Q = { a: P };
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const q: Q = { a: { name: "x" } };
     \\  q.a.name = 7;
@@ -12880,8 +12873,8 @@ const container_writes = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "w1_union_receiver_member_refuses_the_value", .expect = "ZTS200@5", .source =
-    \\structural A = { v: number };
-    \\structural B = { v: string };
+    \\type A = { v: number };
+    \\type B = { v: string };
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const ab: A | B = { v: 1 };
     \\  ab.v = 5;
@@ -12889,7 +12882,7 @@ const container_writes = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "w1_declared_literal_field", .expect = "ZTS200@4", .source =
-    \\structural S = { kind: "a" | "b" };
+    \\type S = { kind: "a" | "b" };
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const s: S = { kind: "a" };
     \\  s.kind = "c";
@@ -12918,7 +12911,7 @@ const container_writes = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "w1_record_field_write_of_matching_type_is_clean", .expect = "clean", .source =
-    \\structural P = { name: string };
+    \\type P = { name: string };
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const p: P = { name: "a" };
     \\  p.name = "b";
@@ -12959,7 +12952,7 @@ const container_writes = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "w1_write_of_a_value_with_no_type_is_clean", .expect = "clean", .source =
-    \\structural P = { name: string };
+    \\type P = { name: string };
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const p: P = { name: "a" };
     \\  p.name = [1, 2].reduce((acc, v) => acc, "");
@@ -13025,7 +13018,7 @@ const container_writes = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "w1_write_through_an_unannotated_alias_of_a_declared_record", .expect = "ZTS200@5", .source =
-    \\structural S = { kind: "a" | "b" };
+    \\type S = { kind: "a" | "b" };
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const s: S = { kind: "a" };
     \\  const alias = s;
@@ -13034,7 +13027,7 @@ const container_writes = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "w1_write_into_an_unannotated_function_result", .expect = "ZTS200@5", .source =
-    \\structural S = { kind: "a" | "b" };
+    \\type S = { kind: "a" | "b" };
     \\function mk(): S { return { kind: "a" }; }
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const r = mk();
@@ -13084,7 +13077,7 @@ const absent_read_untyped_receiver = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n1_index_then_member_call_keeps_zts309", .expect = "ZTS309@4,ZTS401@4,ZTS500@2", .source =
-    \\structural P = { age: number };
+    \\type P = { age: number };
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const ps: P[] = [];
     \\  return Response.text(String(ps[0].age.toFixed(2)));
@@ -13194,9 +13187,11 @@ const json_dict_key = [_]AbsentReadCase{
     \\  return Response.json([b]);
     \\}
     },
-    .{ .name = "j1_nominal_number_key", .expect = "ZTS213@5", .source =
+    .{ .name = "j1_nominal_number_key", .expect = "ZTS213@7", .source =
     \\import { dictEmpty } from "zttp:collections";
-    \\nominal Port = number;
+    \\import type { Nominal } from "zttp:core";
+    \\declare const portBrand: unique symbol;
+    \\type Port = Nominal<number, typeof portBrand>;
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const p: Dict<Port, string> = dictEmpty();
     \\  return Response.json(p);
@@ -13204,7 +13199,7 @@ const json_dict_key = [_]AbsentReadCase{
     },
     .{ .name = "j1_named_union_key_with_a_number", .expect = "ZTS213@5", .source =
     \\import { dictEmpty } from "zttp:collections";
-    \\structural Key = number | string;
+    \\type Key = number | string;
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const k: Dict<Key, string> = dictEmpty();
     \\  return Response.json(k);
@@ -13275,7 +13270,7 @@ const json_dict_key = [_]AbsentReadCase{
     },
     .{ .name = "j1_function_alias_key", .expect = "ZTS209@4,ZTS213@5", .source =
     \\import { dictEmpty } from "zttp:collections";
-    \\structural Fn = (x: number) => number;
+    \\type Fn = (x: number) => number;
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const d: Dict<Fn, number> = dictEmpty();
     \\  return Response.json(d);
@@ -13290,8 +13285,10 @@ const json_dict_key = [_]AbsentReadCase{
     },
     .{ .name = "j1_string_literal_template_nominal_and_unknown_keys_are_clean", .expect = "clean", .source =
     \\import { dictEmpty, dictSet } from "zttp:collections";
-    \\nominal UserId = string;
-    \\structural Name = "a" | "b";
+    \\import type { Nominal } from "zttp:core";
+    \\declare const userIdBrand: unique symbol;
+    \\type UserId = Nominal<string, typeof userIdBrand>;
+    \\type Name = "a" | "b";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const d: Dict<string, number> = dictSet(dictEmpty(), "a", 1);
     \\  const e: Dict<"a" | "b", number> = dictEmpty();
@@ -14074,7 +14071,7 @@ test "a fresh factory array and a same-site factory row written by a request kee
     try std.testing.expectEqual(@as(usize, 0), p3.json_diagnostics.items.len);
 
     const same_site =
-        \\structural Row = { n: number };
+        \\type Row = { n: number };
         \\function makeRow(): Row {
         \\  return { n: 0 };
         \\}
@@ -14318,7 +14315,7 @@ test "a pure capsule on a factory helper keeps the factory shapes proven" {
     try std.testing.expectEqual(@as(usize, 0), p3.json_diagnostics.items.len);
 
     const same_site =
-        \\structural Row = { n: number };
+        \\type Row = { n: number };
         \\function makeRow(): Row {
         \\  return { n: 0 };
         \\}
@@ -15609,12 +15606,12 @@ test "a response chosen by a branch on a varying value is not deterministic" {
     const rows = [_]ControlRefusal{
         .{ .name = "s1_if", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  if (t % 2 === 0) {\n    return Response.text(\"even\");\n  }\n  return Response.text(\"odd\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "s2_ternary", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  return Response.text(t % 2 === 0 ? \"even\" : \"odd\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:36 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
-        .{ .name = "s4_match", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const k = t % 2;\n  const s = match (k) {\n    when 0: \"even\"\n    default: \"odd\"\n  };\n  return Response.text(s);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:13 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "s4_match", .source = match_import ++ "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const k = t % 2;\n  const s = match(k).with(0, () => \"even\").otherwise(() => \"odd\");\n  return Response.text(s);\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:53 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "s5_loop", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const parts: string[] = [];\n  for (const i of range(t % 3)) {\n    parts.push(\"x\");\n  }\n  return Response.text(parts.join(\"\"));\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "s6_random", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  if (Math.random() > 0.5) {\n    return Response.text(\"a\");\n  }\n  return Response.text(\"b\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 2:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "s7_status", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  if (t % 2 === 0) {\n    return Response.json({ ok: true }, { status: 201 });\n  }\n  return Response.json({ ok: true });\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "s13_let", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  let s = \"even\";\n  if (t % 2 === 1) {\n    s = \"odd\";\n  }\n  return Response.text(s);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
-        .{ .name = "s15_assert", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  assert t % 2 === 0;\n  return Response.text(\"ok\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "s15_assert", .source = "import { assert } from \"zttp:core\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  assert(t % 2 === 0);\n  return Response.text(\"ok\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "s18_rate", .source = "import { rateCheck } from \"zttp:ratelimit\";\n\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const r = rateCheck(\"k\", 5, 60);\n  if (r.ok) {\n    return Response.text(\"ok\");\n  }\n  return Response.text(\"slow down\");\n}\n", .line = 3, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "s19_cache", .source = "import { cacheGet } from \"zttp:cache\";\n\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const v = cacheGet(\"ns\", \"k\");\n  if (v === undefined) {\n    return Response.text(\"miss\");\n  }\n  return Response.text(\"hit\");\n}\n", .line = 3, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "p_call_after_branch", .source = "function pick(req: Request): string {\n  if (req.url.length > 5) {\n    return \"long\";\n  }\n  return \"short\";\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  let s = \"even\";\n  if (t % 2 === 1) {\n    s = pick(req);\n  }\n  return Response.text(s);\n}\n", .line = 7, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 10:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
@@ -15622,7 +15619,7 @@ test "a response chosen by a branch on a varying value is not deterministic" {
         .{ .name = "p_recurse", .source = "function rep(n: number): string {\n  if (n === 0) {\n    return \"\";\n  }\n  return [\"x\", rep(n - 1)].join(\"\");\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  return Response.text(rep(t % 3));\n}\n", .line = 7, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 2:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "p_init_status", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const k = t % 2 === 0 ? 200 : 201;\n  return Response.text(\"ok\", { status: k });\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:25 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "p_holder", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const h = { v: \"even\" };\n  if (t % 2 === 1) {\n    h.v = \"odd\";\n  }\n  return Response.text(h.v);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
-        .{ .name = "e_match_record", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { kind: t % 2, name: \"n\" };\n  const s = match (o) {\n    when { kind: 0 }: \"even\"\n    default: \"odd\"\n  };\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:13 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "e_match_record", .source = match_import ++ "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { kind: t % 2, name: \"n\" };\n  const s = match(o).with({ kind: 0 }, () => \"even\").otherwise(() => \"odd\");\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:63 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "e_filter", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [\"a\", \"b\"].filter((x: string): boolean => x.length > t % 3);\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:30 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "d_opt_prop", .source = "import { dictGet, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { n: 1 };\n  const d: Dict<string, { n: number }> = dictSet(dictEmpty(), \"a\", o);\n  const m = dictGet(d, String(t));\n  const s = m?.n;\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 7:14 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
         .{ .name = "d_opt_call3", .source = "import { dictGet, dictSet, dictEmpty } from \"zttp:collections\";\nfunction aStr(): string { return \"a\"; }\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { f: aStr };\n  const d: Dict<string, { f: () => string }> = dictSet(dictEmpty(), \"a\", o);\n  const m = dictGet(d, String(t));\n  const s = m?.f();\n  return Response.text(\"x\");\n}\n", .line = 3, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 7:20 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
@@ -15671,7 +15668,7 @@ test "a branch on request data, a constant, or an unused clock read keeps determ
         .{ .name = "c_urllen", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  if (req.url.length > 5) {\n    return Response.text(\"long\");\n  }\n  return Response.text(\"short\");\n}\n" },
         .{ .name = "c_const", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const k = 3;\n  if (k > 2) {\n    return Response.text(\"big\");\n  }\n  return Response.text(\"small\");\n}\n" },
         .{ .name = "c_pE3", .source = "function stamp(): number {\n  return Date.now();\n}\n\nexport function handler(req: Request): Response {\n  const t = stamp();\n  return Response.text(\"ok\");\n}\n" },
-        .{ .name = "c_logts", .source = "import { logInfo } from \"zttp:log\";\n\nstructural LoggedResponse<T> = Proof<T, \"deterministic\" | \"state_isolated\">;\n\nexport function handler(req: Request): LoggedResponse<Response> {\n  const at = Date.now();\n  logInfo(\"served request\", { at: at });\n  return Response.json({ ok: true });\n}\n" },
+        .{ .name = "c_logts", .source = "import { logInfo } from \"zttp:log\";\n\ntype LoggedResponse<T> = Proof<T, \"deterministic\" | \"state_isolated\">;\n\nexport function handler(req: Request): LoggedResponse<Response> {\n  const at = Date.now();\n  logInfo(\"served request\", { at: at });\n  return Response.json({ ok: true });\n}\n" },
         .{ .name = "c_secret_det", .source = "import { env } from \"zttp:env\";\nexport function handler(req: Request): Proof<Response, \"no_secret_leakage\" | \"deterministic\"> {\n  const secret = env(\"API_KEY\");\n  const guess = req.headers.get(\"x\");\n  if (secret === guess) {\n    return Response.text(\"yes\");\n  }\n  return Response.text(\"no\");\n}\n" },
         .{ .name = "d_map_data", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = [\"a\", \"b\"].map((x: string): string => \"k\");\n  return Response.text(xs.join(\",\"));\n}\n" },
         .{ .name = "d_map_data2", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = [\"a\", \"b\"].map((x: string): number => t);\n  return Response.text(\"x\");\n}\n" },
@@ -15802,11 +15799,11 @@ test "a branch on a varying value is the cause of a failed deterministic" {
         .{ .name = "s19_cache_branch", .source = s19_cache_branch, .line = 3, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
         // The return in the loop is reached only on the second pass, through the back edge, and
         // that pass carries the mark.
-        .{ .name = "m1_loop_second_pass", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let n = 0;\n  for (const x of [1, 2]) {\n    if (n === 1) {\n      return Response.text(\"second\");\n    }\n    if (Date.now() % 2 === 0) {\n      n = 1;\n    }\n  }\n  assert(false);\n  return Response.text(\"never\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 7:5 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
+        .{ .name = "m1_loop_second_pass", .source = "import { assert } from \"zttp:core\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let n = 0;\n  for (const x of [1, 2]) {\n    if (n === 1) {\n      return Response.text(\"second\");\n    }\n    if (Date.now() % 2 === 0) {\n      n = 1;\n    }\n  }\n  assert(false);\n  return Response.text(\"never\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 8:5 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
         // The loop reaches `h` only on its second pass, through `f`, and the branch in `h` changes
         // nothing but the mark. The loop fixpoint must compare the site, or it stops before the
         // return reads the mark.
-        .{ .name = "m3_mark_only_pass", .source = "function g(): number {\n  return 0;\n}\nfunction h(): number {\n  if (Date.now() % 2 === 0) {\n    assert(false);\n  }\n  return 0;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let f = { run: g };\n  let n = 0;\n  for (const x of [1, 2, 3]) {\n    if (x === 3) {\n      return Response.text(String(n));\n    }\n    n = f.run();\n    f = { run: h };\n  }\n  assert(false);\n  return Response.text(\"never\");\n}\n", .line = 10, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
+        .{ .name = "m3_mark_only_pass", .source = "import { assert } from \"zttp:core\";\nfunction g(): number {\n  return 0;\n}\nfunction h(): number {\n  if (Date.now() % 2 === 0) {\n    assert(false);\n  }\n  return 0;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let f = { run: g };\n  let n = 0;\n  for (const x of [1, 2, 3]) {\n    if (x === 3) {\n      return Response.text(String(n));\n    }\n    n = f.run();\n    f = { run: h };\n  }\n  assert(false);\n  return Response.text(\"never\");\n}\n", .line = 11, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 6:3 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
         // Two arms mark the state at different sites. The join keeps the smaller site, the
         // first branch in the source.
         .{ .name = "m2_two_sites", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let s = \"x\";\n  if (req.url.length > 3) {\n    if (Date.now() % 2 === 0) {\n      s = \"a\";\n    }\n  } else {\n    if (Math.random() > 0.5) {\n      s = \"b\";\n    }\n  }\n  return Response.text(s);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:5 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
@@ -15817,6 +15814,7 @@ test "a branch on a varying value is the cause of a failed deterministic" {
 test "a loop that reaches a function with no varying branch keeps deterministic" {
     // The control of the m3_mark_only_pass row: the same loop with a clean `h`.
     try expectDeterministicHeld(std.testing.allocator, .{ .name = "m3_clean_pass", .source =
+        \\import { assert } from "zttp:core";
         \\function g(): number {
         \\  return 0;
         \\}
@@ -16154,27 +16152,25 @@ test "a router match on a request whose route operands vary is not deterministic
     });
 }
 
-const n01_binding_new_name =
+const n01_binding_new_name = match_import ++
     \\export function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const t = Date.now();
     \\  const r = { m: req.method, t: t };
-    \\  const s = match (r) {
-    \\    when { m: "GET", t: v }: "get"
-    \\    default: "other"
-    \\  };
+    \\  const s = match(r)
+    \\    .with({ m: "GET" }, (selected) => { const v = selected.t; return "get"; })
+    \\    .otherwise(() => "other");
     \\  return Response.text(s);
     \\}
     \\
 ;
 
-const n01_binding_shorthand =
+const n01_binding_shorthand = match_import ++
     \\export function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const now = Date.now();
     \\  const r = { m: req.method, t: now };
-    \\  const s = match (r) {
-    \\    when { m: "GET", t }: "get"
-    \\    default: "other"
-    \\  };
+    \\  const s = match(r)
+    \\    .with({ m: "GET" }, (selected) => { const t = selected.t; return "get"; })
+    \\    .otherwise(() => "other");
     \\  return Response.text(s);
     \\}
     \\
@@ -16188,21 +16184,20 @@ test "a record pattern field that only binds a varying value tests nothing" {
 test "a record pattern literal test on a varying field is not deterministic" {
     try expectDeterministicRefused(std.testing.allocator, .{
         .name = "n01_literal_on_varying_field",
-        .source =
-        \\export function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const t = Date.now();
-        \\  const r = { m: req.method, t: t % 2 };
-        \\  const s = match (r) {
-        \\    when { m: "GET", t: 0 }: "get"
-        \\    default: "other"
-        \\  };
-        \\  return Response.text(s);
-        \\}
-        \\
+        .source = match_import ++
+            \\export function handler(req: Request): Proof<Response, "deterministic"> {
+            \\  const t = Date.now();
+            \\  const r = { m: req.method, t: t % 2 };
+            \\  const s = match(r)
+            \\    .with({ m: "GET", t: 0 }, () => "get")
+            \\    .otherwise(() => "other");
+            \\  return Response.text(s);
+            \\}
+            \\
         ,
-        .line = 1,
+        .line = 2,
         .column = 24,
-        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:13 by `a branch on a value that varies between requests`)",
+        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 7:15 by `a branch on a value that varies between requests`)",
         .suggestion = branch_suggestion,
     });
 }
@@ -16248,13 +16243,13 @@ test "a clock read that reaches the response wins over an earlier discarded expo
 }
 
 const n01_wildcard_presence =
+    \\import { match, P } from "zttp:core";
     \\export function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const t = Date.now();
     \\  const r = { m: req.method, t: t % 2 };
-    \\  const s = match (r) {
-    \\    when { m: "GET", t: _ }: "get"
-    \\    default: "other"
-    \\  };
+    \\  const s = match(r)
+    \\    .with({ m: "GET", t: P.present }, () => "get")
+    \\    .otherwise(() => "other");
     \\  return Response.text(s);
     \\}
     \\
@@ -16264,9 +16259,9 @@ test "a record pattern wildcard on a varying field is a presence test" {
     try expectDeterministicRefused(std.testing.allocator, .{
         .name = "n01_wildcard_presence",
         .source = n01_wildcard_presence,
-        .line = 1,
+        .line = 2,
         .column = 24,
-        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:13 by `a branch on a value that varies between requests`)",
+        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 7:15 by `a branch on a value that varies between requests`)",
         .suggestion = branch_suggestion,
     });
 }
@@ -16316,7 +16311,7 @@ test "a block comment inside a union does not widen the declared type past its m
 test "line and block comments inside a record type keep its fields" {
     try expectCommentSource(
         std.testing.allocator,
-        "structural U = {\n  // the id\n  id: string;\n  name: number; // trailing\n};\n" ++
+        "type U = {\n  // the id\n  id: string;\n  name: number; // trailing\n};\n" ++
             "function f(u: U): number { return u.name; }\n",
         &.{},
     );
@@ -16325,7 +16320,7 @@ test "line and block comments inside a record type keep its fields" {
 test "a block comment after a record field colon keeps the field type" {
     try expectCommentSource(
         std.testing.allocator,
-        "structural U = { id: /* c */ string };\n" ++
+        "type U = { id: /* c */ string };\n" ++
             "function g(): number { const u: U = { id: 1 }; return 1; }\n",
         &.{.{
             .code = "ZTS200",
@@ -16337,18 +16332,18 @@ test "a block comment after a record field colon keeps the field type" {
 }
 
 test "a trailing block comment after a type is admitted" {
-    try expectCommentSource(std.testing.allocator, "structural L = number /* c */;\n", &.{});
+    try expectCommentSource(std.testing.allocator, "type L = number /* c */;\n", &.{});
 }
 
 test "type text before a trailing block comment is still refused" {
     try expectCommentSource(
         std.testing.allocator,
-        "structural L = number number /* c */;\n",
+        "type L = number number /* c */;\n",
         &.{.{
             .code = "ZTS001",
             .message = "this type syntax is not supported",
             .line = 1,
-            .column = 23,
+            .column = 17,
             .suggestion = "write an admitted type from section 5.7 of the specification",
         }},
     );
@@ -16368,7 +16363,7 @@ test "CHECK refuses a Dict key type that is not a string or a number" {
         .{ .source = "function g(a: [Dict<null, number>, string]): number { return 1; }\n" ++ handler_line, .message = "type argument null for 'K' does not satisfy constraint DictKey", .line = 1, .column = 12 },
         .{ .source = "function g<K, V>(d: Dict<K, V>): number { return 1; }\n" ++ handler_line, .message = "type argument K for 'K' does not satisfy constraint DictKey", .line = 1, .column = 18 },
         .{ .source = "const w: Dict<unknown, string> = {};\n" ++ handler_line, .message = "type argument unknown for 'K' does not satisfy constraint DictKey", .line = 1, .column = 1 },
-        .{ .source = "structural Flag = boolean;\nconst x: Dict<Flag, string> = {};\n" ++ handler_line, .message = "type argument Flag for 'K' does not satisfy constraint DictKey", .line = 2, .column = 1 },
+        .{ .source = "type Flag = boolean;\nconst x: Dict<Flag, string> = {};\n" ++ handler_line, .message = "type argument Flag for 'K' does not satisfy constraint DictKey", .line = 2, .column = 1 },
         .{ .source = "function id<T>(x: T): T { return x; }\nconst r = id<Dict<boolean, string>>({});\n" ++ handler_line, .message = "type argument boolean for 'K' does not satisfy constraint DictKey", .line = 2, .column = 36 },
     };
     for (cases) |case| {
@@ -16394,9 +16389,9 @@ test "CHECK refuses a Dict key type that is not a string or a number" {
 
 test "CHECK admits a Dict key type that is assignable to a string or a number" {
     const source =
-        "nominal UserId = string;\n" ++
-        "structural Name = \"a\" | \"b\";\n" ++
-        "structural Key = string | number;\n" ++
+        "import type { Nominal } from \"zttp:core\";\ndeclare const userIdBrand: unique symbol;\ntype UserId = Nominal<string, typeof userIdBrand>;\n" ++
+        "type Name = \"a\" | \"b\";\n" ++
+        "type Key = string | number;\n" ++
         "function g1(a: Dict<string, number>): number { return 1; }\n" ++
         "function g2(a: Dict<number, number>): number { return 1; }\n" ++
         "function g3(a: Dict<\"a\" | \"b\", number>): number { return 1; }\n" ++
@@ -16417,12 +16412,12 @@ test "CHECK admits a Dict key type that is assignable to a string or a number" {
 }
 
 test "CHECK refuses a type parameter whose own bound breaks the bound of a generic alias parameter" {
-    const box = "structural Box<T extends string> = { value: T };\n";
+    const box = "type Box<T extends string> = { value: T };\n";
     const handler_line = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
     const cases = [_]struct { source: []const u8, message: []const u8, line: u32, column: u32 }{
         .{ .source = box ++ "function f<T>(b: Box<T>): number { return 1; }\n" ++ handler_line, .message = "type argument T for 'T' does not satisfy constraint string", .line = 2, .column = 15 },
         .{ .source = box ++ "function f<T extends number>(b: Box<T>): number { return 1; }\n" ++ handler_line, .message = "type argument T for 'T' does not satisfy constraint string", .line = 2, .column = 30 },
-        .{ .source = box ++ "structural Wrap<U> = Box<U>;\nfunction f(w: Wrap<\"a\">): number { return 1; }\n" ++ handler_line, .message = "type argument U for 'T' does not satisfy constraint string", .line = 3, .column = 12 },
+        .{ .source = box ++ "type Wrap<U> = Box<U>;\nfunction f(w: Wrap<\"a\">): number { return 1; }\n" ++ handler_line, .message = "type argument U for 'T' does not satisfy constraint string", .line = 3, .column = 12 },
     };
     for (cases) |case| {
         errdefer std.debug.print("alias type parameter refusal failed for source:\n{s}\n", .{case.source});
@@ -16446,8 +16441,8 @@ test "CHECK refuses a type parameter whose own bound breaks the bound of a gener
 
 test "CHECK admits a type parameter whose own bound satisfies the bound of a generic alias parameter" {
     const source =
-        "structural Box<T extends string> = { value: T };\n" ++
-        "structural Wrap<U extends string> = Box<U>;\n" ++
+        "type Box<T extends string> = { value: T };\n" ++
+        "type Wrap<U extends string> = Box<U>;\n" ++
         "function f1<T extends string>(b: Box<T>): number { return 1; }\n" ++
         "function f2<T extends \"a\" | \"b\">(b: Box<T>): number { return 1; }\n" ++
         "function f4(w: Wrap<\"a\">): string { return w.value; }\n" ++

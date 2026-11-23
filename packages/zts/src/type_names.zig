@@ -1,7 +1,7 @@
 //! The closed type namespace (ZTS065).
 //!
 //! A type name in source type syntax must be a primitive, an ambient type from
-//! `ambient_names.types`, a `structural` or `nominal` declaration of the module
+//! `ambient_names.types`, a `type` declaration in the module
 //! (earlier or later in the file), an imported name, or a type parameter.
 //! Any other name is refused at the name. The pass runs once, after the parse,
 //! because a forward reference needs every declaration of the file.
@@ -51,7 +51,7 @@ const repairs = [_]Repair{
     .{ .name = "Function", .text = "write a function type, such as `(x: number) => string`" },
 };
 
-const default_repair = "declare it with `structural`, import it, or use a type name from `meta` ambient_names";
+const default_repair = "declare it with `type`, import it, or use a type name from `meta` ambient_names";
 
 pub fn repairFor(name: []const u8) []const u8 {
     for (repairs) |row| {

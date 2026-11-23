@@ -1,5 +1,5 @@
 // Proves: a boolean field read through two member accesses of a record parameter is typed boolean.
-structural Todo = {
+type Todo = {
     text: string;
     done: boolean;
 };

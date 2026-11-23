@@ -87,8 +87,8 @@ fn arr_call(comptime span: []const u8, comptime e: []const u8) Refusal {
     return r(span, top("function g(xs: number[]): unknown {\n  return " ++ e ++ ";\n}"));
 }
 
-const box_alias = "structural Box<T extends string> = { value: T };\n";
-const boundary_proof = "structural Boundary<T> = Proof<T, \"deterministic\" | \"read_only\">;\n";
+const box_alias = "type Box<T extends string> = { value: T };\n";
+const boundary_proof = "type Boundary<T> = Proof<T, \"deterministic\" | \"read_only\">;\n";
 
 const dict_round_trip = "import { dictEmpty, dictSet, dictEntries, dictFromEntries } from \"zttp:collections\";\nfunction g(): boolean {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const pairs = dictEntries(d).map((p) => [p[0], p[1] * 2]);\n  const rebuilt = dictFromEntries(pairs);\n  return rebuilt.ok;\n}\n" ++ tail;
 
@@ -96,7 +96,11 @@ const dict_reduce = "import { dictEmpty, dictSet, dictEntries } from \"zttp:coll
 
 const dict_bulk = "import { dictEmpty, dictSet, dictMapValues, dictFilter, dictFold } from \"zttp:collections\";\nfunction g(): number {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const m = dictMapValues(d, (v, k) => v * 2);\n  const f = dictFilter(m, (v, k) => v > 0);\n  return dictFold(f, (acc, v, k) => acc + v, 0);\n}\n" ++ tail;
 
-const command_type = "structural Cmd = { kind: \"a\"; text: string } | { kind: \"b\"; text: string };\n";
+const match_import = "import { match } from \"zttp:core\";\n";
+const assert_import = "import { assert } from \"zttp:core\";\n";
+const nominal_alias = "import type { Nominal } from \"zttp:core\";\ndeclare const idBrand: unique symbol;\ntype Id = Nominal<string, typeof idBrand>;\n";
+const command_type = match_import ++ "type Cmd = { kind: \"a\"; text: string } | { kind: \"b\"; text: string };\n";
+const complete_command = command_type ++ "function g(c: Cmd): string {\n  return match(c).with({ kind: \"a\" }, (a) => a.text).with({ kind: \"b\" }, (b) => b.text).exhaustive();\n}";
 
 // ---------------------------------------------------------------------------
 // Refusal rows
@@ -325,7 +329,7 @@ const refusal_rows_a = [_]RefusalRow{
             r("enum", top("enum E {\n  A,\n}")),
             r("const enum", top("const enum E {\n  A,\n}")),
         },
-        .clean = c(top("structural E = \"a\" | \"b\";")),
+        .clean = c(top("type E = \"a\" | \"b\";")),
     },
     .{
         .key = "Decorators (`@decorator`)",
@@ -340,7 +344,7 @@ const refusal_rows_a = [_]RefusalRow{
             r("private", top("class A {\n  private a: number;\n}")),
             r("protected", top("class A {\n  protected a: number;\n}")),
         },
-        .clean = c(top("structural A = { a: number };")),
+        .clean = c(top("type A = { a: number };")),
     },
     .{
         .key = "`interface X { ... }`",
@@ -350,7 +354,22 @@ const refusal_rows_a = [_]RefusalRow{
     .{
         .key = "`distinct type X = string;`",
         .refused = &.{r("distinct type X = string;", top("distinct type X = string;"))},
-        .clean = c(top("nominal X = string;")),
+        .clean = c(top(nominal_alias)),
+    },
+    .{
+        .key = "A legacy `structural` declaration",
+        .refused = &.{r("structural", top("structural X = number;"))},
+        .clean = c(top("type X = number;")),
+    },
+    .{
+        .key = "A legacy `nominal` declaration",
+        .refused = &.{r("nominal", top("nominal Id = string;"))},
+        .clean = c(top(nominal_alias)),
+    },
+    .{
+        .key = "A raw initializer assigned to a nominal type, such as `const id: Id = \"a\";`",
+        .refused = &.{r("const id: Id = \"a\";", top(nominal_alias ++ "function g(): string {\n  const id: Id = \"a\";\n  return id;\n}"))},
+        .clean = c(top("import { nominal } from \"zttp:core\";\n" ++ nominal_alias ++ "function g(): string {\n  const id: Id = nominal<Id>(\"a\");\n  return id;\n}")),
     },
     .{
         .key = "A `nominal` type over a record, tuple, union, or function",
@@ -360,7 +379,7 @@ const refusal_rows_a = [_]RefusalRow{
             r("nominal", top("nominal X = string | number;")),
             r("nominal", top("nominal X = (a: number) => number;")),
         },
-        .clean = c(top("nominal X = string;")),
+        .clean = c(top(nominal_alias)),
     },
     .{
         .key = "An arrow outside a direct call argument: a bound arrow such as `const double = (x) => x * 2;`, an exported one such as `export const f = (x: number): number => x;`, a returned arrow such as `return (x) => x;`, an arrow in a record field such as `{ f: (x) => x }`, an immediately called arrow such as `((x) => x)(1)`, and an arrow as a `?:` arm",
@@ -376,7 +395,7 @@ const refusal_rows_a = [_]RefusalRow{
     },
     .{
         .key = "A nominal type called as a function, such as `Id(\"a\")`",
-        .refused = &.{r("Id(\"a\")", top("nominal Id = string;\nfunction g(): string {\n  const x = Id(\"a\");\n  return x;\n}"))},
+        .refused = &.{r("Id(\"a\")", top(nominal_alias ++ "function g(): string {\n  const x = Id(\"a\");\n  return x;\n}"))},
         .clean = c(top("import { nominal } from \"zttp:core\";\nimport type { Nominal } from \"zttp:core\";\ndeclare const idBrand: unique symbol;\ntype Id = Nominal<string, typeof idBrand>;\nfunction g(): string {\n  const x: Id = nominal<Id>(\"a\");\n  return x;\n}")),
     },
 
@@ -435,14 +454,14 @@ const refusal_rows_a = [_]RefusalRow{
         .clean = c(top("function f<A, B>(a: A): A {\n  return a;\n}")),
     },
     .{
-        .key = "A duplicate parameter name, such as `function f(a: number, a: number)`, and a duplicate type parameter, such as `function f<T, T>(a: T): T` and `structural Box<T, T> = T;`",
+        .key = "A duplicate parameter name, such as `function f(a: number, a: number)`, and a duplicate type parameter, such as `function f<T, T>(a: T): T` and `type Box<T, T> = T;`",
         .refused = &.{
             r("function f(a: number, a: number)", top("function g(a: number, a: number): number {\n  return a;\n}")),
             r("function f(a: number, a: number)", body("  const xs: number[] = [1];\n  const ys = xs.map((a, a) => a);")),
             r("function f<T, T>(a: T): T", top("function g<T, T>(a: T): T {\n  return a;\n}")),
-            r("structural Box<T, T> = T;", top("structural Box<T, T> = T;")),
+            r("type Box<T, T> = T;", top("type Box<T, T> = T;")),
         },
-        .clean = c(top("structural Box<T, U> = T;\nfunction g<T, U>(a: T, b: U): T {\n  return a;\n}")),
+        .clean = c(top("type Box<T, U> = T;\nfunction g<T, U>(a: T, b: U): T {\n  return a;\n}")),
     },
     .{
         .key = "An assignment to a parameter, such as `a = a + 1` for a function parameter and `x = 0` for an arrow parameter",
@@ -502,8 +521,8 @@ const refusal_rows_a = [_]RefusalRow{
     },
     .{
         .key = "An exported function that reaches a capability with no `Effects<...>` return ceiling",
-        .refused = &.{r("Effects<...>", top("import { env } from \"zttp:env\";\nstructural B<T> = Proof<T, \"read_only\">;\nexport function f(): B<string> {\n  return env(\"A\") ?? \"\";\n}"))},
-        .clean = c(top("import { env } from \"zttp:env\";\nstructural B<T> = Proof<T, \"read_only\">;\nexport function f(): B<Effects<string, \"env\" | \"policy_check\">> {\n  return env(\"A\") ?? \"\";\n}")),
+        .refused = &.{r("Effects<...>", top("import { env } from \"zttp:env\";\ntype B<T> = Proof<T, \"read_only\">;\nexport function f(): B<string> {\n  return env(\"A\") ?? \"\";\n}"))},
+        .clean = c(top("import { env } from \"zttp:env\";\ntype B<T> = Proof<T, \"read_only\">;\nexport function f(): B<Effects<string, \"env\" | \"policy_check\">> {\n  return env(\"A\") ?? \"\";\n}")),
     },
     .{
         .key = "A module-internal function that declares an `Effects<...>` ceiling",
@@ -522,18 +541,23 @@ const refusal_rows_a = [_]RefusalRow{
     },
     .{
         .key = "An exported helper with no `Proof<...>` capsule, when the handler declares a proof spec",
-        .refused = &.{r("Proof<...>", "nominal Id = string;\nexport function helper(a: Id): Id {\n  return a;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"ok\");\n}\n")},
-        .clean = c("nominal Id = string;\nexport function helper(a: Id): Proof<Id, \"deterministic\"> {\n  return a;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"ok\");\n}\n"),
+        .refused = &.{r("Proof<...>", nominal_alias ++ "export function helper(a: Id): Id {\n  return a;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"ok\");\n}\n")},
+        .clean = c(nominal_alias ++ "export function helper(a: Id): Proof<Id, \"deterministic\"> {\n  return a;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"ok\");\n}\n"),
     },
 
     // ----- Statements And Control Flow -----
+    .{
+        .key = "A legacy `assert predicate;` statement",
+        .refused = &.{r("assert predicate;", body("  assert req.method === \"GET\";"))},
+        .clean = c(assert_import ++ body("  assert(req.method === \"GET\");")),
+    },
     .{
         .key = "`switch` / `case`",
         .refused = &.{
             r("switch", body("  const n = 1;\n  switch (n) {\n    default:\n  }")),
             r("case", body("  const n = 1;\n  switch (n) {\n    case 1:\n  }")),
         },
-        .clean = c(top("function f(n: number): number {\n  return match (n) {\n    when 1: 1\n    default: 0\n  };\n}")),
+        .clean = c(top(match_import ++ "function f(n: number): number {\n  return match(n).with(1, () => 1).otherwise(() => 0);\n}")),
     },
     .{
         .key = "`while` and `do...while`",
@@ -669,7 +693,7 @@ const refusal_rows_a = [_]RefusalRow{
     .{
         .key = "`instanceof`",
         .refused = &.{r("instanceof", body("  const a = req instanceof Request;"))},
-        .clean = c(top(command_type ++ "function f(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n  };\n}")),
+        .clean = c(top(complete_command)),
     },
     .{
         .key = "The `in` operator",
@@ -737,7 +761,7 @@ const refusal_rows_a = [_]RefusalRow{
         .key = "A non-boolean condition in `if`, `assert`, or `?:`",
         .refused = &.{
             r("if", body("  const n = 1;\n  if (n) {\n    const y = n;\n  }")),
-            r("assert", body("  const n = 1;\n  assert n;")),
+            r("assert", assert_import ++ body("  const n = 1;\n  assert(n);")),
             r("?:", body("  const n = 1;\n  const a = n ? 1 : 2;")),
         },
         .clean = c(body("  const n = 1;\n  if (n > 0) {\n    const y = n;\n  }")),
@@ -970,11 +994,11 @@ const refusal_rows_b = [_]RefusalRow{
         .key = "A write to a field that the type does not declare, such as `o.z = 1`",
         .refused = &.{
             r("o.z = 1", top("function g(): number {\n  const o = { a: 1 };\n  o.z = 1;\n  return o.a;\n}")),
-            r("o.z = 1", top("structural P = { a: number };\nfunction g(o: P): number {\n  o.z = 1;\n  return o.a;\n}")),
-            r("o.z = 1", top("structural P = { a: number; z: number };\nstructural Q = { a: number };\nfunction g(o: P | Q): number {\n  o.z = 1;\n  return o.a;\n}")),
+            r("o.z = 1", top("type P = { a: number };\nfunction g(o: P): number {\n  o.z = 1;\n  return o.a;\n}")),
+            r("o.z = 1", top("type P = { a: number; z: number };\ntype Q = { a: number };\nfunction g(o: P | Q): number {\n  o.z = 1;\n  return o.a;\n}")),
             r("o.z = 1", top("function g(xs: number[]): number {\n  xs.z = 1;\n  return 1;\n}")),
         },
-        .clean = c(top("structural P = { a: number; z: number };\nfunction g(o: P): number {\n  o.z = 1;\n  return o.a;\n}")),
+        .clean = c(top("type P = { a: number; z: number };\nfunction g(o: P): number {\n  o.z = 1;\n  return o.a;\n}")),
     },
     .{
         .key = "`push` on a tuple",
@@ -1002,14 +1026,14 @@ const refusal_rows_b = [_]RefusalRow{
     .{
         .key = "A write to a `readonly` field",
         .refused = &.{
-            r("readonly", top("structural R = { readonly a: number };\nfunction g(r: R): number {\n  r.a = 2;\n  return r.a;\n}")),
-            r("readonly", top("structural In = { readonly a: number };\nstructural Out = { inner: In };\nfunction g(o: Out): number {\n  o.inner.a = 2;\n  return o.inner.a;\n}")),
-            r("readonly", top("structural R = { readonly a: number };\nfunction g(os: R[]): number {\n  for (const e of os) {\n    e.a = 7;\n  }\n  return 1;\n}")),
-            r("readonly", top("structural R = { readonly a: number };\nfunction g(o: R | undefined): number {\n  if (o !== undefined) {\n    o.a = 3;\n  }\n  return 1;\n}")),
-            r("readonly", top("structural R = { readonly a: number };\nfunction g(o: R, k: \"a\"): number {\n  o[k] = 3;\n  return 1;\n}")),
-            r("readonly", top("structural R = { readonly a: number };\nfunction g(o: R): number {\n  o[\"a\"] = 3;\n  return 1;\n}")),
+            r("readonly", top("type R = { readonly a: number };\nfunction g(r: R): number {\n  r.a = 2;\n  return r.a;\n}")),
+            r("readonly", top("type In = { readonly a: number };\ntype Out = { inner: In };\nfunction g(o: Out): number {\n  o.inner.a = 2;\n  return o.inner.a;\n}")),
+            r("readonly", top("type R = { readonly a: number };\nfunction g(os: R[]): number {\n  for (const e of os) {\n    e.a = 7;\n  }\n  return 1;\n}")),
+            r("readonly", top("type R = { readonly a: number };\nfunction g(o: R | undefined): number {\n  if (o !== undefined) {\n    o.a = 3;\n  }\n  return 1;\n}")),
+            r("readonly", top("type R = { readonly a: number };\nfunction g(o: R, k: \"a\"): number {\n  o[k] = 3;\n  return 1;\n}")),
+            r("readonly", top("type R = { readonly a: number };\nfunction g(o: R): number {\n  o[\"a\"] = 3;\n  return 1;\n}")),
         },
-        .clean = c(top("structural R = { readonly a: number };\nfunction g(r: R): R {\n  return { a: 2 };\n}")),
+        .clean = c(top("type R = { readonly a: number };\nfunction g(r: R): R {\n  return { a: 2 };\n}")),
     },
     .{
         .key = "A `dictEntries` round trip through `dictFromEntries` that changes only values or drops entries",
@@ -1063,64 +1087,59 @@ const refusal_rows_b = [_]RefusalRow{
 
     // ----- Match -----
     .{
+        .key = "A legacy brace `match` expression",
+        .refused = &.{r("match", top("function g(n: number): number {\n  return match (n) { when 1: 1, default: 0 };\n}"))},
+        .clean = c(top(complete_command)),
+    },
+    .{
         .key = "A `default` arm before a `when` arm, or a second `default` arm",
         .refused = &.{
             r("default", top("function g(n: number): number {\n  return match (n) {\n    default: 0\n    when 1: 1\n  };\n}")),
             r("when", top("function g(n: number): number {\n  return match (n) {\n    default: 0\n    when 1: 1\n  };\n}")),
             r("default", top("function g(n: number): number {\n  return match (n) {\n    when 1: 1\n    default: 0\n    default: 2\n  };\n}")),
         },
-        .clean = c(top("function g(n: number): number {\n  return match (n) {\n    when 1: 1\n    default: 0\n  };\n}")),
+        .clean = c(top(complete_command)),
     },
     .{
-        .key = "A type-test name below the top level of a pattern, such as `when { v: string }`",
-        .refused = &.{r("when { v: string }", top("structural R = { v: string | number };\nfunction g(r: R): number {\n  return match (r) {\n    when { v: string }: 1\n    default: 0\n  };\n}"))},
-        .clean = c(top("structural R = { v: string | number };\nfunction g(r: R): number {\n  const v = r.v;\n  return match (v) {\n    when string: 1\n    default: 0\n  };\n}")),
+        .key = "A type descriptor below the top level of a pattern, such as `{ v: P.string }`",
+        .refused = &.{r("{ v: P.string }", top("import { match, P } from \"zttp:core\";\ntype R = { v: string | number };\nfunction g(r: R): number {\n  return match(r).with({ v: P.string }, () => 1).otherwise(() => 0);\n}"))},
+        .clean = c(top("import { match, P } from \"zttp:core\";\ntype R = { v: string | number };\nfunction g(r: R): number {\n  const v = r.v;\n  return match(v).with(P.string, () => 1).otherwise(() => 0);\n}")),
     },
     .{
         .key = "`when _:`",
         .refused = &.{r("when _:", top("function g(n: number): number {\n  return match (n) {\n    when _: 0\n  };\n}"))},
-        .clean = c(top("function g(n: number): number {\n  return match (n) {\n    default: 0\n  };\n}")),
+        .clean = c(top(match_import ++ "function g(n: number): number {\n  return match(n).otherwise(() => 0);\n}")),
     },
     .{
-        .key = "A `match` scrutinee that is not a name or a member path, such as `match (g())`, `match (xs[0])`, or `match (r.a?.b)`",
+        .key = "A `match` subject that is not a name or a member path, such as `match(g())`, `match(xs[0])`, or `match(r.a?.b)`",
         .refused = &.{
-            r("match", top(g_fn ++ "function h(): number {\n  return match (g()) {\n    when 1: 1\n    default: 0\n  };\n}")),
-            r("match (g())", top(g_fn ++ "function h(): number {\n  return match (g()) {\n    when 1: 1\n    default: 0\n  };\n}")),
-            r("match (xs[0])", top("function h(xs: number[]): number {\n  return match (xs[0]) {\n    when 1: 1\n    default: 0\n  };\n}")),
-            r("match (r.a?.b)", top("structural R = { a: { b: number } | null };\nfunction h(r: R): number {\n  return match (r.a?.b) {\n    when 1: 1\n    default: 0\n  };\n}")),
+            r("match", top(match_import ++ g_fn ++ "function h(): number {\n  return match(g()).otherwise(() => 0);\n}")),
+            r("match(g())", top(match_import ++ g_fn ++ "function h(): number {\n  return match(g()).otherwise(() => 0);\n}")),
+            r("match(xs[0])", top(match_import ++ "function h(xs: number[]): number {\n  return match(xs[0]).otherwise(() => 0);\n}")),
+            r("match(r.a?.b)", top(match_import ++ "type R = { a?: { b: number } };\nfunction h(r: R): number {\n  return match(r.a?.b).otherwise(() => 0);\n}")),
         },
-        .clean = c(top(g_fn ++ "function h(): number {\n  const v = g();\n  return match (v) {\n    when 1: 1\n    default: 0\n  };\n}")),
+        .clean = c(top(match_import ++ g_fn ++ "function h(): number {\n  const v = g();\n  return match(v).with(1, () => 1).otherwise(() => 0);\n}")),
     },
     .{
-        .key = "A rename to the same name, such as `{ text: text }` in a pattern",
-        .refused = &.{r("{ text: text }", top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text: text }: text\n    when { kind: \"b\", text }: text\n  };\n}"))},
-        .clean = c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n  };\n}")),
-    },
-    .{
-        .key = "An arm that reads a field off the scrutinee",
-        .refused = &.{r("", top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\" }: c.text\n    when { kind: \"b\", text }: text\n  };\n}"))},
-        .clean = c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n  };\n}")),
-    },
-    .{
-        .key = "A `default` arm after full coverage of a closed union, or a duplicate `when` arm",
+        .key = "An `.otherwise(...)` after full coverage of a closed union, or a duplicate `.with(...)` arm",
         .refused = &.{
-            r("default", top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n    default: \"\"\n  };\n}")),
-            r("when", top("function g(n: number): number {\n  return match (n) {\n    when 1: 1\n    when 1: 2\n    default: 0\n  };\n}")),
+            r(".otherwise(...)", top(command_type ++ "function g(c: Cmd): string {\n  return match(c).with({ kind: \"a\" }, (a) => a.text).with({ kind: \"b\" }, (b) => b.text).otherwise(() => \"\");\n}")),
+            r(".with(...)", top(match_import ++ "function g(n: number): number {\n  return match(n).with(1, () => 1).with(1, () => 2).otherwise(() => 0);\n}")),
         },
-        .clean = c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n  };\n}")),
+        .clean = c(top(complete_command)),
     },
     .{
         .key = "A `match` that does not cover every case, in a statement or a `const`",
         .refused = &.{
-            r("match", top(command_type ++ "function g(c: Cmd): string {\n  const v = match (c) {\n    when { kind: \"a\", text }: text\n  };\n  return \"x\";\n}")),
-            r("const", top("function g(n: number): string {\n  const v = match (n) {\n    when 1: \"a\"\n  };\n  return \"x\";\n}")),
+            r("match", top(command_type ++ "function g(c: Cmd): string {\n  const v = match(c).with({ kind: \"a\" }, (a) => a.text).exhaustive();\n  return \"x\";\n}")),
+            r("const", top(match_import ++ "function g(n: number): string {\n  const v = match(n).with(1, () => \"a\").exhaustive();\n  return \"x\";\n}")),
         },
-        .clean = c(top("function g(n: number): string {\n  const v = match (n) {\n    when 1: \"a\"\n    default: \"b\"\n  };\n  return v;\n}")),
+        .clean = c(top(match_import ++ "function g(n: number): string {\n  const v = match(n).with(1, () => \"a\").otherwise(() => \"b\");\n  return v;\n}")),
     },
     .{
         .key = "A `match` that does not cover every case, as the return value",
-        .refused = &.{r("match", top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n  };\n}"))},
-        .clean = c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n  };\n}")),
+        .refused = &.{r("match", top(command_type ++ "function g(c: Cmd): string {\n  return match(c).with({ kind: \"a\" }, (a) => a.text).exhaustive();\n}"))},
+        .clean = c(top(complete_command)),
     },
 
     // ----- Types -----
@@ -1162,12 +1181,12 @@ const refusal_rows_b = [_]RefusalRow{
     .{
         .key = "A raw built-in open type in an exported parameter or return",
         .refused = &.{r("", top("export function g(a: string): string {\n  return a;\n}"))},
-        .clean = c(top("nominal Id = string;\nstructural B<T> = Proof<T, \"deterministic\">;\nexport function g(a: Id): B<Id> {\n  return a;\n}")),
+        .clean = c(top(nominal_alias ++ "type B<T> = Proof<T, \"deterministic\">;\nexport function g(a: Id): B<Id> {\n  return a;\n}")),
     },
     .{
         .key = "A recursive alias with a cycle that does not pass through a record, tuple, array, or `Dict`",
-        .refused = &.{r("Dict", top("structural A = A | number;\nconst value: A = 1;"))},
-        .clean = c(top("structural A = { next: A | undefined };\nconst value: A = { next: undefined };")),
+        .refused = &.{r("Dict", top("type A = A | number;\nconst value: A = 1;"))},
+        .clean = c(top("type A = { next: A | undefined };\nconst value: A = { next: undefined };")),
     },
     .{
         .key = "A type predicate whose body does not prove the predicate",
@@ -1200,22 +1219,22 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = param("Dict<string, number>"),
     },
     .{
-        .key = "A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };`",
+        .key = "A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `type Box<T extends string> = { value: T };`",
         .refused = &.{
             r("Box<number>", top(box_alias ++ "function g(b: Box<number>): number {\n  return 1;\n}")),
             r("Box<number>", top(box_alias ++ "const v: Box<number> = { value: 1 };")),
             r("Box<number>", top(box_alias ++ "function g(): Box<number> {\n  return { value: 1 };\n}")),
-            r("Box<number>", top(box_alias ++ "structural Holder = { box: Box<number> };\nfunction g(h: Holder): number {\n  return 1;\n}")),
+            r("Box<number>", top(box_alias ++ "type Holder = { box: Box<number> };\nfunction g(h: Holder): number {\n  return 1;\n}")),
             r("Box<number>", top(box_alias ++ "function g(xs: Box<number>[]): number {\n  return 1;\n}")),
             r("Box<number>", top(box_alias ++ "function g(u: Box<number> | undefined): number {\n  return 1;\n}")),
             r("Box<number>", top(box_alias ++ "function g(f: (b: Box<number>) => number): number {\n  return 1;\n}")),
-            r("Box<number>", top(box_alias ++ "structural Wrapped = Box<number>;\nfunction g(w: Wrapped): number {\n  return 1;\n}")),
-            r("structural Box<T extends string> = { value: T };", top("structural Bag<K extends DictKey, V> = Dict<K, V>;\nfunction g(b: Bag<boolean, string>): number {\n  return 1;\n}")),
-            r("structural Box<T extends string> = { value: T };", top(box_alias ++ "function g<T>(b: Box<T>): number {\n  return 1;\n}")),
-            r("structural Box<T extends string> = { value: T };", top(box_alias ++ "function g<T extends number>(b: Box<T>): number {\n  return 1;\n}")),
-            r("structural Box<T extends string> = { value: T };", top(box_alias ++ "structural Wrap<U> = Box<U>;\nfunction g(w: Wrap<\"a\">): number {\n  return 1;\n}")),
+            r("Box<number>", top(box_alias ++ "type Wrapped = Box<number>;\nfunction g(w: Wrapped): number {\n  return 1;\n}")),
+            r("type Box<T extends string> = { value: T };", top("type Bag<K extends DictKey, V> = Dict<K, V>;\nfunction g(b: Bag<boolean, string>): number {\n  return 1;\n}")),
+            r("type Box<T extends string> = { value: T };", top(box_alias ++ "function g<T>(b: Box<T>): number {\n  return 1;\n}")),
+            r("type Box<T extends string> = { value: T };", top(box_alias ++ "function g<T extends number>(b: Box<T>): number {\n  return 1;\n}")),
+            r("type Box<T extends string> = { value: T };", top(box_alias ++ "type Wrap<U> = Box<U>;\nfunction g(w: Wrap<\"a\">): number {\n  return 1;\n}")),
         },
-        .clean = c(top(box_alias ++ "structural Wrap<U extends string> = Box<U>;\nfunction g(b: Box<string>): number {\n  return 1;\n}\nfunction h<T extends string>(b: Box<T>): number {\n  return 1;\n}\nfunction k(w: Wrap<\"a\">): number {\n  return 1;\n}")),
+        .clean = c(top(box_alias ++ "type Wrap<U extends string> = Box<U>;\nfunction g(b: Box<string>): number {\n  return 1;\n}\nfunction h<T extends string>(b: Box<T>): number {\n  return 1;\n}\nfunction k(w: Wrap<\"a\">): number {\n  return 1;\n}")),
     },
 
     // ----- Ambient Names And Effects -----
@@ -1410,13 +1429,9 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("import { ok } from \"zttp:result\";")),
     },
     .{
-        .key = "A `structural` or `nominal` declaration inside a function",
-        .refused = &.{
-            r("structural", top("function g(): number {\n  structural L = number;\n  return 1;\n}")),
-            r("structural", top("function g(): number {\nstructural L = number;\n  return 1;\n}")),
-            r("nominal", top("function g(): number {\n  nominal L = number;\n  return 1;\n}")),
-        },
-        .clean = c(top("structural L = number;\nfunction g(x: L): L {\n  return x;\n}")),
+        .key = "A `type` declaration inside a function",
+        .refused = &.{r("type", top("function g(): number {\n  type L = number;\n  return 1;\n}"))},
+        .clean = c(top("type L = number;\nfunction g(x: L): L {\n  return x;\n}")),
     },
     .{
         .key = "A type name that is not declared, imported, or ambient, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error`, `object`, and the utility types `Partial<T>`, `Required<T>`, `Pick<T, K>`, `Omit<T, K>`, and `Readonly<T>`",
@@ -1433,13 +1448,13 @@ const refusal_rows_b = [_]RefusalRow{
             r("RegExp", paramText("RegExp")),
             r("Error", paramText("Error")),
             r("object", paramText("object")),
-            r("Partial<T>", top("structural U = { id: number };\nfunction g(a: Partial<U>): number {\n  return 1;\n}")),
-            r("Required<T>", top("structural U = { id?: number };\nfunction g(a: Required<U>): number {\n  return 1;\n}")),
-            r("Pick<T, K>", top("structural U = { id: number; name: string };\nfunction g(a: Pick<U, \"id\">): number {\n  return 1;\n}")),
-            r("Omit<T, K>", top("structural U = { id: number; name: string };\nfunction g(a: Omit<U, \"id\">): number {\n  return 1;\n}")),
-            r("Readonly<T>", top("structural U = { id: number };\nfunction g(a: Readonly<U>): number {\n  return 1;\n}")),
+            r("Partial<T>", top("type U = { id: number };\nfunction g(a: Partial<U>): number {\n  return 1;\n}")),
+            r("Required<T>", top("type U = { id?: number };\nfunction g(a: Required<U>): number {\n  return 1;\n}")),
+            r("Pick<T, K>", top("type U = { id: number; name: string };\nfunction g(a: Pick<U, \"id\">): number {\n  return 1;\n}")),
+            r("Omit<T, K>", top("type U = { id: number; name: string };\nfunction g(a: Omit<U, \"id\">): number {\n  return 1;\n}")),
+            r("Readonly<T>", top("type U = { id: number };\nfunction g(a: Readonly<U>): number {\n  return 1;\n}")),
         },
-        .clean = c(top("structural Item = { id: number };\nstructural Partial<T> = { v: T };\nfunction g<T>(a: T, b: Item, c: readonly Item[], d: Later, e: Partial<number>): T {\n  return a;\n}\nstructural Later = { v: number };")),
+        .clean = c(top("type Item = { id: number };\ntype Partial<T> = { v: T };\nfunction g<T>(a: T, b: Item, c: readonly Item[], d: Later, e: Partial<number>): T {\n  return a;\n}\ntype Later = { v: number };")),
     },
     .{
         .key = "`FetchOptions` with no import",
@@ -1455,32 +1470,31 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("import type { FetchError } from \"zttp:fetch\";\nimport type { Result } from \"zttp:result\";\nfunction g(e: FetchError, r: Result<number, string>): number {\n  return 1;\n}")),
     },
     .{
-        .key = "A `structural` declaration of `Result` beside an `import type` of it",
+        .key = "A `type` declaration of `Result` beside an `import type` of it",
         .refused = &.{
-            r("structural", top("import type { Result } from \"zttp:result\";\nstructural Result<T, E> = { value: T };")),
-            r("Result", top("import type { Result } from \"zttp:result\";\nstructural Result<T, E> = { value: T };")),
-            r("import type", top("import type { Result } from \"zttp:result\";\nstructural Result<T, E> = { value: T };")),
+            r("type", top("import type { Result } from \"zttp:result\";\ntype Result<T, E> = { value: T };")),
+            r("Result", top("import type { Result } from \"zttp:result\";\ntype Result<T, E> = { value: T };")),
+            r("import type", top("import type { Result } from \"zttp:result\";\ntype Result<T, E> = { value: T };")),
         },
-        .clean = c(top("import type { Result } from \"zttp:result\";\nstructural Outcome<T, E> = { value: T };\nfunction g(r: Result<number, string>): number {\n  return 1;\n}")),
+        .clean = c(top("import type { Result } from \"zttp:result\";\ntype Outcome<T, E> = { value: T };\nfunction g(r: Result<number, string>): number {\n  return 1;\n}")),
     },
     .{
-        .key = "A `structural` or `nominal` declaration of an ambient type name or of a name that an `import type` binds, such as `structural Request = number;`, `structural string = number;`, `nominal Proof<T, P> = string;`, and `structural FetchOptions = number;` beside an import of it",
+        .key = "A `type` declaration of an ambient type name or of a name that an `import type` binds, such as `type Request = number;`, `type string = number;`, `type Proof<T, P> = string;`, and `type FetchOptions = number;` beside an import of it",
         .refused = &.{
-            r("structural", top("structural Request = number;")),
-            r("nominal", top("nominal Request = number;")),
-            r("import type", top("import type { FetchOptions } from \"zttp:fetch\";\nnominal FetchOptions = number;")),
-            r("structural Request = number;", top("structural Request = number;")),
-            r("structural string = number;", top("structural string = number;")),
-            r("nominal Proof<T, P> = string;", top("nominal Proof<T, P> = string;")),
-            r("structural FetchOptions = number;", top("import type { FetchOptions } from \"zttp:fetch\";\nstructural FetchOptions = number;")),
+            r("type", top("type Request = number;")),
+            r("import type", top("import type { FetchOptions } from \"zttp:fetch\";\ntype FetchOptions = number;")),
+            r("type Request = number;", top("type Request = number;")),
+            r("type string = number;", top("type string = number;")),
+            r("type Proof<T, P> = string;", top("type Proof<T, P> = string;")),
+            r("type FetchOptions = number;", top("import type { FetchOptions } from \"zttp:fetch\";\ntype FetchOptions = number;")),
         },
-        .clean = c(top("structural MyRequest = { id: string };\nfunction g(r: MyRequest): number {\n  return 1;\n}")),
+        .clean = c(top("type MyRequest = { id: string };\nfunction g(r: MyRequest): number {\n  return 1;\n}")),
     },
     .{
         .key = "A generic default, such as `function f<T = string>(a: T): T`",
         .refused = &.{
             r("function f<T = string>(a: T): T", top("function f<T = string>(a: T): T {\n  return a;\n}")),
-            r("function f<T = string>(a: T): T", top("structural Box<T = string> = { value: T };")),
+            r("function f<T = string>(a: T): T", top("type Box<T = string> = { value: T };")),
         },
         .clean = c(top("function f<T>(a: T): T {\n  return a;\n}")),
     },
@@ -1500,31 +1514,31 @@ const refusal_rows_b = [_]RefusalRow{
     },
     .{
         .key = "A keyof type, such as `keyof T`",
-        .refused = &.{r("keyof T", top("structural K<T> = keyof T;"))},
-        .clean = c(top("structural K = \"a\" | \"b\";")),
+        .refused = &.{r("keyof T", top("type K<T> = keyof T;"))},
+        .clean = c(top("type K = \"a\" | \"b\";")),
     },
     .{
         .key = "An indexed access type, such as `A[\"a\"]`",
-        .refused = &.{r("A[\"a\"]", top("structural A = { a: number };\nfunction f(x: A[\"a\"]): number {\n  return x;\n}"))},
-        .clean = c(top("structural A = { a: number };\nfunction f(x: number): number {\n  return x;\n}")),
+        .refused = &.{r("A[\"a\"]", top("type A = { a: number };\nfunction f(x: A[\"a\"]): number {\n  return x;\n}"))},
+        .clean = c(top("type A = { a: number };\nfunction f(x: number): number {\n  return x;\n}")),
     },
     .{
         .key = "An index signature, such as `{ [k: string]: number }`",
         .refused = &.{
-            r("{ [k: string]: number }", top("structural D = { [k: string]: number };")),
+            r("{ [k: string]: number }", top("type D = { [k: string]: number };")),
             r("{ [k: string]: number }", top("function f(x: { [k: string]: number }): number {\n  return 1;\n}")),
         },
-        .clean = c(top("structural D = Dict<string, number>;")),
+        .clean = c(top("type D = Dict<string, number>;")),
     },
     .{
         .key = "A mapped type, such as `{ [K in \"a\" | \"b\"]: number }`",
-        .refused = &.{r("{ [K in \"a\" | \"b\"]: number }", top("structural M = { [K in \"a\" | \"b\"]: number };"))},
-        .clean = c(top("structural M = { a: number; b: number };")),
+        .refused = &.{r("{ [K in \"a\" | \"b\"]: number }", top("type M = { [K in \"a\" | \"b\"]: number };"))},
+        .clean = c(top("type M = { a: number; b: number };")),
     },
     .{
         .key = "A conditional type, such as `T extends string ? number : boolean`, including one that uses infer",
-        .refused = &.{r("T extends string ? number : boolean", top("structural C<T> = T extends string ? number : boolean;"))},
-        .clean = c(top("structural C = number;")),
+        .refused = &.{r("T extends string ? number : boolean", top("type C<T> = T extends string ? number : boolean;"))},
+        .clean = c(top("type C = number;")),
     },
     .{
         .key = "A type-position typeof that is not a resolved brand identity inside imported Nominal, such as `typeof base`",
@@ -1534,10 +1548,10 @@ const refusal_rows_b = [_]RefusalRow{
     .{
         .key = "A quoted key in a record type, such as `{ \"a\": number }`",
         .refused = &.{
-            r("{ \"a\": number }", top("structural R = { \"a\": number };")),
-            r("{ \"a\": number }", top("structural R = { \"a\": number };\nfunction g(r: R): number {\n  return r.a;\n}")),
+            r("{ \"a\": number }", top("type R = { \"a\": number };")),
+            r("{ \"a\": number }", top("type R = { \"a\": number };\nfunction g(r: R): number {\n  return r.a;\n}")),
         },
-        .clean = c(top("structural R = { a: number };")),
+        .clean = c(top("type R = { a: number };")),
     },
     .{
         .key = "A number literal type that is not an integer in -32768..32767, such as `1.5`, `1e3`, and `40000`",
@@ -1551,7 +1565,7 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(paramText("string | 32767 | -32768 | 0x7FFF")),
     },
     .{
-        .key = "A type form outside the admitted grammar, such as `new () => T`, `unique symbol` outside the exact brand declaration, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, a call signature such as `{ (): number }`, and an empty parenthesized type with no arrow, such as `Outer<()>` and `structural E = ();`",
+        .key = "A type form outside the admitted grammar, such as `new () => T`, `unique symbol` outside the exact brand declaration, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, a call signature such as `{ (): number }`, and an empty parenthesized type with no arrow, such as `Outer<()>` and `type E = ();`",
         .refused = &.{
             r("new () => T", paramText("new () => string")),
             r("unique symbol", paramText("unique symbol")),
@@ -1561,27 +1575,27 @@ const refusal_rows_b = [_]RefusalRow{
             r("(...a: string[]) => number", paramText("(...a: string[]) => number")),
             r("{ m(): number }", paramText("{ m(): number }")),
             r("{ (): number }", paramText("{ (): number }")),
-            r("Outer<()>", top("structural Outer<T> = { v: T };\nfunction g(a: Outer<()>): number {\n  return 1;\n}")),
-            r("structural E = ();", top("structural E = ();")),
+            r("Outer<()>", top("type Outer<T> = { v: T };\nfunction g(a: Outer<()>): number {\n  return 1;\n}")),
+            r("type E = ();", top("type E = ();")),
         },
         .clean = c(top("function g(a: [string]): number {\n  return 1;\n}")),
     },
     .{
-        .key = "An unrecognized type, such as `number number`, an empty type, such as `structural L = ;`, a field with no type, such as `{ x: }`, a missing separator, such as `{ x: number y: string }`, `(x: number y: string) => number`, `B<string number>`, and `[number string]`, a function type with no return type, such as `(x: number) =>`, an unclosed bracket, such as `number [`, an explicit call type argument, such as `f<number number>(1)`, and a generic constraint, such as `T extends number string`",
+        .key = "An unrecognized type, such as `number number`, an empty type, such as `type L = ;`, a field with no type, such as `{ x: }`, a missing separator, such as `{ x: number y: string }`, `(x: number y: string) => number`, `B<string number>`, and `[number string]`, a function type with no return type, such as `(x: number) =>`, an unclosed bracket, such as `number [`, an explicit call type argument, such as `f<number number>(1)`, and a generic constraint, such as `T extends number string`",
         .refused = &.{
-            r("number number", top("structural L = number number;")),
-            r("structural L = ;", top("structural L = ;")),
-            r("{ x: }", top("structural L = { x: };")),
-            r("{ x: number y: string }", top("structural L = { x: number y: string };")),
+            r("number number", top("type L = number number;")),
+            r("type L = ;", top("type L = ;")),
+            r("{ x: }", top("type L = { x: };")),
+            r("{ x: number y: string }", top("type L = { x: number y: string };")),
             r("(x: number y: string) => number", paramText("(x: number y: string) => number")),
-            r("B<string number>", top("structural B<T> = { v: T };\nfunction g(a: B<string number>): number {\n  return 1;\n}")),
+            r("B<string number>", top("type B<T> = { v: T };\nfunction g(a: B<string number>): number {\n  return 1;\n}")),
             r("[number string]", paramText("[number string]")),
             r("(x: number) =>", paramText("(x: number) =>")),
             r("number [", paramText("number [")),
             r("f<number number>(1)", top("function f<T>(a: T): T {\n  return a;\n}\nfunction g(): number {\n  return f<number number>(1);\n}")),
             r("T extends number string", top("function f<T extends number string>(a: T): T {\n  return a;\n}")),
         },
-        .clean = c(top("structural L = { x: number; y: string };\nstructural B<T> = { v: T };\nfunction f<T extends string>(a: T): T {\n  return a;\n}\nfunction g(a: B<string>, h: (x: number, y: string) => number, t: [number, string], xs: number[]): number {\n  return f<string>(\"a\") === \"a\" ? 1 : 2;\n}\nfunction k(n: 400, m: -1, s: \"a\" | 0x10): string {\n  return f<\"a,b\">(\"a,b\");\n}\nfunction w(): string {\n  return f</* x, y */ string>(\"s\");\n}")),
+        .clean = c(top("type L = { x: number; y: string };\ntype B<T> = { v: T };\nfunction f<T extends string>(a: T): T {\n  return a;\n}\nfunction g(a: B<string>, h: (x: number, y: string) => number, t: [number, string], xs: number[]): number {\n  return f<string>(\"a\") === \"a\" ? 1 : 2;\n}\nfunction k(n: 400, m: -1, s: \"a\" | 0x10): string {\n  return f<\"a,b\">(\"a,b\");\n}\nfunction w(): string {\n  return f</* x, y */ string>(\"s\");\n}")),
     },
     .{
         .key = "A record type with comma separators, such as `{ a: number, b: string }`",
@@ -1649,9 +1663,9 @@ const refusal_rows_b = [_]RefusalRow{
             r("of", top("function g(of: number): number {\n  return of;\n}")),
             r("get", body("  const xs = [1, 2];\n  const ys = xs.map((get: number): number => get);\n  assert ys.length > 0;")),
             r("import { dictEmpty as match }", top("import { dictEmpty as match } from \"zttp:collections\";")),
-            r("when { from }", top("structural M = { kind: \"a\"; from: number } | { kind: \"b\" };\nfunction g(m: M): number {\n  return match (m) {\n    when { kind: \"a\", from }: 1\n    when { kind: \"b\" }: 0\n  };\n}")),
+            r("when { from }", top("type M = { kind: \"a\"; from: number } | { kind: \"b\" };\nfunction g(m: M): number {\n  return match (m) {\n    when { kind: \"a\", from }: 1\n    when { kind: \"b\" }: 0\n  };\n}")),
         },
-        .clean = c(top("structural M = { kind: \"a\"; from: number } | { kind: \"b\" };\nfunction g(m: M): number {\n  const x = { assert: 1, set: 2 };\n  assert x.assert + x.set > 0;\n  return match (m) {\n    when { kind: \"a\", from: f }: f\n    when { kind: \"b\" }: 0\n  };\n}")),
+        .clean = c(top("import { assert, match } from \"zttp:core\";\ntype M = { kind: \"a\"; from: number } | { kind: \"b\" };\nfunction g(m: M): number {\n  const x = { assert: 1, set: 2 };\n  assert(x.assert + x.set > 0);\n  return match(m).with({ kind: \"a\" }, (selected) => selected.from).with({ kind: \"b\" }, () => 0).exhaustive();\n}")),
     },
     .{
         .key = "`for...of` over a value that is not an array, a tuple, or range(n), such as a record, a number, a string, a Dict, a namespace, a function, or an array that may be null",

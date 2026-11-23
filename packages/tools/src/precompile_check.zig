@@ -780,11 +780,14 @@ pub fn generateTypeDefs(writer: anytype) void {
     // here - so a `zttp.d.ts` fed to `tsc` reported "Cannot find name 'Dict'"
     // for a file the zts checker accepts. The declarations are opaque on
     // purpose: this file describes the surface to an external tool, and the
-    // zts checker has its own, real definitions.
+    // zts checker has its own definitions. Its proof and effect capsules
+    // project to their value type for external TypeScript tools.
     writer.writeAll(
         \\type Dict<K, V> = { readonly __dict: unique symbol };
         \\type Bytes = { readonly __bytes: unique symbol };
         \\type MessageId = string & { readonly __messageId: unique symbol };
+        \\type Proof<Value, Properties> = Value;
+        \\type Effects<Value, Ceiling> = Value;
         \\
         \\interface FetchOptions {
         \\  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
@@ -1100,6 +1103,8 @@ test "type defs project the classified zttp core surface" {
     defer aw.deinit();
     generateTypeDefs(&aw.writer);
     const emitted = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "type Proof<Value, Properties> = Value;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "type Effects<Value, Ceiling> = Value;") != null);
 
     try std.testing.expect(std.mem.indexOf(u8, emitted,
         \\declare module "zttp:core" {

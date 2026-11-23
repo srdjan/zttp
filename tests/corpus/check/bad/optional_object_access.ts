@@ -9,7 +9,7 @@ const routes = {
     "GET /": getHome,
 };
 
-structural Guardrails<T> = Proof<T, "optional_safe">;
+type Guardrails<T> = Proof<T, "optional_safe">;
 
 function handler(req: Request): Guardrails<Response> {
     const route = routerMatch(routes, req);

@@ -1032,7 +1032,8 @@ pub fn synthesizeRoute(
 
     const has_router = std.mem.indexOf(u8, source, "zttp:router") != null;
     const has_routes = std.mem.indexOf(u8, source, "const routes = {") != null;
-    const has_guardrails_alias = std.mem.indexOf(u8, source, "structural Guardrails<") != null;
+    const has_guardrails_alias = std.mem.indexOf(u8, source, "type Guardrails<") != null or
+        std.mem.indexOf(u8, source, "type Guardrails<") != null;
 
     if (!has_router) {
         try out.appendSlice(allocator, "import { routerMatch } from \"zttp:router\";\n");
@@ -1044,7 +1045,7 @@ pub fn synthesizeRoute(
 
     if (!has_router and !has_guardrails_alias) {
         try out.appendSlice(allocator,
-            \\structural Guardrails<T> = Proof<T,
+            \\type Guardrails<T> = Proof<T,
             \\    | "deterministic"
             \\    | "idempotent"
             \\    | "no_secret_leakage"

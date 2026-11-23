@@ -20,7 +20,9 @@ const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
 const module_facts_mod = @import("module_facts.zig");
+const intrinsic_lowering = @import("intrinsic_lowering.zig");
 const type_checker_mod = @import("type_checker.zig");
+const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
 const strict_checker_mod = @import("strict_checker.zig");
 const node_types = @import("zts-engine").node_types;
@@ -1876,10 +1878,26 @@ fn checkSourceFull(source: []const u8, expect_errors: u32, expect_warnings: ?u32
     var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+
     const root = try parser.parse();
 
+    var pool = type_pool_mod.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = type_env_mod.TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .module_path = "/app/bool-checker-test.ts",
+        .store = &parser.type_store,
+        .ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants),
+        .atoms = &atoms,
+    } });
+    try intrinsic_lowering.validateSource(allocator, &parser, &atoms, &env);
+
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var checker = BoolChecker.init(allocator, ir_view, null);
+    var checker = BoolChecker.init(allocator, ir_view, &atoms);
     defer checker.deinit();
 
     const errors = try checker.check(root);
@@ -1961,8 +1979,8 @@ test "sound: !boolean passes" {
 }
 
 test "sound: assert requires a boolean condition" {
-    try checkSource("function f() { assert 1; }", 1);
-    try checkSource("function f() { assert true; }", 0);
+    try checkSource("import { assert } from \"zttp:core\"; function f() { assert(1); }", 1);
+    try checkSource("import { assert } from \"zttp:core\"; function f() { assert(true); }", 0);
 }
 
 // S4: ?? warnings

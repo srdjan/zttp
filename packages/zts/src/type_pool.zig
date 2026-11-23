@@ -272,7 +272,7 @@ pub const TypePool = struct {
         return idx;
     }
 
-    /// Whether an absent declared field on this record reads as `unknown`.
+    /// Whether the source can have fields the record does not declare.
     pub fn hasUnknownFields(self: *const TypePool, idx: TypeIndex) bool {
         return self.unknown_field_records.contains(idx);
     }

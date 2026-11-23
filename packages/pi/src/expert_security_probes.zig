@@ -44,7 +44,7 @@ pub const corpus = [_]Probe{
         .family = "sensitive_data_flow",
         .source =
         \\import { env } from "zttp:env";
-        \\structural Guard<T> = Proof<T, "no_secret_leakage">;
+        \\type Guard<T> = Proof<T, "no_secret_leakage">;
         \\function handler(req: Request): Guard<Response> {
         \\  const secret = env("JWT_SECRET");
         \\  if (secret === undefined) {
@@ -63,7 +63,7 @@ pub const corpus = [_]Probe{
         .family = "sensitive_data_flow",
         .source =
         \\import { env } from "zttp:env";
-        \\structural Guard<T> = Proof<T, "no_secret_leakage">;
+        \\type Guard<T> = Proof<T, "no_secret_leakage">;
         \\function handler(req: Request): Guard<Response> {
         \\  const secret = env("JWT_SECRET");
         \\  if (secret === undefined) {
@@ -83,7 +83,7 @@ pub const corpus = [_]Probe{
         .source =
         \\import { env } from "zttp:env";
         \\import { schemaCompile, validateJson } from "zttp:validate";
-        \\structural Guard<T> = Proof<T, "no_secret_leakage">;
+        \\type Guard<T> = Proof<T, "no_secret_leakage">;
         \\function handler(req: Request): Guard<Response> {
         \\  schemaCompile("payload", "{}");
         \\  const secret = env("JWT_SECRET");
@@ -109,7 +109,7 @@ pub const corpus = [_]Probe{
         \\import { parseBearer, jwtVerify } from "zttp:auth";
         \\import { schemaCompile, validateJson } from "zttp:validate";
         \\import { stringifyJson } from "zttp:json";
-        \\structural Guard<T> = Proof<T, "no_credential_leakage">;
+        \\type Guard<T> = Proof<T, "no_credential_leakage">;
         \\function handler(req: Request): Guard<Response> {
         \\  const token = parseBearer(req.headers.authorization ?? "");
         \\  if (token === undefined) {
@@ -145,7 +145,7 @@ pub const corpus = [_]Probe{
         .family = "untrusted_input_flow",
         .source =
         \\import { escapeHtml } from "zttp:text";
-        \\structural Guard<T> = Proof<T, "injection_safe">;
+        \\type Guard<T> = Proof<T, "injection_safe">;
         \\function handler(req: Request): Guard<Response> {
         \\  return Response.html(escapeHtml(req.path));
         \\}
@@ -159,7 +159,7 @@ pub const corpus = [_]Probe{
         .scenario = "raw-input-html-refused",
         .family = "untrusted_input_flow",
         .source =
-        \\structural Guard<T> = Proof<T, "injection_safe">;
+        \\type Guard<T> = Proof<T, "injection_safe">;
         \\function handler(req: Request): Guard<Response> {
         \\  return Response.html(req.path);
         \\}
@@ -173,7 +173,7 @@ pub const corpus = [_]Probe{
         .scenario = "request-local-mutation-is-isolated",
         .family = "state_isolation",
         .source =
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\function handler(req: Request): Guard<Response> {
         \\  let count = 0;
         \\  count = count + 1;
@@ -190,7 +190,7 @@ pub const corpus = [_]Probe{
         .family = "state_isolation",
         .source =
         \\let count = 0;
-        \\structural Guard<T> = Proof<T, "state_isolated">;
+        \\type Guard<T> = Proof<T, "state_isolated">;
         \\function handler(req: Request): Guard<Response> {
         \\  count = count + 1;
         \\  return Response.json({ count: count });

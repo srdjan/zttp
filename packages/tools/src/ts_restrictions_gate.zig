@@ -136,7 +136,7 @@ fn isCode(token: []const u8) bool {
 }
 
 /// The codes of a "Code" cell: `ZTS001`, `ZTS308, ZTS309`, `ZTS216 (warning)`,
-/// `ZTS625 (advisory)`. An advisory never fails a build (spec 4.2.1).
+/// `ZTS628 (advisory)`. An advisory never fails a build (spec 4.2.1).
 fn parseCodeCell(a: std.mem.Allocator, cell: []const u8) ![]const Code {
     var codes: std.ArrayList(Code) = .empty;
     errdefer codes.deinit(a);
@@ -1096,11 +1096,11 @@ test "an admitted member whose read is refused fails" {
 }
 
 test "an advisory code passes only at advisory severity" {
-    const doc = try std.mem.replaceOwned(u8, testing.allocator, test_doc, "| A plain form | ZTS002 |", "| A plain form | ZTS625 (advisory) |");
+    const doc = try std.mem.replaceOwned(u8, testing.allocator, test_doc, "| A plain form | ZTS002 |", "| A plain form | ZTS628 (advisory) |");
     defer testing.allocator.free(doc);
     const advisory = [_]probes.RefusalRow{ good_refusals[0], .{
         .key = "A plain form",
-        .refused = &.{.{ .source = .{ .text = "ZTS625:advisory" } }},
+        .refused = &.{.{ .source = .{ .text = "ZTS628:advisory" } }},
         .clean = .{ .text = "clean" },
     } };
     var inputs = testInputs(doc, &advisory, test_registry);
@@ -1111,14 +1111,14 @@ test "an advisory code passes only at advisory severity" {
 
     const as_warning = [_]probes.RefusalRow{ good_refusals[0], .{
         .key = "A plain form",
-        .refused = &.{.{ .source = .{ .text = "ZTS625:warning" } }},
+        .refused = &.{.{ .source = .{ .text = "ZTS628:warning" } }},
         .clean = .{ .text = "clean" },
     } };
     inputs.refusal_probes = &as_warning;
     var fail = try runGate(testing.allocator, inputs);
     defer fail.deinit();
     try expectFailure(&fail, "refusal row \"A plain form\" []: the probe reports no error");
-    try expectFailure(&fail, "no probe reports ZTS625 at advisory severity");
+    try expectFailure(&fail, "no probe reports ZTS628 at advisory severity");
 }
 
 test "a table headed with the gap columns is refused in any section" {

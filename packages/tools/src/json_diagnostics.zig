@@ -721,9 +721,7 @@ const allowed_features = [_]Feature{
     .{ .name = "assert statement", .status = .allowed, .alternative = null },
     .{ .name = "import/export", .status = .allowed, .alternative = null },
     .{ .name = "type annotations", .status = .allowed, .alternative = null },
-    // Phase 7's spellings. `type` and `distinct type` were rows here beside
-    // them through the cutover, and are gone with the forms.
-    .{ .name = "structural", .status = .allowed, .alternative = null },
+    .{ .name = "type aliases", .status = .allowed, .alternative = null },
     .{ .name = "nominal", .status = .allowed, .alternative = null },
     .{ .name = "readonly fields", .status = .allowed, .alternative = null },
     .{ .name = "type guards (x is T)", .status = .allowed, .alternative = null },
@@ -1333,6 +1331,10 @@ test "every diagnostic code names exactly one diagnostic" {
     // Intrinsic references are source-profile refusals, like unsupported parser forms (ZTS001).
     const shared_codes = [_]struct { code: []const u8, kinds: [2][]const u8 }{
         .{ .code = "ZTS001", .kinds = .{ "unsupported_intrinsic_reference", "unsupported_feature" } },
+        .{ .code = "ZTS001", .kinds = .{ "unsupported_intrinsic_reference", "legacy_structural_declaration" } },
+        .{ .code = "ZTS001", .kinds = .{ "unsupported_intrinsic_reference", "legacy_nominal_declaration" } },
+        .{ .code = "ZTS001", .kinds = .{ "unsupported_intrinsic_reference", "legacy_match_expression" } },
+        .{ .code = "ZTS001", .kinds = .{ "unsupported_intrinsic_reference", "legacy_assert_statement" } },
         .{ .code = "ZTS008", .kinds = .{ "unterminated_string", "unterminated_string" } },
         .{ .code = "ZTS042", .kinds = .{ "type_assertion", "as_assertion" } },
         .{ .code = "ZTS044", .kinds = .{ "nesting_too_deep", "nesting_too_deep" } },

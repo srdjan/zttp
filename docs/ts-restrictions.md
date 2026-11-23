@@ -113,10 +113,13 @@ A renamed import must use a name that is not reserved. These exceptions do not a
 | Decorators (`@decorator`) | ZTS001 | Function composition |
 | `implements` and access modifiers (`public`, `private`, `protected`) | ZTS001 | Remove them |
 | `interface X { ... }` | ZTS049 | `type X = { ... };` |
-| `distinct type X = string;` | ZTS051 | `nominal X = string;` |
-| A `nominal` type over a record, tuple, union, or function | ZTS048 | `nominal` over `string`, `number`, or `boolean`. Use `structural` for other shapes |
+| `distinct type X = string;` | ZTS051 | Declare a unique-symbol brand and use `Nominal<string, typeof brand>` from `zttp:core` |
+| A legacy `structural` declaration | ZTS001 | `type X = ...;` |
+| A legacy `nominal` declaration | ZTS001 | Declare a unique-symbol brand and use `Nominal<Base, typeof brand>` from `zttp:core` |
+| A raw initializer assigned to a nominal type, such as `const id: Id = "a";` | ZTS200 | Import `nominal` from `zttp:core` and use `nominal<Id>("a")` |
+| A `nominal` type over a record, tuple, union, or function | ZTS048 | `Nominal` over `string`, `number`, or `boolean`. Use a transparent `type` alias for other shapes |
 | An arrow outside a direct call argument: a bound arrow such as `const double = (x) => x * 2;`, an exported one such as `export const f = (x: number): number => x;`, a returned arrow such as `return (x) => x;`, an arrow in a record field such as `{ f: (x) => x }`, an immediately called arrow such as `((x) => x)(1)`, and an arrow as a `?:` arm | ZTS072 | A module-level `function`. Pass an arrow only as a direct call argument, such as `xs.map((x: number): number => x + 1)` |
-| A nominal type called as a function, such as `Id("a")` | ZTS214 | `nominal<Id>("a")` for an explicit nominal identity. Legacy annotated construction remains admitted until migration cutover |
+| A nominal type called as a function, such as `Id("a")` | ZTS214 | `nominal<Id>("a")` for an explicit nominal identity |
 
 Declaration merging, open interfaces, and inheritance are excluded.
 Top-level `type` aliases reuse the existing structural semantics. The exact
@@ -134,7 +137,7 @@ brand declaration creates type identity and no runtime value.
 | Rest parameters `...args` | ZTS001 | An explicit array parameter |
 | Type parameters on an arrow, such as `<T>(x: T) => x` | ZTS001 | The arrow without type parameters, or a module-level generic function |
 | An empty type parameter, such as `<A, ,B>` and `<A,>` | ZTS001 | Remove the extra comma |
-| A duplicate parameter name, such as `function f(a: number, a: number)`, and a duplicate type parameter, such as `function f<T, T>(a: T): T` and `structural Box<T, T> = T;` | ZTS018 | A different name |
+| A duplicate parameter name, such as `function f(a: number, a: number)`, and a duplicate type parameter, such as `function f<T, T>(a: T): T` and `type Box<T, T> = T;` | ZTS018 | A different name |
 | An assignment to a parameter, such as `a = a + 1` for a function parameter and `x = 0` for an arrow parameter | ZTS068 | Bind the new value to a new `const` |
 | A function declaration inside a function body or a block, such as `function inner(): number` | ZTS071 | A module-level function |
 | A callback that writes a binding of an enclosing function, such as `t = x`, `counts[0] = x`, or `out.push(x)` in an arrow whose enclosing function declares the name | ZTS073 | Return the value from the callback, or build the result with `for...of` |
@@ -171,6 +174,7 @@ statement, `if`/`else`, `for...of`, `assert`, `return`, `break`, and
 | A bare block statement, such as `{ const a = 1; }` | ZTS001 | Put its statements in the enclosing block |
 | An empty body of `if`, `else`, or `for...of`, such as `if (c) {}` | ZTS001 | Remove the statement, or invert the condition and drop the empty branch |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | ZTS070 | Write the body as a block, such as `if (c) { g(); }`. `else if` stays |
+| A legacy `assert predicate;` statement | ZTS001 | Import `assert` from `zttp:core` and write `assert(predicate);` |
 | A fallback `assert` form | ZTS002 | `if (!predicate) { return fallback; }` |
 | A `for...of` body that mutates the collection that it iterates | ZTS622 | Read one collection and build the changed one separately |
 | `for...of` over a value that is not an array, a tuple, or range(n), such as a record, a number, a string, a Dict, a namespace, a function, or an array that may be null | ZTS218 | `Object.keys(r)` for a record, `dictEntries(d)` for a `Dict`, `s.split("")` for a string, `range(n)` for a count, and a check that the array is not `null` first |
@@ -282,22 +286,19 @@ absence handling.
 
 | Refused form | Code | Write instead |
 |---|---|---|
-| A `default` arm before a `when` arm, or a second `default` arm | ZTS062 | One `default`, after every `when` arm |
-| A type-test name below the top level of a pattern, such as `when { v: string }` | ZTS001 | Bind the field and match it in a nested `match` |
-| `when _:` | ZTS001 | `default:` |
-| A `match` scrutinee that is not a name or a member path, such as `match (g())`, `match (xs[0])`, or `match (r.a?.b)` | ZTS001 | Bind the value to a `const` first and match on that |
-| A rename to the same name, such as `{ text: text }` in a pattern | ZTS625 (advisory) | `{ text }` |
-| An arm that reads a field off the scrutinee | ZTS626 (advisory) | Bind the field in the pattern |
-| A `default` arm after full coverage of a closed union, or a duplicate `when` arm | ZTS216 | Remove the `default` arm or the duplicate arm |
-| A `match` that does not cover every case, in a statement or a `const` | ZTS603 | Cover each member, or add `default` for an open domain |
-| A `match` that does not cover every case, as the return value | ZTS603 | Cover each member, or add `default` for an open domain |
+| A legacy brace `match` expression | ZTS001 | Import `match` from `zttp:core` and use `match(value).with(pattern, callback).exhaustive()` or end with `.otherwise(callback)` |
+| A `default` arm before a `when` arm, or a second `default` arm | ZTS062 | A fluent chain ending in one `.otherwise(callback)` |
+| A type descriptor below the top level of a pattern, such as `{ v: P.string }` | ZTS001 | Name the field value and match it with `P.string` |
+| `when _:` | ZTS001 | `.otherwise(callback)` |
+| A `match` subject that is not a name or a member path, such as `match(g())`, `match(xs[0])`, or `match(r.a?.b)` | ZTS001 | Bind the value to a `const` first and match on that |
+| An `.otherwise(...)` after full coverage of a closed union, or a duplicate `.with(...)` arm | ZTS216 | Remove the unreachable arm |
+| A `match` that does not cover every case, in a statement or a `const` | ZTS603 | Cover each member, or end with `.otherwise(callback)` for an open domain |
+| A `match` that does not cover every case, as the return value | ZTS603 | Cover each member, or end with `.otherwise(callback)` for an open domain |
 
-An advisory names a better form for code that is already correct. An advisory
-never fails a build (spec section 4.2.1).
-
-Patterns are literals, fixed record patterns, array patterns, and six type
-tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
-`undefined` match by their literal patterns.
+Patterns are literals, fixed record patterns, fixed array patterns, and six
+top-level type tests from `P`. The selected callback can take the narrowed
+subject. `P.any` matches any array element. `P.present` requires a record field
+whose value differs from `undefined`.
 
 ## Types
 
@@ -310,14 +311,14 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | `Array<T>` | ZTS058 | `T[]` |
 | `ReadonlyArray<T>` | ZTS059 | `readonly T[]` |
 | The `void` type | ZTS060 | `undefined` |
-| A raw built-in open type in an exported parameter or return | ZTS061 | A `nominal` or `structural` alias |
+| A raw built-in open type in an exported parameter or return | ZTS061 | A named `Nominal` identity or a `type` alias for a closed shape |
 | A recursive alias with a cycle that does not pass through a record, tuple, array, or `Dict` | ZTS212 | Put the cycle under one of those constructors |
 | A type predicate whose body does not prove the predicate | ZTS211 | A predicate body that checks the claimed type |
 | A wrong number of explicit type arguments, or a violated constraint | ZTS210, ZTS209 | Match the declaration |
 | A ninth type parameter in one generic declaration, such as `function f<A, B, C, D, E, F, G, H, I>(a: A): A` | ZTS028 | Use at most eight type parameters |
 | A Dict key type other than string or number, such as `Dict<boolean, string>`, `Dict<undefined, string>`, `Dict<unknown, string>`, and `Dict<string \| undefined, string>` | ZTS209 | Use `string` or `number` as the key type |
-| A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | ZTS209 | Pass a type argument that satisfies the constraint |
-| A `structural` or `nominal` declaration inside a function | ZTS002 | Declare the type at the top level |
+| A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `type Box<T extends string> = { value: T };` | ZTS209 | Pass a type argument that satisfies the constraint |
+| A `type` declaration inside a function | ZTS002 | Declare the type at the top level |
 | A generic default, such as `function f<T = string>(a: T): T` | ZTS001 | Remove the default. Pass the type argument at each use |
 | A type-parameter modifier, such as `in`, `out`, or `const` | ZTS001 | Remove the modifier |
 | An `asserts` return type | ZTS001 | A type predicate `x is T`, or `assert` in the caller |
@@ -329,15 +330,15 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | A type-position typeof that is not a resolved brand identity inside imported Nominal, such as `typeof base` | ZTS001 | The type itself. Use `typeof brand` only as the second argument of `Nominal` |
 | A quoted key in a record type, such as `{ "a": number }` | ZTS001 | The key as a name, such as `{ a: number }` |
 | A number literal type that is not an integer in -32768..32767, such as `1.5`, `1e3`, and `40000` | ZTS001 | `number`, or an integer literal type in that range |
-| A type form outside the admitted grammar, such as `new () => T`, `unique symbol` outside the exact brand declaration, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, a call signature such as `{ (): number }`, and an empty parenthesized type with no arrow, such as `Outer<()>` and `structural E = ();` | ZTS001 | An admitted type form from section 5.7 of the specification |
-| An unrecognized type, such as `number number`, an empty type, such as `structural L = ;`, a field with no type, such as `{ x: }`, a missing separator, such as `{ x: number y: string }`, `(x: number y: string) => number`, `B<string number>`, and `[number string]`, a function type with no return type, such as `(x: number) =>`, an unclosed bracket, such as `number [`, an explicit call type argument, such as `f<number number>(1)`, and a generic constraint, such as `T extends number string` | ZTS001 | An admitted type from section 5.7 of the specification |
+| A type form outside the admitted grammar, such as `new () => T`, `unique symbol` outside the exact brand declaration, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, a call signature such as `{ (): number }`, and an empty parenthesized type with no arrow, such as `Outer<()>` and `type E = ();` | ZTS001 | An admitted type form from section 5.7 of the specification |
+| An unrecognized type, such as `number number`, an empty type, such as `type L = ;`, a field with no type, such as `{ x: }`, a missing separator, such as `{ x: number y: string }`, `(x: number y: string) => number`, `B<string number>`, and `[number string]`, a function type with no return type, such as `(x: number) =>`, an unclosed bracket, such as `number [`, an explicit call type argument, such as `f<number number>(1)`, and a generic constraint, such as `T extends number string` | ZTS001 | An admitted type from section 5.7 of the specification |
 | A record type with comma separators, such as `{ a: number, b: string }` | ZTS001 | `{ a: number; b: string }` |
 | `readonly` on a record type, such as `readonly { a: number }` | ZTS001 | The record type |
 | A type name that is not declared, imported, or ambient, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error`, `object`, and the utility types `Partial<T>`, `Required<T>`, `Pick<T, K>`, `Omit<T, K>`, and `Readonly<T>` | ZTS065 | A declared or imported type, or an ambient type from `meta` |
 | `FetchOptions` with no import | ZTS065 | Write `import type { FetchOptions } from "zttp:fetch";` |
 | `FetchError` and `Result` with no import | ZTS065 | Write `import type { FetchError } from "zttp:fetch";` and `import type { Result } from "zttp:result";` |
-| A `structural` declaration of `Result` beside an `import type` of it | ZTS019 | A different name, such as `structural Outcome<T, E> = { value: T };` |
-| A `structural` or `nominal` declaration of an ambient type name or of a name that an `import type` binds, such as `structural Request = number;`, `structural string = number;`, `nominal Proof<T, P> = string;`, and `structural FetchOptions = number;` beside an import of it | ZTS019 | A different name, such as `structural MyRequest = { id: string };` |
+| A `type` declaration of `Result` beside an `import type` of it | ZTS019 | A different name, such as `type Outcome<T, E> = { value: T };` |
+| A `type` declaration of an ambient type name or of a name that an `import type` binds, such as `type Request = number;`, `type string = number;`, `type Proof<T, P> = string;`, and `type FetchOptions = number;` beside an import of it | ZTS019 | A different name, such as `type MyRequest = { id: string };` |
 
 The ZTS065 check counts a function type parameter as declared in the whole
 file, so a stray `T` outside its function passes it. The type checker then
@@ -381,7 +382,7 @@ The type checker admits these members on an array, on a string, and on each ambi
 ## Ambient Names And Effects
 
 The closed ambient value namespace is: `Array`, `Date`,
-`Math`, `Number`, `Object`, `Request`, `Response`, `String`, `assert`, `h`,
+`Math`, `Number`, `Object`, `Request`, `Response`, `String`, `h`,
 `hole`, `isBytes`, `isDict`, `parseFloat`, `parseInt`, `range`,
 `renderToString`, `requestBody`, `requestJson`, and `requestText`. The `meta`
 operation of `zttp agent --stdin-json` publishes this list as

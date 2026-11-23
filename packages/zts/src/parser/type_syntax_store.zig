@@ -60,6 +60,10 @@ pub const AdmissionKind = enum {
     readonly_array_type_alias,
     void_type,
     nesting_too_deep,
+    legacy_structural_declaration,
+    legacy_nominal_declaration,
+    legacy_match_expression,
+    legacy_assert_statement,
 };
 
 pub const AdmissionPosition = struct {
@@ -3421,7 +3425,7 @@ test "return validation refuses an empty predicate narrowing" {
     }
 }
 
-test "admission vocabulary retains sixteen ordered kinds" {
+test "admission vocabulary retains ordered kinds" {
     const expected = [_]AdmissionKind{
         .any_type,
         .as_assertion,
@@ -3439,8 +3443,12 @@ test "admission vocabulary retains sixteen ordered kinds" {
         .readonly_array_type_alias,
         .void_type,
         .nesting_too_deep,
+        .legacy_structural_declaration,
+        .legacy_nominal_declaration,
+        .legacy_match_expression,
+        .legacy_assert_statement,
     };
-    try std.testing.expectEqual(@as(usize, 16), @typeInfo(AdmissionKind).@"enum".field_names.len);
+    try std.testing.expectEqual(@as(usize, 20), @typeInfo(AdmissionKind).@"enum".field_names.len);
     for (expected, 0..) |kind, index| {
         try std.testing.expectEqual(index, @backingInt(kind));
     }

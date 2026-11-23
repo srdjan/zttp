@@ -1,7 +1,7 @@
 //! Type Environment: resolves type names to TypePool indices.
 //!
 //! Resolves validated syntax owners. Provides:
-//! - Type alias resolution (structural Foo = ...)
+//! - Type alias resolution (type Foo = ...)
 //! - Interface resolution (interface Bar { ... })
 //! - Variable type annotations (const x: Type = ...)
 //! - Function signatures (params + return types)
@@ -361,7 +361,7 @@ pub const TypePredicate = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Generic type alias (structural Result<T> = ...)
+// Generic type alias (type Result<T> = ...)
 // ---------------------------------------------------------------------------
 
 pub const GenericAlias = struct {
@@ -423,7 +423,7 @@ pub const TypeEnv = struct {
     non_contractive_aliases: std.StringHashMapUnmanaged(void),
     /// The same aliases by the index their name resolves to. An annotation is
     /// resolved before the checker sees it, and only a name with no definition
-    /// at all survives as a `t_ref` - `structural U = number | U` arrives as the
+    /// at all survives as a `t_ref` - `type U = number | U` arrives as the
     /// union itself, so a name-only lookup would miss every alias that has a
     /// body, which is every one that matters.
     non_contractive_indices: std.AutoHashMapUnmanaged(TypeIndex, void),
@@ -1985,7 +1985,7 @@ pub const TypeEnv = struct {
                     const src = self.resolveRefToRecord(self.tryInstantiateGenericApp(raw_args[0]));
                     if (src == null_type_idx) return idx;
                     // Resolve the keys argument through the alias map too, so
-                    // `structural K = "id" | "name"; Pick<User, K>` sees the literal
+                    // `type K = "id" | "name"; Pick<User, K>` sees the literal
                     // union instead of an unresolved t_ref (which collectStringKeys
                     // reads as zero keys, silently returning the full source - an
                     // unsound over-accept).
@@ -2095,7 +2095,7 @@ pub const TypeEnv = struct {
     /// Spec 5.7: a recursive alias is contractive when every cycle passes
     /// through a record, tuple, or array constructor - `Dict` joins that list
     /// in phase 4. Union and intersection edges do not guard recursion, so
-    /// `structural Loop = Loop`, `structural U = number | U`, and a cycle through a
+    /// `type Loop = Loop`, `type U = number | U`, and a cycle through a
     /// function parameter are all errors rather than infinite types.
     ///
     /// Decided per alias by walking its body and stopping at the first
@@ -2177,7 +2177,7 @@ pub const TypeEnv = struct {
     }
 
     /// Follow a t_ref through the alias then interface map to its underlying
-    /// type, chasing chains (`structural A = B; structural B = {...}` stores A as t_ref(B))
+    /// type, chasing chains (`type A = B; type B = {...}` stores A as t_ref(B))
     /// up to a small depth with a self-reference guard. Non-ref types and
     /// unresolved refs pass through unchanged.
     pub fn resolveRef(self: *const TypeEnv, idx: TypeIndex) TypeIndex {
@@ -2254,7 +2254,7 @@ pub const TypeEnv = struct {
                 // Request/WebSocket-style nominal refs have no definition in
                 // TypeEnv, so unresolved named refs are pragmatically object-like.
                 // This over-accepts an unresolved primitive alias such as
-                // `structural Foo = string`; aliases present in TypeEnv resolve above.
+                // `type Foo = string`; aliases present in TypeEnv resolve above.
                 break :blk true;
             },
             .t_union => blk: {
@@ -2438,7 +2438,7 @@ pub const TypeEnv = struct {
 
     /// Register a type alias that no source text declares. The runtime's own
     /// globals arrive this way: a handler writes `: Response` and there is no
-    /// `structural Response = ...` anywhere to read it from.
+    /// `type Response = ...` anywhere to read it from.
     pub fn putTypeAlias(self: *TypeEnv, name: []const u8, type_idx: TypeIndex) void {
         const owned_name = self.internName(name);
         self.type_aliases.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
@@ -2669,7 +2669,7 @@ pub const TypeEnv = struct {
                 }
             },
             .t_ref => {
-                // An aliased capability set (`structural Caps = "clock" | "crypto";`
+                // An aliased capability set (`type Caps = "clock" | "crypto";`
                 // used as `Effects<Response, Caps>`) reaches here as a t_ref.
                 // Resolve through the alias/interface chain and recurse so the
                 // literal names are recovered; without this the budget extracts
@@ -3535,8 +3535,8 @@ test "TypeEnv basic type alias resolution" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // Simulate: structural Config = { port: number }
-    const source = "structural Config = { port: number };";
+    // Simulate: type Config = { port: number }
+    const source = "type Config = { port: number };";
     try populateTestSource(&env, source);
 
     const config_idx = env.getTypeAlias("Config");
@@ -3585,7 +3585,7 @@ test "TypeEnv resolves type aliases in annotations" {
     defer env.deinit();
 
     // First: define a type alias
-    const source = "structural Status = number;const code: Status = 200;";
+    const source = "type Status = number;const code: Status = 200;";
     try populateTestSource(&env, source);
 
     // "Status" should resolve to number
@@ -3650,9 +3650,9 @@ test "TypeEnv generic type alias Result<string>" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // Simulate: structural Result<T> = { ok: boolean; value: T; error: string }
+    // Simulate: type Result<T> = { ok: boolean; value: T; error: string }
     //           const auth: Result<unknown> = jwtVerify(token, secret);
-    const source = "structural Result<T> = { ok: boolean; value: T; error: string };const auth: Result<unknown> = jwtVerify();";
+    const source = "type Result<T> = { ok: boolean; value: T; error: string };const auth: Result<unknown> = jwtVerify();";
     try populateTestSource(&env, source);
 
     // "Result" should be in generic_aliases, not type_aliases
@@ -3683,9 +3683,9 @@ test "TypeEnv generic alias with multiple params" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // Simulate: structural Pair<A, B> = { first: A; second: B }
+    // Simulate: type Pair<A, B> = { first: A; second: B }
     //           const p: Pair<string, number> = ...
-    const source = "structural Pair<A, B> = { first: A; second: B };const p: Pair<string, number> = x;";
+    const source = "type Pair<A, B> = { first: A; second: B };const p: Pair<string, number> = x;";
     try populateTestSource(&env, source);
 
     const p_type = env.getVarTypeByName("p");
@@ -3852,11 +3852,11 @@ test "TypeEnv intersection alias type AB = A & B" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // Simulate: structural AB = A & B;
+    // Simulate: type AB = A & B;
     // Names A and B stay as t_ref inside the intersection (resolveType only
     // substitutes alias names when the entire annotation text matches; nested
     // identifiers in compound expressions remain refs - same behaviour as union).
-    const source = "structural A = { a: number };\nstructural B = { b: number };\nstructural AB = A & B;";
+    const source = "type A = { a: number };\ntype B = { b: number };\ntype AB = A & B;";
     try populateTestSource(&env, source);
 
     const ab_idx = env.getTypeAlias("AB");
@@ -3884,7 +3884,7 @@ test "TypeEnv return-type intersection X & Y" {
     env.type_aliases.put(allocator, owned_y, pool.idx_number) catch {};
 
     // function f(): X & Y { ... }
-    const source = "structural X = string;\nstructural Y = number;\nfunction f(): X & Y { return null; }";
+    const source = "type X = string;\ntype Y = number;\nfunction f(): X & Y { return null; }";
     try populateTestSource(&env, source);
 
     const sig = env.getSourceFnSigByName("f");
@@ -3941,7 +3941,7 @@ test "resolveType Required<A> follows a forward alias chain to the record" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // `structural A = B` (forward) stores A as a t_ref(B); B is the record.
+    // `type A = B` (forward) stores A as a t_ref(B); B is the record.
     // resolveRefToRecord must chase the chain: returning the t_ref unchanged
     // would make Required<A> a no-op that accepts any record. It must clear `host?`.
     const b = parseTypeText(&pool, allocator, "{ host?: string }");
@@ -4063,7 +4063,7 @@ test "extractProofMembers walks a generic Proof alias to its literal union" {
 
     // Simulate a source-defined alias around the ambient capsule.
     const source =
-        "structural Guardrails<T> = Proof<T, \"idempotent\" | \"deterministic\">;" ++
+        "type Guardrails<T> = Proof<T, \"idempotent\" | \"deterministic\">;" ++
         "function handler(): Guardrails<Response> { return null; }";
     try populateTestSource(&env, source);
 
@@ -4363,8 +4363,8 @@ test "TypeEnv leading-pipe union literal" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // structural Names = | "a" | "b" | "c"
-    const source = "structural Names = | \"a\" | \"b\" | \"c\";";
+    // type Names = | "a" | "b" | "c"
+    const source = "type Names = | \"a\" | \"b\" | \"c\";";
     try populateTestSource(&env, source);
 
     const names_idx = env.getTypeAlias("Names");
@@ -4377,7 +4377,7 @@ test "a generic alias instantiates through direct syntax" {
     // Parse the source and populate the environment through the same direct
     // path used by consumers, including the generic declaration and use.
     const allocator = std.testing.allocator;
-    const source = "structural Box<V> = { v: V };\nconst b: Box<string> = { v: \"x\" };\n";
+    const source = "type Box<V> = { v: V };\nconst b: Box<string> = { v: \"x\" };\n";
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -4487,7 +4487,7 @@ test "readonly on an array alias survives to the resolved type" {
     // `t_ref` when the modifier is read and the modifier was dropped: a
     // declared read-only value was accepted by a mutating parameter.
     const allocator = std.testing.allocator;
-    const source = "structural Items = string[];\nconst f: readonly Items = [\"a\"];\n";
+    const source = "type Items = string[];\nconst f: readonly Items = [\"a\"];\n";
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);

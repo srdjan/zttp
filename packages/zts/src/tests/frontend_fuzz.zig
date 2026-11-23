@@ -54,10 +54,10 @@ const seeds = [_][]const u8{
     "import { a, b } from \"zttp:json\";\nexport const k = 1;\n",
     "import type { T } from \"x\";\nexport default function () {}\n",
     // match, one seed per pattern family
-    "function f(cmd: Command): string {\n  return match (cmd) {\n    when { kind: \"echo\", text }: text\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n",
-    "const r = match (v) {\n  when null: \"null\"\n  when boolean: \"b\"\n  when number: \"n\"\n  when string: \"s\"\n  when array: \"a\"\n  when Dict: \"d\"\n  when Bytes: \"y\"\n  default: \"x\"\n};\n",
-    "const r = match (xs) { when [a, b]: a when [] : 0 default: 1 };",
-    "match (req) { when { method: \"GET\", path: \"/h\" }: 1 default: 2 };",
+    "import { match } from \"zttp:core\";\nfunction f(cmd: Command): string {\n  return match(cmd).with({ kind: \"echo\" }, (selected) => { const text = selected.text; return text; }).with({ kind: \"ping\" }, () => \"pong\").exhaustive();\n}\n",
+    "import { match, P } from \"zttp:core\";\nconst r = match(v).with(null, () => \"null\").with(P.boolean, () => \"b\").with(P.number, () => \"n\").with(P.string, () => \"s\").with(P.array, () => \"a\").with(P.Dict, () => \"d\").with(P.Bytes, () => \"y\").otherwise(() => \"x\");\n",
+    "import { match, P } from \"zttp:core\";\nconst r = match(xs).with([P.any, P.any], (selected) => selected[0]).with([], () => 0).otherwise(() => 1);",
+    "import { match } from \"zttp:core\";\nmatch(req).with({ method: \"GET\", path: \"/h\" }, () => 1).otherwise(() => 2);",
     // template literals
     "const s = `a ${1 + 2} b ${`x${y}`} c`;",
     "const s = `${ {a: {b: 1}}.a }`;",
@@ -65,7 +65,7 @@ const seeds = [_][]const u8{
     "const s = `${ {`${ {} }`} }`;",
     // type annotations
     "function f(a: number, b: string[]): { x: number } | null { return null; }",
-    "structural Box<T> = { v: T }; const b: Box<number> = { v: 1 };",
+    "type Box<T> = { v: T }; const b: Box<number> = { v: 1 };",
     "function id<T>(value: T): T { return value; } const n = id<number>(1);",
     "import type { Shape } from \"./types\";\nconst n: number = 1;",
     "export type { Shape } from \"./types\";\nconst n: number = 1;",
@@ -73,8 +73,8 @@ const seeds = [_][]const u8{
     "const value: any = 1;",
     "const value = ;",
     "const value: { /* unfinished",
-    "structural Box<T> = { v: T };\nconst b: Box<Array<number>> = { v: [1] };",
-    "nominal Id = string;\nstructural P = { id: Id; tags: string[] };\n",
+    "type Box<T> = { v: T };\nconst b: Box<Array<number>> = { v: [1] };",
+    "import type { Nominal } from \"zttp:core\";\ndeclare const idBrand: unique symbol;\ntype Id = Nominal<string, typeof idBrand>;\ntype P = { id: Id; tags: string[] };\n",
     "const a = x as number; const b = y satisfies string; let c: any = 1;",
     "function f(a?: number, b: number = 2) {}",
     "interface I { a: number } type T = string; distinct type D = number;",
@@ -105,7 +105,7 @@ const seeds = [_][]const u8{
     "const f = (x: number): number => x * 2; [1,2].map((v) => v + 1).filter(v => v > 1);",
     "for (const x of range(0, 10)) { if (x > 3) { break; } }",
     "const k = comptime(1 / 3); const j = comptime(Env.NAME);",
-    "assert x > 0;",
+    "import { assert } from \"zttp:core\";\nassert(x > 0);",
     // refused forms
     "class A {} async function f() { await g(); } var x = 1; while (true) {} switch (x) {} new Foo(); try {} catch (e) {} x == y; x++;",
     "const { a, b } = o; const [c, d] = xs;",
@@ -790,12 +790,12 @@ fn buildNested(allocator: std.mem.Allocator, shape: Shape, depth: usize) !std.Ar
 }
 
 const type_shapes = [_]Shape{
-    .{ .name = "tuple", .prefix = "structural Deep = ", .open = "[", .core = "string", .close = "]", .suffix = ";" },
-    .{ .name = "generic", .prefix = "structural Box<T> = T;\nstructural Deep = ", .open = "Box<", .core = "string", .close = ">", .suffix = ";" },
-    .{ .name = "object", .prefix = "structural Deep = ", .open = "{ a: ", .core = "string", .close = "}", .suffix = ";" },
-    .{ .name = "paren", .prefix = "structural Deep = ", .open = "(", .core = "string", .close = ")", .suffix = ";" },
-    .{ .name = "function type", .prefix = "structural Deep = ", .open = "(a: ", .core = "string", .close = ") => string", .suffix = ";" },
-    .{ .name = "annotation", .prefix = "structural Box<T> = T;\nconst x: ", .open = "Box<", .core = "string", .close = ">", .suffix = " = [];" },
+    .{ .name = "tuple", .prefix = "type Deep = ", .open = "[", .core = "string", .close = "]", .suffix = ";" },
+    .{ .name = "generic", .prefix = "type Box<T> = T;\ntype Deep = ", .open = "Box<", .core = "string", .close = ">", .suffix = ";" },
+    .{ .name = "object", .prefix = "type Deep = ", .open = "{ a: ", .core = "string", .close = "}", .suffix = ";" },
+    .{ .name = "paren", .prefix = "type Deep = ", .open = "(", .core = "string", .close = ")", .suffix = ";" },
+    .{ .name = "function type", .prefix = "type Deep = ", .open = "(a: ", .core = "string", .close = ") => string", .suffix = ";" },
+    .{ .name = "annotation", .prefix = "type Box<T> = T;\nconst x: ", .open = "Box<", .core = "string", .close = ">", .suffix = " = [];" },
 };
 
 const value_shapes = [_]Shape{
@@ -809,7 +809,7 @@ const value_shapes = [_]Shape{
     .{ .name = "if", .prefix = "function g() { ", .open = "if (a) { ", .core = "a;", .close = "}", .suffix = " }" },
     .{ .name = "callback body", .prefix = "function g() { ", .open = "f(() => { ", .core = "a;", .close = "});", .suffix = " }" },
     .{ .name = "template", .prefix = "const x = ", .open = "`${", .core = "1", .close = "}`", .suffix = ";" },
-    .{ .name = "match", .prefix = "const x = ", .open = "match (a) { when 1: ", .core = "1", .close = " default: 2 }", .suffix = ";" },
+    .{ .name = "match", .prefix = "import { match } from \"zttp:core\";\nconst x = ", .open = "match(a).with(1, () => ", .core = "1", .close = ").otherwise(() => 2)", .suffix = ";" },
     .{ .name = "spread object", .prefix = "const x = ", .open = "{ ...", .core = "a", .close = "}", .suffix = ";" },
     .{ .name = "member chain", .prefix = "const x = a", .open = ".b", .core = "", .close = "", .suffix = ";" },
 };

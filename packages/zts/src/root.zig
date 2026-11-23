@@ -616,9 +616,10 @@ test "stable GrammarCatalog exposes the productions and their enforcement points
     const rows = GrammarCatalog.productions();
     try std.testing.expectEqualStrings("zts-model-1", GrammarCatalog.profile_id);
     try std.testing.expectEqual(compiler.grammar_registry.productions.len, rows.len);
-    const match_expr = GrammarCatalog.findByName("MatchExpr") orelse
+    const type_alias = GrammarCatalog.findByName("TypeAliasDecl") orelse
         return error.TestExpectedProduction;
-    try std.testing.expectEqual(GrammarCatalog.Enforcement.check_time, match_expr.enforcement);
+    try std.testing.expectEqual(GrammarCatalog.Enforcement.check_time, type_alias.enforcement);
+    try std.testing.expect(GrammarCatalog.findByName("MatchExpr") == null);
     try std.testing.expect(GrammarCatalog.findByName("NotAProduction") == null);
     try std.testing.expectEqualStrings(&compiler.grammar_registry.grammarHash(), &grammarHash());
     try std.testing.expectEqualStrings(&compiler.semantics.semanticsHash(), &semanticsHash());

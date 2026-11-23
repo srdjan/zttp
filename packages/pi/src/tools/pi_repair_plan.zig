@@ -929,8 +929,8 @@ test "repair plan: a closure read gets a check inside the closure" {
 }
 
 test "repair plan: a read inside an assert gets a check before the statement" {
-    try expectFirstPlan(plan_head ++
-        \\  assert r.value !== undefined;
+    try expectFirstPlan("import { assert } from \"zttp:core\";\n" ++ plan_head ++
+        \\  assert(r.value !== undefined);
         \\  return Response.text("ok");
         \\}
     , "Check result.ok in an if statement before the assert, throw, switch, or try statement that reads the Result.", shape_guard);
@@ -1014,8 +1014,11 @@ test "repair plan: a spread Result asks for result.value" {
 }
 
 test "repair plan: a match on a Result gets the failure guard" {
-    try expectFirstPlan(plan_head ++
-        \\  const v = match (r) { when { ok: true, value: x }: x default: 0 };
+    try expectFirstPlan("import { match } from \"zttp:core\";\n" ++ plan_head ++
+        \\  const v = match(r).with({ ok: true }, (selected) => {
+        \\    const x = selected.value;
+        \\    return x;
+        \\  }).otherwise((): number => 0);
         \\  return Response.json({ v: v });
         \\}
     , "Replace match with if (!result.ok) { return ...; }, then read result.value.", shape_guard);

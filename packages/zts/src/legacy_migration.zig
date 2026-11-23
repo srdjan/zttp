@@ -193,6 +193,11 @@ fn appendPatternBinding(
     try bindings.append(allocator, .{ .name = owned_name, .path = owned_path });
 }
 
+const PatternDescriptor = struct {
+    alias: []const u8,
+    used: bool = false,
+};
+
 fn appendStructuredPattern(
     allocator: std.mem.Allocator,
     output: *std.ArrayListUnmanaged(u8),
@@ -200,7 +205,7 @@ fn appendStructuredPattern(
     authority: ParsedAuthority,
     node: engine.parser.NodeIndex,
     path: []const u8,
-    pattern_alias: []const u8,
+    descriptor: *PatternDescriptor,
 ) !void {
     const view = authority.ir_view;
     switch (view.getTag(node) orelse return error.InvalidMigration) {
@@ -224,9 +229,10 @@ fn appendStructuredPattern(
                 emitted = true;
                 try output.print(allocator, "{s}: ", .{key});
                 if (property.value == engine.parser.null_node) {
-                    try output.print(allocator, "{s}.present", .{pattern_alias});
+                    descriptor.used = true;
+                    try output.print(allocator, "{s}.present", .{descriptor.alias});
                 } else {
-                    try appendStructuredPattern(allocator, output, bindings, authority, property.value, field_path, pattern_alias);
+                    try appendStructuredPattern(allocator, output, bindings, authority, property.value, field_path, descriptor);
                 }
             }
             try output.appendSlice(allocator, " }");
@@ -238,11 +244,12 @@ fn appendStructuredPattern(
                 if (offset > 0) try output.appendSlice(allocator, ", ");
                 const element = view.getListIndex(array.elements_start, @intCast(offset));
                 if (element == engine.parser.null_node) {
-                    try output.print(allocator, "{s}.any", .{pattern_alias});
+                    descriptor.used = true;
+                    try output.print(allocator, "{s}.any", .{descriptor.alias});
                 } else {
                     const item_path = try allocator.print("{s}[{d}]", .{ path, offset });
                     defer allocator.free(item_path);
-                    try appendStructuredPattern(allocator, output, bindings, authority, element, item_path, pattern_alias);
+                    try appendStructuredPattern(allocator, output, bindings, authority, element, item_path, descriptor);
                 }
             }
             try output.append(allocator, ']');
@@ -257,7 +264,8 @@ fn appendStructuredPattern(
                 .dict => "Dict",
                 .bytes => "Bytes",
             };
-            try output.print(allocator, "{s}.{s}", .{ pattern_alias, name });
+            descriptor.used = true;
+            try output.print(allocator, "{s}.{s}", .{ descriptor.alias, name });
         },
         .lit_int, .lit_float, .lit_string, .lit_bool, .lit_null, .lit_undefined => try output.appendSlice(allocator, nodeSource(authority, node) orelse return error.InvalidMigration),
         else => return error.InvalidMigration,
@@ -279,7 +287,7 @@ fn matchReplacement(
     records: OriginalRecords,
     record: LegacyMatchRepair,
     match_alias: []const u8,
-    pattern_alias: []const u8,
+    descriptor: *PatternDescriptor,
     authority: ParsedAuthority,
     next_callback: *usize,
 ) ![]u8 {
@@ -289,7 +297,7 @@ fn matchReplacement(
     var default_body: ?[]u8 = null;
     defer if (default_body) |body| allocator.free(body);
     for (records.arms(record)) |arm| {
-        const body = try renderNestedMatches(allocator, records, arm.body_span, match_alias, pattern_alias, authority, next_callback);
+        const body = try renderNestedMatches(allocator, records, arm.body_span, match_alias, descriptor, authority, next_callback);
         if (arm.pattern_span == null) {
             if (default_body != null) allocator.free(default_body.?);
             default_body = body;
@@ -308,7 +316,7 @@ fn matchReplacement(
         }
         const callback = try freshCallbackName(allocator, authority, next_callback);
         defer allocator.free(callback);
-        try appendStructuredPattern(allocator, &pattern, &bindings, authority, arm.pattern_node, callback, pattern_alias);
+        try appendStructuredPattern(allocator, &pattern, &bindings, authority, arm.pattern_node, callback, descriptor);
         try output.print(allocator, ".with({s}, ", .{pattern.items});
         if (bindings.items.len == 0) {
             try output.print(allocator, "() => {s})", .{body});
@@ -327,7 +335,7 @@ fn renderNestedMatches(
     records: OriginalRecords,
     span: engine.parser.type_syntax.Span,
     match_alias: []const u8,
-    pattern_alias: []const u8,
+    descriptor: *PatternDescriptor,
     authority: ParsedAuthority,
     next_callback: *usize,
 ) anyerror![]u8 {
@@ -352,7 +360,7 @@ fn renderNestedMatches(
         try edits.append(allocator, .{
             .start = record.full_span.start - span.start,
             .end = record.full_span.end - span.start,
-            .replacement = try matchReplacement(allocator, records, record, match_alias, pattern_alias, authority, next_callback),
+            .replacement = try matchReplacement(allocator, records, record, match_alias, descriptor, authority, next_callback),
         });
     }
     const raw = span.text(records.source);
@@ -393,7 +401,7 @@ fn phaseOneExpected(allocator: std.mem.Allocator, input: SourceInput) ![]u8 {
     var need_nominal = false;
     const match_alias = runtimeCoreAlias(authority, "match") orelse "match";
     const assert_alias = runtimeCoreAlias(authority, "assert") orelse "assert";
-    const pattern_alias = runtimeCoreAlias(authority, "P") orelse "P";
+    var descriptor: PatternDescriptor = .{ .alias = runtimeCoreAlias(authority, "P") orelse "P" };
     const nominal_alias = typeCoreAlias(authority, "Nominal") orelse "Nominal";
     var next_callback: usize = 1;
 
@@ -433,7 +441,7 @@ fn phaseOneExpected(allocator: std.mem.Allocator, input: SourceInput) ![]u8 {
         try edits.append(allocator, .{
             .start = record.full_span.start,
             .end = record.full_span.end,
-            .replacement = try matchReplacement(allocator, input.original, record, match_alias, pattern_alias, authority, &next_callback),
+            .replacement = try matchReplacement(allocator, input.original, record, match_alias, &descriptor, authority, &next_callback),
         });
     }
 
@@ -454,7 +462,7 @@ fn phaseOneExpected(allocator: std.mem.Allocator, input: SourceInput) ![]u8 {
         if (runtime.items.len > 0) try runtime.appendSlice(allocator, ", ");
         try runtime.appendSlice(allocator, "assert");
     }
-    if (input.original.matches.len > 0 and runtimeCoreAlias(authority, "P") == null) {
+    if (descriptor.used and runtimeCoreAlias(authority, "P") == null) {
         if (hasModuleBinding(authority, "P")) return error.InvalidMigration;
         if (runtime.items.len > 0) try runtime.appendSlice(allocator, ", ");
         try runtime.appendSlice(allocator, "P");

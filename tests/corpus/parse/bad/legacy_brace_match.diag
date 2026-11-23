@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS001","severity":"error","message":"brace `match` is no longer supported","file":"parse/bad/legacy_brace_match.ts","line":3,"column":12,"suggestion":"import `match` from `zttp:core` and use `match(value).with(pattern, callback).exhaustive()` or end with `.otherwise(callback)`","repair_intent":null}

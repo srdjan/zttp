@@ -1963,16 +1963,22 @@ pub const PathGenerator = struct {
         while (i < match_data.arms_count) : (i += 1) {
             const arm_idx = self.ir_view.getListIndex(match_data.arms_start, i);
             const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-            if (arm.kind == .callback) return true;
-            if (self.ir_view.getTag(arm.body)) |tag| {
+            const value = if (arm.kind == .callback) value: {
+                const callback = self.ir_view.getFunction(arm.body) orelse return true;
+                // An expression callback has a single synthetic return.
+                // Walk block callbacks as paths so their statements are kept.
+                if (self.ir_view.getTag(callback.body) != .return_stmt) return true;
+                break :value self.ir_view.getOptValue(callback.body) orelse return true;
+            } else arm.body;
+            if (self.ir_view.getTag(value)) |tag| {
                 if (tag == .call) {
-                    if (self.ir_view.getCall(arm.body)) |call| {
+                    if (self.ir_view.getCall(value)) |call| {
                         if (self.responseHelperName(call.callee) != null) return true;
                     }
                 }
             }
             const before = self.io_seq.items.len;
-            try self.trackModuleCall(arm.body, null);
+            try self.trackModuleCall(value, null);
             const found = self.io_seq.items.len > before;
             self.io_seq.shrinkRetainingCapacity(before);
             if (found) return true;
@@ -6382,13 +6388,14 @@ fn countStatus(tests: []const GeneratedTest, status: u16) usize {
 test "assert without an error expression fails with status 500" {
     const allocator = std.testing.allocator;
     const source =
+        \\import { assert } from "zttp:core";
         \\function handler(req) {
         \\  const ok = req.method === "GET";
-        \\  assert ok;
+        \\  assert(ok);
         \\  return Response.text("ok");
         \\}
     ;
-    var fixture = try generateFixture(allocator, source);
+    var fixture = try generateLoweredFixture(allocator, source);
     defer fixture.deinit();
 
     const tests = fixture.generator.getTests();
@@ -6400,14 +6407,15 @@ test "assert without an error expression fails with status 500" {
 test "assert in an unbraced branch body gets its failure path" {
     const allocator = std.testing.allocator;
     const source =
+        \\import { assert } from "zttp:core";
         \\function handler(req) {
         \\  const post = req.method === "POST";
         \\  const ready = req.url === "/ready";
-        \\  if (post) { assert ready; }
+        \\  if (post) { assert(ready); }
         \\  return Response.text("ok");
         \\}
     ;
-    var fixture = try generateFixture(allocator, source);
+    var fixture = try generateLoweredFixture(allocator, source);
     defer fixture.deinit();
 
     const tests = fixture.generator.getTests();
@@ -6419,12 +6427,13 @@ test "assert in an unbraced branch body gets its failure path" {
 test "assert on a conjunction forks one failure path for each way it is false" {
     const allocator = std.testing.allocator;
     const source =
+        \\import { assert } from "zttp:core";
         \\function handler(req) {
-        \\  assert req.method === "GET" && req.url === "/x";
+        \\  assert(req.method === "GET" && req.url === "/x");
         \\  return Response.text("ok");
         \\}
     ;
-    var fixture = try generateFixture(allocator, source);
+    var fixture = try generateLoweredFixture(allocator, source);
     defer fixture.deinit();
 
     const tests = fixture.generator.getTests();
@@ -6435,13 +6444,14 @@ test "assert on a conjunction forks one failure path for each way it is false" {
 test "a module call in the assert condition is on both paths" {
     const allocator = std.testing.allocator;
     const source =
+        \\import { assert } from "zttp:core";
         \\import { sha256 } from "zttp:crypto";
         \\function handler(req) {
-        \\  assert sha256(req.url) === req.method;
+        \\  assert(sha256(req.url) === req.method);
         \\  return Response.text("ok");
         \\}
     ;
-    var fixture = try generateFixture(allocator, source);
+    var fixture = try generateLoweredFixture(allocator, source);
     defer fixture.deinit();
 
     const tests = fixture.generator.getTests();
@@ -6452,15 +6462,15 @@ test "a module call in the assert condition is on both paths" {
 test "a returned match forks one path for each arm, default included" {
     const allocator = std.testing.allocator;
     const source =
+        \\import { match } from "zttp:core";
         \\function handler(req) {
-        \\  return match (req.method) {
-        \\    when "GET": Response.text("get")
-        \\    when "POST": Response.text("post", { status: 201 })
-        \\    default: Response.text("other", { status: 405 })
-        \\  };
+        \\  return match(req.method)
+        \\    .with("GET", () => Response.text("get"))
+        \\    .with("POST", () => Response.text("post", { status: 201 }))
+        \\    .otherwise(() => Response.text("other", { status: 405 }));
         \\}
     ;
-    var fixture = try generateFixture(allocator, source);
+    var fixture = try generateLoweredFixture(allocator, source);
     defer fixture.deinit();
 
     const tests = fixture.generator.getTests();
@@ -6486,17 +6496,16 @@ test "a returned ternary stays one path" {
 test "a nested returned match forks again" {
     const allocator = std.testing.allocator;
     const source =
+        \\import { match } from "zttp:core";
         \\function handler(req) {
-        \\  return match (req.method) {
-        \\    when "GET": match (req.url) {
-        \\      when "/a": Response.text("a")
-        \\      default: Response.text("not a", { status: 404 })
-        \\    }
-        \\    default: Response.text("other", { status: 405 })
-        \\  };
+        \\  return match(req.method)
+        \\    .with("GET", () => match(req.url)
+        \\      .with("/a", () => Response.text("a"))
+        \\      .otherwise(() => Response.text("not a", { status: 404 })))
+        \\    .otherwise(() => Response.text("other", { status: 405 }));
         \\}
     ;
-    var fixture = try generateFixture(allocator, source);
+    var fixture = try generateLoweredFixture(allocator, source);
     defer fixture.deinit();
 
     const tests = fixture.generator.getTests();
@@ -6509,16 +6518,16 @@ test "a nested returned match forks again" {
 test "a module call bound before the returned match is on every arm path and an arm call on its own" {
     const allocator = std.testing.allocator;
     const source =
+        \\import { match } from "zttp:core";
         \\import { sha256 } from "zttp:crypto";
         \\function handler(req) {
         \\  const digest = sha256(req.url);
-        \\  return match (digest) {
-        \\    when "x": Response.text(sha256("arm"))
-        \\    default: Response.text("other", { status: 405 })
-        \\  };
+        \\  return match(digest)
+        \\    .with("x", () => Response.text(sha256("arm")))
+        \\    .otherwise(() => Response.text("other", { status: 405 }));
         \\}
     ;
-    var fixture = try generateFixture(allocator, source);
+    var fixture = try generateLoweredFixture(allocator, source);
     defer fixture.deinit();
 
     const tests = fixture.generator.getTests();
@@ -6532,7 +6541,7 @@ test "a module call bound before the returned match is on every arm path and an 
 test "a fluent returned match keeps one bound subject call on every path" {
     const allocator = std.testing.allocator;
     const source =
-        \\import { match } from "zttp:core";
+        \\import { assert, match } from "zttp:core";
         \\import { cacheGet } from "zttp:cache";
         \\function handler(req: Request): Response {
         \\  const subject = cacheGet("items", "key") ?? "";
@@ -6645,11 +6654,11 @@ test "a nested callback fallthrough resumes a bound outer match" {
 test "a callback assert result resumes a bound outer match" {
     const allocator = std.testing.allocator;
     const source =
-        \\import { match } from "zttp:core";
+        \\import { assert, match } from "zttp:core";
         \\function handler(req: Request): Response {
         \\  const ignored = match(req.url)
         \\    .otherwise((selected: string): Response | undefined => {
-        \\      assert selected === "/ok";
+        \\      assert(selected === "/ok");
         \\    });
         \\  return Response.text("done", { status: 299 });
         \\}

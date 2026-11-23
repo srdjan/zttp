@@ -1571,8 +1571,8 @@ test "type-only module rich source retains declarations and live binding" {
     const source =
         "import type { A } from \"./a\";\n" ++
         "export type { B };\n" ++
-        "export structural Shape = { value: string };\n" ++
-        "export nominal Id = string;\n" ++
+        "export type Shape = { value: string };\n" ++
+        "export type Id = string;\n" ++
         "const live: number = 1;\n" ++
         "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
     try expectTypeOnlyModuleCase(source, &.{
@@ -1588,7 +1588,7 @@ test "type-only module rich source retains declarations and live binding" {
     _ = try parser.parse();
     try std.testing.expectEqual(@as(usize, 2), parser.type_store.declarations.items.len);
     try std.testing.expectEqual(TypeSyntax.DeclarationKind.structural, parser.type_store.declarations.items[0].kind);
-    try std.testing.expectEqual(TypeSyntax.DeclarationKind.nominal, parser.type_store.declarations.items[1].kind);
+    try std.testing.expectEqual(TypeSyntax.DeclarationKind.structural, parser.type_store.declarations.items[1].kind);
     for (parser.type_store.declarations.items) |declaration| {
         const export_span = declaration.export_span orelse return error.TestUnexpectedResult;
         try std.testing.expectEqualStrings("export", export_span.text(source));
@@ -2634,22 +2634,22 @@ const GenericAliasFixture = struct {
 };
 
 const generic_alias_fixtures = [_]GenericAliasFixture{
-    .{ .case = .spaced_list, .source = "structural Box <T> = { value: T };\nconst value: Box<number> = undefined;" },
-    .{ .case = .empty_list, .source = "structural Box<> = number;\nconst value: Box<> = undefined;" },
-    .{ .case = .enforced_constraint, .source = "structural Box<T extends string> = { value: T };\nconst value: Box<number> = undefined;" },
-    .{ .case = .eight_item_projection, .source = "structural Wide<A,B,C,D,E,F,G,H> = H;\nconst value: Wide<string,string,string,string,string,string,string,number> = undefined;" },
-    .{ .case = .generic_then_plain, .source = "structural Both<T> = T;\nstructural Both = number;" },
-    .{ .case = .plain_then_generic, .source = "structural Both = number;\nstructural Both<T> = T;" },
-    .{ .case = .ambient_replacement, .source = "structural Proof<T> = { value: T };\nconst value: Proof<number> = undefined;" },
-    .{ .case = .alias_before_parameter, .source = "structural T = number;\nstructural Box<T> = T;\nconst value: Box<string> = undefined;" },
-    .{ .case = .nested_substitution, .source = "structural Box<T> = { values: T[] };\nconst value: Box<number> = undefined;" },
-    .{ .case = .nested_application_projection, .source = "structural Inner<T> = { value: T };\nstructural Outer<U> = Inner<U>;\nconst value: Outer<number> = undefined;" },
-    .{ .case = .constraint_closer, .source = "structural Box<T extends Dict<string, number>> = number;\nconst value: Box<Dict<string, number>> = undefined;" },
-    .{ .case = .constraint_less_than, .source = "structural Box<T extends { value: Missing < }> = number;\nconst value: Box<> = undefined;" },
-    .{ .case = .wrapped_constraint_less_than, .source = "structural Box<T extends Wrap<{ value: Missing < }, string>> = number;\nconst value: Box<> = undefined;" },
-    .{ .case = .quoted_equals, .source = "structural Box<T extends \"a=b\"> = number;\nconst value: Box<\"a=b\"> = undefined;" },
-    .{ .case = .adjacent_alias_equals, .source = "structural Box<T>=T;\nconst value: Box<number> = undefined;" },
-    .{ .case = .adjacent_annotation_equals, .source = "structural Box<T> = T;\nconst value:Box<number>=undefined;" },
+    .{ .case = .spaced_list, .source = "type Box <T> = { value: T };\nconst value: Box<number> = undefined;" },
+    .{ .case = .empty_list, .source = "type Box<> = number;\nconst value: Box<> = undefined;" },
+    .{ .case = .enforced_constraint, .source = "type Box<T extends string> = { value: T };\nconst value: Box<number> = undefined;" },
+    .{ .case = .eight_item_projection, .source = "type Wide<A,B,C,D,E,F,G,H> = H;\nconst value: Wide<string,string,string,string,string,string,string,number> = undefined;" },
+    .{ .case = .generic_then_plain, .source = "type Both<T> = T;\ntype Both = number;" },
+    .{ .case = .plain_then_generic, .source = "type Both = number;\ntype Both<T> = T;" },
+    .{ .case = .ambient_replacement, .source = "type Proof<T> = { value: T };\nconst value: Proof<number> = undefined;" },
+    .{ .case = .alias_before_parameter, .source = "type T = number;\ntype Box<T> = T;\nconst value: Box<string> = undefined;" },
+    .{ .case = .nested_substitution, .source = "type Box<T> = { values: T[] };\nconst value: Box<number> = undefined;" },
+    .{ .case = .nested_application_projection, .source = "type Inner<T> = { value: T };\ntype Outer<U> = Inner<U>;\nconst value: Outer<number> = undefined;" },
+    .{ .case = .constraint_closer, .source = "type Box<T extends Dict<string, number>> = number;\nconst value: Box<Dict<string, number>> = undefined;" },
+    .{ .case = .constraint_less_than, .source = "type Box<T extends { value: Missing < }> = number;\nconst value: Box<> = undefined;" },
+    .{ .case = .wrapped_constraint_less_than, .source = "type Box<T extends Wrap<{ value: Missing < }, string>> = number;\nconst value: Box<> = undefined;" },
+    .{ .case = .quoted_equals, .source = "type Box<T extends \"a=b\"> = number;\nconst value: Box<\"a=b\"> = undefined;" },
+    .{ .case = .adjacent_alias_equals, .source = "type Box<T>=T;\nconst value: Box<number> = undefined;" },
+    .{ .case = .adjacent_annotation_equals, .source = "type Box<T> = T;\nconst value:Box<number>=undefined;" },
 };
 
 const GenericProjectionCase = enum {
@@ -2667,12 +2667,12 @@ const GenericProjectionFixture = struct {
 };
 
 const generic_projection_fixtures = [_]GenericProjectionFixture{
-    .{ .case = .quoted_comma, .source = "structural Box<T extends \"a,b\"> = T;" },
-    .{ .case = .comment_comma, .source = "structural Box<T /*,*/> = T;" },
-    .{ .case = .malformed_tail, .source = "structural Box<T nonsense> = T;" },
-    .{ .case = .quoted_equals_metadata, .source = "structural Box<T extends \"a=b\"> = number;\nconst value: Box<string> = undefined;" },
-    .{ .case = .arrow_constraint_metadata, .source = "structural Box<T extends (x:string)=>number> = number;\nconst value: Box<string> = undefined;" },
-    .{ .case = .commented_equals_metadata, .source = "structural Box<T extends Wrap<string /* = */>> = number;\nconst value: Box<string> = undefined;" },
+    .{ .case = .quoted_comma, .source = "type Box<T extends \"a,b\"> = T;" },
+    .{ .case = .comment_comma, .source = "type Box<T /*,*/> = T;" },
+    .{ .case = .malformed_tail, .source = "type Box<T nonsense> = T;" },
+    .{ .case = .quoted_equals_metadata, .source = "type Box<T extends \"a=b\"> = number;\nconst value: Box<string> = undefined;" },
+    .{ .case = .arrow_constraint_metadata, .source = "type Box<T extends (x:string)=>number> = number;\nconst value: Box<string> = undefined;" },
+    .{ .case = .commented_equals_metadata, .source = "type Box<T extends Wrap<string /* = */>> = number;\nconst value: Box<string> = undefined;" },
 };
 
 const GenericFragmentCase = enum {
@@ -2775,57 +2775,57 @@ const long_nominal_name = "N" ++
 const long_nominal_source = "nominal " ++ long_nominal_name ++ " = string;";
 
 const declaration_fixtures = [_]DeclarationFixture{
-    .{ .case = .structural_alias, .source = "structural Alias = number; const value: Alias = 1;", .probe = .equivalent },
-    .{ .case = .nominal_alias, .source = "nominal UserId = string; const value: UserId = \"x\";", .probe = .equivalent },
-    .{ .case = .exported_structural_alias, .source = "export structural Alias = number; const value: Alias = 1;", .probe = .equivalent },
-    .{ .case = .exported_nominal_alias, .source = "export nominal UserId = string; const value: UserId = \"x\";", .probe = .equivalent },
-    .{ .case = .root_boundary, .source = "structural Alias = number;", .probe = .equivalent },
-    .{ .case = .root_leading_space_refusal, .source = " structural Alias = number;", .probe = .parser_refused },
-    .{ .case = .after_newline_refusal, .source = "const first = 1;\n  structural Alias = number;", .probe = .parser_refused },
-    .{ .case = .after_semicolon_refusal, .source = "const first = 1; structural Alias = number;", .probe = .parser_refused },
-    .{ .case = .block_left_aligned, .source = "function outer() {\nstructural Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 0 } },
-    .{ .case = .block_indented_refusal, .source = "function outer() {\n  structural Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 0 } },
-    .{ .case = .runtime_structural_collision, .source = "structural Alias = number; function Alias() { return 1; }", .probe = .{ .retained_declarations = 1 } },
-    .{ .case = .runtime_nominal_collision, .source = "nominal Alias = number; function Alias() { return 1; }", .probe = .{ .retained_declarations = 1 } },
-    .{ .case = .exact_eager_alias, .source = "structural A = string;\nstructural B = A;\nstructural A = number;", .probe = .equivalent },
-    .{ .case = .forward_deferred_ref, .source = "structural B = A;\nstructural A = string;\nstructural A = number;", .probe = .equivalent },
-    .{ .case = .nested_deferred_ref, .source = "structural B = { value: A };\nstructural A = number;", .probe = .equivalent },
-    .{ .case = .last_write_alias, .source = "structural A = string;\nstructural A = number;", .probe = .equivalent },
-    .{ .case = .builtin_before_source, .source = "structural Copy = FetchOptions;", .probe = .equivalent },
-    .{ .case = .abi_before_source, .source = "structural Copy = Request;", .probe = .equivalent },
-    .{ .case = .primitive_alias_declaration_root, .source = "structural string = number;\nstructural Copy = string;", .probe = .equivalent },
-    .{ .case = .primitive_alias_annotation_root, .source = "structural string = number; const value: string = 1;", .probe = .equivalent },
-    .{ .case = .primitive_alias_nominal_base, .source = "structural string = number;\nnominal UserId = string;", .probe = .equivalent },
-    .{ .case = .primitive_alias_nested_child, .source = "structural string = number;\nstructural Choice = string | boolean;", .probe = .equivalent },
-    .{ .case = .readonly_named_root, .source = "structural Items = string[]; const value: readonly Items = \"x\";", .probe = .equivalent },
-    .{ .case = .readonly_named_union, .source = "structural Items = string[];\nstructural View = readonly Items | number;", .probe = .equivalent },
-    .{ .case = .readonly_named_intersection, .source = "structural Items = string[];\nstructural View = readonly Items & { tag: string };", .probe = .equivalent },
-    .{ .case = .readonly_named_nullable, .source = "structural Items = string[];\nstructural View = readonly Items | undefined;", .probe = .equivalent },
-    .{ .case = .readonly_named_record_terminal, .source = "structural Items = string[];\nstructural View = { field: readonly Items };", .probe = .equivalent },
-    .{ .case = .readonly_named_tuple_terminal, .source = "structural Items = string[];\nstructural View = [readonly Items];", .probe = .equivalent },
-    .{ .case = .named_array_repeated_suffix, .source = "structural Alias = string;\nstructural View = Alias[][];", .probe = .equivalent },
-    .{ .case = .grouped_named_array_repeated_suffix, .source = "structural Alias = string;\nstructural View = (Alias)[][];", .probe = .equivalent },
-    .{ .case = .nominal_same_name_same_base, .source = "nominal Id = string;\nnominal Id = string;", .probe = .equivalent },
-    .{ .case = .nominal_different_name_same_base, .source = "nominal Left = string;\nnominal Right = string;", .probe = .equivalent },
-    .{ .case = .nominal_to_base, .source = "nominal Id = string;\nstructural Base = string;", .probe = .equivalent },
-    .{ .case = .base_to_nominal, .source = "nominal Id = string;\nstructural Copy = Id;", .probe = .equivalent },
-    .{ .case = .nominal_long_name, .source = long_nominal_source, .probe = .equivalent },
-    .{ .case = .direct_cycle, .source = "structural A = A;", .probe = .equivalent },
-    .{ .case = .union_cycle, .source = "structural A = number | A;", .probe = .equivalent },
-    .{ .case = .intersection_cycle, .source = "structural A = number & A;", .probe = .equivalent },
-    .{ .case = .nullable_cycle, .source = "structural A = A | undefined;", .probe = .equivalent },
-    .{ .case = .function_cycle, .source = "structural A = () => A;", .probe = .equivalent },
-    .{ .case = .record_guard, .source = "structural A = { next: A };", .probe = .equivalent },
-    .{ .case = .tuple_guard, .source = "structural A = [A];", .probe = .equivalent },
-    .{ .case = .array_guard, .source = "structural A = A[];", .probe = .equivalent },
-    .{ .case = .final_replacement_contractivity, .source = "structural A = A;\nstructural A = number;", .probe = .equivalent },
-    .{ .case = .repeated_population_additive, .source = "structural A = A;", .probe = .repeated_population_additive },
-    .{ .case = .contractivity_path_limit, .source = "structural A = A;", .probe = .contractivity_path_limit },
-    .{ .case = .resolution_hop_limit, .source = "structural A0 = A1;\nstructural A1 = A2;\nstructural A2 = A3;\nstructural A3 = A4;\nstructural A4 = A5;\nstructural A5 = A6;\nstructural A6 = A7;\nstructural A7 = A8;\nstructural A8 = A9;\nstructural A9 = number;", .probe = .equivalent },
-    .{ .case = .ref_structural_compare, .source = "structural A = Missing;", .probe = .equivalent },
-    .{ .case = .generic_app_structural_compare, .source = "structural Items = string[];\nstructural View = { field: readonly Items };", .probe = .equivalent },
-    .{ .case = .nominal_structural_compare, .source = "nominal Id = string;", .probe = .equivalent },
-    .{ .case = .generic_declaration, .source = "structural Box<T> = T;", .probe = .equivalent },
+    .{ .case = .structural_alias, .source = "type Alias = number; const value: Alias = 1;", .probe = .equivalent },
+    .{ .case = .nominal_alias, .source = "nominal UserId = string; const value: UserId = \"x\";", .probe = .{ .admission_refused = .legacy_nominal_declaration } },
+    .{ .case = .exported_structural_alias, .source = "export type Alias = number; const value: Alias = 1;", .probe = .equivalent },
+    .{ .case = .exported_nominal_alias, .source = "export nominal UserId = string; const value: UserId = \"x\";", .probe = .{ .admission_refused = .legacy_nominal_declaration } },
+    .{ .case = .root_boundary, .source = "type Alias = number;", .probe = .equivalent },
+    .{ .case = .root_leading_space_refusal, .source = " type Alias = number;", .probe = .parser_refused },
+    .{ .case = .after_newline_refusal, .source = "const first = 1;\n  type Alias = number;", .probe = .parser_refused },
+    .{ .case = .after_semicolon_refusal, .source = "const first = 1; type Alias = number;", .probe = .parser_refused },
+    .{ .case = .block_left_aligned, .source = "function outer() {\ntype Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 0 } },
+    .{ .case = .block_indented_refusal, .source = "function outer() {\n  type Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 0 } },
+    .{ .case = .runtime_structural_collision, .source = "type Alias = number; function Alias() { return 1; }", .probe = .{ .retained_declarations = 1 } },
+    .{ .case = .runtime_nominal_collision, .source = "nominal Alias = number; function Alias() { return 1; }", .probe = .{ .admission_refused = .legacy_nominal_declaration } },
+    .{ .case = .exact_eager_alias, .source = "type A = string;\ntype B = A;\ntype A = number;", .probe = .equivalent },
+    .{ .case = .forward_deferred_ref, .source = "type B = A;\ntype A = string;\ntype A = number;", .probe = .equivalent },
+    .{ .case = .nested_deferred_ref, .source = "type B = { value: A };\ntype A = number;", .probe = .equivalent },
+    .{ .case = .last_write_alias, .source = "type A = string;\ntype A = number;", .probe = .equivalent },
+    .{ .case = .builtin_before_source, .source = "type Copy = FetchOptions;", .probe = .equivalent },
+    .{ .case = .abi_before_source, .source = "type Copy = Request;", .probe = .equivalent },
+    .{ .case = .primitive_alias_declaration_root, .source = "type string = number;\ntype Copy = string;", .probe = .equivalent },
+    .{ .case = .primitive_alias_annotation_root, .source = "type string = number; const value: string = 1;", .probe = .equivalent },
+    .{ .case = .primitive_alias_nominal_base, .source = "type string = number;\nnominal UserId = string;", .probe = .{ .admission_refused = .legacy_nominal_declaration } },
+    .{ .case = .primitive_alias_nested_child, .source = "type string = number;\ntype Choice = string | boolean;", .probe = .equivalent },
+    .{ .case = .readonly_named_root, .source = "type Items = string[]; const value: readonly Items = \"x\";", .probe = .equivalent },
+    .{ .case = .readonly_named_union, .source = "type Items = string[];\ntype View = readonly Items | number;", .probe = .equivalent },
+    .{ .case = .readonly_named_intersection, .source = "type Items = string[];\ntype View = readonly Items & { tag: string };", .probe = .equivalent },
+    .{ .case = .readonly_named_nullable, .source = "type Items = string[];\ntype View = readonly Items | undefined;", .probe = .equivalent },
+    .{ .case = .readonly_named_record_terminal, .source = "type Items = string[];\ntype View = { field: readonly Items };", .probe = .equivalent },
+    .{ .case = .readonly_named_tuple_terminal, .source = "type Items = string[];\ntype View = [readonly Items];", .probe = .equivalent },
+    .{ .case = .named_array_repeated_suffix, .source = "type Alias = string;\ntype View = Alias[][];", .probe = .equivalent },
+    .{ .case = .grouped_named_array_repeated_suffix, .source = "type Alias = string;\ntype View = (Alias)[][];", .probe = .equivalent },
+    .{ .case = .nominal_same_name_same_base, .source = "nominal Id = string;\nnominal Id = string;", .probe = .{ .admission_refused = .legacy_nominal_declaration } },
+    .{ .case = .nominal_different_name_same_base, .source = "nominal Left = string;\nnominal Right = string;", .probe = .{ .admission_refused = .legacy_nominal_declaration } },
+    .{ .case = .nominal_to_base, .source = "nominal Id = string;\ntype Base = string;", .probe = .{ .admission_refused = .legacy_nominal_declaration } },
+    .{ .case = .base_to_nominal, .source = "nominal Id = string;\ntype Copy = Id;", .probe = .{ .admission_refused = .legacy_nominal_declaration } },
+    .{ .case = .nominal_long_name, .source = long_nominal_source, .probe = .{ .admission_refused = .legacy_nominal_declaration } },
+    .{ .case = .direct_cycle, .source = "type A = A;", .probe = .equivalent },
+    .{ .case = .union_cycle, .source = "type A = number | A;", .probe = .equivalent },
+    .{ .case = .intersection_cycle, .source = "type A = number & A;", .probe = .equivalent },
+    .{ .case = .nullable_cycle, .source = "type A = A | undefined;", .probe = .equivalent },
+    .{ .case = .function_cycle, .source = "type A = () => A;", .probe = .equivalent },
+    .{ .case = .record_guard, .source = "type A = { next: A };", .probe = .equivalent },
+    .{ .case = .tuple_guard, .source = "type A = [A];", .probe = .equivalent },
+    .{ .case = .array_guard, .source = "type A = A[];", .probe = .equivalent },
+    .{ .case = .final_replacement_contractivity, .source = "type A = A;\ntype A = number;", .probe = .equivalent },
+    .{ .case = .repeated_population_additive, .source = "type A = A;", .probe = .repeated_population_additive },
+    .{ .case = .contractivity_path_limit, .source = "type A = A;", .probe = .contractivity_path_limit },
+    .{ .case = .resolution_hop_limit, .source = "type A0 = A1;\ntype A1 = A2;\ntype A2 = A3;\ntype A3 = A4;\ntype A4 = A5;\ntype A5 = A6;\ntype A6 = A7;\ntype A7 = A8;\ntype A8 = A9;\ntype A9 = number;", .probe = .equivalent },
+    .{ .case = .ref_structural_compare, .source = "type A = Missing;", .probe = .equivalent },
+    .{ .case = .generic_app_structural_compare, .source = "type Items = string[];\ntype View = { field: readonly Items };", .probe = .equivalent },
+    .{ .case = .nominal_structural_compare, .source = "nominal Id = string;", .probe = .{ .admission_refused = .legacy_nominal_declaration } },
+    .{ .case = .generic_declaration, .source = "type Box<T> = T;", .probe = .equivalent },
     .{ .case = .invalid_nominal_base_refusal, .source = "nominal Bad = { value: number };", .probe = .{ .admission_refused = .nominal_base_not_scalar } },
 };
 
@@ -3336,7 +3336,7 @@ fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) 
     try parser.type_store.validate();
     // Every declaration in these fixtures starts with its own keyword.
     try std.testing.expectEqual(
-        std.mem.count(u8, source, "structural ") + std.mem.count(u8, source, "nominal "),
+        std.mem.count(u8, source, "type ") - std.mem.count(u8, source, "import type "),
         parser.type_store.declarations.items.len,
     );
 
@@ -4146,11 +4146,9 @@ fn expectNominalGenericOwner(
 
 test "nominal generic source owns the exact declaration without generic semantics" {
     const source = "nominal Id<T> = string;";
-    try expectDirectAccepted(source);
-
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
-    _ = try parser.parse();
+    try std.testing.expectError(error.AdmissionRefused, parser.parse());
     try parser.type_store.validate();
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
@@ -4161,25 +4159,6 @@ test "nominal generic source owns the exact declaration without generic semantic
         .list = "<T>",
         .base = .string,
     });
-
-    var pool = TypePool.init(std.testing.allocator);
-    defer pool.deinit(std.testing.allocator);
-    var env = TypeEnv.init(std.testing.allocator, &pool);
-    defer env.deinit();
-    module_types.populateModuleTypes(&env, &pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&env, &pool, std.testing.allocator);
-    try lowerSyntaxStore(
-        std.testing.allocator,
-        &parser.type_store,
-        &pool,
-        &env,
-        parserIrView(&parser),
-    );
-    const alias = env.getTypeAlias("Id") orelse return error.TestUnexpectedResult;
-    try std.testing.expect(pool.isNominal(alias));
-    try std.testing.expectEqualStrings("Id", pool.nominalName(alias));
-    try std.testing.expectEqual(pool.idx_string, pool.unwrapNominal(alias));
-    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
 }
 
 test "nominal generic scalar matrix retains ignored bounds and declaration order" {
@@ -4188,11 +4167,9 @@ test "nominal generic scalar matrix retains ignored bounds and declaration order
         "nominal Count<T extends string> = number;\n" ++
         "nominal Flag<T> = boolean;\n" ++
         "nominal Both<T extends string> = string;\n";
-    try expectDirectAccepted(source);
-
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
-    _ = try parser.parse();
+    try std.testing.expectError(error.AdmissionRefused, parser.parse());
     try parser.type_store.validate();
     try std.testing.expectEqual(@as(usize, 4), parser.type_store.declarations.items.len);
     try std.testing.expectEqual(@as(usize, 4), parser.type_store.generic_owners.items.len);
@@ -4230,29 +4207,6 @@ test "nominal generic scalar matrix retains ignored bounds and declaration order
     for (parser.type_store.projected_generic_parameters.items) |parameter| {
         try std.testing.expect(parameter.bound_fragment == null);
     }
-
-    var pool = TypePool.init(std.testing.allocator);
-    defer pool.deinit(std.testing.allocator);
-    var env = TypeEnv.init(std.testing.allocator, &pool);
-    defer env.deinit();
-    module_types.populateModuleTypes(&env, &pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&env, &pool, std.testing.allocator);
-    try lowerSyntaxStore(
-        std.testing.allocator,
-        &parser.type_store,
-        &pool,
-        &env,
-        parserIrView(&parser),
-    );
-    const names = [_][]const u8{ "Text", "Count", "Flag", "Both" };
-    const bases = [_]TypeIndex{ pool.idx_string, pool.idx_number, pool.idx_boolean, pool.idx_string };
-    for (names, bases) |name, base| {
-        const alias = env.getTypeAlias(name) orelse return error.TestUnexpectedResult;
-        try std.testing.expect(pool.isNominal(alias));
-        try std.testing.expectEqualStrings(name, pool.nominalName(alias));
-        try std.testing.expectEqual(base, pool.unwrapNominal(alias));
-    }
-    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
 }
 
 test "nominal generic base refusal retains direct diagnostic" {
@@ -4280,14 +4234,16 @@ test "nominal generic type allocation failures restore the published seed" {
             var parser = try JsParser.initAdmission(std.testing.allocator, type_allocator, source, .compile);
             defer parser.deinit();
             parser.setAtomTable(&atoms);
-            const root = parser.parse() catch |err| switch (err) {
+            if (parser.parse()) |_| return error.TestUnexpectedResult else |err| switch (err) {
                 error.OutOfMemory => {
                     observed_failures.* += 1;
                     try std.testing.expectEqual(@as(u16, 0), parser.scopes.current_scope);
                     const checkpoint = parser.type_store.checkpoint();
                     const second_declaration = std.mem.indexOf(u8, source, "nominal Id") orelse
                         return error.TestUnexpectedResult;
-                    if (parser.current.start >= second_declaration) {
+                    if (parser.current.type == .eof and checkpoint.declarations == 2) {
+                        try parser.type_store.validate();
+                    } else if (parser.current.start >= second_declaration) {
                         observed_post_seed_rollbacks.* += 1;
                         try std.testing.expect(std.meta.eql(checkpoint, nominalGenericSeedCheckpoint()));
                         try parser.type_store.validate();
@@ -4299,10 +4255,9 @@ test "nominal generic type allocation failures restore the published seed" {
                     }
                     return error.OutOfMemory;
                 },
+                error.AdmissionRefused => {},
                 else => return err,
-            };
-
-            try expectParsedStoreValid(source, &parser, root);
+            }
             try parser.type_store.validate();
             const checkpoint = parser.type_store.checkpoint();
             try std.testing.expect(checkpoint.nodes >= 2);
@@ -4695,7 +4650,7 @@ test "direct calls retain eight projected arguments without publishing a ninth" 
 
 test "explicit call applications instantiate the completed generic alias namespace" {
     const source =
-        "const seed: number = 1;\nstructural Box<T> = { value: T };\n" ++
+        "const seed: number = 1;\ntype Box<T> = { value: T };\n" ++
         "function id<U>(value) { return value; } const result=id<Box<number>>(seed);";
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
@@ -5202,7 +5157,7 @@ test "generic function publication rejects a swallowed diagnostic allocation fai
 test "generic parameter projection retains u32 depth arithmetic" {
     var source: std.ArrayListUnmanaged(u8) = .empty;
     defer source.deinit(std.testing.allocator);
-    try source.appendSlice(std.testing.allocator, "structural Box<\"");
+    try source.appendSlice(std.testing.allocator, "type Box<\"");
     try source.appendNTimes(std.testing.allocator, '<', 65_536);
     try source.appendNTimes(std.testing.allocator, '>', 65_535);
     try source.appendSlice(
@@ -5256,12 +5211,13 @@ test "declaration semantic census observes every case" {
                 try std.testing.expectEqual(@as(usize, 0), parser.type_store.declarations.items.len);
             },
             .admission_refused => |expected| {
-                const diagnostic = try directDiagnosticAt(fixture.source, expected, "{ value: number }");
+                const marker = if (expected == .legacy_nominal_declaration) "nominal" else "{ value: number }";
+                const diagnostic = try directDiagnosticAt(fixture.source, expected, marker);
                 try expectDirectAdmission(
                     std.testing.allocator,
                     fixture.source,
-                    .collect,
-                    .recovered_admission_refused,
+                    .compile,
+                    .terminal_admission_refused,
                     &.{diagnostic},
                     null,
                 );
@@ -5289,11 +5245,11 @@ test "declaration semantic census observes every case" {
                         const errors = parser.errors.getErrors();
                         try std.testing.expectEqual(@as(usize, 1), errors.len);
                         try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[0].kind);
-                        const structural = std.mem.indexOf(u8, fixture.source, "structural") orelse
+                        const keyword = std.mem.indexOf(u8, fixture.source, "type") orelse
                             return error.TestUnexpectedResult;
-                        try std.testing.expectEqual(@as(u32, @intCast(structural)), errors[0].location.offset);
+                        try std.testing.expectEqual(@as(u32, @intCast(keyword)), errors[0].location.offset);
                         try std.testing.expectEqual(
-                            @as(u32, @intCast(structural + "structural".len)),
+                            @as(u32, @intCast(keyword + "type".len)),
                             errors[0].location.end_offset,
                         );
                     },
@@ -5321,11 +5277,11 @@ test "declaration semantic census observes every case" {
 
 test "declaration bodies admit numeric leading and blank-line continuations" {
     const cases = [_]struct { source: []const u8, name: []const u8, body: []const u8, tag: TypeTag }{
-        .{ .source = "structural Numeric = 1;", .name = "Numeric", .body = "1", .tag = .t_literal_number },
-        .{ .source = "structural LeadingUnion = | number;", .name = "LeadingUnion", .body = "| number", .tag = .t_number },
-        .{ .source = "structural LeadingIntersection = & number;", .name = "LeadingIntersection", .body = "& number", .tag = .t_number },
-        .{ .source = "structural Union = number |\n\n string;", .name = "Union", .body = "number |\n\n string", .tag = .t_union },
-        .{ .source = "structural Intersection = number &\n\n { value: string };", .name = "Intersection", .body = "number &\n\n { value: string }", .tag = .t_intersection },
+        .{ .source = "type Numeric = 1;", .name = "Numeric", .body = "1", .tag = .t_literal_number },
+        .{ .source = "type LeadingUnion = | number;", .name = "LeadingUnion", .body = "| number", .tag = .t_number },
+        .{ .source = "type LeadingIntersection = & number;", .name = "LeadingIntersection", .body = "& number", .tag = .t_number },
+        .{ .source = "type Union = number |\n\n string;", .name = "Union", .body = "number |\n\n string", .tag = .t_union },
+        .{ .source = "type Intersection = number &\n\n { value: string };", .name = "Intersection", .body = "number &\n\n { value: string }", .tag = .t_intersection },
     };
     for (cases) |case| {
         var atoms = AtomTable.init(std.testing.allocator);
@@ -5365,10 +5321,10 @@ test "declaration bodies admit numeric leading and blank-line continuations" {
 test "type text left after the type parser stops is refused with ZTS001" {
     const Case = struct { source: []const u8, offset: u32 };
     const cases = [_]Case{
-        .{ .source = "structural Empty<T> =;", .offset = 21 },
-        .{ .source = "structural Empty =;", .offset = 18 },
-        .{ .source = "structural A = number = >\nconst value = 1;", .offset = 22 },
-        .{ .source = "structural A = string;\nstructural B = A tolerated_suffix;\nstructural A = number;", .offset = 40 },
+        .{ .source = "type Empty<T> =;", .offset = 15 },
+        .{ .source = "type Empty =;", .offset = 12 },
+        .{ .source = "type A = number = >\nconst value = 1;", .offset = 16 },
+        .{ .source = "type A = string;\ntype B = A tolerated_suffix;\ntype A = number;", .offset = 28 },
         .{ .source = "const value: Outer<(), string> = undefined;", .offset = 19 },
         .{ .source = "const value: Outer<string, (), number> = undefined;", .offset = 27 },
         .{ .source = "const value: (number: string | boolean, number) = undefined;", .offset = 20 },
@@ -5424,18 +5380,18 @@ test "a numeric literal type at the start of an annotation parses" {
     try expectParsesClean("function g(x: \"a\" | 400): number { return 1; }\n");
     try expectParsesClean("const v: 400 = 400;\n");
     try expectParsesClean("function g(): 400 { return 400; }\n");
-    try expectParsesClean("structural Box<T> = { v: T };\nfunction g(a: Box<400>): number { return 1; }\n");
+    try expectParsesClean("type Box<T> = { v: T };\nfunction g(a: Box<400>): number { return 1; }\n");
 }
 
 test "an empty parenthesized type is refused where a closing bracket follows it" {
     const message = "this type syntax is not supported; write an admitted type from section 5.7 of the specification";
-    try expectRefusedAt("structural Outer<T> = { v: T };\nfunction g(a: Outer<()>): number { return 1; }\n", 52, message);
+    try expectRefusedAt("type Outer<T> = { v: T };\nfunction g(a: Outer<()>): number { return 1; }\n", 46, message);
     try expectRefusedAt("function g(a: [()][]): number { return 1; }\n", 15, message);
 }
 
 test "an empty parameter list with an arrow is a function type" {
     try expectParsesClean("function g(a: () => number): number { return a(); }\n");
-    try expectParsesClean("structural Outer<T> = { v: T };\nfunction g(a: Outer<() => number>): number { return 1; }\n");
+    try expectParsesClean("type Outer<T> = { v: T };\nfunction g(a: Outer<() => number>): number { return 1; }\n");
 }
 
 test "a comma inside a string literal or comment in an explicit call type argument is not a separator" {
@@ -5457,7 +5413,7 @@ test "an unclosed bracket after a type reports an unsupported type, not an index
 
 test "an empty parenthesized type with no arrow is refused at the opening parenthesis" {
     const message = "this type syntax is not supported; write an admitted type from section 5.7 of the specification";
-    try expectRefusedAt("structural Empty = ();\nfunction g(a: Empty): number {\n  return a;\n}\n", 19, message);
+    try expectRefusedAt("type Empty = ();\nfunction g(a: Empty): number {\n  return a;\n}\n", 13, message);
     try expectRefusedAt("function g(a: ()): number { return 1; }\n", 14, message);
     try expectRefusedAt("const v: () = 1;\n", 9, message);
 }
@@ -5533,7 +5489,7 @@ test "a comment between a predicate target and is is admitted" {
 }
 
 test "comment-separated declaration terminator remains a runtime semicolon" {
-    const source = "structural A = number\n/*c*/;";
+    const source = "type A = number\n/*c*/;";
 
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
@@ -5571,7 +5527,7 @@ test "nominal refusal recovery preserves a comment-separated semicolon" {
 }
 
 test "unterminated trailing declaration comment is refused directly" {
-    const source = "structural A = number;/*";
+    const source = "type A = number;/*";
     inline for (.{ TypeSyntax.AdmissionMode.collect, TypeSyntax.AdmissionMode.compile }) |mode| {
         var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, mode);
         defer parser.deinit();
@@ -5584,7 +5540,7 @@ test "unterminated trailing declaration comment is refused directly" {
 test "declaration names admit identifier-shaped keyword tokens" {
     const names = [_][]const u8{ "true", "null", "undefined", "function" };
     for (names) |name| {
-        const source = try std.testing.allocator.print("structural {s} = number;\nconst value: {s} = 1;", .{ name, name });
+        const source = try std.testing.allocator.print("type {s} = number;\nconst value: {s} = 1;", .{ name, name });
         defer std.testing.allocator.free(source);
         try expectDirectAccepted(source);
     }
@@ -5626,8 +5582,8 @@ test "direct declaration lowering closes every allocation failure" {
     const Context = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const source =
-                "structural Loop = Loop;\n" ++
-                "nominal Identifier = string;\n" ++
+                "type Loop = Loop;\n" ++
+                "type Identifier = string;\n" ++
                 "const value: Identifier = \"x\";";
             try expectDirectSourceWithAllocator(allocator, source);
         }
@@ -5719,12 +5675,12 @@ fn expectDirectDeclarationNeutral(
 }
 
 test "simple structural declaration is runtime neutral and lowers directly" {
-    try expectDirectDeclarationNeutral("structural Alias = number; const value: Alias = 1;", "Alias", .number, false, 1);
-    try expectDirectDeclarationNeutral("structural Alias = number;", "Alias", .number, false, 0);
+    try expectDirectDeclarationNeutral("type Alias = number; const value: Alias = 1;", "Alias", .number, false, 1);
+    try expectDirectDeclarationNeutral("type Alias = number;", "Alias", .number, false, 0);
 }
 
 test "simple nominal declaration is runtime neutral and lowers directly" {
-    try expectDirectDeclarationNeutral("nominal UserId = string; const value: UserId = \"x\";", "UserId", .string, true, 1);
+    try expectDirectDeclarationNeutral("import type { Nominal } from \"zttp:core\";\ndeclare const userIdBrand: unique symbol;\ntype UserId = Nominal<string, typeof userIdBrand>;\nconst value: UserId = \"x\";", "UserId", .string, true, 1);
 }
 
 test "direct compound slice keeps ordered record fields and nested arrays" {
@@ -6423,7 +6379,7 @@ test "direct admission preserves removed-type order and source spans" {
         .{ .source = "const value: void = 1;", .kind = .void_type, .marker = "void" },
         .{ .source = "const value:\r\n any = 1;", .kind = .any_type, .marker = "any" },
         .{ .source = "const value: number many = 1;", .kind = .any_type, .marker = "any" },
-        .{ .source = "structural Many<A,B,C,D,E,F,G,H> = H;\nconst value: Many<string,string,string,string,string,string,string,number> = undefined;", .kind = .any_type, .marker = "any", .exact_span = .{ .start = 52, .end = 55 } },
+        .{ .source = "type Many<A,B,C,D,E,F,G,H> = H;\nconst value: Many<string,string,string,string,string,string,string,number> = undefined;", .kind = .any_type, .marker = "any", .exact_span = .{ .start = 46, .end = 49 } },
         .{ .source = "const value: number Array<string> = 1;", .kind = .array_type_alias, .marker = "Array" },
         .{ .source = "const value: number ReadonlyArray<string> = 1;", .kind = .readonly_array_type_alias, .marker = "ReadonlyArray" },
     };
@@ -6566,7 +6522,7 @@ test "direct structural generic source closes every allocation failure" {
     const Context = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const source =
-                "structural Box<T extends string> = { value: T };\n" ++
+                "type Box<T extends string> = { value: T };\n" ++
                 "const value: Box<number> = undefined;";
             try expectDirectSourceWithAllocator(allocator, source);
         }
@@ -6575,7 +6531,7 @@ test "direct structural generic source closes every allocation failure" {
 }
 
 test "later semantic fragment rollback closes every allocation failure" {
-    const source = "structural Box<T> = T;\n<Outer<number>>(";
+    const source = "type Box<T> = T;\n<Outer<number>>(";
     const Later = struct {
         fn run(
             allocator: std.mem.Allocator,
@@ -7351,8 +7307,8 @@ test "variable and export allocation failures remove unfinished annotation owner
 
 test "annotation owner census covers current syntax kinds" {
     const source =
-        "structural Box<T> = { value: T };\n" ++
-        "nominal Id = string;\n" ++
+        "type Box<T> = { value: T };\n" ++
+        "type Id = string;\n" ++
         "const seed: number = 1; let label: string = \"x\";\n" ++
         "function id<U>(value: U): U { return value; } " ++
         "function isString(candidate: unknown): candidate is string { return typeof candidate === \"string\"; }\n" ++
@@ -7372,7 +7328,7 @@ test "annotation owner census covers current syntax kinds" {
     try store.validateRuntimeOwners(std.testing.allocator, view);
     try std.testing.expectEqual(@as(usize, 2), store.declarations.items.len);
     try std.testing.expectEqual(TypeSyntax.DeclarationKind.structural, store.declarations.items[0].kind);
-    try std.testing.expectEqual(TypeSyntax.DeclarationKind.nominal, store.declarations.items[1].kind);
+    try std.testing.expectEqual(TypeSyntax.DeclarationKind.structural, store.declarations.items[1].kind);
     try std.testing.expectEqual(@as(usize, 2), store.annotations.items.len);
     try std.testing.expectEqual(@as(usize, 2), store.parameter_annotations.items.len);
     try std.testing.expectEqual(@as(usize, 2), store.function_signatures.items.len);
@@ -8027,7 +7983,7 @@ fn runDirectCallAllocationSweep(
     observations: *DirectCallAllocationObservations,
 ) !void {
     const source =
-        "structural Seed = string;\n" ++
+        "type Seed = string;\n" ++
         "const first: Seed = identity<Seed>(\"a\");\n" ++
         "function /* gap */ identity<T>(value) { return value; }\n" ++
         "const second: Seed = identity<{ id: string }>(\"b\");";
@@ -8492,7 +8448,7 @@ fn runPredicateAllocationSweep(
     observations: *PredicateAllocationObservations,
 ) !void {
     const source =
-        "structural Seed = string;\n" ++
+        "type Seed = string;\n" ++
         "function guard<T>(candidate: Seed): candidate is T[] { return true; }\n";
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
@@ -8630,7 +8586,7 @@ fn runDirectGenericAllocationSweep(
     observations: *DirectGenericAllocationObservations,
 ) !void {
     const source =
-        "structural Seed = string;\n" ++
+        "type Seed = string;\n" ++
         "function before<P extends { id: string }>(value) { return value; }\n" ++
         "function identity<T extends string>(value: T): T { return value; }\n" ++
         "function after<Q extends number>(value) { return value; }";
@@ -8703,7 +8659,7 @@ fn runDirectGenericMapAllocationSweep(
     observations: *DirectGenericAllocationObservations,
 ) !void {
     const source =
-        "structural Seed = string;\n" ++
+        "type Seed = string;\n" ++
         "function identity<T>(value) { return value; }";
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
@@ -9303,9 +9259,11 @@ fn expectDirectDeclarationConsumer(
         ) != null);
     }
 
+    try @import("intrinsic_lowering.zig").validateSource(std.testing.allocator, &direct, &direct_atoms, &direct_env);
+    const lowered_view = parserIrView(&direct);
     var direct_checker = type_checker_mod.TypeChecker.init(
         std.testing.allocator,
-        direct_view,
+        lowered_view,
         &direct_atoms,
         &direct_env,
     );
@@ -9315,14 +9273,14 @@ fn expectDirectDeclarationConsumer(
     try std.testing.expectEqual(expected_diagnostics.len, direct_checker.getDiagnostics().len);
     for (direct_checker.getDiagnostics(), expected_diagnostics) |direct_diagnostic, expected| {
         try std.testing.expectEqual(expected.kind, direct_diagnostic.kind);
-        const location = direct_view.getLoc(direct_diagnostic.node).?;
+        const location = lowered_view.getLoc(direct_diagnostic.node) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(expected.line, location.line);
         try std.testing.expectEqual(expected.column, location.column);
     }
 
     var direct_strict = strict_checker_mod.StrictChecker.init(
         std.testing.allocator,
-        direct_view,
+        lowered_view,
         &direct_atoms,
         &direct_env,
         &direct_checker,
@@ -9335,8 +9293,8 @@ fn expectDirectDeclarationConsumer(
 
 test "direct declarations preserve namespace contractivity and diagnostics" {
     try expectDirectDeclarationConsumer(
-        "structural Label = string;\n" ++
-            "nominal Count = number;\n" ++
+        "type Label = string;\n" ++
+            "type Count = number;\n" ++
             "const label: Label = \"ok\";\n" ++
             "const count: Count = 1;",
         &.{},
@@ -9344,7 +9302,7 @@ test "direct declarations preserve namespace contractivity and diagnostics" {
         false,
     );
     try expectDirectDeclarationConsumer(
-        "structural Loop = Loop;\n" ++
+        "type Loop = Loop;\n" ++
             "const value: Loop = 1;",
         &.{
             .{ .kind = .non_contractive_alias },
@@ -9354,8 +9312,8 @@ test "direct declarations preserve namespace contractivity and diagnostics" {
         true,
     );
     try expectDirectDeclarationConsumer(
-        "structural Loop = Loop;\n" ++
-            "structural Loop = string;\n" ++
+        "type Loop = Loop;\n" ++
+            "type Loop = string;\n" ++
             "const value: Loop = \"ok\";",
         &.{},
         "Loop",
@@ -9432,21 +9390,24 @@ test "direct generic declarations preserve aliases and empty distinctions" {
         case: GenericDeclarationFactCase,
     }{
         .{
-            .source = "structural Box<T> = { value: T };\n" ++
-                "nominal UserId<T> = string;\n" ++
+            .source = "import type { Nominal } from \"zttp:core\";\n" ++
+                "import { nominal } from \"zttp:core\";\n" ++
+                "type Box<T> = { value: T };\n" ++
+                "declare const userIdBrand: unique symbol;\n" ++
+                "type UserId = Nominal<string, typeof userIdBrand>;\n" ++
                 "const box: Box<number> = { value: 1 };\n" ++
-                "const id: UserId = \"x\";",
+                "const id: UserId = nominal<UserId>(\"x\");",
             .case = .combined,
         },
         .{
-            .source = "structural Box = number;\n" ++
-                "structural Box<T> = { value: T };\n" ++
+            .source = "type Box = number;\n" ++
+                "type Box<T> = { value: T };\n" ++
                 "const plain: Box = 1;\n" ++
                 "const generic: Box<string> = { value: \"ok\" };",
             .case = .collision,
         },
         .{
-            .source = "structural Unit<> = number;\n" ++
+            .source = "type Unit<> = number;\n" ++
                 "const value: Unit<> = 1;",
             .case = .empty_parameters,
         },
@@ -9461,7 +9422,7 @@ test "direct generic declarations preserve aliases and empty distinctions" {
 }
 
 test "parsed declaration helper retains operational failure" {
-    const record_source = "structural Record = { id: string };";
+    const record_source = "type Record = { id: string };";
     var record_atoms = AtomTable.init(std.testing.allocator);
     defer record_atoms.deinit();
     var record_parser = try JsParser.initAdmission(
@@ -9513,7 +9474,7 @@ test "parsed declaration helper retains operational failure" {
 }
 
 test "parsed generic declaration helper restores scope and retains failure" {
-    const source = "structural Unit<> = number;";
+    const source = "type Unit<> = number;";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -9555,7 +9516,7 @@ test "parsed generic declaration helper restores scope and retains failure" {
 }
 
 test "parsed generic declaration helper validates exact owner before mutation" {
-    const source = "structural Box<T> = T;";
+    const source = "type Box<T> = T;";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -9610,7 +9571,7 @@ test "parsed generic declaration helper validates exact owner before mutation" {
 }
 
 test "parsed generic declaration helper rejects malformed oversized projected Store" {
-    const wide_source = "structural Wide<A, B, C, D, E, F, G, H> = string;";
+    const wide_source = "type Wide<A, B, C, D, E, F, G, H> = string;";
     var wide_atoms = AtomTable.init(std.testing.allocator);
     defer wide_atoms.deinit();
     var wide_parser = try JsParser.initAdmission(
@@ -9679,8 +9640,8 @@ fn runDirectDeclarationAllocationSweep(
     observations: *DirectDeclarationAllocationObservations,
 ) !void {
     const source =
-        "structural Seed = string;\n" ++
-        "structural Loop = Loop;\n" ++
+        "type Seed = string;\n" ++
+        "type Loop = Loop;\n" ++
         "const seed: Seed = \"ok\";";
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
@@ -9737,8 +9698,8 @@ fn runDirectGenericDeclarationAllocationSweep(
     observations: *DirectGenericDeclarationAllocationObservations,
 ) !void {
     const source =
-        "structural Seed = string;\n" ++
-        "structural Box<T> = { value: T };\n" ++
+        "type Seed = string;\n" ++
+        "type Box<T> = { value: T };\n" ++
         "const seed: Seed = \"ok\";";
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
@@ -10403,7 +10364,7 @@ fn expectDirectFunctionCapsules(source: []const u8) !void {
 test "direct function specifications preserve nonempty effects and helper selection by name" {
     const source =
         \\import { sha256 } from "zttp:crypto";
-        \\structural Text = string;
+        \\type Text = string;
         \\function helper(value: Text): Effects<Text, "crypto"> { return sha256(value); }
         \\function other(value: Text): Effects<Text, "clock"> { return value; }
         \\
@@ -10516,9 +10477,9 @@ fn expectDirectSingleModuleContract(
 
 test "direct single-module full and sound extraction preserve contract bytes" {
     const fixtures = [_]struct { kind: ContractConsumerCase, source: []const u8, json_hash: u64 }{
-        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0xc45dd90555b9c86c },
-        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0x7862607f9d18dbe9 },
-        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0x006c229e112f84ce },
+        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0x781b223de0e44e28 },
+        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0x6aff8c526aed6024 },
+        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0x5b1d78cd04535cc4 },
     };
     const fields = @typeInfo(ContractConsumerCase).@"enum".field_names;
     try std.testing.expectEqual(@as(usize, 3), fixtures.len);
@@ -10731,7 +10692,7 @@ test "direct callback ceilings preserve actual-position compact-gap behavior" {
         .diagnostic = .effect_row_lower_bound,
     });
     try expectDirectCallbackCeiling(
-        \\structural CryptoValue = Effects<string, "crypto">;
+        \\type CryptoValue = Effects<string, "crypto">;
         \\
         \\function run<T extends string>(callback: (value: T) => CryptoValue, value: T): Effects<string, "crypto"> {
         \\  return callback(value);
@@ -10820,22 +10781,22 @@ fn expectTooManyTypeParametersAt(source: []const u8, offset: u32) !void {
 
 test "a ninth type parameter is refused at the ninth parameter" {
     try expectTooManyTypeParametersAt("function f<A, B, C, D, E, F, G, H, I>(a: I): I { return a; }\n", 35);
-    try expectTooManyTypeParametersAt("structural Many<A, B, C, D, E, F, G, H, I> = I;\n", 40);
+    try expectTooManyTypeParametersAt("type Many<A, B, C, D, E, F, G, H, I> = I;\n", 34);
     try expectTooManyTypeParametersAt("nominal Many<A, B, C, D, E, F, G, H, I> = string;\n", 37);
     try expectTooManyTypeParametersAt("function f<A, B, C, D, E, F, G, H, I, J>(a: I): I { return a; }\n", 35);
-    try expectTooManyTypeParametersAt("structural Many<A,B,C,D,E,F,G,H,I> = I;", 32);
+    try expectTooManyTypeParametersAt("type Many<A,B,C,D,E,F,G,H,I> = I;", 26);
 }
 
 test "an empty type parameter is refused" {
     const message = "an empty type parameter is not supported; remove the extra comma";
-    try expectRefusedAt("structural Box<A, ,B> = A;", 16, message);
-    try expectRefusedAt("structural Box<T,,U> = T;", 16, message);
+    try expectRefusedAt("type Box<A, ,B> = A;", 10, message);
+    try expectRefusedAt("type Box<T,,U> = T;", 10, message);
     try expectRefusedAt("function f<A,>(a: A): A { return a; }\n", 12, message);
 }
 
 test "eight type parameters parse, and a comma inside a constraint is not a separator" {
     try expectParsesClean("function f<A, B, C, D, E, F, G, H>(a: H): H { return a; }\n");
-    try expectParsesClean("structural Many<A, B, C, D, E, F, G, H> = H;\n");
+    try expectParsesClean("type Many<A, B, C, D, E, F, G, H> = H;\n");
     try expectParsesClean("function f<A extends Dict<string, number>, B, C, D, E, F, G, H>(a: A): A { return a; }\n");
 }
 
@@ -10861,7 +10822,7 @@ fn expectUndeclaredNameAt(source: []const u8, offset: u32, message: []const u8, 
 }
 
 test "a type name that a later declaration binds resolves" {
-    try expectNamesResolve("function g(a: Later): number { return 1; }\nstructural Later = { id: number };\n");
+    try expectNamesResolve("function g(a: Later): number { return 1; }\ntype Later = { id: number };\n");
 }
 
 test "a type parameter of a generic function resolves" {
@@ -10873,7 +10834,7 @@ test "a readonly array type resolves" {
 }
 
 test "a user declaration of a utility name binds that name" {
-    try expectNamesResolve("structural Partial<T> = { v: T };\nfunction g(a: Partial<number>): number { return 1; }\n");
+    try expectNamesResolve("type Partial<T> = { v: T };\nfunction g(a: Partial<number>): number { return 1; }\n");
 }
 
 test "an undeclared type name is refused at the name" {
@@ -10881,7 +10842,7 @@ test "an undeclared type name is refused at the name" {
         "function g(a: Widget): number { return 1; }\n",
         14,
         "type name `Widget` is not declared",
-        "declare it with `structural`, import it, or use a type name from `meta` ambient_names",
+        "declare it with `type`, import it, or use a type name from `meta` ambient_names",
     );
 }
 

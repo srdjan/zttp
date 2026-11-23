@@ -546,32 +546,6 @@ test "prefix increment is rejected with helpful error" {
     try std.testing.expect(std.mem.indexOf(u8, err.message, "x = x + 1") != null);
 }
 
-test "a match record key that cannot be interned fails codegen instead of dropping the field" {
-    // Codegen skipped a record-pattern field whose key atom could not be
-    // interned and emitted the rest, so the bytecode tested fewer fields than
-    // the proven IR. Every other name is interned first; the table is then
-    // full, so only the pattern key `zzkind` fails.
-    const allocator = std.testing.allocator;
-    var strings = string.StringTable.init(allocator);
-    defer strings.deinit();
-    var atoms = atom_table_mod.AtomTable.init(allocator);
-    defer atoms.deinit();
-    for ([_][]const u8{ "h", "zzq" }) |name| _ = try atoms.intern(name);
-    atoms.next_id = 0xFFFE;
-
-    var p = try Parser.initTyped(allocator, allocator,
-        \\function h(zzq) {
-        \\  return match (zzq) {
-        \\    when { zzkind: "x" }: 200,
-        \\    default: 404
-        \\  };
-        \\}
-    , &strings, &atoms);
-    defer p.deinit();
-
-    try std.testing.expectError(error.OutOfMemory, generateAdmitted(&p));
-}
-
 test "typed parser delays generation and matches equivalent JavaScript bytecode and atoms" {
     const allocator = std.testing.allocator;
     const typed_source = "const reset_value: number = 4;\nfunction reset_identity(input: number): number { return input; }\n";
@@ -763,10 +737,8 @@ test "typed generation failures clean published float and nested function payloa
     const dispatch_source =
         "function handler(request: Request): Response {\n" ++
         "  const url: string = request.url;\n" ++
-        "  return match (url) {\n" ++
-        "    when '/api/a': Response.json({ ok: true }),\n" ++
-        "    default: Response.text('missing')\n" ++
-        "  };\n" ++
+        "  if (url === '/api/a') { return Response.json({ ok: true }); }\n" ++
+        "  return Response.text('missing');\n" ++
         "}\n" ++
         "const tail: number = 1.25;\n";
     var strings = string.StringTable.init(std.testing.allocator);

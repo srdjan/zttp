@@ -432,7 +432,7 @@ Declare which compiler-proven properties your handler must satisfy
 directly in the return type:
 
 ```typescript
-structural Guardrails<T> = Proof<T, "idempotent" | "deterministic" | "no_secret_leakage">;
+type Guardrails<T> = Proof<T, "idempotent" | "deterministic" | "no_secret_leakage">;
 
 function handler(req: Request): Guardrails<Response> {
     // ...

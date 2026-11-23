@@ -48,25 +48,14 @@ found it writing semicolons onto the wrong line and into trailing comments.
 
 ## Declaration Rules
 
-| Form | Code | What it does instead |
+| Form | Code | Write instead |
 |---|---|---|
-| `nominal Bad = { a: number };` - a nominal base that is not scalar | ZTS048 | A nominal declaration carries scalar identity only, so its base is `string`, `number`, or `boolean`. Use `structural` for a record, a tuple, a union, or a function |
-| `interface X { ... }` | ZTS049 | Write `structural X = { ... };`. The `export` form is refused the same way |
-| `type X = ...;` | ZTS050 | Write `structural X = ...;`. `import type` and `export type { ... }` keep the keyword |
-| `distinct type X = string;` | ZTS051 | Write `nominal X = string;` |
+| A brand over a record, tuple, union, or function | ZTS048 | Use `Nominal` over `string`, `number`, or `boolean`. Use a transparent `type` alias for other shapes |
+| `interface X { ... }` | ZTS049 | `type X = { ... };` |
+| A legacy `structural` declaration | ZTS001 | `type X = ...;` |
+| A legacy `nominal` declaration or `distinct type X = string;` | ZTS001 or ZTS051 | Declare a unique-symbol brand and use `Nominal<string, typeof brand>` from `zttp:core` |
 
-The published grammar has always said `ScalarType` at that position; until this
-rule existed nothing enforced it, and a nominal type over a record checked
-clean. The rule ran on the older `distinct type` spelling too, which shared the
-path. That spelling is refused outright now, so its base is no longer reached:
-one line gets one diagnostic, and it is the one naming the repair.
-
-`interface` is recognized rather than merely rejected: the body is scanned so
-the span is known and the repair is exact, and no supported type declaration is
-published, so nothing downstream resolves it. Open interfaces, `extends`, merging, and
-declaration augmentation were never supported and are not repaired into an
-alias. The heuristic that made an all-function interface nominal went with the
-form - nominal identity now comes only from a `nominal` declaration.
+Run `zts normalize handler.ts` to preview supported legacy migrations.
 
 ## Top-Level And Binding Rules
 
@@ -80,7 +69,7 @@ form - nominal identity now comes only from a `nominal` declaration.
 | A function declaration inside a function body or a block | ZTS071 | A module-level function |
 | An assignment to a parameter, such as `a = a + 1` | ZTS068 | Bind the new value to a new `const` |
 | A declaration of a name that an enclosing or a nested scope, or the module scope, already declares | ZTS069 | A different name. Two sibling blocks may declare one name |
-| A `structural` or `nominal` declaration of an ambient type name, or of a name that an `import type` binds, such as `structural Request = number;` | ZTS019 | A different name |
+| A `type` declaration that reuses an ambient or imported type name, such as `type Request = number;` | ZTS019 | A different name |
 
 ## Operator And Builtin Rules
 
@@ -93,29 +82,23 @@ form - nominal identity now comes only from a `nominal` declaration.
 | `Headers` | ZTS629 | Read request headers through `req.headers` |
 | `substring`, array `concat`, and `Number.parseInt` or `Number.parseFloat` | ZTS201 | `slice`, spread `[...a, ...b]`, and the globals `parseInt` and `parseFloat` |
 | An `Object` member other than `keys`, `values`, and `entries`, such as `Object.fromEntries` | ZTS201 | `Object.keys`, `Object.values`, `Object.entries`, or object spread |
-| `Partial<T>`, `Required<T>`, `Pick<T, K>`, `Omit<T, K>`, and `Readonly<T>` | ZTS065 | An explicit `structural` declaration and the `readonly` modifier |
+| `Partial<T>`, `Required<T>`, `Pick<T, K>`, `Omit<T, K>`, and `Readonly<T>` | ZTS065 | An explicit `type` declaration and the `readonly` modifier |
 | `for...of` over a record, a number, a string, or a `Dict` | ZTS218 | `Object.keys(r)`, `range(n)`, `s.split("")`, or `dictEntries(d)` |
 | `FetchOptions` with no import | ZTS065 | `import type { FetchOptions } from "zttp:fetch";` |
 
 ## Match Rules
 
-Spec 5.5 gives `match` the grammar `MatchArm+ [DefaultArm]`. The parser enforces
-the position of `default` because the code generator tests the `when` arms in
-order and takes `default` last. A `when` written after `default` was accepted
-before and then answered by the `default` arm.
+Import `match` from `zttp:core`. The compiler tests each `.with(pattern, callback)`
+in order. End a complete chain with `.exhaustive()`, or handle
+remaining values with `.otherwise(callback)`.
 
-| Form | Code | What it does instead |
+| Form | Code | Write instead |
 |---|---|---|
-| A `default` arm followed by a `when` arm | ZTS062 | Move `default` after the `when` arms. The diagnostic points at the misplaced `default` |
-| A second `default` arm | ZTS062 | A match has at most one `default`. The diagnostic points at the second one |
-| `when { v: string }` or `when [string]` - a type-test name below the top level of a pattern | ZTS001 | Nested type tests are not supported. Bind the field and match it in a nested `match`, or use a top-level type test (`when string:`) |
-| A `default` arm after full coverage of a closed union, or a duplicate `when` arm | ZTS216 | An error. Remove the `default` arm or the duplicate arm |
-
-A renamed binding (`value: v`) declares a variable, so `{ v: string }` bound a
-variable called `string` and matched every value. That spelling and the
-array-element spelling are refused for the six type-test names `boolean`,
-`number`, `string`, `array`, `Dict`, and `Bytes`. A shorthand binding such as
-`{ string }` is not refused: it binds a field that is literally named `string`.
+| A legacy brace match | ZTS001 | The imported `match` call and its fluent arms |
+| A legacy `default` arm before a `when` arm, or a second `default` arm | ZTS062 | One `.otherwise(callback)` terminal |
+| A nested type test such as `{ v: P.string }` | ZTS001 | Match that field separately with a subject-level descriptor |
+| An `.otherwise()` after full coverage or an unreachable `.with()` | ZTS216 | Remove the unreachable branch |
+| Incomplete coverage with `.exhaustive()` | ZTS603 | Add the missing arms or use `.otherwise(callback)` |
 
 ## Supported Module Syntax
 
@@ -336,7 +319,7 @@ The strict checker enforces the **canonical ZigTS profile** on every `zttp check
 | `ZTS058` | `Array<T>` type spelling | write `T[]` |
 | `ZTS059` | `ReadonlyArray<T>` type spelling | write `readonly T[]` |
 | `ZTS060` | `void` type spelling | write `undefined` |
-| `ZTS061` | raw built-in type in an exported parameter or return | declare a `nominal` or `structural` alias and name it in the signature |
+| `ZTS061` | raw built-in type in an exported parameter or return | declare a scalar brand or transparent alias and name it in the signature |
 | `ZTS620` | boolean compared to a boolean literal (`x === true`) | use the boolean directly: `x` (or `!x` for `=== false`) |
 | `ZTS622` | the iterated collection is mutated in the loop body (`for (const x of xs) { xs.push(x); }`) | iterate a snapshot: read one collection, build the mutated one separately |
 

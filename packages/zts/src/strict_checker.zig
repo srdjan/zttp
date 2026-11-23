@@ -20,6 +20,7 @@ const match_analysis_mod = @import("match_analysis.zig");
 const packBindingKey = @import("binding_key.zig").packBindingKey;
 const repair_intent_mod = @import("repair_intent.zig");
 const module_facts_mod = @import("module_facts.zig");
+const intrinsic_lowering = @import("intrinsic_lowering.zig");
 const abi_types = @import("abi_types.zig");
 const builtin_modules = @import("zts-engine").builtin_modules;
 const known_globals = @import("zts-base").known_globals;
@@ -116,13 +117,6 @@ pub const DiagnosticKind = enum {
     /// `undefined` alike, so on such an operand they silently erase the
     /// distinction JSON fidelity depends on.
     nullish_operator_on_null,
-    /// A `match` record pattern renames a field to the name it already has
-    /// (`{ value: value }`). Spec 4.2.1 row `match binding field name`: the
-    /// shorthand is the idiomatic spelling.
-    canonical_redundant_pattern_rename,
-    /// A `match` arm reads a field off the scrutinee instead of binding it in
-    /// the pattern. Spec 4.2.1 row `matched field read`.
-    canonical_unbound_field_read,
     /// An entry round trip through `dictEntries` and `dictFromEntries` that
     /// changes only values, or only drops entries. Spec 4.2.1 rows
     /// `dictionary map` and `dictionary filter`: `dictMapValues` and
@@ -1330,7 +1324,6 @@ pub const StrictChecker = struct {
             .match_expr => {
                 const match = self.ir_view.getMatchExpr(node) orelse return;
                 self.walkExpr(match.discriminant);
-                self.checkMatchBindingIdioms(match);
                 var coverage = self.matchCoverage(node, match);
                 defer coverage.deinit(self.allocator);
                 if (!coverage.exhaustive) {
@@ -1453,7 +1446,7 @@ pub const StrictChecker = struct {
             .kind = .raw_exported_boundary_type,
             .node = node,
             .message = message,
-            .help = "declare a nominal or structural alias and name it in the exported signature",
+            .help = "declare a named Nominal identity or a type alias for a closed shape and name it in the exported signature",
             .message_owned = true,
             .repair_intent = .declare_boundary_type,
         }) catch {
@@ -1550,122 +1543,6 @@ pub const StrictChecker = struct {
             .result_shape = if (result_subject != null) .unrecognized_guard else null,
             .result_subject = result_subject,
         });
-    }
-
-    /// The two spec 4.2.1 rows a `match` binding realizes.
-    ///
-    /// `match binding field name` (ZTS625): `{ value: value }` says the field name
-    /// twice; the shorthand `{ value }` is the same pattern.
-    ///
-    /// `matched field read` (ZTS626): an arm that reads a field off the
-    /// scrutinee is spelling by hand what a binding pattern field does, and
-    /// the read is a second traversal of the same value.
-    ///
-    /// Both are advisory: the code they name is correct, and the row names a
-    /// better spelling for it.
-    fn checkMatchBindingIdioms(self: *StrictChecker, match: ir.Node.MatchExpr) void {
-        const disc_binding: ?ir.BindingRef = if (self.ir_view.getTag(match.discriminant) == .identifier)
-            self.ir_view.getBinding(match.discriminant)
-        else
-            null;
-
-        for (0..match.arms_count) |i| {
-            const arm_idx = self.ir_view.getListIndex(match.arms_start, @intCast(i));
-            const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-            self.checkRedundantPatternRename(arm.pattern);
-            if (disc_binding) |binding| self.checkUnboundFieldRead(arm.body, binding);
-        }
-    }
-
-    fn checkRedundantPatternRename(self: *StrictChecker, pattern: NodeIndex) void {
-        if (pattern == null_node) return;
-        if (self.ir_view.getTag(pattern) != .match_pattern) return;
-        const record = self.ir_view.getMatchPattern(pattern) orelse return;
-
-        for (0..record.props_count) |i| {
-            const prop_idx = self.ir_view.getListIndex(record.props_start, @intCast(i));
-            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
-            if (prop.is_shorthand) continue;
-            if (prop.value == null_node) continue;
-            if (self.ir_view.getTag(prop.value) != .identifier) continue;
-
-            const binding = self.ir_view.getBinding(prop.value) orelse continue;
-            const bound_name = self.resolveAtomName(binding.name_atom) orelse continue;
-            const key_str_idx = self.ir_view.getStringIdx(prop.key) orelse continue;
-            const key_str = self.ir_view.getString(key_str_idx) orelse continue;
-            if (!std.mem.eql(u8, bound_name, key_str)) continue;
-
-            self.addDiagnostic(.{
-                .severity = .advisory,
-                .kind = .canonical_redundant_pattern_rename,
-                .node = prop_idx,
-                .message = "a pattern field renamed to its own name is the shorthand binding",
-                .help = "drop the rename and write the field name once",
-            });
-        }
-    }
-
-    /// Report the first field read off `scrutinee` inside `body`. One per arm:
-    /// the repair is the same one every time, and an arm that reads three
-    /// fields does not need three advisories to say so.
-    fn checkUnboundFieldRead(self: *StrictChecker, body: NodeIndex, scrutinee: ir.BindingRef) void {
-        const found = self.findScrutineeFieldRead(body, scrutinee, 0) orelse return;
-        self.addDiagnostic(.{
-            .severity = .advisory,
-            .kind = .canonical_unbound_field_read,
-            .node = found,
-            .message = "a match arm reads a field off the scrutinee instead of binding it",
-            .help = "bind the field in the arm's pattern (`when { kind: \"echo\", text }:`) and read the bound name",
-        });
-    }
-
-    fn findScrutineeFieldRead(self: *const StrictChecker, node: NodeIndex, scrutinee: ir.BindingRef, depth: u8) ?NodeIndex {
-        if (node == null_node or depth > 16) return null;
-        const tag = self.ir_view.getTag(node) orelse return null;
-
-        switch (tag) {
-            .member_access, .optional_chain => {
-                const member = self.ir_view.getMember(node) orelse return null;
-                if (self.ir_view.getTag(member.object) == .identifier) {
-                    if (self.ir_view.getBinding(member.object)) |b| {
-                        if (b.scope_id == scrutinee.scope_id and b.slot == scrutinee.slot) return node;
-                    }
-                }
-                return self.findScrutineeFieldRead(member.object, scrutinee, depth + 1);
-            },
-            .binary_op => {
-                const bin = self.ir_view.getBinary(node) orelse return null;
-                return self.findScrutineeFieldRead(bin.left, scrutinee, depth + 1) orelse
-                    self.findScrutineeFieldRead(bin.right, scrutinee, depth + 1);
-            },
-            .unary_op => {
-                const un = self.ir_view.getUnary(node) orelse return null;
-                return self.findScrutineeFieldRead(un.operand, scrutinee, depth + 1);
-            },
-            // The operand is payload word `a`; `getUnary` reads word `b`.
-            .spread => {
-                const operand = self.ir_view.getOptValue(node) orelse return null;
-                return self.findScrutineeFieldRead(operand, scrutinee, depth + 1);
-            },
-            .ternary => {
-                const t = self.ir_view.getTernary(node) orelse return null;
-                return self.findScrutineeFieldRead(t.condition, scrutinee, depth + 1) orelse
-                    self.findScrutineeFieldRead(t.then_branch, scrutinee, depth + 1) orelse
-                    self.findScrutineeFieldRead(t.else_branch, scrutinee, depth + 1);
-            },
-            .call => {
-                const call = self.ir_view.getCall(node) orelse return null;
-                var i: u16 = 0;
-                while (i < call.args_count) : (i += 1) {
-                    const arg = self.ir_view.getListIndex(call.args_start, i);
-                    if (self.findScrutineeFieldRead(arg, scrutinee, depth + 1)) |hit| return hit;
-                }
-                return null;
-            },
-            // exhaustive: the remaining tags are leaves, or they open a scope
-            // of their own whose reads are not this arm's spelling choice.
-            else => return null,
-        }
     }
 
     /// The two spec 4.2.1 rows spec 6.2 names as rewrites over a `Dict`.
@@ -1988,7 +1865,7 @@ pub const StrictChecker = struct {
                         .kind = .implicit_unknown,
                         .node = node,
                         .message = "call result has implicit unknown type",
-                        .help = "add a return type annotation, use a modeled virtual module, or narrow with a type guard/assert",
+                        .help = "add a return type annotation, use a modeled virtual module, or narrow with a type guard or an imported assert(predicate) call",
                     });
                 }
             }
@@ -2825,11 +2702,13 @@ fn checkDirectWithSections(
         .ir_view = view,
         .atoms = &h.atoms,
     } });
-    h.tc = TypeChecker.init(testing.allocator, view, &h.atoms, &h.env);
+    try intrinsic_lowering.validateSource(testing.allocator, &h.parser, &h.atoms, &h.env);
+    const lowered_view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants);
+    h.tc = TypeChecker.init(testing.allocator, lowered_view, &h.atoms, &h.env);
     h.tc.scopes = &h.parser.scopes;
     errdefer h.tc.deinit();
     _ = try h.tc.check(root);
-    h.checker = StrictChecker.init(testing.allocator, view, &h.atoms, &h.env, &h.tc);
+    h.checker = StrictChecker.init(testing.allocator, lowered_view, &h.atoms, &h.env, &h.tc);
     errdefer h.checker.deinit();
     h.checker.policy_sections = policy_sections;
     _ = try h.checker.check(root);
@@ -3088,21 +2967,21 @@ test "raw exported boundaries survive a next-line function brace" {
 }
 
 test "a structural alias over a raw scalar does not satisfy the boundary" {
-    // Only `nominal` mints an identity. `structural Text = string` is a
+    // Only `nominal` mints an identity. `type Text = string` is a
     // transparent alias: it *is* `string` for assignability, so `expose("raw")`
     // is accepted and the boundary closes nothing it was written to close.
     // Admitting it gave one operation two spellings, one of which did no work.
     const sources = [_][]const u8{
-        "structural Text = string; export function expose(value: Text): Text { return value; }",
-        "structural Count = number; export function expose(value: Count): Count { return value; }",
-        "structural Flag = boolean; export function expose(value: Flag): Flag { return value; }",
+        "type Text = string; export function expose(value: Text): Text { return value; }",
+        "type Count = number; export function expose(value: Count): Count { return value; }",
+        "type Flag = boolean; export function expose(value: Flag): Flag { return value; }",
         // Through an array, and through a chain of aliases: transparency is not
         // interrupted by either.
-        "structural Text = string; export function expose(value: Text[]): Text[] { return value; }",
+        "type Text = string; export function expose(value: Text[]): Text[] { return value; }",
         // Separate lines keep this fixture focused on alias transparency;
         // two on one line is a parse failure unrelated to this rule.
-        "structural A = string;\nstructural B = A;\nexport function expose(value: B): B { return value; }",
-        "structural Text = string; export function expose(value: readonly Text[]): readonly Text[] { return value; }",
+        "type A = string;\ntype B = A;\nexport function expose(value: B): B { return value; }",
+        "type Text = string; export function expose(value: readonly Text[]): readonly Text[] { return value; }",
     };
     for (sources) |source| {
         var h = try checkDirect(source);
@@ -3116,9 +2995,9 @@ test "a structural alias carrying real structure still satisfies the boundary" {
     // `structural` itself: a record and a closed literal union both name
     // something `string` does not.
     const sources = [_][]const u8{
-        "structural Cfg = { host: string }; export function expose(value: Cfg): Cfg { return value; }",
-        "structural Method = \"GET\" | \"POST\"; export function expose(value: Method): Method { return value; }",
-        "structural Pair = [string, number]; export function expose(value: Pair): Pair { return value; }",
+        "type Cfg = { host: string }; export function expose(value: Cfg): Cfg { return value; }",
+        "type Method = \"GET\" | \"POST\"; export function expose(value: Method): Method { return value; }",
+        "type Pair = [string, number]; export function expose(value: Pair): Pair { return value; }",
     };
     for (sources) |source| {
         var h = try checkDirect(source);
@@ -3129,8 +3008,8 @@ test "a structural alias carrying real structure still satisfies the boundary" {
 
 test "declared ABI and literal-union boundary types are admitted" {
     const sources = [_][]const u8{
-        "nominal UserId = string; export function expose(value: UserId): UserId { return value; }",
-        "nominal UserId = string; export function expose(value: readonly UserId[]): readonly UserId[] { return value; }",
+        "import type { Nominal } from \"zttp:core\";\ndeclare const userIdBrand: unique symbol;\ntype UserId = Nominal<string, typeof userIdBrand>;\nexport function expose(value: UserId): UserId { return value; }",
+        "import type { Nominal } from \"zttp:core\";\ndeclare const userIdBrand: unique symbol;\ntype UserId = Nominal<string, typeof userIdBrand>;\nexport function expose(value: readonly UserId[]): readonly UserId[] { return value; }",
         "export function expose(value: Request): Response { return Response.json({}); }",
         "export function expose(value: Bytes): Bytes { return value; }",
         "export function expose(value: Dict<string, number>): Dict<string, number> { return value; }",
@@ -3626,49 +3505,22 @@ test "a reduce over a filtered entry list is not the fold row" {
     try expectNoKind(&h.checker, .canonical_dict_entries_reduce);
 }
 
-// ---------------------------------------------------------------------------
-// Match binding idioms, spec 4.2.1 rows (phase 3 task 5)
-// ---------------------------------------------------------------------------
-
-const command_union_source =
-    "structural Command =\n  | { kind: \"echo\"; text: string }\n  | { kind: \"ping\" };\n";
-
-test "a pattern field renamed to its own name is advised to the shorthand" {
-    var h = try checkDirect(command_union_source ++
-        "function run(command: Command): string {\n  return match (command) {\n    when { kind: \"echo\", text: text }: text\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n");
-    defer h.deinit();
-    try expectKind(&h.checker, .canonical_redundant_pattern_rename);
-}
-
-test "the shorthand itself is advised nothing" {
-    var h = try checkDirect(command_union_source ++
-        "function run(command: Command): string {\n  return match (command) {\n    when { kind: \"echo\", text }: text\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n");
-    defer h.deinit();
-    try expectNoKind(&h.checker, .canonical_redundant_pattern_rename);
-    try expectNoKind(&h.checker, .canonical_unbound_field_read);
-}
-
-test "an arm reading the field off the scrutinee is advised to bind it" {
-    var h = try checkDirect(command_union_source ++
-        "function run(command: Command): string {\n  return match (command) {\n    when { kind: \"echo\" }: command.text\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n");
-    defer h.deinit();
-    try expectKind(&h.checker, .canonical_unbound_field_read);
-}
-
-test "a rename under a different name is not the redundant form" {
-    var h = try checkDirect(command_union_source ++
-        "function run(command: Command): string {\n  return match (command) {\n    when { kind: \"echo\", text: message }: message\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n");
-    defer h.deinit();
-    try expectNoKind(&h.checker, .canonical_redundant_pattern_rename);
-}
-
 test "a const initialized from a two-way effectful match passes the profile" {
     // Spec 5.5 names `match` with effectful named calls in its arms the
     // idiomatic effectful selection form, including for initializing a `const`
     // from a two-way effectful choice. The canonical profile refuses an impure
     // ternary (ZTS612) and points here, so a rule refusing this shape would
     // leave the author with nowhere to go.
-    var h = try checkDirect("import { logInfo } from \"zttp:log\";\nfunction handler(req: Request): Response {\n  const chosen = match (req.method) {\n    when \"GET\": logInfo(\"read\")\n    default: logInfo(\"write\")\n  };\n  return Response.json({ ok: true });\n}\n");
+    var h = try checkDirect(
+        "import { match } from \"zttp:core\";\n" ++
+            "import { logInfo } from \"zttp:log\";\n" ++
+            "function handler(req: Request): Response {\n" ++
+            "  const chosen = match(req.method)\n" ++
+            "    .with(\"GET\", () => logInfo(\"read\"))\n" ++
+            "    .otherwise(() => logInfo(\"write\"));\n" ++
+            "  return Response.json({ ok: true });\n" ++
+            "}\n",
+    );
     defer h.deinit();
     try expectNoKind(&h.checker, .canonical_ternary_impure);
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
@@ -3677,19 +3529,63 @@ test "a const initialized from a two-way effectful match passes the profile" {
 test "dropping one arm leaves the JsonValue match non-exhaustive" {
     // The floor under the phase 3 exit gate: a coverage check that answered
     // "exhaustive" for everything would pass the gate without measuring it.
-    var h = try checkDirect("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[];\nfunction depth(value: JsonValue): number {\n  return match (value) {\n    when null: 1\n    when boolean: 1\n    when number: 1\n    when string: 1\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ d: depth([1]) });\n}\n");
+    var h = try checkDirect(
+        "import { match, P } from \"zttp:core\";\n" ++
+            "type JsonValue = null | boolean | number | string | readonly JsonValue[];\n" ++
+            "function depth(value: JsonValue): number {\n" ++
+            "  return match(value)\n" ++
+            "    .with(null, () => 1)\n" ++
+            "    .with(P.boolean, () => 1)\n" ++
+            "    .with(P.number, () => 1)\n" ++
+            "    .with(P.string, () => 1)\n" ++
+            "    .exhaustive();\n" ++
+            "}\n" ++
+            "function handler(req: Request): Response {\n" ++
+            "  return Response.json({ d: depth([1]) });\n" ++
+            "}\n",
+    );
     defer h.deinit();
     try expectKind(&h.checker, .non_exhaustive_profile_match);
 }
 
 test "the five arms cover JsonValue without a default" {
-    var h = try checkDirect("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[];\nfunction depth(value: JsonValue): number {\n  return match (value) {\n    when null: 1\n    when boolean: 1\n    when number: 1\n    when string: 1\n    when array: 2\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ d: depth([1]) });\n}\n");
+    var h = try checkDirect(
+        "import { match, P } from \"zttp:core\";\n" ++
+            "type JsonValue = null | boolean | number | string | readonly JsonValue[];\n" ++
+            "function depth(value: JsonValue): number {\n" ++
+            "  return match(value)\n" ++
+            "    .with(null, () => 1)\n" ++
+            "    .with(P.boolean, () => 1)\n" ++
+            "    .with(P.number, () => 1)\n" ++
+            "    .with(P.string, () => 1)\n" ++
+            "    .with(P.array, () => 2)\n" ++
+            "    .exhaustive();\n" ++
+            "}\n" ++
+            "function handler(req: Request): Response {\n" ++
+            "  return Response.json({ d: depth([1]) });\n" ++
+            "}\n",
+    );
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
 }
 
 test "dropping the Dict arm leaves the six-kind JsonValue non-exhaustive" {
-    var h = try checkDirect("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkDirect(
+        "import { match, P } from \"zttp:core\";\n" ++
+            "type JsonValue = null | boolean | number | string | readonly JsonValue[] | Dict<string, JsonValue>;\n" ++
+            "function kindOf(value: JsonValue): string {\n" ++
+            "  return match(value)\n" ++
+            "    .with(null, () => \"null\")\n" ++
+            "    .with(P.boolean, () => \"boolean\")\n" ++
+            "    .with(P.number, () => \"number\")\n" ++
+            "    .with(P.string, () => \"string\")\n" ++
+            "    .with(P.array, () => \"array\")\n" ++
+            "    .exhaustive();\n" ++
+            "}\n" ++
+            "function handler(req: Request): Response {\n" ++
+            "  return Response.json({ k: kindOf(1) });\n" ++
+            "}\n",
+    );
     defer h.deinit();
     try expectKind(&h.checker, .non_exhaustive_profile_match);
 }
@@ -3697,7 +3593,21 @@ test "dropping the Dict arm leaves the six-kind JsonValue non-exhaustive" {
 test "a union carrying Bytes is exhaustive with its Bytes arm" {
     // Spec 5.5's type tests are six now, and `when Bytes:` is the sixth. A
     // union covered member by member needs no `default`.
-    var h = try checkDirect("structural Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when Bytes: \"bytes\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkDirect(
+        "import { match, P } from \"zttp:core\";\n" ++
+            "type Payload = boolean | number | string | Bytes;\n" ++
+            "function kindOf(value: Payload): string {\n" ++
+            "  return match(value)\n" ++
+            "    .with(P.boolean, () => \"boolean\")\n" ++
+            "    .with(P.number, () => \"number\")\n" ++
+            "    .with(P.string, () => \"string\")\n" ++
+            "    .with(P.Bytes, () => \"bytes\")\n" ++
+            "    .exhaustive();\n" ++
+            "}\n" ++
+            "function handler(req: Request): Response {\n" ++
+            "  return Response.json({ k: kindOf(1) });\n" ++
+            "}\n",
+    );
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
 }
@@ -3705,7 +3615,20 @@ test "a union carrying Bytes is exhaustive with its Bytes arm" {
 test "dropping the Bytes arm leaves that union non-exhaustive" {
     // The half that makes the test above mean something: without it, a checker
     // that ignored the arm entirely would pass the covered case too.
-    var h = try checkDirect("structural Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkDirect(
+        "import { match, P } from \"zttp:core\";\n" ++
+            "type Payload = boolean | number | string | Bytes;\n" ++
+            "function kindOf(value: Payload): string {\n" ++
+            "  return match(value)\n" ++
+            "    .with(P.boolean, () => \"boolean\")\n" ++
+            "    .with(P.number, () => \"number\")\n" ++
+            "    .with(P.string, () => \"string\")\n" ++
+            "    .exhaustive();\n" ++
+            "}\n" ++
+            "function handler(req: Request): Response {\n" ++
+            "  return Response.json({ k: kindOf(1) });\n" ++
+            "}\n",
+    );
     defer h.deinit();
     try expectKind(&h.checker, .non_exhaustive_profile_match);
 }
@@ -3713,7 +3636,22 @@ test "dropping the Bytes arm leaves that union non-exhaustive" {
 test "the strict match error names the first missing case" {
     // The message stays fixed because `edit_simulate` keys a violation on code
     // plus message; the witness rides in the help.
-    var h = try checkDirect("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkDirect(
+        "import { match, P } from \"zttp:core\";\n" ++
+            "type JsonValue = null | boolean | number | string | readonly JsonValue[] | Dict<string, JsonValue>;\n" ++
+            "function kindOf(value: JsonValue): string {\n" ++
+            "  return match(value)\n" ++
+            "    .with(null, () => \"null\")\n" ++
+            "    .with(P.boolean, () => \"boolean\")\n" ++
+            "    .with(P.number, () => \"number\")\n" ++
+            "    .with(P.string, () => \"string\")\n" ++
+            "    .with(P.array, () => \"array\")\n" ++
+            "    .exhaustive();\n" ++
+            "}\n" ++
+            "function handler(req: Request): Response {\n" ++
+            "  return Response.json({ k: kindOf(1) });\n" ++
+            "}\n",
+    );
     defer h.deinit();
     var found = false;
     for (h.checker.getDiagnostics()) |diag| {
@@ -3721,7 +3659,7 @@ test "the strict match error names the first missing case" {
         found = true;
         try testing.expectEqualStrings("match expression must be exhaustive in strict ZigTS", diag.message);
         try testing.expectEqualStrings(
-            "missing case: when Dict. Add an arm for it, or add a 'default:' arm.",
+            "missing pattern: P.Dict. Add a .with(pattern, callback) arm, or end the match with .otherwise(callback).",
             diag.help.?,
         );
     }
@@ -3729,12 +3667,35 @@ test "the strict match error names the first missing case" {
 }
 
 test "the six arms cover it" {
-    var h = try checkDirect("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n    when Dict: \"dict\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkDirect(
+        "import { match, P } from \"zttp:core\";\n" ++
+            "type JsonValue = null | boolean | number | string | readonly JsonValue[] | Dict<string, JsonValue>;\n" ++
+            "function kindOf(value: JsonValue): string {\n" ++
+            "  return match(value)\n" ++
+            "    .with(null, () => \"null\")\n" ++
+            "    .with(P.boolean, () => \"boolean\")\n" ++
+            "    .with(P.number, () => \"number\")\n" ++
+            "    .with(P.string, () => \"string\")\n" ++
+            "    .with(P.array, () => \"array\")\n" ++
+            "    .with(P.Dict, () => \"dict\")\n" ++
+            "    .exhaustive();\n" ++
+            "}\n" ++
+            "function handler(req: Request): Response {\n" ++
+            "  return Response.json({ k: kindOf(1) });\n" ++
+            "}\n",
+    );
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
 }
 
-const narrowed_match_head = "structural C = { kind: \"a\"; n: number } | { kind: \"b\" };\nfunction f(c: C): string {\n  if (c.kind === \"a\") {\n    return \"o\";\n  }\n  return match (c) {\n";
+const narrowed_match_head =
+    "import { match } from \"zttp:core\";\n" ++
+    "type C = { kind: \"a\"; n: number } | { kind: \"b\" };\n" ++
+    "function f(c: C): string {\n" ++
+    "  if (c.kind === \"a\") {\n" ++
+    "    return \"o\";\n" ++
+    "  }\n" ++
+    "  return match(c)\n";
 
 const handler_tail = "function handler(req: Request): Response {\n  return Response.json({ k: f({ kind: \"b\" }) });\n}\n";
 
@@ -3746,13 +3707,18 @@ fn expectNoMatchDiagnostic(h: *DirectHarness) !void {
 }
 
 test "a match that covers the type narrowed by an early return passes both checks" {
-    var h = try checkDirect(narrowed_match_head ++ "    when { kind: \"b\" }: \"b\"\n  };\n}\n" ++ handler_tail);
+    var h = try checkDirect(narrowed_match_head ++
+        "    .with({ kind: \"b\" }, () => \"b\")\n" ++
+        "    .exhaustive();\n}\n" ++ handler_tail);
     defer h.deinit();
     try expectNoMatchDiagnostic(h);
 }
 
 test "an arm for the case an early return removed is unreachable and nothing else" {
-    var h = try checkDirect(narrowed_match_head ++ "    when { kind: \"a\" }: \"a\"\n    when { kind: \"b\" }: \"b\"\n  };\n}\n" ++ handler_tail);
+    var h = try checkDirect(narrowed_match_head ++
+        "    .with({ kind: \"a\" }, () => \"a\")\n" ++
+        "    .with({ kind: \"b\" }, () => \"b\")\n" ++
+        "    .exhaustive();\n}\n" ++ handler_tail);
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
     var redundant: usize = 0;
@@ -3763,14 +3729,22 @@ test "an arm for the case an early return removed is unreachable and nothing els
 }
 
 test "without the early return the strict match error names the case the arms omit" {
-    var h = try checkDirect("structural C = { kind: \"a\"; n: number } | { kind: \"b\" };\nfunction f(c: C): string {\n  return match (c) {\n    when { kind: \"b\" }: \"b\"\n  };\n}\n" ++ handler_tail);
+    var h = try checkDirect(
+        "import { match } from \"zttp:core\";\n" ++
+            "type C = { kind: \"a\"; n: number } | { kind: \"b\" };\n" ++
+            "function f(c: C): string {\n" ++
+            "  return match(c)\n" ++
+            "    .with({ kind: \"b\" }, () => \"b\")\n" ++
+            "    .exhaustive();\n" ++
+            "}\n" ++ handler_tail,
+    );
     defer h.deinit();
     var found = false;
     for (h.checker.getDiagnostics()) |diag| {
         if (diag.kind != .non_exhaustive_profile_match) continue;
         found = true;
         try testing.expectEqualStrings(
-            "missing case: when { kind: \"a\" }. Add an arm for it, or add a 'default:' arm.",
+            "missing pattern: { kind: \"a\" }. Add a .with(pattern, callback) arm, or end the match with .otherwise(callback).",
             diag.help.?,
         );
     }
@@ -3816,11 +3790,11 @@ test "a call under an array spread makes the ternary arm impure" {
 }
 
 test "a ternary inside an assert is checked for purity" {
-    var checker = try checkSource(
-        "function pick(n) { return [n]; } function handler(req) { assert (req.method === \"GET\" ? pick(1) : []).length > 0; return Response.text(\"yes\"); }",
+    var harness = try checkDirect(
+        "import { assert } from \"zttp:core\"; function pick(n: number): number[] { return [n]; } function handler(req: Request): Response { assert((req.method === \"GET\" ? pick(1) : []).length > 0); return Response.text(\"yes\"); }",
     );
-    defer checker.deinit();
-    try expectKind(&checker, .canonical_ternary_impure);
+    defer harness.deinit();
+    try expectKind(&harness.checker, .canonical_ternary_impure);
 }
 
 test "a let that nothing reassigns is still flagged next to a closure" {
@@ -3884,8 +3858,8 @@ test "canonical_redundant_bool_compare fires inside an arrow callback" {
 }
 
 test "canonical_redundant_bool_compare fires inside an assert condition" {
-    var h = try checkSourceTyped(
-        "function handler(req) { const ready = req.method === \"GET\"; assert ready === true; return Response.text(\"yes\"); }",
+    var h = try checkDirect(
+        "import { assert } from \"zttp:core\"; function handler(req: Request): Response { const ready = req.method === \"GET\"; assert(ready === true); return Response.text(\"yes\"); }",
     );
     defer h.deinit();
     try expectKind(&h.checker, .canonical_redundant_bool_compare);

@@ -1099,8 +1099,8 @@ test "value combinations cannot borrow validation from another contributor" {
         "a ?? b",
         "b || a",
         "b ? a : b",
-        "match (b) { when \"\": b, default: a }",
-        "match (a) { when \"\": a, default: b }",
+        "match(b).with(\"\", () => b).otherwise(() => a)",
+        "match(a).with(\"\", () => a).otherwise(() => b)",
         "choose(a, b)",
         "dictGet(dictSet(dictSet(dictEmpty(), \"raw\", a), \"safe\", b), \"raw\")",
     };
@@ -1108,6 +1108,7 @@ test "value combinations cannot borrow validation from another contributor" {
         const source = try std.testing.allocator.print(
             \\import {{ escapeHtml }} from "zttp:text";
             \\import {{ dictEmpty, dictSet, dictGet }} from "zttp:collections";
+            \\import {{ match }} from "zttp:core";
             \\function choose(raw, safe) {{
             \\  if (raw === "") {{ return safe; }}
             \\  return raw;
@@ -1186,11 +1187,12 @@ test "escaped assembly with static markup still proves injection_safe" {
         "[a].map((v) => escapeHtml(v)).join(\"\")",
         "escapeHtml([a, b].join(\"\"))",
         "req.method === \"GET\" ? b : escapeHtml(a)",
-        "match (a) { when \"\": b, default: escapeHtml(a) }",
+        "match(a).with(\"\", () => b).otherwise(() => escapeHtml(a))",
     };
     for (expressions) |expression| {
         const source = try std.testing.allocator.print(
             \\import {{ escapeHtml }} from "zttp:text";
+            \\import {{ match }} from "zttp:core";
             \\function handler(req) {{
             \\  const a = req.url;
             \\  const b = escapeHtml(a);
@@ -1207,13 +1209,14 @@ test "escaped assembly with static markup still proves injection_safe" {
 
 test "literal match arms preserve escaped content validation" {
     const expressions = [_][]const u8{
-        "match (req.url) { when \"\": \"\", default: escapeHtml(req.url) }",
-        "match (req.url) { when \"\": escapeHtml(req.url), default: \"\" }",
-        "match (req.url) { when \"\": \"\", when \"/\": escapeHtml(req.url), default: \"static\" }",
+        "match(req.url).with(\"\", () => \"\").otherwise(() => escapeHtml(req.url))",
+        "match(req.url).with(\"\", () => escapeHtml(req.url)).otherwise(() => \"\")",
+        "match(req.url).with(\"\", () => \"\").with(\"/\", () => escapeHtml(req.url)).otherwise(() => \"static\")",
     };
     for (expressions) |expression| {
         const source = try std.testing.allocator.print(
             \\import {{ escapeHtml }} from "zttp:text";
+            \\import {{ match }} from "zttp:core";
             \\function handler(req) {{ return Response.html({s}); }}
         , .{expression});
         defer std.testing.allocator.free(source);
@@ -2021,8 +2024,8 @@ test "typed imported builtin receivers keep their pre-fallback labels" {
         \\function handler(req) { return Response.json({ v: normalizeLabel(" Ready ") }); }
     ;
     const string_helper =
-        \\export structural LabelText = string;
-        \\export structural NormalizedLabel = string;
+        \\export type LabelText = string;
+        \\export type NormalizedLabel = string;
         \\export function normalizeLabel(text: LabelText): NormalizedLabel {
         \\  return text.trim().toLowerCase();
         \\}
@@ -2039,7 +2042,7 @@ test "typed imported builtin receivers keep their pre-fallback labels" {
         \\function handler(req) { return Response.json({ v: normalizeLabels(["a", "b"]) }); }
     ;
     const array_helper =
-        \\export structural Labels = readonly string[];
+        \\export type Labels = readonly string[];
         \\export function normalizeLabels(values: Labels): string {
         \\  return values.slice(0, 2).join("");
         \\}
@@ -2054,7 +2057,7 @@ test "typed imported builtin receivers keep their pre-fallback labels" {
 
 test "typed object methods resolve their actual bodies across imports" {
     const imported =
-        \\export structural Trimmer = { trim: () => string };
+        \\export type Trimmer = { trim: () => string };
         \\export function invoke(value: Trimmer): string { return value.trim(); }
     ;
     const source =
@@ -2098,6 +2101,25 @@ fn runNoSecretLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
     return checker.getProperties().no_secret_leakage;
 }
 
+fn lowerIntrinsics(
+    allocator: std.mem.Allocator,
+    parser: *engine.parser.JsParser,
+    atoms: *atom_table.AtomTable,
+    module_path: []const u8,
+) !void {
+    var pool = type_pool_mod.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = type_env_mod.TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants),
+        .atoms = atoms,
+        .module_path = module_path,
+    } });
+    try intrinsic_lowering.validateSource(allocator, parser, atoms, &env);
+}
+
 /// Run the production intrinsic validation before the public flow analysis.
 fn runLoweredNoSecretLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
     var parser = try engine.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
@@ -2106,18 +2128,7 @@ fn runLoweredNoSecretLeakage(allocator: std.mem.Allocator, source: []const u8) !
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-
-    var pool = type_pool_mod.TypePool.init(allocator);
-    defer pool.deinit(allocator);
-    var env = type_env_mod.TypeEnv.init(allocator, &pool);
-    defer env.deinit();
-    try env.populateSourceTypes(.{ .direct = .{
-        .store = &parser.type_store,
-        .ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants),
-        .atoms = &atoms,
-        .module_path = "/app/fluent-match.ts",
-    } });
-    try intrinsic_lowering.validateSource(allocator, &parser, &atoms, &env);
+    try lowerIntrinsics(allocator, &parser, &atoms, "/app/fluent-match.ts");
 
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler = handler_function_mod.findHandlerFunction(view, root) orelse return error.HandlerNotFound;
@@ -2178,6 +2189,7 @@ fn runNoCredentialLeakage(allocator: std.mem.Allocator, source: []const u8) !boo
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
+    try lowerIntrinsics(allocator, &parser, &atoms, "/app/flow-properties.ts");
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
     const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
@@ -2201,6 +2213,7 @@ fn runInputValidated(allocator: std.mem.Allocator, source: []const u8) !bool {
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
+    try lowerIntrinsics(allocator, &parser, &atoms, "/app/flow-diagnostics.ts");
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
     const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
@@ -2231,6 +2244,7 @@ fn runFlowPropertiesPublic(
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
+    try lowerIntrinsics(allocator, &parser, &atoms, "/app/flow-properties.ts");
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
     const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
@@ -2444,6 +2458,7 @@ fn runFlowDiagnostics(
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
+    try lowerIntrinsics(allocator, &parser, &atoms, "/app/flow-diagnostics.ts");
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
     const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
@@ -4304,7 +4319,8 @@ test "FlowChecker preserves known request string and rawJson calls" {
     }
 
     const inspected_array =
-        \\function kindOf(value) { return match (value) { when array: "array" default: "other" }; }
+        \\import { match, P } from "zttp:core";
+        \\function kindOf(value) { return match(value).with(P.array, () => "array").otherwise(() => "other"); }
         \\function handler(req) {
         \\  const document = [1, "two", true, null, [3]];
         \\  const kinds = document.map(kindOf);

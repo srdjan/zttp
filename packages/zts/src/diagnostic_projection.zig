@@ -283,6 +283,7 @@ const all_codes: [code_count]CodeEntry = blk: {
 };
 
 test "checker diagnostic codes are globally unique" {
+    // 65 after removing the two legacy match advisories.
     // 67 with the typed intrinsic-reference refusal (ZTS001).
     // 66 with the non-iterable loop kind (ZTS218, Decision 25). It was 65 with
     // the strict top-level initializer rule (ZTS630) in place.
@@ -303,7 +304,7 @@ test "checker diagnostic codes are globally unique" {
     // The count is here so a projection that silently stops enumerating a
     // checker cannot pass the uniqueness loop below over a shorter list; it
     // moves whenever a checker's kind set does.
-    try std.testing.expectEqual(@as(usize, 67), allCodes().len);
+    try std.testing.expectEqual(@as(usize, 65), allCodes().len);
 
     var seen: std.StringHashMapUnmanaged(CodeEntry) = .empty;
     defer seen.deinit(std.testing.allocator);

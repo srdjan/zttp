@@ -35,6 +35,9 @@ const report_types = @import("flow_report.zig");
 const flow_evidence = @import("flow_evidence.zig");
 const counterexample = @import("counterexample.zig");
 const ok_record_mod = @import("ok_record.zig");
+const intrinsic_lowering = @import("intrinsic_lowering.zig");
+const type_env_mod = @import("type_env.zig");
+const type_pool_mod = @import("type_pool.zig");
 const isMutatingArrayMethod = @import("mutating_methods.zig").isMutatingArrayMethod;
 
 const NodeIndex = ir.NodeIndex;
@@ -3624,9 +3627,9 @@ pub const FlowInterp = struct {
                 self.current_call_node = self.functionHandle(pending.node);
                 defer self.current_call_node = previous_call;
                 const summary = try self.invoke(arm.body, &.{pending.discriminant}, pending.arm_state);
-                pending.result = try joinOpt(self.mem(), pending.result, summary.value);
-                pending.arm_state.* = summary.state;
-                pending.joined = try joinStates(self.mem(), pending.joined, summary.state);
+                const value = try self.takeSummary(pending.node, pending.arm_state, summary, .{});
+                if (pending.arm_state.reachable) pending.result = try joinOpt(self.mem(), pending.result, value);
+                pending.joined = try joinStates(self.mem(), pending.joined, pending.arm_state.*);
                 pending.index += 1;
                 continue;
             }
@@ -3886,7 +3889,9 @@ pub const FlowInterp = struct {
     /// Whether `pattern` tests a field or element of `disc` that varies, at any nesting depth.
     fn patternVaries(self: *FlowInterp, pattern: NodeIndex, disc: Value, st: *const State) Error!bool {
         if (pattern == null_node) return false;
-        switch (self.ir_view.getTag(pattern) orelse return false) {
+        const tag = self.ir_view.getTag(pattern) orelse return false;
+        self.noteVisited(tag);
+        switch (tag) {
             .match_pattern => {
                 const pat = self.ir_view.getMatchPattern(pattern) orelse return false;
                 var i: u16 = 0;
@@ -4311,6 +4316,17 @@ const Harness = struct {
         errdefer h.parser.deinit();
         h.parser.setAtomTable(&h.atoms);
         _ = try h.parser.parse();
+        var pool = type_pool_mod.TypePool.init(allocator);
+        defer pool.deinit(allocator);
+        var env = type_env_mod.TypeEnv.init(allocator, &pool);
+        defer env.deinit();
+        try env.populateSourceTypes(.{ .direct = .{
+            .module_path = "/app/flow-interp-test.ts",
+            .store = &h.parser.type_store,
+            .ir_view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants),
+            .atoms = &h.atoms,
+        } });
+        try intrinsic_lowering.validateSource(allocator, &h.parser, &h.atoms, &env);
         h.captures = if (place_captures) try CaptureTable.init(allocator, &h.parser.scopes) else null;
         errdefer if (h.captures) |*table| table.deinit();
         const view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants);
@@ -4611,7 +4627,7 @@ test "an unnamed origin and a named origin see each other's writes" {
 }
 
 test "a bare assert halts with clean" {
-    const bare = try analyzeSource("function f(c, s) { assert c; return \"ok\"; }", "f", &.{ Value.clean, secret_value });
+    const bare = try analyzeSource("import { assert } from \"zttp:core\"; function f(c, s) { assert(c); return \"ok\"; }", "f", &.{ Value.clean, secret_value });
     defer bare.deinit();
     try testing.expect(!bare.result.cleared);
     try testing.expectEqual(@as(usize, 2), bare.result.completions.len);
@@ -4743,7 +4759,7 @@ test "a call clears the result with its owner, and a nested pattern does not" {
     try testing.expect(call.result.returned.?.labels.unknown);
 
     // A nested pattern binds below the first level, so it resolves.
-    const nested = "function f(s) { const o = { a: { b: s } }; return match (o) { when { a: { b: v } }: v default: 0 }; }";
+    const nested = "import { match } from \"zttp:core\"; function f(s) { const o = { a: { b: s } }; return match(o).with({ a: {} }, (selected) => { const v = selected.a.b; return v; }).otherwise(() => 0); }";
     try expectSecret(nested, &.{secret_value}, true);
     try expectSecret(nested, &.{Value.clean}, false);
 
@@ -4754,50 +4770,50 @@ test "a call clears the result with its owner, and a nested pattern does not" {
 }
 
 test "match arms join and a record pattern binding reads its own field" {
-    const bound = "function f(s) { const o = { kind: \"a\", text: s }; return match (o) { when { kind: \"a\", text }: text default: \"k\" }; }";
+    const bound = "import { match } from \"zttp:core\"; function f(s) { const o = { kind: \"a\", text: s }; return match(o).with({ kind: \"a\" }, (selected) => { const text = selected.text; return text; }).otherwise(() => \"k\"); }";
     try expectSecret(bound, &.{secret_value}, true);
     try expectSecret(bound, &.{Value.clean}, false);
 
     // The binding reads `text`, not the neighbouring field.
-    const other_field = "function f(s) { const o = { kind: \"a\", text: \"c\", other: s }; return match (o) { when { kind: \"a\", text }: text default: \"k\" }; }";
+    const other_field = "import { match } from \"zttp:core\"; function f(s) { const o = { kind: \"a\", text: \"c\", other: s }; return match(o).with({ kind: \"a\" }, (selected) => { const text = selected.text; return text; }).otherwise(() => \"k\"); }";
     try expectSecret(other_field, &.{secret_value}, false);
 
     // The default arm contributes to the join.
-    const default_arm = "function f(s, x) { return match (x) { when \"a\": \"c\" default: s }; }";
+    const default_arm = "import { match } from \"zttp:core\"; function f(s, x) { return match(x).with(\"a\", () => \"c\").otherwise(() => s); }";
     try expectSecret(default_arm, &.{ secret_value, Value.clean }, true);
-    const first_arm = "function f(s, x) { return match (x) { when \"a\": s default: \"c\" }; }";
+    const first_arm = "import { match } from \"zttp:core\"; function f(s, x) { return match(x).with(\"a\", () => s).otherwise(() => \"c\"); }";
     try expectSecret(first_arm, &.{ secret_value, Value.clean }, true);
     try expectSecret(first_arm, &.{ Value.clean, Value.clean }, false);
 
     // Without a default the runtime answers `undefined` on no match, so the
     // join includes a clean path and keeps the labels of the arms.
-    const no_default = "function f(s, x) { return match (x) { when \"a\": s when \"b\": \"c\" }; }";
+    const no_default = "import { match } from \"zttp:core\"; function f(s, x) { return match(x).with(\"a\", () => s).with(\"b\", () => \"c\").exhaustive(); }";
     try expectSecret(no_default, &.{ secret_value, Value.clean }, true);
 }
 
 // --- nested match patterns (P6a) ---
 
 test "a nested record pattern binds its field and not a neighbour" {
-    const source = "function f(s) { const x = { a: { b: s } }; return match (x) { when { a: { b: v } }: v default: \"c\" }; }";
+    const source = "import { match } from \"zttp:core\"; function f(s) { const x = { a: { b: s } }; return match(x).with({ a: {} }, (selected) => { const v = selected.a.b; return v; }).otherwise(() => \"c\"); }";
     try expectSecret(source, &.{secret_value}, true);
     try expectSecret(source, &.{Value.clean}, false);
 
-    const neighbour = "function f(s) { const x = { a: { b: \"c\", z: s } }; return match (x) { when { a: { b: v } }: v default: \"c\" }; }";
+    const neighbour = "import { match } from \"zttp:core\"; function f(s) { const x = { a: { b: \"c\", z: s } }; return match(x).with({ a: {} }, (selected) => { const v = selected.a.b; return v; }).otherwise(() => \"c\"); }";
     try expectSecret(neighbour, &.{secret_value}, false);
 }
 
 test "an array pattern binds through an element record pattern" {
-    const source = "function f(s) { const x = [{ k: s }]; return match (x) { when [{ k: v }]: v default: \"c\" }; }";
+    const source = "import { match } from \"zttp:core\"; function f(s) { const x = [{ k: s }]; return match(x).with([{}], (selected) => { const v = selected[0].k; return v; }).otherwise(() => \"c\"); }";
     try expectSecret(source, &.{secret_value}, true);
     try expectSecret(source, &.{Value.clean}, false);
 }
 
 test "a pattern nested in a record field or an array element binds" {
-    const in_field = "function f(s) { const x = { a: [{ b: s }] }; return match (x) { when { a: [{ b: v }] }: v default: \"c\" }; }";
+    const in_field = "import { match } from \"zttp:core\"; function f(s) { const x = { a: [{ b: s }] }; return match(x).with({ a: [{}] }, (selected) => { const v = selected.a[0].b; return v; }).otherwise(() => \"c\"); }";
     try expectSecret(in_field, &.{secret_value}, true);
     try expectSecret(in_field, &.{Value.clean}, false);
 
-    const in_element = "function f(s) { const x = [[{ b: s }]]; return match (x) { when [[{ b: v }]]: v default: \"c\" }; }";
+    const in_element = "import { match } from \"zttp:core\"; function f(s) { const x = [[{ b: s }]]; return match(x).with([[{}]], (selected) => { const v = selected[0][0].b; return v; }).otherwise(() => \"c\"); }";
     try expectSecret(in_element, &.{secret_value}, true);
     try expectSecret(in_element, &.{Value.clean}, false);
 }
@@ -4805,8 +4821,8 @@ test "a pattern nested in a record field or an array element binds" {
 test "a hole and a literal element bind nothing and the arm still evaluates" {
     const holes = [_][]const u8{
         // The arm body reads a parameter, so the arm runs.
-        "function f(s, x) { return match (x) { when [, \"a\"]: s default: \"c\" }; }",
-        "function f(s, x) { return match (x) { when [\"a\", , { k: v }]: s default: \"c\" }; }",
+        "import { match, P } from \"zttp:core\"; function f(s, x) { return match(x).with([P.any, \"a\"], () => s).otherwise(() => \"c\"); }",
+        "import { match, P } from \"zttp:core\"; function f(s, x) { return match(x).with([\"a\", P.any, {}], () => s).otherwise(() => \"c\"); }",
     };
     for (holes) |source| {
         const r = try analyzeSource(source, "f", &.{ secret_value, Value.clean });
@@ -4818,7 +4834,7 @@ test "a hole and a literal element bind nothing and the arm still evaluates" {
 
     // A secret in the discriminant reaches no binding, because the hole and
     // the literal bind none.
-    const unbound = "function f(s) { const x = [s, \"a\"]; return match (x) { when [, \"a\"]: \"d\" default: \"c\" }; }";
+    const unbound = "import { match, P } from \"zttp:core\"; function f(s) { const x = [s, \"a\"]; return match(x).with([P.any, \"a\"], () => \"d\").otherwise(() => \"c\"); }";
     const r = try analyzeSource(unbound, "f", &.{secret_value});
     defer r.deinit();
     try testing.expect(!r.result.cleared);
@@ -5257,8 +5273,8 @@ test "a callee that falls off its end returns to the caller" {
 }
 
 test "a bare helper assert returns clean undefined to the caller" {
-    try expectSecret("function g(d, t) { assert d; return t; } function f(c, s) { return g(c, s); }", &c_secret, true);
-    try expectSecret("function g(d) { assert d; return \"c\"; } function f(c, s) { return g(c); }", &c_secret, false);
+    try expectSecret("import { assert } from \"zttp:core\"; function g(d, t) { assert(d); return t; } function f(c, s) { return g(c, s); }", &c_secret, true);
+    try expectSecret("import { assert } from \"zttp:core\"; function g(d) { assert(d); return \"c\"; } function f(c, s) { return g(c); }", &c_secret, false);
 }
 
 test "a callable set runs every function in both node orders" {
@@ -5312,12 +5328,12 @@ test "two activations of a captured parameter share one weak cell" {
 
 test "a captured match binding lives in its cell" {
     try expectSecret(
-        thunk_fn ++ "function f(s) { const o = { text: s }; return match (o) { when { text }: thunk(() => text) default: \"c\" }; }",
+        "import { match } from \"zttp:core\"; " ++ thunk_fn ++ "function f(s) { const o = { text: s }; return match(o).with({}, (selected) => { const text = selected.text; return thunk(() => text); }).otherwise(() => \"c\"); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        thunk_fn ++ "function f(s) { const o = { text: \"d\" }; return match (o) { when { text }: thunk(() => text) default: \"c\" }; }",
+        "import { match } from \"zttp:core\"; " ++ thunk_fn ++ "function f(s) { const o = { text: \"d\" }; return match(o).with({}, (selected) => { const text = selected.text; return thunk(() => text); }).otherwise(() => \"c\"); }",
         &.{secret_value},
         false,
     );
@@ -7719,9 +7735,9 @@ const resolved_corpus = [_][]const u8{
     "function f(p, q) { const a = [p, ...q]; const o = { k: p, ...q }; return o.k; }",
     "function inner() { return 1; } function f(p, q) { [p].map((z) => q); return inner; }",
     "function f(p, q) { if (p) { return 1; } else { return 2; } }",
-    "function f(p, q) { assert p; assert q; return 1; }",
-    "function f(p, q) { return match (p) { when { kind: \"a\", text }: text when \"x\": q when string: q default: 0 }; }",
-    "function f(p, q) { return match (p) { when [{ k: v }, , \"a\"]: v when { a: [{ b: w }] }: w when { c: { d: z } }: z default: 0 }; }",
+    "import { assert } from \"zttp:core\"; function f(p, q) { assert(p); assert(q); return 1; }",
+    "import { match, P } from \"zttp:core\"; function f(p, q) { return match(p).with({ kind: \"a\" }, (selected) => { const text = selected.text; return text; }).with(\"x\", () => q).with(P.string, () => q).otherwise(() => 0); }",
+    "import { match, P } from \"zttp:core\"; function f(p, q) { return match(p).with([{}, P.any, \"a\"], (selected) => { const v = selected[0].k; return v; }).with({ a: [{}] }, (selected) => { const w = selected.a[0].b; return w; }).with({ c: {} }, (selected) => { const z = selected.c.d; return z; }).otherwise(() => 0); }",
     "function f(p, q) { p; return; }",
     "function f(p, q) { let r = p; for (const v of q) { if (v) { r = v; break; } if (r) { continue; } r = q; } return r; }",
     // Calls: a module-level callee, a captured binding read through a
@@ -7899,8 +7915,8 @@ test "request identity follows joins cells returns and callbacks" {
     try expectHandlerInput("function handler(req) { return [req].map((r) => r.headers.accept).join(\",\"); }", false);
     try expectHandlerInput("function handler(req) { const box = { h: req.headers }; return box.h.authorization; }", true);
     try expectHandlerInput("function handler(req) { const r = { ...req }; return r.headers.authorization; }", true);
-    try expectHandlerInput("function handler(req) { return match (req) { when { headers: h }: h.authorization default: \"public\" }; }", true);
-    try expectHandlerInput("function handler(req) { return match (req) { when { headers: h }: h.accept default: \"public\" }; }", false);
+    try expectHandlerInput("import { match } from \"zttp:core\"; function handler(req) { return match(req).with({}, (selected) => { const h = selected.headers; return h.authorization; }).otherwise(() => \"public\"); }", true);
+    try expectHandlerInput("import { match } from \"zttp:core\"; function handler(req) { return match(req).with({}, (selected) => { const h = selected.headers; return h.accept; }).otherwise(() => \"public\"); }", false);
 }
 
 test "synthetic request sites use ordinary weak alias writes" {
@@ -8082,7 +8098,7 @@ const DeepExpressionShape = enum { unary, member, array, short_circuit, mixed, c
 fn deepHandlerSource(allocator: std.mem.Allocator, shape: DeepExpressionShape, first: []const u8, depth: usize) ![]u8 {
     var source: std.Io.Writer.Allocating = .init(allocator);
     errdefer source.deinit();
-    try source.writer.writeAll("import { env } from \"zttp:env\"; function id(x) { return x; } function handler(req) { const m = \"a\"; return Response.json(");
+    try source.writer.writeAll("import { match } from \"zttp:core\"; import { env } from \"zttp:env\"; function id(x) { return x; } function handler(req) { const m = \"a\"; return Response.json(");
     switch (shape) {
         .unary => for (0..depth) |_| try source.writer.writeAll("!"),
         .array => for (0..depth) |_| try source.writer.writeAll("["),
@@ -8090,7 +8106,7 @@ fn deepHandlerSource(allocator: std.mem.Allocator, shape: DeepExpressionShape, f
         .call => for (0..depth) |_| try source.writer.writeAll("id("),
         .ternary => for (0..depth) |_| try source.writer.writeAll("true ? "),
         .object => for (0..depth) |_| try source.writer.writeAll("{v:"),
-        .match => for (0..depth) |_| try source.writer.writeAll("match (m) { default: "),
+        .match => for (0..depth) |_| try source.writer.writeAll("match(m).otherwise(() => "),
         .member, .short_circuit => {},
     }
     try source.writer.writeAll(first);
@@ -8103,7 +8119,7 @@ fn deepHandlerSource(allocator: std.mem.Allocator, shape: DeepExpressionShape, f
         .call => for (0..depth) |_| try source.writer.writeAll(")"),
         .ternary => for (0..depth) |_| try source.writer.writeAll(" : \"public\""),
         .object => for (0..depth) |_| try source.writer.writeAll("}"),
-        .match => for (0..depth) |_| try source.writer.writeAll(" }"),
+        .match => for (0..depth) |_| try source.writer.writeAll(")"),
     }
     try source.writer.writeAll("); }");
     return source.toOwnedSlice();
@@ -8126,7 +8142,8 @@ test "deep eager binary expressions keep clean and secret flow verdicts" {
 test "deep expression shapes keep clean and secret flow verdicts" {
     for (std.enums.values(DeepExpressionShape)) |shape| {
         const clean_first = if (shape == .member) "req.body" else "\"public\"";
-        const depth: usize = 300;
+        // Each fluent match adds a callback activation.
+        const depth: usize = if (shape == .match) 48 else 300;
         const clean_source = try deepHandlerSource(testing.allocator, shape, clean_first, depth);
         defer testing.allocator.free(clean_source);
         const clean = try probeReport(clean_source);

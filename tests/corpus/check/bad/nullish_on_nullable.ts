@@ -1,5 +1,5 @@
 // Proves: `??` on an operand whose type admits null is refused (ZTS624).
-structural MaybeName = string | null;
+type MaybeName = string | null;
 
 function nameOf(): MaybeName {
     return null;

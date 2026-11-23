@@ -476,7 +476,7 @@ const basicHandler =
     \\// Run `zttp dev` to check every spec again on each save.
     \\
     \\
-    \\structural Guardrails<T> = Proof<T,
+    \\type Guardrails<T> = Proof<T,
     \\    | "deterministic"
     \\    | "no_secret_leakage"
     \\    | "injection_safe"
@@ -498,7 +498,7 @@ const apiHandler =
     \\// to these properties; without it every supported spec is active, and the
     \\// /echo route below (which reflects the request body) cannot discharge
     \\// pii_contained. Run `zttp check` to see them proven at compile time.
-    \\structural Guardrails<T> = Proof<T,
+    \\type Guardrails<T> = Proof<T,
     \\    | "deterministic"
     \\    | "no_secret_leakage"
     \\    | "injection_safe"

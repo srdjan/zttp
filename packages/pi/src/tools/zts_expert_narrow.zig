@@ -237,7 +237,7 @@ test "narrow reads a secret leak that passes through a relative import" {
         },
         .{
             "utils.ts",
-            \\export structural Wrapped = string;
+            \\export type Wrapped = string;
             \\
             \\export function wrap(value: string): Wrapped {
             \\  return [value, "!"].join("");

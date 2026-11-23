@@ -2064,17 +2064,33 @@ test "proof identity ignores source position and follows structure" {
 
 test "a match is an expression, so it never carries totality" {
     const allocator = testing.allocator;
-    var lowered = try parseAndLower(allocator,
-        \\function handler(req) {
-        \\  return match (req.method) {
-        \\    when "GET": Response.text("get"),
-        \\    default: Response.text("other")
-        \\  };
+    const source =
+        \\import { match } from "zttp:core";
+        \\function handler(req: Request): Response {
+        \\  return match(req.method).with("GET", () => Response.text("get")).otherwise(() => Response.text("other"));
         \\}
-    );
-    defer lowered.deinit();
+    ;
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    var pool = @import("type_pool.zig").TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = @import("type_env.zig").TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants),
+        .atoms = &atoms,
+        .module_path = "fluent-match-proof.ts",
+    } });
+    try @import("intrinsic_lowering.zig").validateSource(allocator, &parser, &atoms, &env);
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var proof = try lower(allocator, view, root, handler_function_mod.findHandlerFunction(view, root), null);
+    defer proof.deinit();
 
-    const proof = lowered.proof;
     const function_id = proof.handler_function orelse return error.TestUnexpectedResult;
     const total = try deriveTotality(allocator, proof, &.{});
     defer allocator.free(total);

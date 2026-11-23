@@ -1,6 +1,6 @@
 // Proves: an if/else whose branches both return passes every stage.
 
-structural Guardrails<T> = Proof<T, "result_safe">;
+type Guardrails<T> = Proof<T, "result_safe">;
 
 function handler(req: Request): Guardrails<Response> {
     const url = req.url;

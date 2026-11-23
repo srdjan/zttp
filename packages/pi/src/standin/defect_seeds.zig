@@ -195,7 +195,7 @@ const clean_exported_handler =
 ;
 
 const clean_nullable =
-    \\structural MaybeName = string | null;
+    \\type MaybeName = string | null;
     \\
     \\function nameOf(): MaybeName {
     \\  return null;
@@ -205,20 +205,6 @@ const clean_nullable =
     \\  const n = nameOf();
     \\  if (n === null) { return Response.json({ name: "anon" }); }
     \\  return Response.json({ name: n });
-    \\}
-    \\
-;
-
-const clean_match =
-    \\structural Msg = { kind: string; text: string };
-    \\
-    \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const msg: Msg = { kind: "echo", text: "hi" };
-    \\  const out = match (msg) {
-    \\    when { kind: "echo", text }: text
-    \\    default: "none"
-    \\  };
-    \\  return Response.json({ out: out });
     \\}
     \\
 ;
@@ -422,11 +408,10 @@ const clean_annotated_helper =
 // would make the `default:` arm unreachable and draw the redundant-arm warning
 // (ZTS216), and a baseline must be veto-clean.
 const clean_match_default =
+    \\import { match } from "zttp:core";
+    \\
     \\function label(n: number): string | undefined {
-    \\  const out = match (n) {
-    \\    when 1: "one"
-    \\    default: "other"
-    \\  };
+    \\  const out = match(n).with(1, () => "one").otherwise(() => "other");
     \\  return out;
     \\}
     \\
@@ -449,7 +434,7 @@ const clean_crypto_budget =
 const clean_handler_log_budget =
     \\import { logInfo } from "zttp:log";
     \\
-    \\structural Narrow<T> = Proof<T,
+    \\type Narrow<T> = Proof<T,
     \\    | "deterministic"
     \\    | "state_isolated"
     \\    | "result_safe"
@@ -473,7 +458,7 @@ const clean_helper_log_ceiling =
     \\import { sha256 } from "zttp:crypto";
     \\import { logInfo } from "zttp:log";
     \\
-    \\structural Narrow<T> = Proof<T,
+    \\type Narrow<T> = Proof<T,
     \\    | "deterministic"
     \\    | "state_isolated"
     \\    | "result_safe"
@@ -486,7 +471,7 @@ const clean_helper_log_ceiling =
     \\    | "cost_bounded"
     \\>;
     \\
-    \\structural Digest = { value: string };
+    \\type Digest = { value: string };
     \\
     \\export function digest(input: Digest): Proof<Effects<Digest, "crypto" | "stderr" | "clock">, "deterministic"> {
     \\  sha256(input.value);
@@ -504,7 +489,7 @@ const clean_helper_log_ceiling =
 const clean_exported_helper_capsule =
     \\import { sha256 } from "zttp:crypto";
     \\
-    \\structural Narrow<T> = Proof<T,
+    \\type Narrow<T> = Proof<T,
     \\    | "deterministic"
     \\    | "state_isolated"
     \\    | "result_safe"
@@ -517,7 +502,7 @@ const clean_exported_helper_capsule =
     \\    | "cost_bounded"
     \\>;
     \\
-    \\structural Digest = { value: string };
+    \\type Digest = { value: string };
     \\
     \\export function digest(input: Digest): Proof<Effects<Digest, "crypto">, "deterministic"> {
     \\  sha256(input.value);
@@ -534,7 +519,7 @@ const clean_exported_helper_capsule =
 const clean_internal_no_ceiling =
     \\import { sha256 } from "zttp:crypto";
     \\
-    \\structural Narrow<T> = Proof<T,
+    \\type Narrow<T> = Proof<T,
     \\    | "deterministic"
     \\    | "state_isolated"
     \\    | "result_safe"
@@ -573,7 +558,7 @@ const clean_deterministic_helper =
 const clean_resolvable_callee =
     \\import { sha256 } from "zttp:crypto";
     \\
-    \\structural Maker = { make: () => string };
+    \\type Maker = { make: () => string };
     \\
     \\function makeIt(): string {
     \\  return sha256("zttp");
@@ -1068,7 +1053,7 @@ pub const seeds = [_]DefectSeed{
         .class = .model_retry,
         .seed_source = clean_nullable,
         .bad_draft =
-        \\structural MaybeName = string | null;
+        \\type MaybeName = string | null;
         \\
         \\function nameOf(): MaybeName {
         \\  return null;
@@ -1082,7 +1067,7 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .good_draft =
-        \\structural MaybeName = string | null;
+        \\type MaybeName = string | null;
         \\
         \\function nameOf(): MaybeName {
         \\  return null;
@@ -1096,72 +1081,6 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS624 compiler error in handler.ts",
-    },
-    .{
-        .id = "redundant-pattern-rename",
-        .code = "ZTS625",
-        .class = .model_retry,
-        .seed_source = clean_match,
-        .bad_draft =
-        \\structural Msg = { kind: string; text: string };
-        \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const msg: Msg = { kind: "echo", text: "hi" };
-        \\  const out = match (msg) {
-        \\    when { kind: "echo", text: text }: text
-        \\    default: "none"
-        \\  };
-        \\  return Response.json({ out: out });
-        \\}
-        \\
-        ,
-        .good_draft =
-        \\structural Msg = { kind: string; text: string };
-        \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const msg: Msg = { kind: "echo", text: "hey" };
-        \\  const out = match (msg) {
-        \\    when { kind: "echo", text }: text
-        \\    default: "none"
-        \\  };
-        \\  return Response.json({ out: out });
-        \\}
-        \\
-        ,
-        .ask = "Fix the ZTS625 compiler error in handler.ts",
-    },
-    .{
-        .id = "scrutinee-field-read",
-        .code = "ZTS626",
-        .class = .model_retry,
-        .seed_source = clean_match,
-        .bad_draft =
-        \\structural Msg = { kind: string; text: string };
-        \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const msg: Msg = { kind: "echo", text: "hi" };
-        \\  const out = match (msg) {
-        \\    when { kind: "echo" }: msg.text
-        \\    default: "none"
-        \\  };
-        \\  return Response.json({ out: out });
-        \\}
-        \\
-        ,
-        .good_draft =
-        \\structural Msg = { kind: string; text: string };
-        \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const msg: Msg = { kind: "echo", text: "yo" };
-        \\  const out = match (msg) {
-        \\    when { kind: "echo", text }: text
-        \\    default: "none"
-        \\  };
-        \\  return Response.json({ out: out });
-        \\}
-        \\
-        ,
-        .ask = "Fix the ZTS626 compiler error in handler.ts",
     },
     .{
         .id = "unused-variable",
@@ -1690,11 +1609,10 @@ pub const seeds = [_]DefectSeed{
         .class = .model_retry,
         .seed_source = clean_match_default,
         .bad_draft =
+        \\import { match } from "zttp:core";
+        \\
         \\function label(n: number): string | undefined {
-        \\  const out = match (n) {
-        \\    when 1: "one"
-        \\    when 2: "two"
-        \\  };
+        \\  const out = match(n).with(1, () => "one").with(2, () => "two").exhaustive();
         \\  return out;
         \\}
         \\
@@ -1705,12 +1623,10 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .good_draft =
+        \\import { match } from "zttp:core";
+        \\
         \\function label(n: number): string | undefined {
-        \\  const out = match (n) {
-        \\    when 1: "one"
-        \\    when 2: "two"
-        \\    default: "other"
-        \\  };
+        \\  const out = match(n).with(1, () => "one").with(2, () => "two").otherwise(() => "other");
         \\  return out;
         \\}
         \\
@@ -1781,7 +1697,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { logInfo } from "zttp:log";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -1803,7 +1719,7 @@ pub const seeds = [_]DefectSeed{
         .good_draft =
         \\import { logInfo } from "zttp:log";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -1832,7 +1748,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { logInfo } from "zttp:log";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -1854,7 +1770,7 @@ pub const seeds = [_]DefectSeed{
         .good_draft =
         \\import { logInfo } from "zttp:log";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -1884,7 +1800,7 @@ pub const seeds = [_]DefectSeed{
         \\import { sha256 } from "zttp:crypto";
         \\import { logInfo } from "zttp:log";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -1897,7 +1813,7 @@ pub const seeds = [_]DefectSeed{
         \\    | "cost_bounded"
         \\>;
         \\
-        \\structural Digest = { value: string };
+        \\type Digest = { value: string };
         \\
         \\export function digest(input: Digest): Proof<Effects<Digest, "crypto" | "clock">, "deterministic"> {
         \\  sha256(input.value);
@@ -1915,7 +1831,7 @@ pub const seeds = [_]DefectSeed{
         \\import { sha256 } from "zttp:crypto";
         \\import { logInfo } from "zttp:log";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -1928,7 +1844,7 @@ pub const seeds = [_]DefectSeed{
         \\    | "cost_bounded"
         \\>;
         \\
-        \\structural Digest = { value: string };
+        \\type Digest = { value: string };
         \\
         \\export function digest(input: Digest): Proof<Effects<Digest, "crypto" | "stderr" | "clock">, "deterministic"> {
         \\  sha256(input.value);
@@ -1953,7 +1869,7 @@ pub const seeds = [_]DefectSeed{
         \\import { sha256 } from "zttp:crypto";
         \\import { logInfo } from "zttp:log";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -1966,7 +1882,7 @@ pub const seeds = [_]DefectSeed{
         \\    | "cost_bounded"
         \\>;
         \\
-        \\structural Digest = { value: string };
+        \\type Digest = { value: string };
         \\
         \\export function digest(input: Digest): Proof<Effects<Digest, "crypto" | "stderr" | "clock">, "deterministic"> {
         \\  sha256(input.value);
@@ -1984,7 +1900,7 @@ pub const seeds = [_]DefectSeed{
         \\import { sha256 } from "zttp:crypto";
         \\import { logInfo } from "zttp:log";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -1997,7 +1913,7 @@ pub const seeds = [_]DefectSeed{
         \\    | "cost_bounded"
         \\>;
         \\
-        \\structural Digest = { value: string };
+        \\type Digest = { value: string };
         \\
         \\export function digest(input: Digest): Proof<Effects<Digest, "crypto" | "stderr" | "clock">, "deterministic"> {
         \\  sha256(input.value);
@@ -2021,7 +1937,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -2034,7 +1950,7 @@ pub const seeds = [_]DefectSeed{
         \\    | "cost_bounded"
         \\>;
         \\
-        \\structural Digest = { value: string };
+        \\type Digest = { value: string };
         \\
         \\export function digest(input: Digest): Proof<Effects<Digest, "crypto">, "deterministic"> {
         \\  return input;
@@ -2049,7 +1965,7 @@ pub const seeds = [_]DefectSeed{
         .good_draft =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -2062,7 +1978,7 @@ pub const seeds = [_]DefectSeed{
         \\    | "cost_bounded"
         \\>;
         \\
-        \\structural Digest = { value: string };
+        \\type Digest = { value: string };
         \\
         \\export function digest(input: Digest): Proof<Effects<Digest, "crypto">, "deterministic"> {
         \\  sha256(input.value);
@@ -2085,7 +2001,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -2098,7 +2014,7 @@ pub const seeds = [_]DefectSeed{
         \\    | "cost_bounded"
         \\>;
         \\
-        \\structural Digest = { value: string };
+        \\type Digest = { value: string };
         \\
         \\export function digest(input: Digest): Proof<Digest, "deterministic"> {
         \\  sha256(input.value);
@@ -2114,7 +2030,7 @@ pub const seeds = [_]DefectSeed{
         .good_draft =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -2127,7 +2043,7 @@ pub const seeds = [_]DefectSeed{
         \\    | "cost_bounded"
         \\>;
         \\
-        \\structural Digest = { value: string };
+        \\type Digest = { value: string };
         \\
         \\export function digest(input: Digest): Proof<Effects<Digest, "crypto">, "deterministic"> {
         \\  sha256(input.value);
@@ -2150,7 +2066,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -2163,7 +2079,7 @@ pub const seeds = [_]DefectSeed{
         \\    | "cost_bounded"
         \\>;
         \\
-        \\structural Digest = { value: string };
+        \\type Digest = { value: string };
         \\
         \\export function digest(input: Digest): Effects<Digest, "crypto"> {
         \\  sha256(input.value);
@@ -2179,7 +2095,7 @@ pub const seeds = [_]DefectSeed{
         .good_draft =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -2192,7 +2108,7 @@ pub const seeds = [_]DefectSeed{
         \\    | "cost_bounded"
         \\>;
         \\
-        \\structural Digest = { value: string };
+        \\type Digest = { value: string };
         \\
         \\export function digest(input: Digest): Proof<Effects<Digest, "crypto">, "deterministic"> {
         \\  sha256(input.value);
@@ -2215,7 +2131,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -2241,7 +2157,7 @@ pub const seeds = [_]DefectSeed{
         .good_draft =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\structural Narrow<T> = Proof<T,
+        \\type Narrow<T> = Proof<T,
         \\    | "deterministic"
         \\    | "state_isolated"
         \\    | "result_safe"
@@ -2302,6 +2218,7 @@ pub const seeds = [_]DefectSeed{
         .seed_source = clean_resolvable_callee,
         .bad_draft =
         \\import { sha256 } from "zttp:crypto";
+        \\import { assert } from "zttp:core";
         \\
         \\function makeIt(): string {
         \\  return sha256("zttp");
@@ -2310,7 +2227,7 @@ pub const seeds = [_]DefectSeed{
         \\function handler(req: Request): Proof<Effects<Response, "crypto">, "fault_covered"> {
         \\  const fs = [makeIt];
         \\  const made = fs[0]();
-        \\  assert made.length >= 0;
+        \\  assert(made.length >= 0);
         \\  return Response.text("ok");
         \\}
         \\
@@ -2318,7 +2235,7 @@ pub const seeds = [_]DefectSeed{
         .good_draft =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\structural Maker = { make: () => string };
+        \\type Maker = { make: () => string };
         \\
         \\function makeIt(): string {
         \\  return sha256("zttp-ok");

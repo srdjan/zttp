@@ -25,6 +25,10 @@ pub const StripError = error{
     ArrayTypeAlias,
     ReadonlyArrayTypeAlias,
     VoidType,
+    LegacyStructuralDeclaration,
+    LegacyNominalDeclaration,
+    LegacyMatchExpression,
+    LegacyAssertStatement,
 };
 
 /// Stable source-admission causes and their public remediation messages.
@@ -45,6 +49,10 @@ pub const StripDiagnosticKind = enum {
     readonly_array_type_alias,
     void_type,
     nesting_too_deep,
+    legacy_structural_declaration,
+    legacy_nominal_declaration,
+    legacy_match_expression,
+    legacy_assert_statement,
 
     pub fn message(self: StripDiagnosticKind) []const u8 {
         return switch (self) {
@@ -53,8 +61,8 @@ pub const StripDiagnosticKind = enum {
             .satisfies_assertion => "'satisfies' type assertion is not supported; use type-safe patterns instead",
             .unterminated_string => "unterminated string literal; close the quote, or write the newline as \\n",
             .nominal_base_not_scalar => "a nominal declaration carries scalar identity only; its base must be `string`, `number`, or `boolean`",
-            .interface_declaration => "`interface` is not a declaration form in this profile; write `structural Name = { ... };`",
-            .distinct_type_declaration => "`distinct type` is not a declaration form in this profile; write `nominal Name = string;`",
+            .interface_declaration => "`interface` is not a declaration form in this profile; write `type Name = { ... };`",
+            .distinct_type_declaration => "`distinct type` is not a declaration form in this profile; import `Nominal` from `zttp:core` and write `declare const brand: unique symbol;` and `type Name = Nominal<string, typeof brand>;`",
             .retired_types_import => "`zttp:types` is not a module in this profile; remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names",
             .default_parameter => "default parameters are not part of this profile; replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body",
             .optional_parameter => "optional parameter shorthand is not part of this profile; replace `name?: T` with `name: T | undefined`",
@@ -64,6 +72,10 @@ pub const StripDiagnosticKind = enum {
             .readonly_array_type_alias => "`ReadonlyArray<T>` is not a type spelling in this profile; write `readonly T[]`",
             .void_type => "`void` is not a type spelling in this profile; write `undefined`",
             .nesting_too_deep => "type syntax nests too deeply; simplify or split it (nesting limit is 512)",
+            .legacy_structural_declaration => "`structural` declarations are no longer supported; write `type Name = ...;`",
+            .legacy_nominal_declaration => "`nominal` declarations are no longer supported; import `Nominal` from `zttp:core` and write `declare const brand: unique symbol;` and `type Name = Nominal<Base, typeof brand>;`",
+            .legacy_match_expression => "brace `match` is no longer supported; import `match` from `zttp:core` and use `match(value).with(pattern, callback).exhaustive()` or end with `.otherwise(callback)`",
+            .legacy_assert_statement => "the `assert` statement is no longer supported; import `assert` from `zttp:core` and write `assert(predicate);`",
         };
     }
 };

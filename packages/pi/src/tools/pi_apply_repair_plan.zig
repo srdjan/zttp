@@ -422,7 +422,7 @@ const testing = std.testing;
 test "bound canonicalize candidate previews through v2 without writing" {
     const source =
         \\
-        \\structural Guardrails<T> = Proof<T, "state_isolated">;
+        \\type Guardrails<T> = Proof<T, "state_isolated">;
         \\
         \\export function handler(req: Request): Guardrails<Response> {
         \\    let name = "world";

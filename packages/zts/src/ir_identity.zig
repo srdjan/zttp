@@ -707,9 +707,10 @@ test "the parser refuses the removed statement forms before a tree exists" {
 /// once to prove nothing in it is refused, and once as the base for the
 /// mutations that must be caught.
 const admitted_surface =
+    \\import { assert, match } from "zttp:core";
     \\import { json } from "zttp:json";
     \\
-    \\structural Order = { id: string; total: number };
+    \\type Order = { id: string; total: number };
     \\
     \\export function handler(req: Request): Response {
     \\  const orders: Order[] = [{ id: "a", total: 1 }, { id: "b", total: 2 }];
@@ -720,13 +721,10 @@ const admitted_surface =
     \\  for (const o of orders) {
     \\    sum = sum + o.total;
     \\  }
-    \\  const kind = match (id) {
-    \\    when "a": "first"
-    \\    default: "other"
-    \\  };
+    \\  const kind = match(id).with("a", () => "first").otherwise(() => "other");
     \\  const flag = sum > 0 ? true : false;
     \\  const merged = { ...orders[0], kind: kind };
-    \\  assert sum >= 0;
+    \\  assert(sum >= 0);
     \\  if (flag) {
     \\    return Response.json({ labels: labels, merged: merged, json: json });
     \\  }
@@ -758,8 +756,8 @@ test "a change anywhere in the admitted surface is caught" {
     // arm, so an arm that reads the wrong bits stops noticing and fails.
     const mutations = [_]struct { from: []const u8, to: []const u8, what: []const u8 }{
         .{ .from = "sum + o.total", .to = "sum - o.total", .what = "a binary operator" },
-        .{ .from = "when \"a\": \"first\"", .to = "when \"a\": \"second\"", .what = "a match arm body" },
-        .{ .from = "when \"a\":", .to = "when \"b\":", .what = "a match arm pattern" },
+        .{ .from = ".with(\"a\", () => \"first\"", .to = ".with(\"a\", () => \"second\"", .what = "a match arm body" },
+        .{ .from = ".with(\"a\",", .to = ".with(\"b\",", .what = "a match arm pattern" },
         .{ .from = "[o.id, \":\", String(o.total)]", .to = "[String(o.total), \":\", o.id]", .what = "join operand order" },
         .{ .from = "{ ...orders[0], kind: kind }", .to = "{ kind: kind, ...orders[0] }", .what = "property order" },
         .{ .from = "orders[0];", .to = "orders[1];", .what = "an index literal" },

@@ -14,6 +14,7 @@ const context = @import("../../context.zig");
 const source_frontend = @import("../../source_frontend.zig");
 const atom_table_mod = @import("../../atom_table.zig");
 const object = @import("../../object.zig");
+const builtin_modules = @import("../../builtin_modules.zig");
 const known_globals = @import("zts-base").known_globals;
 
 pub const ModuleIndex = u16;
@@ -492,8 +493,8 @@ pub const ModuleGraph = struct {
     /// Refused: two modules that bind one top-level value name, a module that
     /// binds a built-in global, a dependency that binds `handler`, and a named
     /// import that its target module does not export. Type declarations are
-    /// not value bindings. Import bindings that name the identical export are
-    /// one binding.
+    /// not value bindings. An exact intrinsic import is erased before runtime.
+    /// Import bindings that name the identical export are one binding.
     pub fn checkBindings(self: *ModuleGraph) CheckBindingsError!void {
         if (self.binding_refusal) |refusal| self.allocator.free(refusal.name);
         self.binding_refusal = null;
@@ -534,7 +535,9 @@ pub const ModuleGraph = struct {
             for (global_scope.bindings.items) |binding| {
                 if (isTypeOnlyBrand(&parser.type_store, binding.name)) continue;
                 const name = try arena.dupe(u8, binding.name);
-                if (known_globals.isRuntimeGlobal(name)) return self.refuse(.reserved, name, module.path, "");
+                if (known_globals.isRuntimeGlobal(name) and !hasExactIntrinsicImport(imports, name)) {
+                    return self.refuse(.reserved, name, module.path, "");
+                }
                 if (module_index != entry_index and std.mem.eql(u8, name, "handler")) {
                     return self.refuse(.dependency_handler, name, module.path, "");
                 }
@@ -705,6 +708,14 @@ const ImportEntry = struct {
     specifier: []const u8,
 };
 
+fn hasExactIntrinsicImport(imports: []const ImportEntry, name: []const u8) bool {
+    for (imports) |entry| {
+        if (!std.mem.eql(u8, entry.local, name) or !std.mem.eql(u8, entry.imported, name)) continue;
+        if (builtin_modules.findIntrinsic(entry.specifier, entry.imported) != null) return true;
+    }
+    return false;
+}
+
 const ModuleFacts = struct {
     exports: std.StringHashMapUnmanaged(void) = .empty,
 };
@@ -850,7 +861,7 @@ test "module graph loads a type-only dependency without making it executable" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "types.ts", .data = "export structural Label = string;\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "types.ts", .data = "export type Label = string;\n" });
     const root = try testTmpRoot(&tmp, allocator);
     defer allocator.free(root);
     const entry_path = try std.fs.path.join(allocator, &.{ root, "handler.ts" });
@@ -872,7 +883,7 @@ test "type-only reachability does not activate transitive runtime imports" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "types.ts", .data = "import { side } from \"./side.ts\";\nexport structural Label = string;\nexport const value = side;\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "types.ts", .data = "import { side } from \"./side.ts\";\nexport type Label = string;\nexport const value = side;\n" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "side.ts", .data = "export const side = 1;\n" });
     const root = try testTmpRoot(&tmp, allocator);
     defer allocator.free(root);
@@ -893,7 +904,7 @@ test "a value path activates a module first found through a type-only path" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "shared.ts", .data = "export structural Label = string;\nexport const value = 1;\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "shared.ts", .data = "export type Label = string;\nexport const value = 1;\n" });
     const root = try testTmpRoot(&tmp, allocator);
     defer allocator.free(root);
     const entry_path = try std.fs.path.join(allocator, &.{ root, "handler.ts" });
@@ -913,7 +924,7 @@ test "a type-only import cycle is refused" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.ts", .data = "import type { A } from \"./a.ts\";\nexport structural B = string;\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.ts", .data = "import type { A } from \"./a.ts\";\nexport type B = string;\n" });
     const root = try testTmpRoot(&tmp, allocator);
     defer allocator.free(root);
     const entry_path = try std.fs.path.join(allocator, &.{ root, "a.ts" });
@@ -922,7 +933,7 @@ test "a type-only import cycle is refused" {
     defer graph.deinit();
     try std.testing.expectError(
         error.CircularImport,
-        graph.build(entry_path, "import type { B } from \"./b.ts\";\nexport structural A = string;\n", testReadRealFile),
+        graph.build(entry_path, "import type { B } from \"./b.ts\";\nexport type A = string;\n", testReadRealFile),
     );
     var buffer: [512]u8 = undefined;
     const expected = try std.fmt.allocPrint(
@@ -989,10 +1000,14 @@ test "graph refuses every hard admission producer" {
         .{ .kind = .optional_parameter, .err = error.OptionalParameter, .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value?: string) { return value; }\n" },
         .{ .kind = .default_export, .err = error.DefaultExport, .source = "import type { A } /* ; */ from \"./a\";\nexport default 1;\n" },
         .{ .kind = .mutable_export, .err = error.MutableExport, .source = "import type { A } /* ; */ from \"./a\";\nexport let value = 1;\n" },
-        .{ .kind = .array_type_alias, .err = error.ArrayTypeAlias, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = Array<string>;\n" },
-        .{ .kind = .readonly_array_type_alias, .err = error.ReadonlyArrayTypeAlias, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = ReadonlyArray<string>;\n" },
-        .{ .kind = .void_type, .err = error.VoidType, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = void;\n" },
+        .{ .kind = .array_type_alias, .err = error.ArrayTypeAlias, .source = "import type { A } /* ; */ from \"./a\";\ntype Box = Array<string>;\n" },
+        .{ .kind = .readonly_array_type_alias, .err = error.ReadonlyArrayTypeAlias, .source = "import type { A } /* ; */ from \"./a\";\ntype Box = ReadonlyArray<string>;\n" },
+        .{ .kind = .void_type, .err = error.VoidType, .source = "import type { A } /* ; */ from \"./a\";\ntype Box = void;\n" },
         .{ .kind = .nesting_too_deep, .err = error.NestingTooDeep, .source = "import type { A } /* ; */ from \"./a\";\nconst value: {{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{ string;\n" },
+        .{ .kind = .legacy_structural_declaration, .err = error.LegacyStructuralDeclaration, .source = "structural Box = string;" },
+        .{ .kind = .legacy_nominal_declaration, .err = error.LegacyNominalDeclaration, .source = "nominal Box = string;" },
+        .{ .kind = .legacy_match_expression, .err = error.LegacyMatchExpression, .source = "function f(x: number): number { return match (x) { default: 0 }; }" },
+        .{ .kind = .legacy_assert_statement, .err = error.LegacyAssertStatement, .source = "function f(x: boolean): number { assert x; return 0; }" },
     };
     try std.testing.expectEqual(@typeInfo(zts_parser.type_syntax.AdmissionKind).@"enum".field_names.len, cases.len);
     var seen = std.EnumSet(zts_parser.type_syntax.AdmissionKind).empty;
@@ -1152,7 +1167,7 @@ test "build records a type-only dependency that admission refuses" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "types.ts", .data = "export structural Value = string; /* open" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "types.ts", .data = "export type Value = string; /* open" });
     const root = try testTmpRoot(&tmp, allocator);
     defer allocator.free(root);
     const entry_path = try std.fs.path.join(allocator, &.{ root, "entry.ts" });
@@ -1203,7 +1218,7 @@ test "buildWithReader reads a dependency from the reader context" {
 }
 
 test "graph build allocation failure cannot select raw" {
-    const source = "structural Label = string;\nconst label: Label = \"value\";\nexport const result: Label = label;\n";
+    const source = "type Label = string;\nconst label: Label = \"value\";\nexport const result: Label = label;\n";
     const Run = struct {
         fn read(_: std.mem.Allocator, _: []const u8) ReadFileError![]const u8 {
             return error.FileNotFound;
@@ -1231,7 +1246,7 @@ test "graph build allocation failure cannot select raw" {
 }
 
 test "selected discovery parser distinguishes initialization and parse allocation failures" {
-    const source = "import { value } from \"./dep.ts\";\nstructural Label = string;\nconst label: Label = \"ready\";\n";
+    const source = "import { value } from \"./dep.ts\";\ntype Label = string;\nconst label: Label = \"ready\";\n";
     const allocator = std.testing.allocator;
     var calibration = std.testing.FailingAllocator.init(allocator, .{});
     var module: Module = .{ .path = "entry.ts", .source = source, .dependencies = &.{}, .state = .unvisited };
@@ -1325,7 +1340,7 @@ test "graph discovery retains its tolerant native parse boundary" {
 }
 
 test "graph preparation propagates native admission allocation failures" {
-    const source = "structural Label = string;\nconst label: Label = \"value\";\nexport const result: Label = label;\n";
+    const source = "type Label = string;\nconst label: Label = \"value\";\nexport const result: Label = label;\n";
     const allocator = std.testing.allocator;
     var calibration = std.testing.FailingAllocator.init(allocator, .{});
     const owned_path = try calibration.allocator().dupe(u8, "entry.ts");
@@ -1374,9 +1389,9 @@ fn bindingsReadFile(allocator: std.mem.Allocator, path: []const u8) ReadFileErro
     else if (std.mem.endsWith(u8, path, "/user.ts"))
         "import { greet } from \"./utils.ts\";\nexport function hello(): string { return greet(\"a\"); }\n"
     else if (std.mem.endsWith(u8, path, "/types_a.ts"))
-        "structural Box = { v: string };\nexport function fromTypesA(): string { return \"a\"; }\n"
+        "type Box = { v: string };\nexport function fromTypesA(): string { return \"a\"; }\n"
     else if (std.mem.endsWith(u8, path, "/types_b.ts"))
-        "structural Box = { v: string };\nexport function fromTypesB(): string { return \"b\"; }\n"
+        "type Box = { v: string };\nexport function fromTypesB(): string { return \"b\"; }\n"
     else if (std.mem.endsWith(u8, path, "/env_user.ts"))
         "import { env } from \"zttp:env\";\nexport function readA(): string { return env(\"A\") ?? \"\"; }\n"
     else if (std.mem.endsWith(u8, path, "/other_env.ts"))

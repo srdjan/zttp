@@ -4048,8 +4048,9 @@ test "type-only imports skip module initializers" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "types.ts",
         .data =
-        \\export structural Message = { text: string };
-        \\function reject(value: boolean): number { assert value; return 1; }
+        \\import { assert } from "zttp:core";
+        \\export type Message = { text: string };
+        \\function reject(value: boolean): number { assert(value); return 1; }
         \\const marker: number = reject(false);
         ,
     });
@@ -4124,7 +4125,8 @@ test "type-only imports skip transitive runtime initializers" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "value.ts",
         .data =
-        \\function reject(value: boolean): number { assert value; return 1; }
+        \\import { assert } from "zttp:core";
+        \\function reject(value: boolean): number { assert(value); return 1; }
         \\export const marker: number = reject(false);
         ,
     });
@@ -4132,7 +4134,7 @@ test "type-only imports skip transitive runtime initializers" {
         .sub_path = "types.ts",
         .data =
         \\import { marker } from "./value.ts";
-        \\export structural Message = { text: string };
+        \\export type Message = { text: string };
         \\const retained: number = marker;
         ,
     });

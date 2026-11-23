@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS001","severity":"error","message":"the `assert` statement is no longer supported","file":"parse/bad/legacy_assert_statement.ts","line":3,"column":5,"suggestion":"import `assert` from `zttp:core` and write `assert(predicate);`","repair_intent":null}
