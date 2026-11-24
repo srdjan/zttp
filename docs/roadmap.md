@@ -18,30 +18,28 @@ The 2026-10-30 reset closed on 2026-10-31. Its
 [plan](plans/2026-10-25-reset-implementation-plan.md) and
 [worklog](plans/2026-10-25-reset-worklog.md) are records, not an authority. The
 [2026-10-14 reset plan](plans/2026-10-14-reset-implementation-plan.md) is also
-complete (U1 to U20) and is not an authority. Release v0.27.1 ships the plans of
+complete (U1 to U20) and is not an authority. Release v0.27.0 ships the plans of
 2026-11-01 to 2026-11-12. Release v0.26.0 was published on 2026-10-30.
 
 Standing rule D-012 in [decisions.md](decisions.md): a model-visible change
-waits for one batched re-record window. The latest window ran on 2026-11-09,
-after the control-flow determinism change (`95050516`). The window before it ran
-on 2026-11-01, under the
-[check parity plan](plans/2026-11-01-check-parity-plan.md). The owner runs any
-later window.
+waits for one batched re-record window. The latest window covered the
+TypeScript syntax migration. See [Convergence](convergence.md) for measured
+replay results. The owner runs subsequent recording windows.
 
 Next work: no plan is active, and no reset is active. The
 [callback parameters and Result types plan](plans/2026-11-02-callback-and-result-types-plan.md)
-shipped in v0.27.1; its unit U3 stopped at its entry check again, and its open
+shipped in v0.27.0. Its unit U3 stopped at its entry check again, and its open
 gaps are under Current Limitations. The
 [builtin result types plan](plans/2026-11-02-builtin-result-types-plan.md)
-shipped in v0.27.1; its unit U3 stopped at its entry check, and its open gaps
+shipped in v0.27.0. Its unit U3 stopped at its entry check, and its open gaps
 are under Current Limitations. The
 [arithmetic operand types plan](plans/2026-11-02-arithmetic-operand-types-plan.md)
-shipped in v0.27.1. The
+shipped in v0.27.0. The
 [function values and type predicates plan](plans/2026-11-02-function-values-and-predicates-plan.md)
-shipped in v0.27.1; its open gaps are under Current Limitations. All units of
+shipped in v0.27.0. Its open gaps are under Current Limitations. All units of
 the
 [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md)
-are done and shipped in v0.27.1. This includes unit G8 (`zttp check` parity) and
+are done and shipped in v0.27.0. This includes unit G8 (`zttp check` parity) and
 unit 9d of the reset plan.
 
 M1, M2, and M3 are complete. M4 is complete: T1a to T7 were delivered. Decision

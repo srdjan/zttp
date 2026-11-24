@@ -205,11 +205,11 @@ The type checker (`packages/zts/src/type_checker.zig`) validates annotations rec
 - Return values match declared return types
 - Property access on known record types (including `readonly` enforcement)
 - Argument count of a call to a function you declare (ZTS202): too few or too many, counted against the declared parameter list
-- Virtual module function signatures (argument types, and a call with too few arguments; a call with too many arguments is not yet refused)
+- Virtual module function signatures use ZTS203 for incompatible arguments and ZTS202 for unsupported argument counts
 - Discriminated union narrowing in `match` expressions and `if` conditions
 - Nominal type safety for `Nominal` aliases
 - Template literal type pattern matching
-- Type guard narrowing (`x is T`) in `if` branches and `assert` statements
+- Type guard narrowing (`x is T`) in `if` branches and standalone `assert(...)` calls
 
 ### Structural Matching
 

@@ -14,8 +14,38 @@ For releases prior to v0.16 see git tags and
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-11-24
+
+### Highlights
+
+Handlers now use standard TypeScript alias declarations and import `nominal`,
+`match`, and `assert` from `zttp:core`. The compiler enforces the restricted
+profile across check and build paths. In an interactive session, `zttp expert`
+shows proof and test results before approval and can hold each change to a
+project's required proof properties.
+
+### Breaking changes
+
+- Replace `structural Name = ...` with `type Name = ...`. For scalar brands,
+  declare a unique symbol and use `Nominal<Base, typeof brand>` from
+  `zttp:core`. Construct a value explicitly with `nominal<Name>(value)`.
+- Replace brace matches with `match(value).with(pattern, callback)` chains
+  imported from `zttp:core`. End them with `.exhaustive()` or
+  `.otherwise(callback)`. The callback receives the narrowed subject.
+- Replace `assert predicate;` with a standalone `assert(predicate);` call
+  imported from `zttp:core`.
+- Run `zts normalize --write src/handler.ts` to migrate legacy forms the tool
+  can rewrite, review the diff, and run `zts check`. When normalization cannot
+  preserve behavior, it leaves the file unchanged and reports the refusal.
+- Code that relies on forms the compiler previously admitted can receive a
+  diagnostic. Use the replacement for that diagnostic in `docs/ts-restrictions.md`.
+
 ### Added
 
+- `zts check --types` emits TypeScript declarations for `zttp:core` and the
+  ambient `Proof` and `Effects` types for editor tooling.
+- `zttp:result` exports the `Result` type and `zttp:fetch` exports `FetchError`.
+  Use `dictEmpty<K, V>()` to construct a typed empty `Dict<K, V>`.
 - `zttp.json` now accepts `"requiredProperties": ["cost_bounded", ...]`.
   `zttp expert` applies no change set whose candidate fails to prove every
   listed property, in every approval mode including `--yes`. The rejection code
@@ -46,9 +76,9 @@ For releases prior to v0.16 see git tags and
   assignment to a parameter (ZTS068), and a name that an enclosing or nested
   scope declares (ZTS069).
 - New refusals in syntax: bitwise operators, `**`, `0b`, `0o`, a number that
-  starts with a dot, `declare`, `abstract`, `x!`, `<T>x`, overloads, tagged
-  templates, comma expressions, generic defaults, labeled jumps, a C-style
-  `for`, and a `match` scrutinee that is not a name or a member path.
+  starts with a dot, `abstract`, `x!`, `<T>x`, overloads, tagged templates,
+  comma expressions, generic defaults, labeled jumps, and a C-style `for`.
+  `declare` is admitted for unique-symbol brand declarations.
 - New refusals in types: a type name that is not declared, imported, or ambient,
   which includes the utility types (ZTS065), a generic alias argument that
   breaks its parameter's bound (ZTS209), a readonly field, element, or tuple
@@ -73,7 +103,7 @@ For releases prior to v0.16 see git tags and
   function body may now call a function or read a `const` that the module
   declares further down, so mutual recursion passes.
 - The exact repair of ZTS612 and ZTS621 now binds the condition,
-  `const cond = !!(c);`, before the statement and writes `match (cond)`.
+  `const cond = !!(c);`, before the statement and uses a fluent `match(cond)`.
 - `zttp expert` now shows a result card before the question "Apply this change
   set? [y/N, d=show files]". The card reports the verdict, failing tests, lost
   and gained proof properties, and contract changes in env variables, egress
@@ -88,6 +118,8 @@ For releases prior to v0.16 see git tags and
 
 ### Fixed
 
+- `zig build bench` runs the runtime workloads under the current source
+  profile and exits with an error if a workload fails.
 - `zttp expert` now rejects every change set with `policy_context_failed` when
   the capability policy file that `zttp.json` names does not parse. The message
   is `capability policy <file> does not parse: <error>`. Before, the expert
@@ -101,7 +133,7 @@ For releases prior to v0.16 see git tags and
   status 500. The default proof profile refuses recursion (ZTS500), so only a
   handler with a narrow `Proof` capsule could reach this.
 
-## [0.27.1] - 2026-11-13
+## [0.27.0] - 2026-11-13
 
 ### Highlights
 
@@ -2136,7 +2168,8 @@ Known-issue notes from that era include:
   destroyFull bug above).
 
 [Unreleased]: https://github.com/srdjan/zttp/compare/v0.27.1...HEAD
-[0.27.1]: https://github.com/srdjan/zttp/compare/v0.26.0...v0.27.1
+[0.27.1]: https://github.com/srdjan/zttp/compare/v0.27.0...v0.27.1
+[0.27.0]: https://github.com/srdjan/zttp/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/srdjan/zttp/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/srdjan/zttp/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/srdjan/zttp/compare/v0.22.3...v0.24.0
