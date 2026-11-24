@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "provenance": {
-    "source_commit": "f1e607b86e298fec4514c7188b6437944800a028",
+    "source_commit": "e82e1e727efe36fbde302c4a804a11291bc0816f",
     "source_dirty": false,
-    "zig_version": "0.17.0",
+    "zig_version": "0.17.1",
     "host": {
       "os": "Darwin",
-      "os_release": "27.0.0",
+      "os_release": "27.2.0",
       "architecture": "arm64",
-      "processor": "Apple M4 Pro"
+      "processor": "Apple M5 Max"
     },
     "run_count": 5,
     "aggregation": "per-benchmark best ops_per_sec"
@@ -18,8 +18,8 @@
       "name": "intArithmetic",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.177,
-      "ops_per_sec": 22967386,
+      "time_ms": 1.657,
+      "ops_per_sec": 30175015,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -32,21 +32,21 @@
       "opt_stats": {
         "get_loc_add_count": 0,
         "get_loc_get_loc_add_count": 0,
-        "push_const_call_count": 1,
+        "push_const_call_count": 0,
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 4,
-        "dispatches_saved": 2,
-        "total_fusions": 2
+        "bytes_saved": 1,
+        "dispatches_saved": 1,
+        "total_fusions": 1
       }
     },
     {
       "name": "stringConcat",
       "iterations": 50000,
       "success": true,
-      "time_ms": 7.877,
-      "ops_per_sec": 6347594,
+      "time_ms": 6.947,
+      "ops_per_sec": 7197351,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -59,21 +59,21 @@
       "opt_stats": {
         "get_loc_add_count": 0,
         "get_loc_get_loc_add_count": 0,
-        "push_const_call_count": 1,
+        "push_const_call_count": 0,
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 0,
-        "bytes_saved": 3,
-        "dispatches_saved": 1,
-        "total_fusions": 1
+        "bytes_saved": 0,
+        "dispatches_saved": 0,
+        "total_fusions": 0
       }
     },
     {
       "name": "stringOps",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.12,
-      "ops_per_sec": 23584905,
+      "time_ms": 1.937,
+      "ops_per_sec": 25813113,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -86,21 +86,21 @@
       "opt_stats": {
         "get_loc_add_count": 0,
         "get_loc_get_loc_add_count": 0,
-        "push_const_call_count": 1,
+        "push_const_call_count": 0,
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 4,
-        "dispatches_saved": 2,
-        "total_fusions": 2
+        "bytes_saved": 1,
+        "dispatches_saved": 1,
+        "total_fusions": 1
       }
     },
     {
       "name": "objectCreate",
       "iterations": 50000,
       "success": true,
-      "time_ms": 3.48,
-      "ops_per_sec": 14367816,
+      "time_ms": 2.75,
+      "ops_per_sec": 18181818,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -113,21 +113,21 @@
       "opt_stats": {
         "get_loc_add_count": 0,
         "get_loc_get_loc_add_count": 0,
-        "push_const_call_count": 1,
+        "push_const_call_count": 0,
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 0,
-        "bytes_saved": 3,
-        "dispatches_saved": 1,
-        "total_fusions": 1
+        "bytes_saved": 0,
+        "dispatches_saved": 0,
+        "total_fusions": 0
       }
     },
     {
       "name": "propertyAccess",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.532,
-      "ops_per_sec": 19747235,
+      "time_ms": 2.45,
+      "ops_per_sec": 20408163,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -140,21 +140,21 @@
       "opt_stats": {
         "get_loc_add_count": 0,
         "get_loc_get_loc_add_count": 0,
-        "push_const_call_count": 1,
+        "push_const_call_count": 0,
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 4,
-        "dispatches_saved": 2,
-        "total_fusions": 2
+        "bytes_saved": 1,
+        "dispatches_saved": 1,
+        "total_fusions": 1
       }
     },
     {
       "name": "arrayOps",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.931,
-      "ops_per_sec": 17059024,
+      "time_ms": 2.795,
+      "ops_per_sec": 17889087,
       "error": null,
       "perf": {
         "backedge_count": 99995,
@@ -167,21 +167,21 @@
       "opt_stats": {
         "get_loc_add_count": 0,
         "get_loc_get_loc_add_count": 0,
-        "push_const_call_count": 1,
+        "push_const_call_count": 0,
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 4,
-        "dispatches_saved": 2,
-        "total_fusions": 2
+        "bytes_saved": 1,
+        "dispatches_saved": 1,
+        "total_fusions": 1
       }
     },
     {
       "name": "functionCalls",
       "iterations": 50000,
       "success": true,
-      "time_ms": 4.086,
-      "ops_per_sec": 12236906,
+      "time_ms": 3.372,
+      "ops_per_sec": 14827995,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -194,21 +194,21 @@
       "opt_stats": {
         "get_loc_add_count": 0,
         "get_loc_get_loc_add_count": 0,
-        "push_const_call_count": 1,
+        "push_const_call_count": 0,
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 4,
-        "dispatches_saved": 2,
-        "total_fusions": 2
+        "bytes_saved": 1,
+        "dispatches_saved": 1,
+        "total_fusions": 1
       }
     },
     {
       "name": "recursion",
       "iterations": 25,
       "success": true,
-      "time_ms": 9.371,
-      "ops_per_sec": 2667,
+      "time_ms": 8.176,
+      "ops_per_sec": 3057,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -234,13 +234,13 @@
       "name": "jsonOps",
       "iterations": 5000,
       "success": true,
-      "time_ms": 1.225,
-      "ops_per_sec": 4081632,
+      "time_ms": 1.873,
+      "ops_per_sec": 2669514,
       "error": null,
       "perf": {
         "backedge_count": 5000,
-        "pic_hits": 14997,
-        "pic_misses": 5003,
+        "pic_hits": 4999,
+        "pic_misses": 25001,
         "mega_recoveries": 0,
         "opcode_histogram_enabled": false,
         "opcode_histogram_nonzero": 0
@@ -261,13 +261,13 @@
       "name": "gcPressure",
       "iterations": 50000,
       "success": true,
-      "time_ms": 6.06,
-      "ops_per_sec": 8250825,
+      "time_ms": 5.928,
+      "ops_per_sec": 8434547,
       "error": null,
       "perf": {
         "backedge_count": 50000,
-        "pic_hits": 49999,
-        "pic_misses": 1,
+        "pic_hits": 0,
+        "pic_misses": 100000,
         "mega_recoveries": 0,
         "opcode_histogram_enabled": false,
         "opcode_histogram_nonzero": 0
@@ -275,26 +275,26 @@
       "opt_stats": {
         "get_loc_add_count": 0,
         "get_loc_get_loc_add_count": 0,
-        "push_const_call_count": 1,
+        "push_const_call_count": 0,
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 4,
-        "dispatches_saved": 2,
-        "total_fusions": 2
+        "bytes_saved": 1,
+        "dispatches_saved": 1,
+        "total_fusions": 1
       }
     },
     {
       "name": "httpHandler",
       "iterations": 5000,
       "success": true,
-      "time_ms": 0.725,
-      "ops_per_sec": 6896551,
+      "time_ms": 0.759,
+      "ops_per_sec": 6587615,
       "error": null,
       "perf": {
         "backedge_count": 5000,
-        "pic_hits": 9998,
-        "pic_misses": 2,
+        "pic_hits": 4999,
+        "pic_misses": 10001,
         "mega_recoveries": 0,
         "opcode_histogram_enabled": false,
         "opcode_histogram_nonzero": 0
@@ -302,26 +302,26 @@
       "opt_stats": {
         "get_loc_add_count": 0,
         "get_loc_get_loc_add_count": 0,
-        "push_const_call_count": 1,
+        "push_const_call_count": 0,
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 4,
-        "dispatches_saved": 2,
-        "total_fusions": 2
+        "bytes_saved": 1,
+        "dispatches_saved": 1,
+        "total_fusions": 1
       }
     },
     {
       "name": "httpHandlerHeavy",
       "iterations": 2000,
       "success": true,
-      "time_ms": 1.937,
-      "ops_per_sec": 1032524,
+      "time_ms": 2.113,
+      "ops_per_sec": 946521,
       "error": null,
       "perf": {
         "backedge_count": 2000,
-        "pic_hits": 7996,
-        "pic_misses": 2005,
+        "pic_hits": 3998,
+        "pic_misses": 12003,
         "mega_recoveries": 0,
         "opcode_histogram_enabled": false,
         "opcode_histogram_nonzero": 0
@@ -329,21 +329,21 @@
       "opt_stats": {
         "get_loc_add_count": 0,
         "get_loc_get_loc_add_count": 0,
-        "push_const_call_count": 1,
+        "push_const_call_count": 0,
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 4,
-        "dispatches_saved": 2,
-        "total_fusions": 2
+        "bytes_saved": 1,
+        "dispatches_saved": 1,
+        "total_fusions": 1
       }
     },
     {
       "name": "forOfLoop",
       "iterations": 50000,
       "success": true,
-      "time_ms": 0.775,
-      "ops_per_sec": 64516129,
+      "time_ms": 0.728,
+      "ops_per_sec": 68681318,
       "error": null,
       "perf": {
         "backedge_count": 50600,
@@ -356,13 +356,13 @@
       "opt_stats": {
         "get_loc_add_count": 0,
         "get_loc_get_loc_add_count": 0,
-        "push_const_call_count": 1,
+        "push_const_call_count": 0,
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 3,
-        "bytes_saved": 6,
-        "dispatches_saved": 4,
-        "total_fusions": 4
+        "bytes_saved": 3,
+        "dispatches_saved": 3,
+        "total_fusions": 3
       }
     }
   ]
