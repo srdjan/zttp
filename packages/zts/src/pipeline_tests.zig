@@ -771,18 +771,19 @@ test "late export capture failure releases a transferred rate limit namespace" {
     };
 
     // A run interns names into the shared atom table, and a later run finds
-    // them there. One warm-up run makes the counting run and the failing run
-    // allocate the same number of times.
+    // them there. Warm the table and disable resize and remap in both passes
+    // so the failure index does not depend on in-place allocator growth.
     try Run.extract(allocator, parsed);
 
     var counting = std.testing.FailingAllocator.init(allocator, .{
-        .fail_index = std.math.maxInt(usize),
+        .resize_fail_index = 0,
     });
     try Run.extract(counting.allocator(), parsed);
     try testing.expect(counting.alloc_index > 0);
 
     var failing = std.testing.FailingAllocator.init(allocator, .{
         .fail_index = counting.alloc_index - 1,
+        .resize_fail_index = 0,
     });
     try testing.expectError(error.OutOfMemory, Run.extract(failing.allocator(), parsed));
     try testing.expect(failing.has_induced_failure);
