@@ -264,12 +264,10 @@ The build supplies task names from the completed graph, including install and un
 The spine checks structural links. The existing behavior suites remain the authority for the linked behavior.
 The [native spine guide](agent-spine.md) describes commands and evidence limits.
 
-Both benchmark binaries are compiled but not run. They import engine
-internals, so a change that removes an engine symbol breaks them even when no
-test references them. That is not hypothetical: when the JIT was removed,
-`verify.sh` passed while `zttp-bench` was broken, because the gate never built
-it. Compiling catches that class of breakage. Running the benchmarks here would
-import their measurement noise into the gate, so `bench-check` stays separate.
+The aggregate runs the runtime benchmark fixtures and checks their results
+without timing them. It also compiles the compiler benchmark to catch changes
+to the engine internals it imports. `bench-check` measures the runtime
+benchmarks separately.
 The benchmark sampler, threshold policy, and atomic baseline writer live in
 `tooling/benchmark.zig`, a native Zig test root.
 

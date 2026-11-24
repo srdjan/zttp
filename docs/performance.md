@@ -28,7 +28,12 @@ zig build bench-check
 ```
 
 These commands cover the in-process benchmark suite and advisory threshold
-check. The public cold-start, RSS, and HTTP-throughput numbers above are pending
+check. The aggregate runs the same workloads without a clock and checks their
+return values. The v0.27.1 fixtures call their entry functions from Zig and
+exercise the Result-returning `zttp:json` API and Dict operations. Compare
+their timing with runs of those same fixtures.
+
+The public cold-start, RSS, and HTTP-throughput numbers above are pending
 receipt-backed measurement in this repo; until that lands, treat them as
 historical/manual benchmark evidence rather than output mechanically reproduced
 by `zig build bench`.

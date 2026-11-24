@@ -363,8 +363,9 @@ fn runBenchmark(_: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, bench:
         .stdout_limit = .limited(max_report_bytes),
         .stderr_limit = .limited(256 * 1024),
     });
-    allocator.free(result.stderr);
+    defer allocator.free(result.stderr);
     if (!termSucceeded(result.term)) {
+        std.debug.print("{s}", .{result.stderr});
         allocator.free(result.stdout);
         return error.BenchmarkRunFailed;
     }

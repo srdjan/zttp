@@ -19,6 +19,7 @@ pub fn addRuntimeBench(ctx: Context, test_step: *std.Build.Step) *std.Build.Step
 
     // Benchmark run command
     const bench_cmd = b.addRunArtifact(bench_exe);
+    bench_cmd.has_side_effects = true;
     bench_cmd.addPassthruArgs();
 
     // Release benchmark policy is implemented in Zig beside the other
@@ -93,11 +94,10 @@ pub fn addCompileBench(ctx: Context, test_step: *std.Build.Step, bench_exe: *std
     compile_bench_test_step.dependOn(&run_compile_bench_tests.step);
     test_step.dependOn(&run_compile_bench_tests.step);
 
-    // Compile (do not run) the benchmark binaries as part of `test`. They import
-    // engine internals, so a change that removes an engine symbol breaks them
-    // even though no test references them. Compiling is enough to catch that
-    // class of breakage; running the benchmarks here would import their measurement noise
-    // into the gate, so `bench-check` stays a separate step.
-    test_step.dependOn(&bench_exe.step);
+    // Run fixture checks separately from timing comparisons. Compiling the
+    // compiler benchmark catches renamed engine symbols it imports directly.
+    const check_fixtures = b.addRunArtifact(bench_exe);
+    check_fixtures.addArg("--check-fixtures");
+    test_step.dependOn(&check_fixtures.step);
     test_step.dependOn(&compile_bench_exe.step);
 }

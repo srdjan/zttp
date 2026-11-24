@@ -35,6 +35,7 @@ const Options = struct {
     script_path: ?[]const u8 = null,
     bench: bool = false,
     request_path: bool = false,
+    check_fixtures: bool = false,
     bench_fn: []const u8 = "run",
     bench_iterations: u32 = 200000,
     warmup_rounds: u32 = 120,
@@ -42,7 +43,7 @@ const Options = struct {
 };
 
 const usage =
-    "Usage: zttp-bench [--json] [--quiet] [--script <path>] [--bench] [--request-path]\n" ++
+    "Usage: zttp-bench [--json] [--quiet] [--script <path>] [--bench] [--request-path] [--check-fixtures]\n" ++
     "                   [--bench-fn <name>] [--iterations <n>] [--warmup <n>] [--warmup-iters <n>]\n";
 
 fn writeStdout(data: []const u8) void {
@@ -84,6 +85,8 @@ fn parseOptions() Options {
             options.bench = true;
         } else if (std.mem.eql(u8, arg, "--request-path")) {
             options.request_path = true;
+        } else if (std.mem.eql(u8, arg, "--check-fixtures")) {
+            options.check_fixtures = true;
         } else if (std.mem.eql(u8, arg, "--bench-fn")) {
             const name = args.next() orelse {
                 writeStdout("Missing value for --bench-fn\n");
@@ -185,32 +188,38 @@ fn writeBenchmarkResultJson(writer: anytype, result: BenchmarkResult) !void {
 
 const ITERATIONS: u32 = 50000;
 
-// Each benchmark as a separate code string
-const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const u8 }{
+const Benchmark = struct {
+    name: []const u8,
+    iterations: u32,
+    expected: i32,
+    code: []const u8,
+};
+
+const benchmarks = [_]Benchmark{
     .{
         .name = "intArithmetic",
         .iterations = ITERATIONS,
+        .expected = 0,
         .code =
-        \\function runIntArithmetic(iterations) {
+        \\function run(iterations: number): number {
         \\    let sum = 0;
-        \\    for (let i of range(iterations)) {
+        \\    for (const i of range(iterations)) {
         \\        sum = (sum + i) % 1000000;
         \\        sum = (sum - (i % 1000) + 1000000) % 1000000;
-        \\        sum = (sum * 2) % 1000000;
-        \\        sum = (sum >> 1);
+        \\        sum = sum % 500000;
         \\    }
         \\    return sum;
         \\}
-        \\runIntArithmetic(50000);
         ,
     },
     .{
         .name = "stringConcat",
         .iterations = ITERATIONS,
+        .expected = 951,
         .code =
-        \\function runStringConcat(iterations) {
+        \\function run(iterations: number): number {
         \\    let result = '';
-        \\    for (let i of range(iterations)) {
+        \\    for (const i of range(iterations)) {
         \\        result = [result, 'x'].join('');
         \\        if (result.length > 1000) {
         \\            result = '';
@@ -218,32 +227,32 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
         \\    }
         \\    return result.length;
         \\}
-        \\runStringConcat(50000);
         ,
     },
     .{
         .name = "stringOps",
         .iterations = ITERATIONS,
+        .expected = 950000,
         .code =
-        \\function runStringOps(iterations) {
-        \\    let str = 'The quick brown fox jumps over the lazy dog';
+        \\function run(iterations: number): number {
+        \\    const str = 'The quick brown fox jumps over the lazy dog';
         \\    let count = 0;
-        \\    for (let i of range(iterations)) {
+        \\    for (const i of range(iterations)) {
         \\        count = (count + str.indexOf('fox')) % 1000000;
         \\        count = (count + str.length) % 1000000;
         \\    }
         \\    return count;
         \\}
-        \\runStringOps(50000);
         ,
     },
     .{
         .name = "objectCreate",
         .iterations = ITERATIONS,
+        .expected = 5,
         .code =
-        \\function runObjectCreate(iterations) {
-        \\    let objects = [];
-        \\    for (let i of range(iterations)) {
+        \\function run(iterations: number): number {
+        \\    let objects: { id: number; name: string }[] = [];
+        \\    for (const i of range(iterations)) {
         \\        objects.push({ id: i, name: 'item' });
         \\        if (objects.length > 100) {
         \\            objects = [];
@@ -251,36 +260,36 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
         \\    }
         \\    return objects.length;
         \\}
-        \\runObjectCreate(50000);
         ,
     },
     .{
         .name = "propertyAccess",
         .iterations = ITERATIONS,
+        .expected = 174902,
         .code =
-        \\function runPropertyAccess(iterations) {
-        \\    let obj = { a: 1, b: 2, c: 3, d: 4, e: 5 };
+        \\function run(iterations: number): number {
+        \\    const obj = { a: 1, b: 2, c: 3, d: 4, e: 5 };
         \\    let sum = 0;
-        \\    for (let i of range(iterations)) {
+        \\    for (const i of range(iterations)) {
         \\        sum = (sum + obj.a + obj.b + obj.c + obj.d + obj.e) % 1000000;
         \\        obj.a = i % 100;
         \\    }
         \\    return sum;
         \\}
-        \\runPropertyAccess(50000);
         ,
     },
     .{
         .name = "arrayOps",
         .iterations = ITERATIONS,
+        .expected = 970015,
         .code =
-        \\function runArrayOps(iterations) {
-        \\    let arr = [];
+        \\function run(iterations: number): number {
+        \\    let arr: number[] = [];
         \\    let sum = 0;
-        \\    for (let i of range(iterations)) {
+        \\    for (const i of range(iterations)) {
         \\        arr.push(i % 1000);
         \\        if (arr.length > 100) {
-        \\            for (let val of arr) {
+        \\            for (const val of arr) {
         \\                sum = (sum + val) % 1000000;
         \\            }
         \\            arr = [];
@@ -288,142 +297,156 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
         \\    }
         \\    return sum;
         \\}
-        \\runArrayOps(50000);
         ,
     },
     .{
         .name = "functionCalls",
         .iterations = ITERATIONS,
+        .expected = 975000,
         .code =
-        \\function add(a, b) { return (a + b) % 1000000; }
-        \\function compute(x, y) { return add(x, y); }
-        \\function runFunctionCalls(iterations) {
+        \\function add(a: number, b: number): number { return (a + b) % 1000000; }
+        \\function compute(x: number, y: number): number { return add(x, y); }
+        \\function run(iterations: number): number {
         \\    let result = 0;
-        \\    for (let i of range(iterations)) {
+        \\    for (const i of range(iterations)) {
         \\        result = compute(i % 1000, result);
         \\    }
         \\    return result;
         \\}
-        \\runFunctionCalls(50000);
         ,
     },
     .{
         .name = "recursion",
         .iterations = 25,
+        .expected = 75025,
         .code =
-        \\function fib(n) {
-        \\    if (n <= 1) return n;
-        \\    return fib(n - 1) + fib(n - 2);
+        \\function run(n: number): number {
+        \\    if (n <= 1) {
+        \\        return n;
+        \\    }
+        \\    return run(n - 1) + run(n - 2);
         \\}
-        \\fib(25);
         ,
     },
     .{
         .name = "jsonOps",
         .iterations = 5000,
+        .expected = 10000,
         .code =
-        \\function runJsonOps(iterations) {
-        \\    let obj = { users: [{ id: 1 }, { id: 2 }] };
+        \\import { parseJson, stringifyJson } from "zttp:json";
+        \\import { dictGet } from "zttp:collections";
+        \\function run(iterations: number): number {
+        \\    const obj = { users: [{ id: 1 }, { id: 2 }] };
         \\    let count = 0;
-        \\    for (let i of range(iterations)) {
-        \\        let json = JSON.stringify(obj);
-        \\        let parsed = JSON.parse(json);
-        \\        count = (count + parsed.users.length) % 1000000;
+        \\    for (const i of range(iterations)) {
+        \\        const encoded = stringifyJson(obj);
+        \\        if (!encoded.ok) { return -1; }
+        \\        const parsed = parseJson(encoded.value);
+        \\        if (!parsed.ok) { return -1; }
+        \\        const document = parsed.value;
+        \\        if (isDict(document) === false) { return -1; }
+        \\        const users = dictGet(document, "users");
+        \\        if (Array.isArray(users) === false) { return -1; }
+        \\        count = (count + users.length) % 1000000;
         \\    }
         \\    return count;
         \\}
-        \\runJsonOps(5000);
         ,
     },
     .{
         .name = "gcPressure",
         .iterations = ITERATIONS,
+        .expected = 895000,
         .code =
-        \\function runGcPressure(iterations) {
+        \\import { stringifyJson } from "zttp:json";
+        \\function run(iterations: number): number {
         \\    let count = 0;
-        \\    for (let i of range(iterations)) {
-        \\        let obj = { a: i % 100, b: 'str' };
-        \\        let str = JSON.stringify(obj);
-        \\        count = (count + str.length) % 1000000;
+        \\    for (const i of range(iterations)) {
+        \\        const encoded = stringifyJson({ a: i % 100, b: 'str' });
+        \\        if (!encoded.ok) { return -1; }
+        \\        count = (count + encoded.value.length) % 1000000;
         \\    }
         \\    return count;
         \\}
-        \\runGcPressure(50000);
         ,
     },
     .{
         .name = "httpHandler",
         .iterations = 5000,
+        .expected = 114500,
         .code =
-        \\function runHttpHandler(iterations) {
+        \\import { stringifyJson } from "zttp:json";
+        \\function run(iterations: number): number {
         \\    let responses = 0;
-        \\    for (let i of range(iterations)) {
-        \\        let response = {
-        \\            status: 200,
-        \\            body: JSON.stringify({ id: i % 100, name: 'User' })
-        \\        };
+        \\    for (const i of range(iterations)) {
+        \\        const encoded = stringifyJson({ id: i % 100, name: 'User' });
+        \\        if (!encoded.ok) { return -1; }
+        \\        const response = { status: 200, body: encoded.value };
         \\        responses = (responses + response.body.length) % 1000000;
         \\    }
         \\    return responses;
         \\}
-        \\runHttpHandler(5000);
         ,
     },
     .{
         .name = "httpHandlerHeavy",
         .iterations = 2000,
+        .expected = 637332,
         .code =
-        \\function runHttpHandlerHeavy(iterations) {
+        \\import { parseJson, stringifyJson } from "zttp:json";
+        \\import { dictSet } from "zttp:collections";
+        \\function run(iterations: number): number {
         \\    let responses = 0;
-        \\    let baseHeaders = { 'content-type': 'application/json', 'cache-control': 'no-store' };
-        \\    let payload = JSON.stringify({ id: 1, name: 'User1', tags: ['alpha','beta','gamma'] });
-        \\    for (let i of range(iterations)) {
-        \\        let reqPath = (i % 3 === 0) ? '/api/users' : '/api/users/42';
-        \\        let query = (i % 2 === 0) ? '?limit=10&offset=5' : '?limit=25&offset=0';
-        \\        let limit = (query.indexOf('limit=25') !== -1) ? 25 : 10;
-        \\        let offset = (query.indexOf('offset=5') !== -1) ? 5 : 0;
-        \\        let bodyObj = undefined;
-        \\        if (reqPath.indexOf('/api/users') === 0) {
-        \\            bodyObj = JSON.parse(payload);
-        \\            bodyObj.limit = limit;
-        \\            bodyObj.offset = offset;
-        \\        }
-        \\        let headers = {
+        \\    const baseHeaders = { 'content-type': 'application/json', 'cache-control': 'no-store' };
+        \\    const payload = stringifyJson({ id: 1, name: 'User1', tags: ['alpha', 'beta', 'gamma'] });
+        \\    if (!payload.ok) { return -1; }
+        \\    for (const i of range(iterations)) {
+        \\        const reqPath = (i % 3 === 0) ? '/api/users' : '/api/users/42';
+        \\        const query = (i % 2 === 0) ? '?limit=10&offset=5' : '?limit=25&offset=0';
+        \\        const limit = (query.indexOf('limit=25') !== -1) ? 25 : 10;
+        \\        const offset = (query.indexOf('offset=5') !== -1) ? 5 : 0;
+        \\        const parsed = parseJson(payload.value);
+        \\        if (!parsed.ok) { return -1; }
+        \\        const body = parsed.value;
+        \\        if (isDict(body) === false) { return -1; }
+        \\        const data = dictSet(dictSet(body, "limit", limit), "offset", offset);
+        \\        const headers = {
         \\            'content-type': baseHeaders['content-type'],
         \\            'cache-control': baseHeaders['cache-control'],
         \\            'x-request-id': ['req-', String(i % 1000)].join('')
         \\        };
-        \\        let response = {
+        \\        const encoded = stringifyJson({ ok: true, path: reqPath, data: data });
+        \\        if (!encoded.ok) { return -1; }
+        \\        const response = {
         \\            status: (reqPath === '/api/users') ? 200 : 201,
         \\            headers: headers,
-        \\            body: JSON.stringify({ ok: true, path: reqPath, data: bodyObj })
+        \\            body: encoded.value
         \\        };
         \\        responses = (responses + response.body.length + response.status) % 1000000;
         \\    }
         \\    return responses;
         \\}
-        \\runHttpHandlerHeavy(2000);
         ,
     },
     .{
         .name = "forOfLoop",
         .iterations = ITERATIONS,
+        .expected = 475000,
         .code =
-        \\function runForOfLoop(iterations) {
-        \\    let arr = [];
-        \\    for (let i of range(100)) {
+        \\function run(iterations: number): number {
+        \\    const arr: number[] = [];
+        \\    for (const i of range(100)) {
         \\        arr.push(i);
         \\    }
         \\    let sum = 0;
-        \\    let loops = (iterations / 100) >> 0;
-        \\    for (let j of range(loops)) {
-        \\        for (let val of arr) {
+        \\    const loops = Math.floor(iterations / 100);
+        \\    for (const j of range(loops)) {
+        \\        for (const val of arr) {
         \\            sum = (sum + val) % 1000000;
         \\        }
         \\    }
         \\    return sum;
         \\}
-        \\runForOfLoop(50000);
         ,
     },
 };
@@ -630,6 +653,41 @@ fn runRequestPath(options: Options) !void {
     printFmt("request_path allocator calls per request: alloc={d:.2} free={d:.2}", .{ allocs_per_request, frees_per_request });
 }
 
+fn runBuiltinBenchmark(
+    allocator: std.mem.Allocator,
+    config: RuntimeConfig,
+    bench: Benchmark,
+    timed: bool,
+) !BenchmarkResult {
+    const runtime = try HandlerInstance.init(allocator, config);
+    defer runtime.deinit();
+
+    const start: ?compat.Instant = if (timed) try compat.Instant.now() else null;
+    try runtime.loadCodeNoHandler(bench.code, "<builtin-benchmark>");
+    const args = [_]zq.JSValue{zq.JSValue.fromInt(@intCast(bench.iterations))};
+    const value = try runtime.callGlobalFunction("run", &args);
+    const elapsed_ns = if (start) |begin| (try compat.Instant.now()).since(begin) else 0;
+
+    const actual = value.toNumber() orelse return error.NonNumericBenchmarkResult;
+    if (actual != @as(f64, @floatFromInt(bench.expected))) {
+        std.log.err("{s}: expected {d}, got {d}", .{ bench.name, bench.expected, actual });
+        return error.UnexpectedBenchmarkResult;
+    }
+    if (timed and elapsed_ns == 0) return error.ZeroBenchmarkDuration;
+
+    return .{
+        .name = bench.name,
+        .iterations = bench.iterations,
+        .time_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0,
+        .ops_per_sec = if (timed)
+            @intFromFloat(@as(f64, @floatFromInt(bench.iterations)) * 1_000_000_000.0 / @as(f64, @floatFromInt(elapsed_ns)))
+        else
+            0,
+        .perf = runtime.interpreter.snapshotPerfStats(),
+        .opt_stats = runtime.last_opt_stats,
+    };
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     g_args = init.args;
     const options = parseOptions();
@@ -654,17 +712,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (options.script_path) |script_path| {
         const code = readFilePosix(allocator, script_path, 10 * 1024 * 1024) catch |err| {
             std.log.err("Failed to read script {s}: {}", .{ script_path, err });
-            return;
+            return err;
         };
         defer allocator.free(code);
 
         const runtime = try HandlerInstance.init(allocator, config);
-        // Note: Skip runtime.deinit() - page_allocator doesn't support individual frees
-        // All memory is released when the process exits
+        defer runtime.deinit();
 
         runtime.loadCodeNoHandler(code, script_path) catch |err| {
             std.log.err("Failed to execute script {s}: {}", .{ script_path, err });
-            return;
+            return err;
         };
 
         if (options.bench) {
@@ -672,7 +729,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const max_i32 = std.math.maxInt(i32);
             if (options.bench_iterations > max_i32 or options.warmup_iterations > max_i32) {
                 std.log.err("Iterations exceed i32 range", .{});
-                return;
+                return error.InvalidBenchmarkIterations;
             }
 
             const warmup_arg = zq.JSValue.fromInt(@intCast(options.warmup_iterations));
@@ -681,25 +738,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
             while (warm_idx < options.warmup_rounds) : (warm_idx += 1) {
                 _ = runtime.callGlobalFunction(options.bench_fn, &warmup_args) catch |err| {
                     std.log.err("Warmup call failed: {}", .{err});
-                    return;
+                    return err;
                 };
             }
 
             const run_arg = zq.JSValue.fromInt(@intCast(options.bench_iterations));
             const run_args = [_]zq.JSValue{run_arg};
 
-            const start = compat.Instant.now() catch {
-                std.log.err("Timer not available", .{});
-                return;
-            };
+            const start = try compat.Instant.now();
             _ = runtime.callGlobalFunction(options.bench_fn, &run_args) catch |err| {
                 std.log.err("Benchmark call failed: {}", .{err});
-                return;
+                return err;
             };
-            const end = compat.Instant.now() catch {
-                std.log.err("Timer not available", .{});
-                return;
-            };
+            const end = try compat.Instant.now();
 
             const elapsed_ns = end.since(start);
             const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
@@ -731,54 +782,32 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
 
-    if (!options.quiet and !options.json) {
+    if (!options.quiet and !options.json and !options.check_fixtures) {
         println("");
         println("=== zts JavaScript Engine Benchmarks ===");
         println("");
     }
 
     var results: [benchmarks.len]BenchmarkResult = undefined;
-    for (benchmarks, 0..) |bench, i| {
-        results[i] = .{
-            .name = bench.name,
-            .iterations = bench.iterations,
-        };
-    }
-    var total_time_ns: u64 = 0;
+    var failed = false;
+    var total_ms: f64 = 0;
 
     for (benchmarks, 0..) |bench, i| {
-        // Create fresh runtime for each benchmark
-        const runtime = try HandlerInstance.init(allocator, config);
-        // Note: Skip runtime.deinit() - page_allocator doesn't support individual frees
-
-        const start = compat.Instant.now() catch {
-            println("Timer not available");
-            return;
-        };
-
-        runtime.loadCodeNoHandler(bench.code, "<builtin-benchmark>") catch |err| {
-            results[i].success = false;
-            results[i].error_name = @errorName(err);
-            if (!options.quiet and !options.json) {
-                printFmt("{s}: ERROR - {}", .{ bench.name, err });
-            }
+        const result = runBuiltinBenchmark(allocator, config, bench, !options.check_fixtures) catch |err| {
+            failed = true;
+            std.log.err("{s}: {s}", .{ bench.name, @errorName(err) });
+            results[i] = .{
+                .name = bench.name,
+                .iterations = bench.iterations,
+                .success = false,
+                .error_name = @errorName(err),
+            };
             continue;
         };
+        results[i] = result;
+        total_ms += result.time_ms;
 
-        const end = compat.Instant.now() catch continue;
-        const elapsed_ns = end.since(start);
-        total_time_ns += elapsed_ns;
-        const perf = runtime.interpreter.snapshotPerfStats();
-
-        results[i].time_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        results[i].ops_per_sec = if (elapsed_ns > 0)
-            @intFromFloat(@as(f64, @floatFromInt(bench.iterations)) * 1_000_000_000.0 / @as(f64, @floatFromInt(elapsed_ns)))
-        else
-            0;
-        results[i].perf = perf;
-        results[i].opt_stats = runtime.last_opt_stats;
-
-        if (!options.quiet and !options.json) {
+        if (!options.quiet and !options.json and !options.check_fixtures) {
             printFmt("{s}: {d:.3}ms ({} ops/sec)", .{ bench.name, results[i].time_ms, results[i].ops_per_sec });
             const pic_total = @as(u64, results[i].perf.pic_hits) + @as(u64, results[i].perf.pic_misses);
             if (pic_total > 0) {
@@ -791,7 +820,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
-    if (options.json) {
+    if (options.check_fixtures) {
+        if (benchmarks.len != 13) return error.IncompleteBenchmarkFixtures;
+        if (!failed) printFmt("benchmark fixtures: {d} workload results matched", .{benchmarks.len});
+    } else if (options.json) {
         var output: std.ArrayList(u8) = .empty;
         defer output.deinit(allocator);
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
@@ -805,14 +837,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 try aw.writer.writeAll("\n");
             }
         }
-        const total_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
         try aw.writer.print("  ],\n  \"total_ms\":{d:.3}\n}}\n", .{total_ms});
         output = aw.toArrayList();
         writeStdout(output.items);
-        return;
+    } else {
+        printFmt("Total time: {d:.1}ms", .{total_ms});
+        println("");
     }
-
-    const total_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
-    printFmt("Total time: {d:.1}ms", .{total_ms});
-    println("");
+    if (failed) return error.BenchmarkFailed;
 }
