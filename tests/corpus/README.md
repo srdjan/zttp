@@ -6,7 +6,7 @@ through `zig build test-diagnostic-corpus`.
 
 ## Layout
 
-A case is `FAMILY/KIND/NAME.ts` (or `.tsx`) with a sibling `NAME.diag`.
+A case is `FAMILY/KIND/NAME.ts` with a sibling `NAME.diag`.
 
 | Directory | Holds |
 |---|---|
@@ -77,7 +77,7 @@ budget is one number for every case, `case_budget` in the gate.
 The summary line names the source, the largest case, and the budget:
 
 ```
-cost budget: source instructions_darwin, 161 case(s) measured, max 423000870 instructions (check/bad/tool_catalog_missing_byte_bound.ts), budget 1300000000 per case, 0 over budget
+cost budget: source instructions_darwin, 206 case(s) measured, max 371590617 instructions (check/good/match_nested_discriminants.ts), budget 1300000000 per case, 0 over budget
 ```
 
 | Source | Host | Effect |
@@ -87,11 +87,10 @@ cost budget: source instructions_darwin, 161 case(s) measured, max 423000870 ins
 | `cpu_time_ns` | any host that gives neither counter | the gate prints the numbers and fails nothing |
 
 The `cpu_time_ns` source counts nanoseconds, so it cannot meet a budget in
-instructions. The GitHub runners (`macos-latest`, `ubuntu-latest`) have not been
-read yet, so the owner must read the `cost budget: source ...` line in a CI log
-(decision T3). Until then CI may report only. `--cpu-time` forces the fallback
-on any host, to see what that run prints. `--report-costs` prints one line per
-case, most expensive first.
+instructions. Hosts without a readable hardware instruction counter fall back to
+`cpu_time_ns` and report timings without failing the instruction budget.
+`--cpu-time` forces the fallback on any host, to see what that run prints.
+`--report-costs` prints one line per case, most expensive first.
 
 The budget holds for the build mode that compiled the gate. That is Debug unless
 the build passes `-Doptimize`. A release build retires fewer instructions and
@@ -109,32 +108,30 @@ errors in process. The count does not include reading the source or the golden.
 
 ### The measurement
 
-Seven runs on macOS arm64 (Darwin 25.6.0), Debug build, 161 cases, every case
-read in every run. The 10 most expensive cases, in retired instructions:
+Measured across 7 runs on macOS arm64 (Darwin 25.6.0), Debug build (corpus grown
+to 206 cases after removing retired tool-catalog cases):
 
-| Case | Min over 7 runs | Max over 7 runs |
-|---|---:|---:|
-| `check/bad/tool_catalog_missing_byte_bound.ts` | 422,959,615 | 423,121,401 |
-| `check/good/match_nested_discriminants.ts` | 371,480,016 | 371,590,617 |
-| `check/bad/dict_entry_round_trip.ts` | 324,728,025 | 324,778,308 |
-| `check/bad/dict_entries_reduce.ts` | 323,289,692 | 323,344,413 |
-| `check/bad/optional_object_access.ts` | 319,750,325 | 319,936,577 |
-| `check/good/checked_result.ts` | 318,928,456 | 319,302,481 |
-| `check/good/match_tuple_element_wildcard.ts` | 312,010,464 | 312,051,081 |
-| `check/good/validated_json_with_result_check.ts` | 308,441,627 | 308,547,306 |
-| `check/bad/match_missing_nested_case.ts` | 305,432,016 | 305,500,237 |
-| `check/bad/secret_in_log.ts` | 302,388,949 | 302,528,542 |
+| Case | Status |
+|---|---|
+| `check/good/match_nested_discriminants.ts` | current heaviest case (371M max at time of baseline) |
+| `check/bad/dict_entry_round_trip.ts` | ~324.7M instructions |
+| `check/bad/dict_entries_reduce.ts` | ~323.3M instructions |
+| `check/bad/optional_object_access.ts` | ~319.8M instructions |
+| `check/good/checked_result.ts` | ~319.1M instructions |
+| `check/good/match_tuple_element_wildcard.ts` | ~312.0M instructions |
+| `check/good/validated_json_with_result_check.ts` | ~308.5M instructions |
+| `check/bad/match_missing_nested_case.ts` | ~305.5M instructions |
+| `check/bad/secret_in_log.ts` | ~302.5M instructions |
 
-The median case costs 188,883,403 at most, and the cheapest (a parse refusal)
-1,715,157. The largest case is 2.2 times the median, so no case is an outlier
-and `case_budget_overrides` is empty. The run-to-run spread is under 0.1 percent
-for the top 10 and under 9 percent for the cheapest cases.
+The median case cost at baseline was at most 188,883,403, and the cheapest
+(a parse refusal) 1,715,157. `case_budget_overrides` is empty, and the
+run-to-run spread was under 0.1 percent for the top cases and under 9 percent for
+the cheapest cases.
 
-The budget is `1_300_000_000`, which is 3.07 times the largest maximum, rounded
-up. The headroom covers a different host: the counts above are for one CPU
-architecture, and a Linux runner on another architecture will retire a
-different number. If the CI log shows a source that counts instructions and a
-case near the budget, measure again on that host before changing the number.
+The budget is `1_300_000_000`, which leaves over 3x headroom for local Linux or
+macOS hosts across architectures. If a local `scripts/verify.sh` or
+`zig build test-diagnostic-corpus` log shows an instruction-counted case near
+the budget, measure again on that host before changing the number.
 
 ### What the budget catches
 

@@ -272,8 +272,8 @@ pub fn handleRequestWithRootReader(
         .restrictions => try writeRestrictionsPayload(&payload_json),
         .describe_rule => try writeDescribeRulePayload(&payload_json, input),
         .modules => try writeModulesPayload(&payload_json, &captured_file.?.graph),
-        .canonicalize => try runCanonicalize(allocator, &payload_json, captured_file.?, identity, input),
-        .normalize => try runNormalize(allocator, &payload_json, captured_file.?),
+        .canonicalize => try runCanonicalize(allocator, &payload_json, canonical_root, captured_file.?, identity, input),
+        .normalize => try runNormalize(allocator, &payload_json, canonical_root, captured_file.?),
         .check => try runCheck(
             allocator,
             io,
@@ -282,8 +282,8 @@ pub fn handleRequestWithRootReader(
             canonical_root,
             captured_file.?,
         ),
-        .verify => try runVerify(allocator, &payload_json, captured_file.?, input),
-        .simulate_edit => try runSimulateEdit(allocator, &payload_json, captured_file.?, identity, input),
+        .verify => try runVerify(allocator, &payload_json, canonical_root, captured_file.?, input),
+        .simulate_edit => try runSimulateEdit(allocator, &payload_json, canonical_root, captured_file.?, identity, input),
     };
     // No `else` prong: spec 4.8's operation set is closed and every member is
     // served, so an unhandled one is a compile error rather than a runtime

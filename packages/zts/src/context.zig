@@ -162,6 +162,10 @@ pub const Context = struct {
     object_prototype: ?*object.JSObject,
     function_prototype: ?*object.JSObject,
     result_prototype: ?*object.JSObject,
+    /// Non-owning pointer to Error.prototype (lifetime tracked in builtin_objects).
+    error_prototype: ?*object.JSObject = null,
+    /// Guards ctx.render_writer against reentrant renderToString calls inside components.
+    render_in_use: bool = false,
     /// Atom table for dynamic atoms
     atoms: AtomTable,
     /// Exception value (if any)
@@ -319,6 +323,7 @@ pub const Context = struct {
             .host = null,
         };
         errdefer {
+            ctx.http.deinit(allocator);
             ctx.literal_shapes.deinit(allocator);
             ctx.cached_bytecode.deinit(allocator);
             ctx.bytecode_roots.deinit(allocator);
@@ -469,11 +474,13 @@ pub const Context = struct {
 
     /// Create a JS array, using arena when hybrid mode is enabled
     pub fn createArray(self: *Context) !*object.JSObject {
-        if (self.hybrid) |h| {
-            return object.JSObject.createArrayWithArena(h.arena, self.root_class_idx) orelse
-                return error.OutOfMemory;
-        }
-        return try object.JSObject.createArray(self.allocator, self.root_class_idx);
+        const arr = if (self.hybrid) |h|
+            object.JSObject.createArrayWithArena(h.arena, self.root_class_idx) orelse
+                return error.OutOfMemory
+        else
+            try object.JSObject.createArray(self.allocator, self.root_class_idx);
+        arr.prototype = self.array_prototype;
+        return arr;
     }
 
     /// Create a Dict, using arena when hybrid mode is enabled. A Dict built
@@ -541,13 +548,10 @@ pub const Context = struct {
         return try string.createSlice(self.allocator, parent, offset, len);
     }
 
-    /// Extract a string slice from a JSValue if it is a string
+    /// Extract a string slice from a JSValue if it is a string (flat or slice)
     pub fn getString(self: *const Context, val: value.JSValue) ?[]const u8 {
         _ = self;
-        if (val.isString()) {
-            return val.toPtr(string.JSString).data();
-        }
-        return null;
+        return val.stringBytes();
     }
 
     /// Check if a JSValue points to arena-allocated memory
@@ -721,9 +725,15 @@ pub const Context = struct {
         return @ptrCast(@alignCast(entry.ptr));
     }
 
-    /// Set per-module state for a slot. The deinit_fn will be called during Context.deinit.
+    /// Set per-module state for a slot. The deinit_fn will be called during Context.deinit
+    /// (and immediately for any previously registered state being overwritten).
     pub fn setModuleState(self: *Context, slot: usize, ptr: *anyopaque, deinit_fn: *const fn (*anyopaque, std.mem.Allocator) void) void {
         if (slot >= MAX_MODULE_STATE_SLOTS) return;
+        if (self.module_state[slot]) |old| {
+            if (old.ptr != ptr) {
+                old.deinit_fn(old.ptr, self.allocator);
+            }
+        }
         self.module_state[slot] = .{ .ptr = ptr, .deinit_fn = deinit_fn };
     }
 
@@ -1308,4 +1318,50 @@ test "Context hidden class pool transitions" {
     try std.testing.expectEqual(@as(u16, 0), pool.findProperty(class_xy, .length).?);
     // Second property at offset 1
     try std.testing.expectEqual(@as(u16, 1), pool.findProperty(class_xy, .name).?);
+}
+
+test "Context.createArray attaches array_prototype, getString handles SliceString, and setModuleState cleans overwritten slot" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const fake_proto = try ctx.createObject(null);
+    defer fake_proto.destroy(allocator);
+    ctx.array_prototype = fake_proto;
+    defer ctx.array_prototype = null;
+
+    const arr = try ctx.createArray();
+    defer arr.destroy(allocator);
+    try std.testing.expectEqual(fake_proto, arr.prototype.?);
+
+    const parent = try string.createString(allocator, "hello world");
+    defer string.freeString(allocator, parent);
+    const slice_obj = try string.createSlice(allocator, parent, 6, 5);
+    defer allocator.destroy(slice_obj);
+    try std.testing.expectEqualStrings("world", ctx.getString(value.JSValue.fromPtr(slice_obj)).?);
+
+    const State = struct {
+        cleaned: *bool,
+        fn deinitFn(ptr: *anyopaque, alloc: std.mem.Allocator) void {
+            const s: *@This() = @ptrCast(@alignCast(ptr));
+            s.cleaned.* = true;
+            alloc.destroy(s);
+        }
+    };
+    var first_cleaned = false;
+    var second_cleaned = false;
+    const s1 = try allocator.create(State);
+    s1.* = .{ .cleaned = &first_cleaned };
+    const s2 = try allocator.create(State);
+    s2.* = .{ .cleaned = &second_cleaned };
+
+    ctx.setModuleState(0, s1, State.deinitFn);
+    try std.testing.expect(!first_cleaned);
+    ctx.setModuleState(0, s2, State.deinitFn);
+    try std.testing.expect(first_cleaned);
+    try std.testing.expect(!second_cleaned);
 }

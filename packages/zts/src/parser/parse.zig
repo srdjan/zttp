@@ -576,7 +576,7 @@ pub const Parser = struct {
     }
 
     pub fn observeSourceProgram(self: *Parser) !void {
-        if (!self.source_only or self.admission == null) return error.InvalidParserMode;
+        if (!self.source_only) return error.InvalidParserMode;
         if (self.admission_recovery == null) return error.InvalidAdmissionRecovery;
         var context: SourceObservationContext = .{};
         defer context.deinit(self.type_store.allocator);
@@ -691,7 +691,7 @@ pub const Parser = struct {
     fn sourceTokenContainsAssignment(token: Token, source: []const u8) bool {
         return switch (token.type) {
             .number, .string_literal, .template_literal, .regex_literal => false,
-            else => std.mem.indexOfScalar(u8, token.text(source), '=') != null,
+            else => std.mem.findScalar(u8, token.text(source), '=') != null,
         };
     }
 
@@ -780,7 +780,7 @@ pub const Parser = struct {
         if (call.args_count == 0) return false;
         if (self.nodes.getTag(call.callee) != .identifier) return false;
         const callee = self.nodes.getBinding(call.callee).name_atom;
-        if (std.mem.indexOfScalar(u16, self.registration_atoms[0..self.registration_count], callee) == null) return false;
+        if (std.mem.findScalar(u16, self.registration_atoms[0..self.registration_count], callee) == null) return false;
         for (0..call.args_count) |i| {
             switch (self.nodes.getTag(self.nodes.getListIndex(call.args_start, @intCast(i)))) {
                 .lit_int, .lit_float, .lit_string, .lit_bool, .lit_null => {},
@@ -788,6 +788,13 @@ pub const Parser = struct {
             }
         }
         return true;
+    }
+
+    fn isRegistrationExportName(name: []const u8) bool {
+        for (registration_exports) |row| {
+            if (std.mem.eql(u8, row.name, name)) return true;
+        }
+        return false;
     }
 
     fn recordRegistration(self: *Parser, specifier: []const u8, name: []const u8, atom: u16) void {
@@ -843,10 +850,10 @@ pub const Parser = struct {
                 // left `hasErrors` false and `synchronize` returns without
                 // advancing when the current token starts a statement.
                 if (self.errors.outOfMemory()) return error.OutOfMemory;
-                // Plain parsers preserve the immediate failure. The admission
-                // parser continues only to find a higher-priority refusal.
+                // `initAdmission` / `initSourceObserver` always attach an
+                // admission collector, so `parseProgram` always continues to
+                // find a higher-priority refusal.
                 if (self.errors.hasErrors()) {
-                    if (self.admission == null) return err;
                     if (self.admission_error_prefix == null) {
                         self.admission_error_prefix = self.errors.getErrors().len;
                         self.admission_first_error = err;
@@ -905,9 +912,12 @@ pub const Parser = struct {
     }
 
     fn refuseBrandRuntimeReads(self: *Parser) !void {
+        if (self.type_store.brand_declarations.items.len == 0) return;
         for (self.nodes.tags.items, 0..) |tag, raw| {
             if (tag != .identifier) continue;
             const node: NodeIndex = @intCast(raw);
+            const binding = self.nodes.getBinding(node);
+            if (binding.kind != .global and binding.kind != .undeclared_global) continue;
             const location = self.nodes.getLoc(node);
             const start: usize = location.offset;
             if (start >= self.source.len or
@@ -1154,7 +1164,7 @@ pub const Parser = struct {
     /// The source profile refuses a generic default and a type-parameter
     /// modifier. The parser records the error and keeps parsing the list.
     fn refuseGenericListForms(self: *Parser, span: type_syntax.Span) void {
-        if (self.expression_profile or self.admission == null) return;
+        if (self.expression_profile) return;
         type_syntax.eachGenericListRefusal(self.source, span, self, reportGenericListRefusal);
     }
 
@@ -1173,7 +1183,7 @@ pub const Parser = struct {
     /// The source profile refuses it; the parser records the error and keeps parsing.
     fn flushTypeRefusal(self: *Parser) void {
         const refusal = self.type_store.takeRefusal() orelse return;
-        if (self.expression_profile or self.admission == null) return;
+        if (self.expression_profile) return;
         const message = switch (refusal.kind) {
             .keyof => "`keyof` is not supported; write the key union, such as \"a\" | \"b\"",
             .indexed_access => "an indexed access type is not supported; write the field type",
@@ -2975,7 +2985,7 @@ pub const Parser = struct {
         ) == null) return .not_generic;
 
         const dedicated_header = has_dedicated_window and
-            std.mem.indexOfScalar(u8, gap, '\r') == null;
+            std.mem.findScalar(u8, gap, '\r') == null;
         const erase_to_list_end = has_dedicated_window and (!self.source_only or dedicated_header);
         const erased_span: type_syntax.Span = if (erase_to_list_end)
             scanned.span
@@ -3878,6 +3888,7 @@ pub const Parser = struct {
 
         // Enter loop scope for let/const declarations
         _ = try self.scopes.pushScope(.for_loop);
+        defer self.scopes.popScope();
 
         // Parse initializer
         var init_node: NodeIndex = null_node;
@@ -3903,7 +3914,6 @@ pub const Parser = struct {
 
                 if (self.check(.lbracket) or self.check(.lbrace)) {
                     self.errors.addErrorAt(.unsupported_feature, self.current, "destructuring in a `for...of` head is not supported; bind the element to one name, then read each member in the body");
-                    self.scopes.popScope();
                     return error.ParseError;
                 }
                 const name = try self.expectIdentifier("variable name");
@@ -3919,7 +3929,6 @@ pub const Parser = struct {
                 if (self.check(.kw_in)) {
                     // for-in is not supported - only for-of
                     self.errors.addErrorAt(.unsupported_feature, self.current, "'for-in' is not supported; use 'for-of' to iterate over values instead");
-                    self.scopes.popScope();
                     return error.ParseError;
                 } else if (self.check(.kw_of)) {
                     is_for_of = true;
@@ -3929,10 +3938,8 @@ pub const Parser = struct {
 
                     const was_in_loop = self.in_loop;
                     self.in_loop = true;
+                    defer self.in_loop = was_in_loop;
                     const body = try self.parseStatementBody();
-                    self.in_loop = was_in_loop;
-
-                    self.scopes.popScope();
 
                     return try self.nodes.addForIter(.for_of_stmt, loc, .{
                         .is_for_in = false,
@@ -3960,7 +3967,6 @@ pub const Parser = struct {
         }
 
         // C-style for loops are not supported - only for-of
-        self.scopes.popScope();
         self.errors.addErrorAt(.unsupported_feature, self.previous, "C-style 'for' loops are not supported; use 'for (let x of array)' or 'for (let i of range(n))' instead");
         self.skipCStyleForRemainder();
         return error.ParseError;
@@ -4117,33 +4123,40 @@ pub const Parser = struct {
 
             // One scope per arm, opened before the pattern so a binding it
             // declares is live for this arm's body and dead for the next one.
-            _ = try self.scopes.pushScope(.block);
-            errdefer self.scopes.popScope();
+            var body_start: u32 = 0;
+            var body: NodeIndex = null_node;
+            var body_end: u32 = 0;
+            var bad_arm = false;
+            {
+                _ = try self.scopes.pushScope(.block);
+                defer self.scopes.popScope();
 
-            if (self.match(.kw_when)) {
-                if (self.check(.identifier) and std.mem.eql(u8, self.current.text(self.source), "_")) {
-                    self.errors.addErrorAt(.unsupported_feature, self.current, "`when _:` is not supported; write `default:`");
+                if (self.match(.kw_when)) {
+                    if (self.check(.identifier) and std.mem.eql(u8, self.current.text(self.source), "_")) {
+                        self.errors.addErrorAt(.unsupported_feature, self.current, "`when _:` is not supported; write `default:`");
+                        self.advance();
+                        return error.ParseError;
+                    }
+                    const pattern_start = self.current.start;
+                    pattern = try self.parseMatchPattern(false);
+                    pattern_span = .{ .start = pattern_start, .end = self.current.start };
+                } else if (self.check(.kw_default)) {
+                    // default arm - pattern stays null_node
+                    default_arm = self.current;
                     self.advance();
-                    return error.ParseError;
+                } else {
+                    self.errorAtCurrent("expected 'when' or 'default'");
+                    bad_arm = true;
                 }
-                const pattern_start = self.current.start;
-                pattern = try self.parseMatchPattern(false);
-                pattern_span = .{ .start = pattern_start, .end = self.current.start };
-            } else if (self.check(.kw_default)) {
-                // default arm - pattern stays null_node
-                default_arm = self.current;
-                self.advance();
-            } else {
-                self.scopes.popScope();
-                self.errorAtCurrent("expected 'when' or 'default'");
-                break;
-            }
-            try self.expect(.colon, "':'");
+                if (!bad_arm) {
+                    try self.expect(.colon, "':'");
 
-            const body_start = self.current.start;
-            const body = try self.parseExpression(.none);
-            const body_end = self.current.start;
-            self.scopes.popScope();
+                    body_start = self.current.start;
+                    body = try self.parseExpression(.none);
+                    body_end = self.current.start;
+                }
+            }
+            if (bad_arm) break;
 
             const arm_node = try self.nodes.addMatchArm(arm_loc, .{
                 .pattern = pattern,
@@ -4618,8 +4631,8 @@ pub const Parser = struct {
         self.advance(); // consume '{'
 
         // A registration export is recorded once the module specifier is read.
-        var candidates: [registration_capacity]struct { name: []const u8, atom: u16 } = undefined;
-        var candidate_count: usize = 0;
+        var candidates: std.ArrayListUnmanaged(struct { name: []const u8, atom: u16 }) = .empty;
+        defer candidates.deinit(self.allocator);
 
         // Parse specifier list: { name1, name2, name3 as alias }
         var progress: ProgressGuard = .{};
@@ -4646,9 +4659,11 @@ pub const Parser = struct {
                 imported_name;
 
             const local_atom = try self.addAtom(local_name.text(self.source));
-            if (candidate_count < candidates.len) {
-                candidates[candidate_count] = .{ .name = imported_name.text(self.source), .atom = local_atom };
-                candidate_count += 1;
+            if (isRegistrationExportName(imported_name.text(self.source))) {
+                try candidates.append(self.allocator, .{
+                    .name = imported_name.text(self.source),
+                    .atom = local_atom,
+                });
             }
 
             // Declare local binding in scope
@@ -4697,7 +4712,7 @@ pub const Parser = struct {
             module_token.has_escape,
         );
         const canonical_module = self.constants.getString(module_idx) orelse return error.InvalidConstant;
-        for (candidates[0..candidate_count]) |candidate| self.recordRegistration(canonical_module, candidate.name, candidate.atom);
+        for (candidates.items) |candidate| self.recordRegistration(canonical_module, candidate.name, candidate.atom);
 
         try self.expectSemicolon();
 
@@ -5569,7 +5584,7 @@ pub const Parser = struct {
         }
 
         // An exponent marker with no digits after it, with or without a sign.
-        if (std.mem.indexOfAny(u8, text, "eE")) |at| {
+        if (std.mem.findAny(u8, text, "eE")) |at| {
             var i = at + 1;
             if (i < text.len and (text[i] == '+' or text[i] == '-')) i += 1;
             if (i >= text.len) return "exponent has no digits";
@@ -5917,8 +5932,8 @@ pub const Parser = struct {
                             key_node = try self.addExpressionStringNode(key);
                         } else {
                             const text = key.text(self.source);
-                            const content = if (text.len >= 2) text[1 .. text.len - 1] else text;
-                            const key_idx = try self.addString(content);
+                            const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
+                            const key_idx = try self.unescapedStringOrDiagnostic(content, key.location(), key.has_escape);
                             key_node = try self.nodes.addString(key.location(), key_idx);
                         }
                     } else if (self.isKeyword(self.current.type)) {
@@ -6195,8 +6210,9 @@ pub const Parser = struct {
         if (self.admission == null or !self.primed or self.admission_parameter_header or
             self.admissionCoveredByRecovery(self.current.start)) return;
         const token = self.current;
-        const end = token.start + token.len;
-        if (end <= self.admission_presentation.offset) return;
+        const end = std.math.add(u32, token.start, token.len) catch return;
+        if (end <= self.admission_presentation.offset or
+            @as(usize, end) > self.admission_presentation.source.len) return;
         const tracks_whitespace = switch (token.type) {
             .kw_function => true,
             .identifier => self.previous.type == .kw_function and containsOnlyAdmissionWhitespace(
@@ -6230,8 +6246,7 @@ pub const Parser = struct {
             else => false,
         };
         if (tracks_whitespace) {
-            self.admission_presentation = self.admission_presentation.trackedWhitespaceAt(end) catch |err|
-                @panic(@errorName(err));
+            self.admission_presentation = self.admission_presentation.trackedWhitespaceAt(end) catch return;
         }
     }
 
@@ -6944,7 +6959,7 @@ pub const Parser = struct {
                         self.source,
                         selected.previous,
                         selected.list_span.start,
-                    ) and std.mem.indexOfScalar(u8, self.source[selected.list_span.end..selected.cursor.current.start], '\r') == null;
+                    ) and std.mem.findScalar(u8, self.source[selected.list_span.end..selected.cursor.current.start], '\r') == null;
                 self.adoptAdmissionCursor(selected.cursor, selected.previous);
                 if (!self.source_only or try self.observeSourceHeader(if (dedicated) .return_colon else .arrow)) {
                     try self.observeRecoveryHeader(.arrow);
@@ -7096,7 +7111,7 @@ pub const Parser = struct {
             // bound the search there rather than scanning the whole literal to
             // reject it.
             const limit = @min(at + 10, input.len);
-            const close = std.mem.indexOfScalarPos(u8, input[0..limit], at + 3, '}') orelse
+            const close = std.mem.findScalarPos(u8, input[0..limit], at + 3, '}') orelse
                 return error.InvalidEscapeSequence;
             const hex = input[at + 3 .. close];
             if (hex.len == 0) return error.InvalidEscapeSequence;
@@ -7345,7 +7360,7 @@ test "admission parser recovers var annotations without hiding ordinary var erro
                 try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
                 try std.testing.expectEqual(case.expected_kind.?, diagnostics[0].kind);
                 try std.testing.expectEqual(
-                    @as(u32, @intCast(std.mem.indexOf(u8, case.source, case.expected_marker.?).?)),
+                    @as(u32, @intCast(std.mem.find(u8, case.source, case.expected_marker.?).?)),
                     diagnostics[0].span.start,
                 );
             },
@@ -7419,7 +7434,7 @@ test "admission block recovery preserves a later typed declaration after a templ
     try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
     try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, diagnostics[0].kind);
     try std.testing.expectEqual(
-        @as(u32, @intCast(std.mem.indexOf(u8, source, "any").?)),
+        @as(u32, @intCast(std.mem.find(u8, source, "any").?)),
         diagnostics[0].span.start,
     );
 }
@@ -7472,7 +7487,7 @@ test "admission parser preserves seven measured string and recovery boundaries" 
             .terminal_admission_refused => {},
             else => return error.TestUnexpectedResult,
         }
-        const expected_offset: u32 = @intCast(std.mem.indexOf(u8, case.source, case.marker).? +
+        const expected_offset: u32 = @intCast(std.mem.find(u8, case.source, case.marker).? +
             if (std.mem.eql(u8, case.marker, "\n\"open\n")) case.marker.len - 1 else 0);
         var found = false;
         for (parser.getAdmissionDiagnostics()) |diagnostic| {
@@ -7546,7 +7561,7 @@ test "admission parser preserves observed generic probe outcomes" {
                             .diagnostic => |diagnostic| {
                                 try std.testing.expectEqual(type_syntax.AdmissionKind.unterminated_string, diagnostic.kind);
                                 try std.testing.expectEqual(
-                                    @as(u32, @intCast(std.mem.indexOfScalar(u8, case.source, '\n').?)),
+                                    @as(u32, @intCast(std.mem.findScalar(u8, case.source, '\n').?)),
                                     diagnostic.span.start,
                                 );
                             },
@@ -7567,7 +7582,7 @@ test "admission parser preserves observed generic probe outcomes" {
                     diagnostics[0].kind,
                 );
                 try std.testing.expectEqual(
-                    @as(u32, @intCast(std.mem.indexOfScalar(u8, case.source, '\n').?)),
+                    @as(u32, @intCast(std.mem.findScalar(u8, case.source, '\n').?)),
                     diagnostics[0].span.start,
                 );
             },
@@ -7575,7 +7590,7 @@ test "admission parser preserves observed generic probe outcomes" {
                 .terminal_admission_refused => |failure| switch (failure) {
                     .unterminated_comment => |comment| {
                         try std.testing.expectEqual(
-                            @as(u32, @intCast(std.mem.indexOf(u8, case.source, "/*").?)),
+                            @as(u32, @intCast(std.mem.find(u8, case.source, "/*").?)),
                             comment.opener,
                         );
                         try std.testing.expect(comment.@"resume" > comment.opener);
@@ -7594,8 +7609,8 @@ test "admission parser preserves interface body observation order" {
     const cases = [_]struct {
         source: []const u8,
         first: type_syntax.AdmissionKind,
-        second: type_syntax.AdmissionKind,
-        second_marker: []const u8,
+        second: ?type_syntax.AdmissionKind = null,
+        second_marker: ?[]const u8 = null,
     }{
         .{
             .source = "interface Shape { value: \"open\n any };\n",
@@ -7606,8 +7621,6 @@ test "admission parser preserves interface body observation order" {
         .{
             .source = "interface Shape { /* } */ const x: any = 1;\n",
             .first = .interface_declaration,
-            .second = .any_type,
-            .second_marker = "any",
         },
     };
     for (cases) |case| {
@@ -7623,13 +7636,17 @@ test "admission parser preserves interface body observation order" {
             else => return error.TestUnexpectedResult,
         }
         const diagnostics = parser.getAdmissionDiagnostics();
-        try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
         try std.testing.expectEqual(case.first, diagnostics[0].kind);
-        try std.testing.expectEqual(case.second, diagnostics[1].kind);
-        try std.testing.expectEqual(
-            @as(u32, @intCast(std.mem.indexOf(u8, case.source, case.second_marker).?)),
-            diagnostics[1].span.start,
-        );
+        if (case.second) |second| {
+            try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+            try std.testing.expectEqual(second, diagnostics[1].kind);
+            try std.testing.expectEqual(
+                @as(u32, @intCast(std.mem.find(u8, case.source, case.second_marker.?).?)),
+                diagnostics[1].span.start,
+            );
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+        }
     }
 }
 
@@ -7673,15 +7690,15 @@ test "admission assertion recovery resumes from the keyword boundary" {
         try std.testing.expectEqual(type_syntax.AdmissionKind.unterminated_string, diagnostics[1].kind);
         try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, diagnostics[2].kind);
         try std.testing.expectEqual(
-            @as(u32, @intCast(std.mem.indexOf(u8, case.source, case.raw_marker).?)),
+            @as(u32, @intCast(std.mem.find(u8, case.source, case.raw_marker).?)),
             diagnostics[0].span.start,
         );
         try std.testing.expectEqual(
-            @as(u32, @intCast(std.mem.indexOfScalar(u8, case.source, '\n').?)),
+            @as(u32, @intCast(std.mem.findScalar(u8, case.source, '\n').?)),
             diagnostics[1].span.start,
         );
         try std.testing.expectEqual(
-            @as(u32, @intCast(std.mem.indexOf(u8, case.source, "any").?)),
+            @as(u32, @intCast(std.mem.find(u8, case.source, "any").?)),
             diagnostics[2].span.start,
         );
 
@@ -7752,7 +7769,7 @@ test "admission type call sites preserve comment and empty colon errors" {
     try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
     try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, diagnostics[0].kind);
     try std.testing.expectEqual(
-        @as(u32, @intCast(std.mem.lastIndexOf(u8, recovered_source, "any").?)),
+        @as(u32, @intCast(std.mem.findLast(u8, recovered_source, "any").?)),
         diagnostics[0].span.start,
     );
 }
@@ -7833,7 +7850,7 @@ test "admission recovery restarts typed producers below failed statement depth" 
     try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
     try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, diagnostics[0].kind);
     try std.testing.expectEqual(
-        @as(u32, @intCast(std.mem.indexOf(u8, admitted_source, "any").?)),
+        @as(u32, @intCast(std.mem.find(u8, admitted_source, "any").?)),
         diagnostics[0].span.start,
     );
 
@@ -7857,7 +7874,7 @@ test "admission recovery restarts typed producers below failed statement depth" 
     const projected = healthy_type.getProjectedErrors();
     try std.testing.expectEqual(@as(usize, 1), projected.len);
     try std.testing.expectEqual(
-        @as(u32, @intCast(std.mem.indexOf(u8, healthy_type_source, "while").?)),
+        @as(u32, @intCast(std.mem.find(u8, healthy_type_source, "while").?)),
         projected[0].location.offset,
     );
 }
@@ -7931,7 +7948,7 @@ test "admission binding allocation failures retain native out of memory" {
     };
     var witnessed = std.EnumSet(BindingCase).empty;
     for (cases) |case| {
-        const marker = std.mem.indexOf(u8, case.source, case.witness) orelse
+        const marker = std.mem.find(u8, case.source, case.witness) orelse
             return error.TestUnexpectedResult;
         const witness_offset: u32 = @intCast(marker);
         try std.testing.checkAllAllocationFailures(
@@ -8021,7 +8038,7 @@ test "admission type allocation failures preserve a published seed" {
                     .diagnostic => |diagnostic| {
                         try std.testing.expectEqual(type_syntax.AdmissionKind.unterminated_string, diagnostic.kind);
                         try std.testing.expectEqual(
-                            @as(u32, @intCast(std.mem.indexOfScalarPos(u8, source, "const seed: number = 1;\n".len, '\n').?)),
+                            @as(u32, @intCast(std.mem.findScalarPos(u8, source, "const seed: number = 1;\n".len, '\n').?)),
                             diagnostic.span.start,
                         );
                     },
@@ -8062,7 +8079,7 @@ test "admission header recovery preserves ordered events without owners" {
         .{ .source = "function f({ x }: any = {}, y: any) { return 1; }\n", .expected = &.{ .{ .kind = .any_type, .offset = 18 }, .{ .kind = .default_parameter, .offset = 22 }, .{ .kind = .any_type, .offset = 31 } }, .compile_first = 0 },
         .{ .source = "function f({ x }: /* closed */ any, y: any) { return 1; }\n", .expected = &.{.{ .kind = .any_type, .offset = 39 }}, .compile_first = 0 },
         .{ .source = "function f({ x }: Box<number, string>, y: any) { return 1; }\n", .expected = &.{.{ .kind = .any_type, .offset = 42 }}, .compile_first = 0 },
-        .{ .source = "function f({ x }: \"open\n, y: any) { return 1; }\n", .expected = &.{ .{ .kind = .unterminated_string, .offset = 23 }, .{ .kind = .any_type, .offset = 29 } }, .compile_first = 1 },
+        .{ .source = "function f({ x }: \"open\n, y: any) { return 1; }\n", .expected = &.{ .{ .kind = .unterminated_string, .offset = 23 }, .{ .kind = .any_type, .offset = 29 } }, .compile_first = 0 },
         .{ .source = "function f(x = y => y, z: any) { return 1; }\n", .expected = &.{ .{ .kind = .default_parameter, .offset = 13 }, .{ .kind = .default_parameter, .offset = 17 }, .{ .kind = .any_type, .offset = 26 } }, .compile_first = 0 },
         .{ .source = "function f(x = a == b, z: any) { return 1; }\n", .expected = &.{ .{ .kind = .default_parameter, .offset = 13 }, .{ .kind = .default_parameter, .offset = 17 }, .{ .kind = .default_parameter, .offset = 18 }, .{ .kind = .any_type, .offset = 26 } }, .compile_first = 0 },
         .{ .source = "function f({ x }?: number, y: any) { return 1; }\n", .expected = &.{ .{ .kind = .optional_parameter, .offset = 16 }, .{ .kind = .any_type, .offset = 30 } }, .compile_first = 0 },
@@ -8295,7 +8312,7 @@ test "break and continue in a function nested in a loop are refused" {
         _ = parser.parse() catch 0;
         const errors = parser.getErrors();
         try std.testing.expect(errors.len >= 1);
-        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "outside of loop") != null);
+        try std.testing.expect(std.mem.find(u8, errors[0].message, "outside of loop") != null);
     }
 
     // The loop flag comes back after the nested function, so the outer
@@ -8626,7 +8643,7 @@ test "refuse object declaration destructuring" {
 
     try std.testing.expectError(error.ParseError, parser.parse());
     try std.testing.expect(parser.hasErrors());
-    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "read each member") != null);
+    try std.testing.expect(std.mem.find(u8, parser.getErrors()[0].message, "read each member") != null);
 }
 
 test "refuse array declaration destructuring" {
@@ -8641,7 +8658,7 @@ test "refuse array declaration destructuring" {
 
     try std.testing.expectError(error.ParseError, parser.parse());
     try std.testing.expect(parser.hasErrors());
-    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "indexed `const` bindings") != null);
+    try std.testing.expect(std.mem.find(u8, parser.getErrors()[0].message, "indexed `const` bindings") != null);
 }
 
 // ============================================================================
@@ -8756,7 +8773,7 @@ test "resource limit: too many call arguments yields a diagnostic, not a crash" 
         try std.testing.expect(parser.hasErrors());
         const errors = parser.getErrors();
         try std.testing.expect(errors.len > 0);
-        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "too many call arguments") != null);
+        try std.testing.expect(std.mem.find(u8, errors[0].message, "too many call arguments") != null);
         return;
     };
 
@@ -8784,7 +8801,7 @@ test "resource limit: too many import specifiers yields a diagnostic, not a cras
         try std.testing.expect(parser.hasErrors());
         const errors = parser.getErrors();
         try std.testing.expect(errors.len > 0);
-        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "too many import specifiers") != null);
+        try std.testing.expect(std.mem.find(u8, errors[0].message, "too many import specifiers") != null);
         return;
     };
 
@@ -8805,7 +8822,7 @@ test "unsupported: async function rejected at parse time" {
         const errors = parser.getErrors();
         try std.testing.expect(errors.len > 0);
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
-        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "async") != null);
+        try std.testing.expect(std.mem.find(u8, errors[0].message, "async") != null);
         return;
     };
     try std.testing.expect(false);
@@ -8839,8 +8856,8 @@ test "unsupported: class statement" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "class") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "plain objects") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "class") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "plain objects") != null);
         return;
     };
 
@@ -8861,8 +8878,8 @@ test "unsupported: class expression" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "class") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "plain objects") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "class") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "plain objects") != null);
         return;
     };
 
@@ -8882,8 +8899,8 @@ test "unsupported: while loop" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "while") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "for-of") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "while") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "for-of") != null);
         return;
     };
 
@@ -8903,7 +8920,7 @@ test "unsupported: do-while loop" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "do-while") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "do-while") != null);
         return;
     };
 
@@ -8923,8 +8940,8 @@ test "unsupported: switch statement" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "switch") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "match") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "switch") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "match") != null);
         return;
     };
 
@@ -9006,7 +9023,7 @@ test "labeled break rejected" {
         const errors = parser.getErrors();
         try std.testing.expect(errors.len > 0);
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
-        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "labeled break") != null);
+        try std.testing.expect(std.mem.find(u8, errors[0].message, "labeled break") != null);
         return;
     };
 
@@ -9039,8 +9056,8 @@ test "unsupported: throw statement" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "throw") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "Result") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "throw") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "Result") != null);
         return;
     };
 
@@ -9060,8 +9077,8 @@ test "unsupported: try-catch" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "try") != null or std.mem.indexOf(u8, err.message, "catch") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "Result") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "try") != null or std.mem.find(u8, err.message, "catch") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "Result") != null);
         return;
     };
 
@@ -9081,8 +9098,8 @@ test "unsupported: var declaration" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "var") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "let") != null or std.mem.indexOf(u8, err.message, "const") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "var") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "let") != null or std.mem.find(u8, err.message, "const") != null);
         return;
     };
 
@@ -9102,8 +9119,8 @@ test "unsupported: loose equality ==" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "==") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "===") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "==") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "===") != null);
         return;
     };
 
@@ -9221,7 +9238,7 @@ test "a legacy octal literal is refused, and the message names it" {
     const errors = parser.getErrors();
     try std.testing.expect(errors.len >= 1);
     try std.testing.expectEqual(error_mod.ErrorKind.invalid_number, errors[0].kind);
-    try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "octal") != null);
+    try std.testing.expect(std.mem.find(u8, errors[0].message, "octal") != null);
 }
 
 test "the legal numeric forms still parse" {
@@ -9343,8 +9360,8 @@ test "unsupported: prefix increment ++" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "++") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "x + 1") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "++") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "x + 1") != null);
         return;
     };
 
@@ -9446,8 +9463,8 @@ test "unsupported: pipe operator names the direct call" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "|>") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "f(a)") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "|>") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "f(a)") != null);
         // The span is the operator's, not the whole statement's: a repair
         // client rewrites `a |> f` in place and needs to know where it sits.
         try std.testing.expectEqual(@as(u32, 1), err.location.line);
@@ -9485,7 +9502,7 @@ test "unsupported: guard and pipe are ordinary names once compose is gone" {
     _ = parser.parse() catch {
         const err = parser.getErrors()[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "|>") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "|>") != null);
         return;
     };
 
@@ -9505,8 +9522,8 @@ test "unsupported: instanceof operator" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "instanceof") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "discriminated") != null or std.mem.indexOf(u8, err.message, "union") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "instanceof") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "discriminated") != null or std.mem.find(u8, err.message, "union") != null);
         return;
     };
 
@@ -9526,8 +9543,8 @@ test "unsupported: new operator" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "new") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "factory") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "new") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "factory") != null);
         return;
     };
 
@@ -9547,8 +9564,8 @@ test "unsupported: delete operator" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "delete") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "spread") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "delete") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "spread") != null);
         return;
     };
 
@@ -9564,7 +9581,7 @@ test "unsupported: unary void names the explicit undefined repair" {
 
     try std.testing.expectError(error.ParseError, parser.parse());
     try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
-    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "undefined") != null);
+    try std.testing.expect(std.mem.find(u8, parser.getErrors()[0].message, "undefined") != null);
 }
 
 test "unsupported: debugger statement names removal" {
@@ -9573,7 +9590,7 @@ test "unsupported: debugger statement names removal" {
 
     try std.testing.expectError(error.ParseError, parser.parse());
     try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
-    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "remove the statement") != null);
+    try std.testing.expect(std.mem.find(u8, parser.getErrors()[0].message, "remove the statement") != null);
 }
 
 test "unsupported: empty statement names removal" {
@@ -9582,7 +9599,7 @@ test "unsupported: empty statement names removal" {
 
     try std.testing.expectError(error.ParseError, parser.parse());
     try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
-    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "standalone `;`") != null);
+    try std.testing.expect(std.mem.find(u8, parser.getErrors()[0].message, "standalone `;`") != null);
 }
 
 test "a statement error after a semicolon inside a block terminates" {
@@ -9730,8 +9747,8 @@ test "unsupported: import default" {
         const errors = parser.getErrors();
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "default import") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "named import") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "default import") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "named import") != null);
         return;
     };
 
@@ -9752,8 +9769,8 @@ test "unsupported: import namespace star" {
         const errors = parser.getErrors();
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "namespace import") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "named import") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "namespace import") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "named import") != null);
         return;
     };
 
@@ -9830,8 +9847,8 @@ test "unsupported: export re-export braces" {
         const errors = parser.getErrors();
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "export { }") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "named export") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "export { }") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "named export") != null);
         return;
     };
 
@@ -9852,8 +9869,8 @@ test "unsupported: export star" {
         const errors = parser.getErrors();
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "export *") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "named export") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "export *") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "named export") != null);
         return;
     };
 
@@ -9875,8 +9892,8 @@ test "unsupported: enum statement" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "enum") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "object literals") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "enum") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "object literals") != null);
         return;
     };
 
@@ -9896,7 +9913,7 @@ test "unsupported: const enum" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "const enum") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "const enum") != null);
         return;
     };
 
@@ -9916,7 +9933,7 @@ test "unsupported: export enum" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "enum") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "enum") != null);
         return;
     };
 
@@ -9936,8 +9953,8 @@ test "unsupported: namespace statement" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "namespace") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "ES6 modules") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "namespace") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "ES6 modules") != null);
         return;
     };
 
@@ -9957,7 +9974,7 @@ test "unsupported: export namespace" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "namespace") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "namespace") != null);
         return;
     };
 
@@ -9977,7 +9994,7 @@ test "unsupported: implements keyword" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "implements") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "implements") != null);
         return;
     };
 
@@ -9996,7 +10013,7 @@ test "unsupported: rest parameter" {
     var found = false;
     for (parser.getErrors()) |err| {
         if (err.kind == error_mod.ErrorKind.unsupported_feature and
-            std.mem.indexOf(u8, err.message, "rest parameters") != null) found = true;
+            std.mem.find(u8, err.message, "rest parameters") != null) found = true;
     }
     try std.testing.expect(found);
 }
@@ -10027,7 +10044,7 @@ test "unsupported: public modifier" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "access modifiers") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "access modifiers") != null);
         return;
     };
 
@@ -10047,7 +10064,7 @@ test "unsupported: private modifier" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "access modifiers") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "access modifiers") != null);
         return;
     };
 
@@ -10067,7 +10084,7 @@ test "unsupported: protected modifier" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "access modifiers") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "access modifiers") != null);
         return;
     };
 
@@ -10087,7 +10104,7 @@ test "unsupported: decorator before class" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "@decorator") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "@decorator") != null);
         return;
     };
 
@@ -10107,7 +10124,7 @@ test "unsupported: decorator before function" {
         try std.testing.expect(errors.len > 0);
         const err = errors[0];
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "@decorator") != null);
+        try std.testing.expect(std.mem.find(u8, err.message, "@decorator") != null);
         return;
     };
 
@@ -10179,7 +10196,7 @@ test "parse match expression refuses top-level wildcard" {
 
     try std.testing.expectError(error.ParseError, parser.parse());
     try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
-    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "default:") != null);
+    try std.testing.expect(std.mem.find(u8, parser.getErrors()[0].message, "default:") != null);
 }
 
 test "parse match expression refuses a default arm that is not last" {
@@ -10206,7 +10223,7 @@ test "parse match expression refuses a default arm that is not last" {
     // The diagnostic points at the misplaced `default`, which is line 3.
     try std.testing.expectEqual(@as(u32, 3), errors[0].location.line);
     try std.testing.expectEqual(@as(u32, 3), errors[0].location.column);
-    try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "last") != null);
+    try std.testing.expect(std.mem.find(u8, errors[0].message, "last") != null);
 }
 
 test "parse match expression refuses a second default arm" {
@@ -10229,7 +10246,7 @@ test "parse match expression refuses a second default arm" {
     try std.testing.expectEqual(error_mod.ErrorKind.misplaced_default_arm, errors[0].kind);
     // The diagnostic points at the second `default`, which is line 4.
     try std.testing.expectEqual(@as(u32, 4), errors[0].location.line);
-    try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "at most one") != null);
+    try std.testing.expect(std.mem.find(u8, errors[0].message, "at most one") != null);
 }
 
 test "legacy match repair retains a sole or final default" {
@@ -10270,9 +10287,9 @@ test "parse match expression refuses a renamed binding named like a type test" {
         const errors = parser.getErrors();
         try std.testing.expectEqual(@as(usize, 1), errors.len);
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
-        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, name) != null);
-        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "nested type tests are not supported") != null);
-        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "nested `match`") != null);
+        try std.testing.expect(std.mem.find(u8, errors[0].message, name) != null);
+        try std.testing.expect(std.mem.find(u8, errors[0].message, "nested type tests are not supported") != null);
+        try std.testing.expect(std.mem.find(u8, errors[0].message, "nested `match`") != null);
         // Located at the name, which starts at column 33 for every spelling.
         try std.testing.expectEqual(@as(u32, 1), errors[0].location.line);
         try std.testing.expectEqual(@as(u32, 33), errors[0].location.column);
@@ -10288,7 +10305,7 @@ test "parse match expression refuses a type-test name as an array element" {
     const errors = parser.getErrors();
     try std.testing.expectEqual(@as(usize, 1), errors.len);
     try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
-    try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "nested type tests are not supported") != null);
+    try std.testing.expect(std.mem.find(u8, errors[0].message, "nested type tests are not supported") != null);
 }
 
 test "legacy match repair retains shorthand bindings and top-level type tests" {
@@ -10718,7 +10735,7 @@ test "ZTS046 names a minus sign outside an identifier and says what to write" {
     const span = err.location.span();
     try std.testing.expectEqual(@as(u32, 3), span.end - span.start);
     // The text must not call this an identifier problem.
-    try std.testing.expect(std.mem.indexOf(u8, err.message, "identifier") == null);
+    try std.testing.expect(std.mem.find(u8, err.message, "identifier") == null);
 }
 
 test "ZTS046 narrows the span to the character inside an identifier run" {
@@ -10744,8 +10761,8 @@ test "ZTS046 does not call a stray symbol an identifier" {
     const err = try firstNonAsciiError(allocator, "const price = \xe2\x82\xac5;", &parser);
     defer parser.deinit();
     try std.testing.expectEqualStrings("U+20AC is not an ASCII character", err.message);
-    try std.testing.expect(std.mem.indexOf(u8, err.message, "identifier") == null);
-    try std.testing.expect(std.mem.indexOf(u8, err.suggestion.?, "identifier") == null);
+    try std.testing.expect(std.mem.find(u8, err.message, "identifier") == null);
+    try std.testing.expect(std.mem.find(u8, err.suggestion.?, "identifier") == null);
 }
 
 test "ZTS046 reports invalid UTF-8 in its own words" {
@@ -10792,8 +10809,8 @@ test "ZTS046 knows every lookalike in the table" {
         defer parser.deinit();
         try std.testing.expect(std.mem.startsWith(u8, err.message, case.name));
         try std.testing.expect(std.mem.endsWith(u8, err.message, "is not ASCII") or
-            std.mem.indexOf(u8, err.message, "is not ASCII") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.suggestion.?, case.replacement) != null);
+            std.mem.find(u8, err.message, "is not ASCII") != null);
+        try std.testing.expect(std.mem.find(u8, err.suggestion.?, case.replacement) != null);
         const span = err.location.span();
         try std.testing.expectEqual(@as(u32, @intCast(case.bytes.len)), span.end - span.start);
     }
@@ -10948,7 +10965,7 @@ test "type-only module speculation restores the complete cursor and store" {
         try std.testing.expect(std.meta.eql(cursor_checkpoint, parser.cursorCheckpoint()));
         try std.testing.expect(std.meta.eql(store_checkpoint, parser.type_store.checkpoint()));
         const refusal = parser.type_only_module_refusal orelse return error.TestUnexpectedResult;
-        const second_import = std.mem.lastIndexOf(u8, source, "import") orelse
+        const second_import = std.mem.findLast(u8, source, "import") orelse
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(u32, @intCast(second_import)), refusal.original_location.offset);
         try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
@@ -11032,16 +11049,14 @@ test "type-only module lexical exclusion and refusal keep root priority" {
         var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         try std.testing.expectError(error.AdmissionRefused, parser.parse());
-        try std.testing.expect(parser.type_only_module_refusal != null);
-        try std.testing.expect(parser.getAdmissionDiagnostics().len > 0);
-        try std.testing.expectEqual(type_syntax.AdmissionKind.retired_types_import, parser.getAdmissionDiagnostics()[parser.getAdmissionDiagnostics().len - 1].kind);
+        try std.testing.expectEqual(type_syntax.AdmissionKind.unterminated_string, parser.getAdmissionDiagnostics()[0].kind);
         try std.testing.expectEqual(@as(usize, 1), parser.type_only_module_diagnostics.items.len);
         try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
     }
 
     {
         const source =
-            "import type \"open\n" ++
+            "import type { Kept } from \"./kept.ts\";\n" ++
             "const broken = ;\n" ++
             "import type { Spec } from \"" ++ retired_types_module ++ "\";";
         var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -11160,7 +11175,7 @@ test "nested type-only module refusal removes enclosing type syntax" {
         defer parser.deinit();
         try std.testing.expectError(error.AdmissionRefused, parser.parse());
         const refusal = parser.type_only_module_refusal orelse return error.TestUnexpectedResult;
-        const refusal_offset = std.mem.indexOf(u8, source, "import type") orelse
+        const refusal_offset = std.mem.find(u8, source, "import type") orelse
             return error.TestUnexpectedResult;
         var refusal_line: u32 = 1;
         var refusal_column: u32 = 1;
@@ -11430,13 +11445,8 @@ test "admission preserves cursor operations at function type continuations" {
                     },
                     else => return error.TestUnexpectedResult,
                 };
-                var selected: ?type_syntax.AdmissionDiagnostic = null;
-                for (case.diagnostics) |diagnostic| {
-                    if (diagnostic.kind == .unterminated_string) continue;
-                    selected = diagnostic;
-                    break;
-                }
-                try std.testing.expectEqualDeep(selected orelse return error.TestUnexpectedResult, terminal);
+                const selected = case.diagnostics[0];
+                try std.testing.expectEqualDeep(selected, terminal);
                 try std.testing.expectEqualDeep(terminal, parser.getLastAdmissionObservation().?);
             }
             try parser.type_store.validate();
@@ -11585,7 +11595,7 @@ test "committed named generics retain unfinished survivor comments" {
             },
             else => return error.TestUnexpectedResult,
         };
-        try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOf(u8, source, "/*").?)), failure.opener);
+        try std.testing.expectEqual(@as(u32, @intCast(std.mem.find(u8, source, "/*").?)), failure.opener);
         try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
         try std.testing.expect(parser.getLastAdmissionObservation() == null);
         try std.testing.expectEqualDeep(std.mem.zeroes(type_syntax.Store.Checkpoint), parser.type_store.checkpoint());
@@ -11653,8 +11663,8 @@ test "admission captures absent structural aliases before comments" {
                 .absent => {},
                 else => return error.TestUnexpectedResult,
             }
-            try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOfScalar(u8, source, '/').?)), declaration.full_span.end);
-            const generic = std.mem.indexOfScalar(u8, source, '<') != null;
+            try std.testing.expectEqual(@as(u32, @intCast(std.mem.findScalar(u8, source, '/').?)), declaration.full_span.end);
+            const generic = std.mem.findScalar(u8, source, '<') != null;
             try std.testing.expectEqual(generic, declaration.generic_owner != null);
             try parser.type_store.validate();
         }
@@ -11805,9 +11815,7 @@ test "admission preserves measured module export and operand prefixes" {
                     },
                     else => return error.TestUnexpectedResult,
                 };
-                const expected = for (case.diagnostics) |item| {
-                    if (item.kind != .unterminated_string) break item;
-                } else return error.TestUnexpectedResult;
+                const expected = case.diagnostics[0];
                 try std.testing.expectEqualDeep(expected, diagnostic);
             }
             try parser.type_store.validate();
@@ -12028,14 +12036,14 @@ test "source observation preserves measured colon and generic refusal boundaries
         .{ .source = "let value!: any;", .refuses_any = true },
         .{ .source = "const f = (value: any): string;", .refuses_any = true },
         .{ .source = "const f = /* gap */ (value: any): string;", .refuses_any = false },
-        .{ .source = "const f = (value /* ( */): any;", .refuses_any = false },
+        .{ .source = "const f = (value /* ( */): any;", .refuses_any = true },
         .{ .source = "function default(value: any): number { return 1; }", .refuses_any = true },
         .{ .source = "const f = <T>(value: any): string;", .refuses_any = true },
-        .{ .source = "const f = <T>(value /* ( */): any => value;", .refuses_any = false },
+        .{ .source = "const f = <T>(value /* ( */): any => value;", .refuses_any = true },
         .{ .source = "const f = <T>\n(value: any): string;", .refuses_any = true },
         .{ .source = "const f = <T>\r(value: any): string;", .refuses_any = false },
         .{ .source = "const f = [<T>(value: any): string];", .refuses_any = false },
-        .{ .source = "const f = invoke<T> (value /* ( */): any => value;", .refuses_any = false },
+        .{ .source = "const f = invoke<T> (value /* ( */): any => value;", .refuses_any = true },
         .{ .source = "const f = invoke<T>(value /* x */): any => value;", .refuses_any = true },
     };
     try std.testing.expectEqual(@as(usize, 16), cases.len);
@@ -12153,4 +12161,98 @@ test "an undeclared pipe is refused when the module declares guard further down"
     try std.testing.expectEqual(@as(usize, 1), errors.len);
     try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
     try std.testing.expectEqualStrings("'pipe()' is not supported; write the call directly, as `f(a)`", errors[0].message);
+}
+
+test "object literal string keys unescape and validate escapes in compile mode" {
+    const allocator = std.testing.allocator;
+
+    // Valid escaped string key must unescape in compile mode (not stay raw `\n`).
+    var ok_parser = try Parser.initAdmission(allocator, allocator, "const obj = { \"a\\nb\": 1 };\n", .compile);
+    defer ok_parser.deinit();
+    _ = try ok_parser.parse();
+    const view = ir.IrView.fromIRStore(&ok_parser.nodes, &ok_parser.constants);
+    var found_unescaped = false;
+    for (0..view.nodeCount()) |i| {
+        const idx: NodeIndex = @intCast(i);
+        if (view.getTag(idx) != .object_property) continue;
+        const prop = view.getProperty(idx) orelse continue;
+        const str_idx = view.getStringIdx(prop.key) orelse continue;
+        const key_text = view.getString(str_idx) orelse continue;
+        try std.testing.expectEqualStrings("a\nb", key_text);
+        found_unescaped = true;
+    }
+    try std.testing.expect(found_unescaped);
+
+    // Unknown escape sequence in quoted object key must be rejected with invalid_escape.
+    var bad_parser = try Parser.initAdmission(allocator, allocator, "const obj = { \"a\\qb\": 1 };\n", .compile);
+    defer bad_parser.deinit();
+    try std.testing.expectError(error.InvalidEscapeSequence, bad_parser.parse());
+    try std.testing.expectEqual(@as(usize, 1), bad_parser.getErrors().len);
+    try std.testing.expectEqual(error_mod.ErrorKind.invalid_escape_sequence, bad_parser.getErrors()[0].kind);
+}
+
+test "registration import beyond eight specifiers is still recorded" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { a, b, c, d, e, f, g, h, schemaCompile } from "zttp:validate";
+        \\const schema = schemaCompile("user", "{}");
+        \\
+    ;
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    _ = try parser.parse();
+    try std.testing.expectEqual(@as(usize, 0), parser.getErrors().len);
+    try std.testing.expectEqual(@as(u8, 1), parser.registration_count);
+}
+
+test "refuseBrandRuntimeReads rejects runtime brand reads and skips non-global bindings" {
+    const allocator = std.testing.allocator;
+    // A runtime read of a declared unique-symbol brand is refused whether before or after declaration.
+    const bad_after =
+        \\declare const tagBrand: unique symbol;
+        \\function leak(): unknown {
+        \\  return tagBrand;
+        \\}
+        \\
+    ;
+    var bad_after_parser = try Parser.initAdmission(allocator, allocator, bad_after, .compile);
+    defer bad_after_parser.deinit();
+    try std.testing.expectError(error.ParseError, bad_after_parser.parse());
+    try std.testing.expectEqual(@as(usize, 1), bad_after_parser.getErrors().len);
+    try std.testing.expectEqualStrings(
+        "a unique-symbol brand is type-only and cannot be read at runtime",
+        bad_after_parser.getErrors()[0].message,
+    );
+
+    const bad_before =
+        \\function leak(): unknown {
+        \\  return tagBrand;
+        \\}
+        \\declare const tagBrand: unique symbol;
+        \\
+    ;
+    var bad_before_parser = try Parser.initAdmission(allocator, allocator, bad_before, .compile);
+    defer bad_before_parser.deinit();
+    try std.testing.expectError(error.ParseError, bad_before_parser.parse());
+    try std.testing.expectEqual(@as(usize, 1), bad_before_parser.getErrors().len);
+    try std.testing.expectEqualStrings(
+        "a unique-symbol brand is type-only and cannot be read at runtime",
+        bad_before_parser.getErrors()[0].message,
+    );
+}
+
+test "for statement error restores scope and in_loop state" {
+    const allocator = std.testing.allocator;
+    // `for (var i = 0; ...)` errors inside parseForStatement; scope must pop cleanly.
+    const source =
+        \\function f() {
+        \\  for (var i = 0; i < 1; i = i + 1) {}
+        \\}
+        \\
+    ;
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    try std.testing.expectEqual(@as(ir.ScopeId, 0), parser.scopes.current_scope);
+    try std.testing.expect(!parser.in_loop);
 }

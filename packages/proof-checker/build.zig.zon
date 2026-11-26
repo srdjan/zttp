@@ -1,6 +1,6 @@
 .{
     .name = .zttp_proof_checker,
-    .version = "0.0.0",
+    .version = "0.27.2",
     .fingerprint = 0x215fba6bcd20b696,
     .minimum_zig_version = "0.17.1",
     .dependencies = .{},

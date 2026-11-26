@@ -127,11 +127,11 @@ test "build emits one JSON line with the incident fields" {
 
     const s = line.items;
     try std.testing.expect(std.mem.endsWith(u8, s, "\n"));
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"kind\":\"soundness_incident\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"method\":\"GET\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"path\":\"/users\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"claimed\":[\"optional_safe\",\"result_safe\"]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"detail\":\"NotCallable\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"kind\":\"soundness_incident\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"method\":\"GET\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"path\":\"/users\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"claimed\":[\"optional_safe\",\"result_safe\"]") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"detail\":\"NotCallable\"") != null);
 }
 
 test "build escapes quotes and control characters in dynamic fields" {
@@ -141,9 +141,9 @@ test "build escapes quotes and control characters in dynamic fields" {
     try build(allocator, &line, "GET", "/a\"b", &.{}, "line1\nq\"uote");
 
     const s = line.items;
-    try std.testing.expect(std.mem.indexOf(u8, s, "/a\\\"b") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "line1\\nq\\\"uote") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"claimed\":[]") != null);
+    try std.testing.expect(std.mem.find(u8, s, "/a\\\"b") != null);
+    try std.testing.expect(std.mem.find(u8, s, "line1\\nq\\\"uote") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"claimed\":[]") != null);
 }
 
 test "appendEscaped sanitizes invalid UTF-8 and preserves valid multibyte" {
@@ -154,14 +154,14 @@ test "appendEscaped sanitizes invalid UTF-8 and preserves valid multibyte" {
     // A lone high byte (as an unvalidated request path could carry) must be
     // replaced by U+FFFD, never emitted raw, so the JSONL line stays valid UTF-8.
     try appendEscaped(allocator, &out, "a\xE9b");
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\u{FFFD}") != null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, out.items, 0xE9) == null);
+    try std.testing.expect(std.mem.find(u8, out.items, "\u{FFFD}") != null);
+    try std.testing.expect(std.mem.findScalar(u8, out.items, 0xE9) == null);
     try std.testing.expect(std.unicode.utf8ValidateSlice(out.items));
 
     // A complete, valid multibyte sequence (café; é = 0xC3 0xA9) passes through.
     out.clearRetainingCapacity();
     try appendEscaped(allocator, &out, "caf\xC3\xA9");
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\xC3\xA9") != null);
+    try std.testing.expect(std.mem.find(u8, out.items, "\xC3\xA9") != null);
     try std.testing.expect(std.unicode.utf8ValidateSlice(out.items));
 }
 
@@ -184,6 +184,6 @@ test "write appends one line per incident to an O_APPEND fd" {
     var it = std.mem.tokenizeScalar(u8, contents, '\n');
     while (it.next()) |_| lines += 1;
     try std.testing.expectEqual(@as(usize, 2), lines);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "\"path\":\"/x\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "\"path\":\"/y\"") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "\"path\":\"/x\"") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "\"path\":\"/y\"") != null);
 }

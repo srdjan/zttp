@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
+const project_config_mod = @import("project_config");
 const agent_identity = @import("agent_identity.zig");
 const module_graph_record = @import("module_graph_record.zig");
 const precompile = @import("precompile.zig");
@@ -29,16 +30,23 @@ const respond = support_mod.respond;
 pub fn runVerify(
     allocator: std.mem.Allocator,
     json: *std.json.Stringify,
+    canonical_root: []const u8,
     file: *const CapturedFile,
     input: ?std.json.Value,
 ) !bool {
+    var analysis_ctx = try project_config_mod.discoverAnalysisContext(allocator, file.absolute_path, canonical_root);
+    defer analysis_ctx.deinit(allocator);
+    const policy_source = try analysis_ctx.readPolicySource(allocator);
+    defer if (policy_source) |src| allocator.free(src);
+
     var result = precompile.runCheckOnlyFromSourceWithOptions(
         allocator,
         file.effective_source,
         file.absolute_path,
         .{
             .json_mode = true,
-            .sql_schema_path = null,
+            .sql_schema_path = analysis_ctx.sqlite,
+            .policy_source = policy_source,
         },
     ) catch |err| switch (err) {
         // Every property is undecided rather than false: the analysis never
@@ -672,36 +680,88 @@ test "verify with no property list answers the whole registry" {
 }
 
 test "a verifier's published grades are the grades verify can actually answer with" {
-    // The registry says which grades a registered property can carry. If
-    // `writeVerifyResult` learns a fifth grade and this list does not, the
-    // published schema describes an answer the wire no longer gives.
-    // `unknown_property` is excluded on purpose: it is the answer to a name
-    // outside the registry, so no registry row can ever be graded with it.
+    // Exercise every wire grade `writeVerifyResult` emits: `analyzer_proved`,
+    // `analyzer_not_proved`, `not_decided`, and `unknown_property`.
+    // `unknown_property` is excluded from `verify_grades` on purpose: it is the
+    // answer to a name outside the registry, so no registry row can ever carry it.
     const a = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "clean.ts", .data =
         \\function handler(req: Request): Response {
         \\  return Response.json({ ok: true });
         \\}
         \\
     });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "leak.ts", .data =
+        \\import { env } from "zttp:env";
+        \\function handler(req: Request): Response {
+        \\  const secret = env("API_KEY") ?? "";
+        \\  return Response.text(secret);
+        \\}
+        \\
+    });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "unparseable.ts", .data =
+        \\const value: any = 1;
+        \\function handler(req: Request): Response { return Response.text("x"); }
+        \\
+    });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try a.print(
-        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["not_a_property"]}}}}
-    , .{root});
-    defer a.free(req);
-    const out = try respond(a, req);
-    defer a.free(out);
-    var parsed = try parse(a, out);
-    defer parsed.deinit();
-    const results = parsed.value.object.get("payload").?.object.get("results").?.array;
-    try testing.expectEqual(@as(usize, 1), results.items.len);
-    const grade = results.items[0].object.get("grade").?.string;
-    try testing.expectEqualStrings("unknown_property", grade);
-    for (zts.proof_trace.verify_grades) |g| {
-        try testing.expect(!std.mem.eql(u8, g, grade));
+    // 1. Clean handler -> analyzer_proved; unknown property -> unknown_property.
+    {
+        const req = try a.print(
+            \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"clean.ts","properties":["deterministic","not_a_property"]}}}}
+        , .{root});
+        defer a.free(req);
+        const out = try respond(a, req);
+        defer a.free(out);
+        var parsed = try parse(a, out);
+        defer parsed.deinit();
+        const results = parsed.value.object.get("payload").?.object.get("results").?.array;
+        try testing.expectEqual(@as(usize, 2), results.items.len);
+        try testing.expectEqualStrings("analyzer_proved", results.items[0].object.get("grade").?.string);
+        const unknown_grade = results.items[1].object.get("grade").?.string;
+        try testing.expectEqualStrings("unknown_property", unknown_grade);
+        for (zts.proof_trace.verify_grades) |g| {
+            try testing.expect(!std.mem.eql(u8, g, unknown_grade));
+        }
+    }
+
+    // 2. Violating handler -> analyzer_not_proved.
+    {
+        const req = try a.print(
+            \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"leak.ts","properties":["no_secret_leakage"]}}}}
+        , .{root});
+        defer a.free(req);
+        const out = try respond(a, req);
+        defer a.free(out);
+        var parsed = try parse(a, out);
+        defer parsed.deinit();
+        const results = parsed.value.object.get("payload").?.object.get("results").?.array;
+        try testing.expectEqual(@as(usize, 1), results.items.len);
+        try testing.expectEqualStrings("analyzer_not_proved", results.items[0].object.get("grade").?.string);
+    }
+
+    // 3. Unparseable handler -> not_decided (which is in verify_grades).
+    {
+        const req = try a.print(
+            \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"unparseable.ts","properties":["deterministic"]}}}}
+        , .{root});
+        defer a.free(req);
+        const out = try respond(a, req);
+        defer a.free(out);
+        var parsed = try parse(a, out);
+        defer parsed.deinit();
+        const results = parsed.value.object.get("payload").?.object.get("results").?.array;
+        try testing.expectEqual(@as(usize, 1), results.items.len);
+        const undecided = results.items[0].object.get("grade").?.string;
+        try testing.expectEqualStrings("not_decided", undecided);
+        var found_in_published = false;
+        for (zts.proof_trace.verify_grades) |g| {
+            if (std.mem.eql(u8, g, undecided)) found_in_published = true;
+        }
+        try testing.expect(found_in_published);
     }
 }

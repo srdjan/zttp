@@ -86,7 +86,7 @@ pub fn projectArgsForModel(
 
 fn mayCarryHostKeys(keys: []const []const u8, raw_args_json: []const u8) bool {
     for (keys) |key| {
-        if (std.mem.indexOf(u8, raw_args_json, key) != null) return true;
+        if (std.mem.find(u8, raw_args_json, key) != null) return true;
     }
     return false;
 }

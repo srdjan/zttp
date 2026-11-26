@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS021","severity":"error","message":"const declarations must have an initializer","file":"parse/bad/const_without_initializer.ts","line":3,"column":20,"suggestion":"Give the declaration an initializer, such as `const x = value;`.","repair_intent":null}

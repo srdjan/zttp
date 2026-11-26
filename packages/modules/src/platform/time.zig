@@ -135,13 +135,14 @@ fn parseIsoString(s: []const u8) ?i64 {
             if (s.len > 19 and s[19] == '.') {
                 var end: usize = 20;
                 while (end < s.len and std.ascii.isDigit(s[end])) : (end += 1) {}
+                if (end == 20) return null;
                 const frac_str = s[20..end];
                 if (frac_str.len >= 3) {
-                    ms = parseInt(u16, frac_str[0..3]) orelse 0;
+                    ms = parseInt(u16, frac_str[0..3]) orelse return null;
                 } else if (frac_str.len == 2) {
-                    ms = (parseInt(u16, frac_str) orelse 0) * 10;
+                    ms = (parseInt(u16, frac_str) orelse return null) * 10;
                 } else if (frac_str.len == 1) {
-                    ms = (parseInt(u16, frac_str) orelse 0) * 100;
+                    ms = (parseInt(u16, frac_str) orelse return null) * 100;
                 }
                 tz_start = end;
             }
@@ -149,20 +150,31 @@ fn parseIsoString(s: []const u8) ?i64 {
     }
 
     // Parse optional timezone offset: Z / +HH:MM / -HH:MM / +HHMM / -HHMM
+    // Require exact end-of-string and valid offset bounds; fail closed on any
+    // trailing junk or malformed timezone.
     var tz_offset_seconds: i64 = 0;
     if (tz_start < s.len) {
         const tz = s[tz_start..];
         if (tz[0] == 'Z' or tz[0] == 'z') {
-            // UTC - no adjustment needed
-        } else if ((tz[0] == '+' or tz[0] == '-') and tz.len >= 5) {
+            if (tz.len != 1) return null;
+        } else if (tz[0] == '+' or tz[0] == '-') {
             const sign: i64 = if (tz[0] == '+') 1 else -1;
-            const tz_hour = parseInt(u8, tz[1..3]) orelse 0;
-            // Support both +HH:MM (len>=6) and +HHMM (len>=5)
-            const tz_min = if (tz.len >= 6 and tz[3] == ':')
-                parseInt(u8, tz[4..6]) orelse 0
+            const tz_hour: u8, const tz_min: u8 = if (tz.len == 6 and tz[3] == ':')
+                .{
+                    parseInt(u8, tz[1..3]) orelse return null,
+                    parseInt(u8, tz[4..6]) orelse return null,
+                }
+            else if (tz.len == 5)
+                .{
+                    parseInt(u8, tz[1..3]) orelse return null,
+                    parseInt(u8, tz[3..5]) orelse return null,
+                }
             else
-                parseInt(u8, tz[3..5]) orelse 0;
+                return null;
+            if (tz_hour > 23 or tz_min > 59) return null;
             tz_offset_seconds = sign * (@as(i64, tz_hour) * 3600 + @as(i64, tz_min) * 60);
+        } else {
+            return null;
         }
     }
 
@@ -215,7 +227,8 @@ fn addSecondsImpl(_: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValu
 
     const epoch_ms = extractEpochMs(args[0]) orelse return sdk.JSValue.undefined_val;
     const seconds_f = sdk.extractFloat(args[1]) orelse return sdk.JSValue.undefined_val;
-    // Saturating cast: an out-of-range or NaN seconds value must not panic the
+    if (!std.math.isFinite(seconds_f)) return sdk.JSValue.undefined_val;
+    // Saturating cast: an out-of-range seconds value must not panic the
     // worker (`@intFromFloat` is illegal behavior outside the i64 range).
     const delta_ms: i64 = std.math.lossyCast(i64, seconds_f * 1000.0);
     const sum: i64 = std.math.add(i64, epoch_ms, delta_ms) catch
@@ -235,6 +248,10 @@ fn extractEpochMs(val: sdk.JSValue) ?i64 {
 }
 
 fn parseInt(comptime T: type, s: []const u8) ?T {
+    if (s.len == 0) return null;
+    for (s) |c| {
+        if (!std.ascii.isDigit(c)) return null;
+    }
     return std.fmt.parseInt(T, s, 10) catch null;
 }
 
@@ -289,4 +306,35 @@ test "isLeapYear" {
     try std.testing.expect(isLeapYear(2024));
     try std.testing.expect(!isLeapYear(1900));
     try std.testing.expect(!isLeapYear(2023));
+}
+
+test "parseIsoString: rejects trailing junk and malformed or out-of-range timezone offsets" {
+    try std.testing.expectEqual(@as(?i64, 1710493200000), parseIsoString("2024-03-15T14:30:00+05:30"));
+    try std.testing.expectEqual(@as(?i64, 1710541800000), parseIsoString("2024-03-15T14:30:00-0800"));
+    try std.testing.expectEqual(@as(?i64, null), parseIsoString("2024-03-15T14:30:00Zextra"));
+    try std.testing.expectEqual(@as(?i64, null), parseIsoString("2024-03-15T14:30:00garbage"));
+    try std.testing.expectEqual(@as(?i64, null), parseIsoString("2024-03-15T14:30:00+05:30extra"));
+    try std.testing.expectEqual(@as(?i64, null), parseIsoString("2024-03-15T14:30:00+0530extra"));
+    try std.testing.expectEqual(@as(?i64, null), parseIsoString("2024-03-15T14:30:00+24:00"));
+    try std.testing.expectEqual(@as(?i64, null), parseIsoString("2024-03-15T14:30:00+05:60"));
+    try std.testing.expectEqual(@as(?i64, null), parseIsoString("2024-03-15T14:30:00+ab:cd"));
+    try std.testing.expectEqual(@as(?i64, null), parseIsoString("2024-03-15T14:30:00+05"));
+    try std.testing.expectEqual(@as(?i64, null), parseIsoString("2024-03-15T14:30:00."));
+}
+
+test "addSecondsImpl: rejects non-finite seconds" {
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    const base = sdk.JSValue.fromInt(1000);
+
+    const nan_res = try addSecondsImpl(fake_handle, sdk.JSValue.undefined_val, &.{ base, sdk.JSValue.fromFloat(std.math.nan(f64)) });
+    try std.testing.expect(nan_res.isUndefined());
+
+    const inf_res = try addSecondsImpl(fake_handle, sdk.JSValue.undefined_val, &.{ base, sdk.JSValue.fromFloat(std.math.inf(f64)) });
+    try std.testing.expect(inf_res.isUndefined());
+
+    const neg_inf_res = try addSecondsImpl(fake_handle, sdk.JSValue.undefined_val, &.{ base, sdk.JSValue.fromFloat(-std.math.inf(f64)) });
+    try std.testing.expect(neg_inf_res.isUndefined());
+
+    const ok_res = try addSecondsImpl(fake_handle, sdk.JSValue.undefined_val, &.{ base, sdk.JSValue.fromInt(5) });
+    try std.testing.expectEqual(@as(?f64, 6000.0), sdk.extractFloat(ok_res));
 }

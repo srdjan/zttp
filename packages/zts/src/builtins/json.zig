@@ -57,7 +57,13 @@ pub fn jsonStringify(ctx: *context.Context, this: value.JSValue, args: []const v
     const val = args[0];
 
     // Use shared JSON serialization from http module
-    const json_js = http.valueToJsonString(ctx, val) catch return value.JSValue.undefined_val;
+    const json_js = http.valueToJsonString(ctx, val) catch |err| switch (err) {
+        error.NonStringDictKey => {
+            ctx.throwException(value.JSValue.exception_val);
+            return value.JSValue.undefined_val;
+        },
+        else => return value.JSValue.undefined_val,
+    };
     return value.JSValue.fromPtr(json_js);
 }
 
@@ -150,10 +156,10 @@ fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize, depth:
         return value.JSValue.false_val;
     }
 
-    // null -> undefined (zttp has no user-facing null)
+    // null
     if (text.len >= pos.* + 4 and std.mem.eql(u8, text[pos.*..][0..4], "null")) {
         pos.* += 4;
-        return value.JSValue.undefined_val;
+        return value.JSValue.null_val;
     }
 
     return error.InvalidJson;
@@ -179,6 +185,7 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize, depth: 
     var prop_count: usize = 0;
 
     // Parse all properties into buffer
+    var closed = false;
     while (pos.* < text.len) {
         skipJsonWhitespace(text, pos);
 
@@ -247,6 +254,7 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize, depth: 
         if (pos.* >= text.len) return error.InvalidJson;
         if (text[pos.*] == '}') {
             pos.* += 1;
+            closed = true;
             break;
         }
         if (text[pos.*] == ',') {
@@ -255,6 +263,7 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize, depth: 
         }
         return error.InvalidJson;
     }
+    if (!closed) return error.InvalidJson;
 
     // Create object with cached or new shape
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
@@ -462,9 +471,16 @@ fn parseJsonStringWithEscapes(ctx: *context.Context, text: []const u8, pos: *usi
     return error.InvalidJson;
 }
 
+fn isJsonHexDigit(c: u8) bool {
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+}
+
 fn readJsonUnicodeEscape(text: []const u8, pos: *usize) JsonError!u16 {
     if (pos.* + 4 > text.len) return error.InvalidJson;
     const hex = text[pos.*..][0..4];
+    for (hex) |c| {
+        if (!isJsonHexDigit(c)) return error.InvalidJson;
+    }
     pos.* += 4;
     return std.fmt.parseInt(u16, hex, 16) catch return error.InvalidJson;
 }
@@ -751,4 +767,26 @@ test "JSON.parse unicode escapes combine surrogate pairs and reject lone surroga
 
     try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "\"\\uD83D\""));
     try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "\"\\uDE00\""));
+    try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "{\"a\":1,"));
+    try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "\"\\u+041\""));
+    try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "\"\\u0_41\""));
+}
+
+test "JSON.parse returns null_val for JSON null" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const parsed = try parseJsonValue(ctx, "null");
+    try std.testing.expect(parsed.isNull());
 }

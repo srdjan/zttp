@@ -841,7 +841,7 @@ test "critical failure with an unknown status is flagged and prints failure -> ?
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try checker.formatMatrix(report, &out.writer);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "failure -> ?  WARNING") != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "failure -> ?  WARNING") != null);
 }
 
 test "upstream failure with an unknown status is information and sets no fallback" {
@@ -981,9 +981,9 @@ test "format matrix output" {
     try checker.formatMatrix(report, &aw.writer);
     buf = aw.toArrayList();
     const output = buf.items;
-    try std.testing.expect(std.mem.indexOf(u8, output, "FAULT COVERAGE") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "jwtVerify") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "1/1") != null);
+    try std.testing.expect(std.mem.find(u8, output, "FAULT COVERAGE") != null);
+    try std.testing.expect(std.mem.find(u8, output, "jwtVerify") != null);
+    try std.testing.expect(std.mem.find(u8, output, "1/1") != null);
 }
 test "a handler whose only failable call is unseen is not covered" {
     // One failable call, on no emitted path. The report counts zero sites, so

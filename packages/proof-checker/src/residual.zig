@@ -350,7 +350,6 @@ const Scheme = enum {
 fn normalizeEndpoint(value: []const u8, out: []u8) NormalizeError![]const u8 {
     @setRuntimeSafety(true);
     if (value.len == 0) return error.Empty;
-    if (value.len > max_endpoint_bytes) return error.TooLong;
 
     const parsed = try parseScheme(value);
     const authority = try authorityOf(parsed.rest);
@@ -370,7 +369,8 @@ fn normalizeEndpoint(value: []const u8, out: []u8) NormalizeError![]const u8 {
 
 fn parseScheme(value: []const u8) NormalizeError!struct { scheme: Scheme, rest: []const u8 } {
     @setRuntimeSafety(true);
-    const separator = std.mem.indexOf(u8, value, "://") orelse return error.Malformed;
+    const prefix = value[0..@min(value.len, 8)];
+    const separator = std.mem.indexOf(u8, prefix, "://") orelse return error.Malformed;
     const scheme = blk: {
         if (std.ascii.eqlIgnoreCase(value[0..separator], "http")) break :blk Scheme.http;
         if (std.ascii.eqlIgnoreCase(value[0..separator], "https")) break :blk Scheme.https;
@@ -385,9 +385,11 @@ fn authorityOf(rest: []const u8) NormalizeError![]const u8 {
     // the endpoint. The guard authorizes a destination, not a request.
     const authority = if (std.mem.indexOfAny(u8, rest, "/?#")) |cut| rest[0..cut] else rest;
     if (authority.len == 0) return error.Malformed;
+    if (authority.len > max_endpoint_bytes) return error.TooLong;
     // Userinfo is refused rather than dropped: `evil.example@allowed.example`
     // reads as the allowed host to a careless parser and connects to neither.
     if (std.mem.indexOfScalar(u8, authority, '@') != null) return error.Malformed;
+    if (std.mem.indexOfScalar(u8, authority, '\\') != null) return error.Malformed;
     return authority;
 }
 
@@ -397,15 +399,20 @@ fn splitHostPort(authority: []const u8) NormalizeError!struct { host: []const u8
     var port: ?u16 = null;
     if (authority[0] == '[') {
         const close = std.mem.indexOfScalar(u8, authority, ']') orelse return error.Malformed;
+        if (close <= 1) return error.Malformed;
+        if (std.mem.indexOfAny(u8, authority[1..close], "[]") != null) return error.Malformed;
         host = authority[0 .. close + 1];
         const tail = authority[close + 1 ..];
         if (tail.len > 0) {
             if (tail[0] != ':') return error.Malformed;
             port = try parsePort(tail[1..]);
         }
-    } else if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
-        host = authority[0..colon];
-        port = try parsePort(authority[colon + 1 ..]);
+    } else {
+        if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
+            host = authority[0..colon];
+            port = try parsePort(authority[colon + 1 ..]);
+        }
+        if (std.mem.indexOfAny(u8, host, ":[]") != null) return error.Malformed;
     }
     return .{ .host = host, .port = port };
 }
@@ -631,6 +638,22 @@ test "endpoint normalization refuses what it cannot canonicalize" {
         error.Malformed,
         normalize(.endpoint_v1, "https://allowed.example@evil.example/", &out),
     );
+    try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://[]", &out));
+    try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://[[::1]]", &out));
+    try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://a[b]", &out));
+    try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://a:b:80", &out));
+    try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://a\\b", &out));
+
+    // A long path/query over the endpoint limit normalizes when the authority fits.
+    var long_path: [8 + 11 + max_endpoint_bytes]u8 = undefined;
+    @memcpy(long_path[0..19], "https://example.com");
+    @memset(long_path[19..], 'a');
+    long_path[19] = '/';
+    try testing.expectEqualStrings("https://example.com:443", try normalize(.endpoint_v1, &long_path, &out));
+
+    var long_authority: [8 + max_endpoint_bytes + 1]u8 = @splat('a');
+    @memcpy(long_authority[0..8], "https://");
+    try testing.expectError(error.TooLong, normalize(.endpoint_v1, &long_authority, &out));
 }
 
 test "normalization is idempotent" {

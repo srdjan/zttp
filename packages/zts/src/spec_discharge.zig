@@ -1145,15 +1145,15 @@ test "dischargeSpecs implicit default profile gives the narrow Proof remedy" {
     for (diags.items) |d| {
         try std.testing.expect(d.implicit_default);
         const s = d.suggestion orelse continue;
-        if (std.mem.indexOf(u8, s, "returns no Proof<T, P> capsule") != null and
-            std.mem.indexOf(u8, s, "Proof<Response, ") != null)
+        if (std.mem.find(u8, s, "returns no Proof<T, P> capsule") != null and
+            std.mem.find(u8, s, "Proof<Response, ") != null)
         {
             saw_remedy = true;
             // The example lists held properties and never an unheld one.
-            try std.testing.expect(std.mem.indexOf(u8, s, "\"deterministic\"") != null);
-            try std.testing.expect(std.mem.indexOf(u8, s, "\"injection_safe\"") != null);
-            try std.testing.expect(std.mem.indexOf(u8, s, "\"read_only\"") == null);
-            try std.testing.expect(std.mem.indexOf(u8, s, "\"idempotent\"") == null);
+            try std.testing.expect(std.mem.find(u8, s, "\"deterministic\"") != null);
+            try std.testing.expect(std.mem.find(u8, s, "\"injection_safe\"") != null);
+            try std.testing.expect(std.mem.find(u8, s, "\"read_only\"") == null);
+            try std.testing.expect(std.mem.find(u8, s, "\"idempotent\"") == null);
         }
     }
     try std.testing.expect(saw_remedy);
@@ -1193,9 +1193,9 @@ test "dischargeSpecs implicit default omits import-forbidden read_only from the 
                 saw_zts500 = true;
                 const s = d.suggestion orelse continue;
                 // Omits read_only despite the classifier holding it (sql forbids it).
-                try std.testing.expect(std.mem.indexOf(u8, s, "\"read_only\"") == null);
+                try std.testing.expect(std.mem.find(u8, s, "\"read_only\"") == null);
                 // Still lists properties the handler genuinely holds.
-                try std.testing.expect(std.mem.indexOf(u8, s, "\"deterministic\"") != null);
+                try std.testing.expect(std.mem.find(u8, s, "\"deterministic\"") != null);
             },
             .incompatible_with_import => saw_zts501 = true,
             else => {},
@@ -1240,15 +1240,15 @@ test "dischargeSpecs proof-less pure handler collapses to one ZTS500 naming real
 
     const s = d.suggestion orelse return error.MissingSuggestion;
     // Names the real undischarged properties for THIS handler.
-    try std.testing.expect(std.mem.indexOf(u8, s, "fault_covered") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "result_safe") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "optional_safe") != null);
+    try std.testing.expect(std.mem.find(u8, s, "fault_covered") != null);
+    try std.testing.expect(std.mem.find(u8, s, "result_safe") != null);
+    try std.testing.expect(std.mem.find(u8, s, "optional_safe") != null);
     // Never the misdirecting cache/sql sentence on a handler that writes neither.
-    try std.testing.expect(std.mem.indexOf(u8, s, "cache/zttp:sql cannot hold") == null);
+    try std.testing.expect(std.mem.find(u8, s, "cache/zttp:sql cannot hold") == null);
     // The minimal Proof capsule it offers lists held properties, not the unheld ones.
-    try std.testing.expect(std.mem.indexOf(u8, s, "Proof<Response, ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"pure\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"fault_covered\"") == null);
+    try std.testing.expect(std.mem.find(u8, s, "Proof<Response, ") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"pure\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"fault_covered\"") == null);
 }
 
 test "dischargeEffects ceiling matching the inferred row returns empty" {
@@ -1490,8 +1490,8 @@ test "undischarged cost_bounded suggestion names the discharge levers" {
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, diags.items[0].kind);
     const suggestion = diags.items[0].suggestion orelse return error.MissingSuggestion;
-    try std.testing.expect(std.mem.indexOf(u8, suggestion, "maxItems") != null);
-    try std.testing.expect(std.mem.indexOf(u8, suggestion, "LIMIT") != null);
+    try std.testing.expect(std.mem.find(u8, suggestion, "maxItems") != null);
+    try std.testing.expect(std.mem.find(u8, suggestion, "LIMIT") != null);
 }
 
 test "dischargeSpecs ZTS502 unknown name carries a nearest-match suggestion" {
@@ -1517,7 +1517,7 @@ test "dischargeSpecs ZTS502 unknown name carries a nearest-match suggestion" {
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.unknown_name, diags.items[0].kind);
     try std.testing.expect(diags.items[0].suggestion != null);
-    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "idempotent") != null);
+    try std.testing.expect(std.mem.find(u8, diags.items[0].suggestion.?, "idempotent") != null);
 }
 
 test "dischargeSpecs ZTS502 with far-off name yields the fixed suggestion" {
@@ -1565,9 +1565,9 @@ test "dischargeSpecs ZTS501 incompatible carries an actionable suggestion" {
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.incompatible_with_import, diags.items[0].kind);
     try std.testing.expect(diags.items[0].suggestion != null);
-    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "zttp:sql") != null);
-    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "remove") != null);
-    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "reads") == null);
+    try std.testing.expect(std.mem.find(u8, diags.items[0].suggestion.?, "zttp:sql") != null);
+    try std.testing.expect(std.mem.find(u8, diags.items[0].suggestion.?, "remove") != null);
+    try std.testing.expect(std.mem.find(u8, diags.items[0].suggestion.?, "reads") == null);
 }
 
 test "levenshtein distance basics" {
@@ -1613,7 +1613,7 @@ test "dischargeCapsule unknown name emits ZTS502 with suggestion" {
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.unknown_name, diags.items[0].kind);
     try std.testing.expect(diags.items[0].suggestion != null);
-    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "read_only") != null);
+    try std.testing.expect(std.mem.find(u8, diags.items[0].suggestion.?, "read_only") != null);
 }
 
 test "dischargeCapsule recursive function fails total and nothing else" {
@@ -1640,7 +1640,7 @@ test "dischargeCapsule recursive function fails total and nothing else" {
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, diags.items[0].kind);
     try std.testing.expectEqualStrings("total", diags.items[0].spec_name);
-    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "termination") != null);
+    try std.testing.expect(std.mem.find(u8, diags.items[0].suggestion.?, "termination") != null);
 }
 
 test "dischargeCapsule recursion does not launder a property the row refuses" {
@@ -1665,7 +1665,7 @@ test "dischargeCapsule recursion does not launder a property the row refuses" {
         try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, d.kind);
         // The recursion suggestion is now reserved for `total`, so none of
         // these may carry it.
-        try std.testing.expect(std.mem.indexOf(u8, d.suggestion.?, "remove the recursion") == null);
+        try std.testing.expect(std.mem.find(u8, d.suggestion.?, "remove the recursion") == null);
     }
 }
 

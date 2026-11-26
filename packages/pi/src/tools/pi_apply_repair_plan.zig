@@ -468,8 +468,8 @@ test "bound canonicalize candidate previews through v2 without writing" {
                 candidate.object.get("bound").?.object.get("source_digest").?.string,
                 repair.source_digest,
             );
-            try testing.expect(std.mem.indexOf(u8, repair.proposed_content, "const name") != null);
-            try testing.expect(std.mem.indexOf(u8, repair.repairs_json, "replace_let_with_const") != null);
+            try testing.expect(std.mem.find(u8, repair.proposed_content, "const name") != null);
+            try testing.expect(std.mem.find(u8, repair.repairs_json, "replace_let_with_const") != null);
         },
         else => return error.TestExpectedProtocolRepair,
     }
@@ -547,8 +547,8 @@ test "insertTemplateBeforeLine preserves target indentation" {
         },
     );
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "  if (!auth.ok)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "  const data") != null);
+    try testing.expect(std.mem.find(u8, out, "  if (!auth.ok)") != null);
+    try testing.expect(std.mem.find(u8, out, "  const data") != null);
 }
 
 test "insertTemplateBeforeLastClosingBrace inserts inside the outer scope" {
@@ -568,9 +568,9 @@ test "insertTemplateBeforeLastClosingBrace inserts inside the outer scope" {
         },
     );
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "  return Response.json") != null);
-    const return_idx = std.mem.indexOf(u8, out, "return Response.json").?;
-    const brace_idx = std.mem.lastIndexOfScalar(u8, out, '}').?;
+    try testing.expect(std.mem.find(u8, out, "  return Response.json") != null);
+    const return_idx = std.mem.find(u8, out, "return Response.json").?;
+    const brace_idx = std.mem.findScalarLast(u8, out, '}').?;
     try testing.expect(return_idx < brace_idx);
 }
 
@@ -584,7 +584,7 @@ test "unsupported intent returns typed failure" {
     var result = try unsupportedResult(testing.allocator, intent);
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unsupported_repair_intent") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "unsupported_repair_intent") != null);
 }
 
 test "execute dry-runs an add_trailing_return intent" {
@@ -593,15 +593,15 @@ test "execute dry-runs an add_trailing_return intent" {
     ;
     var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "return Response.json") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"applied\":false") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "return Response.json") != null);
     try testing.expect(result.ui_payload != null);
     switch (result.ui_payload.?) {
         .repair_candidate => |candidate| {
             try testing.expectEqualStrings("add_trailing_return", candidate.intent_kind);
-            try testing.expect(std.mem.indexOf(u8, candidate.proposed_content, "return Response.json") != null);
-            const return_idx = std.mem.indexOf(u8, candidate.proposed_content, "return Response.json").?;
-            const brace_idx = std.mem.lastIndexOfScalar(u8, candidate.proposed_content, '}').?;
+            try testing.expect(std.mem.find(u8, candidate.proposed_content, "return Response.json") != null);
+            const return_idx = std.mem.find(u8, candidate.proposed_content, "return Response.json").?;
+            const brace_idx = std.mem.findScalarLast(u8, candidate.proposed_content, '}').?;
             try testing.expect(return_idx < brace_idx);
         },
         else => return error.TestFailed,
@@ -614,8 +614,8 @@ test "a bool-compare candidate carries its discharged equivalence" {
     ;
     var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"discharged\":true") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"method\":\"M4\"") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"discharged\":true") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"method\":\"M4\"") != null);
 }
 
 test "an intent with no implemented validator publishes a null equivalence" {
@@ -627,7 +627,7 @@ test "an intent with no implemented validator publishes a null equivalence" {
     ;
     var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"equivalence\":null") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"equivalence\":null") != null);
 }
 
 test "whole-source migration intent refuses the per-span Pi path" {
@@ -648,8 +648,8 @@ test "whole-source migration intent refuses the per-span Pi path" {
     );
     const output = try text.toOwnedSlice();
     defer testing.allocator.free(output);
-    try testing.expect(std.mem.indexOf(u8, output, "\"discharged\":false") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "use zts normalize for this whole-source migration") != null);
+    try testing.expect(std.mem.find(u8, output, "\"discharged\":false") != null);
+    try testing.expect(std.mem.find(u8, output, "use zts normalize for this whole-source migration") != null);
 }
 
 test "execute returns typed failure for unsupported intent" {
@@ -659,7 +659,7 @@ test "execute returns typed failure for unsupported intent" {
     var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unsupported_repair_intent") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "unsupported_repair_intent") != null);
     try testing.expect(result.ui_payload == null);
 }
 
@@ -669,15 +669,15 @@ test "execute dry-runs a source-backed guard insertion" {
     ;
     var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (!auth.ok)") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"applied\":false") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "if (!auth.ok)") != null);
     try testing.expect(result.ui_payload != null);
     switch (result.ui_payload.?) {
         .repair_candidate => |candidate| {
             try testing.expectEqualStrings("handler.ts", candidate.path);
             try testing.expectEqualStrings("rp_001", candidate.plan_id);
             try testing.expectEqualStrings("insert_guard_before_line", candidate.intent_kind);
-            try testing.expect(std.mem.indexOf(u8, candidate.proposed_content, "if (!auth.ok)") != null);
+            try testing.expect(std.mem.find(u8, candidate.proposed_content, "if (!auth.ok)") != null);
         },
         else => return error.TestFailed,
     }
@@ -690,8 +690,8 @@ test "execute reports a manual_edit help plan as unsupported" {
     var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"unsupported_repair_intent\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "pi_apply_repair_plan has no apply step for this edit intent kind") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"unsupported_repair_intent\"") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "pi_apply_repair_plan has no apply step for this edit intent kind") != null);
     try testing.expect(result.ui_payload == null);
 }
 
@@ -839,7 +839,7 @@ test "census: the source that a repair template yields passes the real check" {
             problems += 1;
             continue;
         }
-        if (std.mem.indexOf(u8, repaired, member.inserted) == null) {
+        if (std.mem.find(u8, repaired, member.inserted) == null) {
             std.debug.print("[template census] {s}: the template text is not in the result:\n{s}\n", .{ member.name, repaired });
             problems += 1;
         }

@@ -8,7 +8,7 @@ Only the latest tagged release and `main` receive security fixes. Release candid
 
 Report suspected vulnerabilities privately via GitHub Security Advisories:
 
-https://github.com/srdjan/zigttp/security/advisories/new
+https://github.com/srdjan/zttp/security/advisories/new
 
 Do not open public issues for security reports. After triage you will receive a remediation plan or a rationale for closing the report.
 
@@ -21,9 +21,9 @@ Include, where possible:
 
 ## Scope
 
-In scope: the runtime (`packages/runtime/`), the zts engine and virtual modules (`packages/zts/`), the build-time tooling (`packages/tools/`), and the `zttp deploy` client path.
+In scope: the runtime (`packages/runtime/`), the zts engine (`packages/zts/`), virtual modules (`packages/modules/`), the consumer proof-checker (`packages/proof-checker/`), the build-time tooling (`packages/tools/`), the module SDK (`packages/zttp-sdk/`), and the `zttp deploy` local artifact path.
 
-Out of scope: the hosted control plane itself (`api.zttp.dev`), which has its own reporting channel, and third-party extensions built with `zttp-sdk`.
+Out of scope: third-party extensions built with `zttp-sdk` (hosted cloud deployment is deferred from this beta).
 
 ## Threat Model Summary
 

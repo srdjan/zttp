@@ -242,13 +242,11 @@ pub fn passes(allocator: std.mem.Allocator, io: std.Io, root: []const u8) bool {
     return report.errors.items.len == 0;
 }
 
-pub fn main(_: std.process.Init.Minimal) !void {
+pub fn main(init: std.process.Init) !void {
     var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
+    const io = init.io;
 
     var report = try validateRepository(allocator, io, ".");
     defer report.deinit(allocator);
@@ -256,7 +254,7 @@ pub fn main(_: std.process.Init.Minimal) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buffer);
     if (report.errors.items.len != 0) {
         for (report.errors.items) |message| {
             try stderr_writer.interface.print("release provenance: {s}\n", .{message});
@@ -275,7 +273,7 @@ pub fn main(_: std.process.Init.Minimal) !void {
 
 fn expectErrorContaining(report: *const Report, needle: []const u8) !void {
     for (report.errors.items) |message| {
-        if (std.mem.indexOf(u8, message, needle) != null) return;
+        if (std.mem.find(u8, message, needle) != null) return;
     }
     return error.ExpectedProvenanceError;
 }

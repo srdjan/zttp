@@ -1,6 +1,6 @@
 .{
     .name = .zttp,
-    .version = "0.27.1",
+    .version = "0.27.2",
     .fingerprint = 0x6d6892a6f6d0b5fe, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
@@ -27,12 +27,15 @@
         },
     },
     .paths = .{
-        "README.md",
+        "AGENTS.md",
         "CHANGELOG.md",
         "CONTRIBUTING.md",
         "LICENSE",
+        "README.md",
         "RELEASE_CHECKLIST.md",
         "SECURITY.md",
+        "VERSION",
+        "agents.json",
         "build",
         "build.zig",
         "build.zig.zon",
@@ -43,6 +46,7 @@
         "policy-hash.txt",
         "scripts",
         "tests",
+        "tooling",
         "zts_main.zig",
     },
 }

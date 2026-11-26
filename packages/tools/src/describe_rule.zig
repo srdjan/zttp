@@ -29,8 +29,10 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         } else if (std.mem.startsWith(u8, arg, "-")) {
             // Unknown flag (e.g. a typo): reject loudly rather than ignoring it.
             return error.InvalidArgument;
-        } else {
+        } else if (rule_name == null) {
             rule_name = arg;
+        } else {
+            return error.TooManyArguments;
         }
     }
 
@@ -41,9 +43,8 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         return;
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
 
     // The idiom table (spec 4.2.1) is a separate surface from the diagnostic
     // rules: an idiom is never an error, so it has no code, category, or
@@ -56,9 +57,8 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         } else {
             try writeIdiomListText(&aw.writer);
         }
-        buf = aw.toArrayList();
-        if (buf.items.len > 0) {
-            try writeAllFd(std.c.STDOUT_FILENO, buf.items);
+        if (aw.written().len > 0) {
+            try writeAllFd(std.c.STDOUT_FILENO, aw.written());
         }
         return;
     }
@@ -77,9 +77,8 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
                 } else {
                     try writeTypeCheckerText(&aw.writer, tc);
                 }
-                buf = aw.toArrayList();
-                if (buf.items.len > 0) {
-                    try writeAllFd(std.c.STDOUT_FILENO, buf.items);
+                if (aw.written().len > 0) {
+                    try writeAllFd(std.c.STDOUT_FILENO, aw.written());
                 }
                 return;
             }
@@ -88,13 +87,12 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
                 // JSON object on stdout instead of a plain-text stderr line.
                 try writeUnknownRuleJson(&aw.writer, name);
                 try aw.writer.writeAll("\n");
-                buf = aw.toArrayList();
-                try writeAllFd(std.c.STDOUT_FILENO, buf.items);
+                try writeAllFd(std.c.STDOUT_FILENO, aw.written());
                 std.process.exit(1);
             }
             try aw.writer.print("Unknown rule: {s}\n", .{name});
-            buf = aw.toArrayList();
-            _ = std.c.write(std.c.STDERR_FILENO, buf.items.ptr, buf.items.len);
+            const msg = aw.written();
+            writeAllFd(std.c.STDERR_FILENO, msg) catch {};
             std.process.exit(1);
         };
 
@@ -124,9 +122,8 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         }
     }
 
-    buf = aw.toArrayList();
-    if (buf.items.len > 0) {
-        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
+    if (aw.written().len > 0) {
+        try writeAllFd(std.c.STDOUT_FILENO, aw.written());
     }
 }
 
@@ -250,6 +247,8 @@ const type_checker_rules = [_]TypeCheckerRule{
     .{ .name = "type_argument_count_mismatch", .code = "ZTS210", .description = "A call gives a different number of explicit type arguments than the signature declares type parameters." },
     .{ .name = "non_contractive_alias", .code = "ZTS212", .description = "A recursive type alias has a cycle that no record, tuple, or array constructor guards, so it describes an infinite type rather than a finite one." },
     .{ .name = "unencodable_json_payload", .code = "ZTS213", .description = "A `Response.json` payload has a type JSON cannot carry - a function, a `Bytes`, or a `Dict` whose key type admits a value that is not a string. The encoder would throw at run time, and the subset has no `try/catch` to handle it." },
+    .{ .name = "nominal_constructor_call", .code = "ZTS214", .description = "A nominal type name used in call position. Import `nominal` from `zttp:core` and call `nominal<Name>(value)` instead." },
+    .{ .name = "readonly_mutation", .code = "ZTS215", .description = "A mutating array method called on a `readonly` receiver, or a write to a `readonly` property, array element, or tuple element." },
     .{ .name = "invalid_type_predicate", .code = "ZTS211", .description = "A `value is T` predicate is not verified by its body; only a single return of admitted narrowing tests over the named parameter installs a guard." },
 };
 
@@ -332,9 +331,9 @@ test "writeUnknownRuleJson emits a JSON error object for an unknown rule" {
     defer aw.deinit();
     try writeUnknownRuleJson(&aw.writer, "BOGUS");
     const out = aw.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, out, "\"error\":\"unknown_rule\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"query\":\"BOGUS\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Unknown rule") == null);
+    try testing.expect(std.mem.find(u8, out, "\"error\":\"unknown_rule\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"query\":\"BOGUS\"") != null);
+    try testing.expect(std.mem.find(u8, out, "Unknown rule") == null);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
     defer parsed.deinit();
@@ -376,8 +375,29 @@ test "writeTypeCheckerJson emits the rule-json shape with a real description" {
     defer aw.deinit();
     try writeTypeCheckerJson(&aw.writer, rule);
     const out = aw.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, out, "\"code\":\"ZTS203\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"name\":\"arg_type_mismatch\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"description\":") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Unknown rule") == null);
+    try testing.expect(std.mem.find(u8, out, "\"code\":\"ZTS203\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"name\":\"arg_type_mismatch\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"description\":") != null);
+    try testing.expect(std.mem.find(u8, out, "Unknown rule") == null);
+}
+
+test "type_checker_rules covers every ZTS2xx diagnostic without duplicates" {
+    var checked: usize = 0;
+    for (zts.DiagnosticCatalog.entries()) |entry| {
+        if (entry.producer != .type_checker) continue;
+        if (!std.mem.startsWith(u8, entry.code, "ZTS2")) continue;
+        const found = findTypeCheckerRule(entry.code) orelse {
+            std.debug.print("missing describe-rule entry for {s} ({s})\n", .{ entry.kind, entry.code });
+            return error.TestExpectedRule;
+        };
+        try testing.expectEqualStrings(entry.kind, found.name);
+        checked += 1;
+    }
+    try testing.expect(checked > 0);
+    for (type_checker_rules, 0..) |a, i| {
+        for (type_checker_rules[i + 1 ..]) |b| {
+            try testing.expect(!std.mem.eql(u8, a.code, b.code));
+            try testing.expect(!std.mem.eql(u8, a.name, b.name));
+        }
+    }
 }

@@ -130,7 +130,7 @@ test "current repository full preset fixed prefix meets U2 budget and stays stab
     const repeated_prompt = try expert_persona.buildSystemPromptWithContext(allocator, repository_agents);
     defer allocator.free(repeated_prompt);
     try testing.expectEqualStrings(prompt, repeated_prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, repository_agents) != null);
+    try testing.expect(std.mem.find(u8, prompt, repository_agents) != null);
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
@@ -566,4 +566,41 @@ test "captured DeepSeek sibling helper cache jumps stay calibrated" {
         .{ .wire_bytes = 82_843, .history_bytes = 47_836, .actual_tokens = 34_079 },
     };
     try expectCapturedDeepSeekFlowCalibrates(&captured);
+}
+
+test "clamped snapshot request_context_sha256 matches fresh snapshot with clamped max_output_tokens" {
+    const system_prompt = try testing.allocator.alloc(u8, 350_000);
+    defer testing.allocator.free(system_prompt);
+    @memset(system_prompt, 'x');
+    const wire_body = try testing.allocator.alloc(u8, system_prompt.len + 100);
+    defer testing.allocator.free(wire_body);
+    @memset(wire_body, 'x');
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+
+    var snapshot = try model_request.createSnapshot(testing.allocator, .{
+        .config = .{
+            .provider = .local,
+            .model = "LiquidAI/LFM2.5-2.6B-MLX-8bit",
+            .max_output_tokens = 8_192,
+            .system_prompt = system_prompt,
+            .tools_json = "[{\"type\":\"function\",\"function\":{\"name\":\"workspace_read_file\"}}]",
+        },
+        .transcript = &transcript,
+    });
+    defer snapshot.deinit(testing.allocator);
+    try snapshot.completePreparation(wire_body);
+    try testing.expect(try snapshot.clampOutputToRemainingContext());
+
+    var fresh = try model_request.createSnapshot(testing.allocator, .{
+        .config = snapshot.config,
+        .transcript = &transcript,
+    });
+    defer fresh.deinit(testing.allocator);
+
+    try testing.expectEqualStrings(
+        fresh.request_context_sha256.slice(),
+        snapshot.request_context_sha256.slice(),
+    );
 }

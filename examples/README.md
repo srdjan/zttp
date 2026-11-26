@@ -1,7 +1,7 @@
 # Examples
 
 The examples demonstrate ordinary TypeScript handlers and retained virtual modules.
-Each adjacent `.test.jsonl` file contains requests and expected responses for `zttp test`.
+Each example with a test suite has an adjacent `.test.jsonl` file containing requests and expected responses for `zttp serve ... --test`.
 `scripts/test-examples.sh` checks runtime responses and the advertised static checks.
 
 ## Start here
@@ -38,7 +38,7 @@ The autoloop example is illustrative and does not enter the example gate.
 zig build run -- examples/handler/spec-guardrails.ts -p 3000
 zig build cli -- serve examples/handler/spec-guardrails.ts -p 3000 --watch --prove
 zts check examples/handler/spec-guardrails.ts
-zttp test examples/handler/handler-ts.test.jsonl
+zttp serve examples/handler/handler.ts --test examples/handler/handler-ts.test.jsonl
 ```
 
 `zttp check` runs the strict analyzer.

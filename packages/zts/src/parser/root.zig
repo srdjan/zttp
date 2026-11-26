@@ -500,8 +500,8 @@ test "var keyword is rejected with helpful error" {
     const errors = p.js_parser.errors.getErrors();
     try std.testing.expect(errors.len > 0);
     const err = errors[0];
-    try std.testing.expect(std.mem.indexOf(u8, err.message, "var") != null);
-    try std.testing.expect(std.mem.indexOf(u8, err.message, "let") != null);
+    try std.testing.expect(std.mem.find(u8, err.message, "var") != null);
+    try std.testing.expect(std.mem.find(u8, err.message, "let") != null);
 }
 
 test "postfix increment is rejected with helpful error" {
@@ -521,8 +521,8 @@ test "postfix increment is rejected with helpful error" {
     try std.testing.expect(errors.len > 0);
     const err = errors[0];
     // Message should mention x++ and suggest x = x + 1
-    try std.testing.expect(std.mem.indexOf(u8, err.message, "x++") != null);
-    try std.testing.expect(std.mem.indexOf(u8, err.message, "x = x + 1") != null);
+    try std.testing.expect(std.mem.find(u8, err.message, "x++") != null);
+    try std.testing.expect(std.mem.find(u8, err.message, "x = x + 1") != null);
 }
 
 test "prefix increment is rejected with helpful error" {
@@ -542,8 +542,8 @@ test "prefix increment is rejected with helpful error" {
     try std.testing.expect(errors.len > 0);
     const err = errors[0];
     // Message should mention ++x and suggest x = x + 1
-    try std.testing.expect(std.mem.indexOf(u8, err.message, "++x") != null);
-    try std.testing.expect(std.mem.indexOf(u8, err.message, "x = x + 1") != null);
+    try std.testing.expect(std.mem.find(u8, err.message, "++x") != null);
+    try std.testing.expect(std.mem.find(u8, err.message, "x = x + 1") != null);
 }
 
 test "typed parser delays generation and matches equivalent JavaScript bytecode and atoms" {
@@ -642,31 +642,17 @@ test "typed generation failures clean published float and nested function payloa
         "  return inner(value) + local;\n" ++
         "}\n" ++
         "const tail: number = 4.125;\n";
-    const Floors = struct { after_float: usize = 0, after_function: usize = 0, after_dispatch: usize = 0 };
+    const Floors = struct { after_float: usize = 0, after_function: usize = 0 };
     const WitnessAllocator = struct {
         backing: std.mem.Allocator,
         parser: *Parser,
         floors: *Floors,
-        fail_after_dispatch: bool = false,
 
         fn allocator(self: *@This()) std.mem.Allocator {
             return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
         }
         fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
             const self: *@This() = @ptrCast(@alignCast(context));
-            if (self.fail_after_dispatch) {
-                if (self.parser.code_gen) |*generator| {
-                    for (generator.constants.items) |constant| {
-                        if (!constant.isExternPtr()) continue;
-                        const function = constant.toExternPtr(bytecode.FunctionBytecode);
-                        if (function.pattern_dispatch) |dispatch| {
-                            if (dispatch.patterns.len == 0) continue;
-                            self.floors.after_dispatch += 1;
-                            return null;
-                        }
-                    }
-                }
-            }
             const memory = self.backing.rawAlloc(len, alignment, return_address);
             if (memory == null) {
                 if (self.parser.code_gen) |*generator| {
@@ -733,31 +719,6 @@ test "typed generation failures clean published float and nested function payloa
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{&floors});
     try std.testing.expect(floors.after_float > 0);
     try std.testing.expect(floors.after_function > 0);
-
-    const dispatch_source =
-        "function handler(request: Request): Response {\n" ++
-        "  const url: string = request.url;\n" ++
-        "  if (url === '/api/a') { return Response.json({ ok: true }); }\n" ++
-        "  return Response.text('missing');\n" ++
-        "}\n" ++
-        "const tail: number = 1.25;\n";
-    var strings = string.StringTable.init(std.testing.allocator);
-    defer strings.deinit();
-    var atoms = atom_table_mod.AtomTable.init(std.testing.allocator);
-    defer atoms.deinit();
-    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, dispatch_source, &strings, &atoms);
-    defer parser.deinit();
-    const root = switch (try parser.parseTypedIr()) {
-        .accepted => |node| node,
-        else => return error.TestUnexpectedResult,
-    };
-    var witness: WitnessAllocator = .{ .backing = std.testing.allocator, .parser = &parser, .floors = &floors, .fail_after_dispatch = true };
-    try std.testing.expectError(error.OutOfMemory, parser.generateParsed(witness.allocator()));
-    try std.testing.expect(floors.after_dispatch > 0);
-    try std.testing.expect(parser.code_gen == null);
-    try std.testing.expectEqual(@as(usize, 0), parser.constants.items.len);
-    try std.testing.expectEqual(root, parser.root_node);
-    try std.testing.expectError(error.InvalidParserPhase, parser.generateParsed(std.testing.allocator));
 }
 
 test "typed parse and validation allocation failures consume the attempt" {

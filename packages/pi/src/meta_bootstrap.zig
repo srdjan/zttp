@@ -29,9 +29,12 @@ pub fn buildAtRoot(
     if (!projection.ok) return error.MetaBootstrapRefused;
     if (projection.llm_text.len > MAX_ENVELOPE_BYTES) return error.MetaBootstrapTooLarge;
 
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, projection.llm_text, .{}) catch
-        return error.MalformedMetaBootstrap;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, projection.llm_text, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.MalformedMetaBootstrap,
+    };
     defer parsed.deinit();
+    if (parsed.value != .object) return error.MalformedMetaBootstrap;
     const payload = parsed.value.object.get("payload") orelse return error.MalformedMetaBootstrap;
     if (payload != .object) return error.MalformedMetaBootstrap;
     const view = payload.object.get("view") orelse return error.MalformedMetaBootstrap;
@@ -66,8 +69,8 @@ test "meta bootstrap is bounded deterministic protocol output" {
     try testing.expect(first.len <= MAX_NOTE_BYTES);
     try testing.expectEqualStrings(first, second);
     try testing.expect(std.mem.startsWith(u8, first, note_prefix));
-    try testing.expect(std.mem.indexOf(u8, first, "\"operation\":\"meta\"") != null);
-    try testing.expect(std.mem.indexOf(u8, first, "\"view\":\"bootstrap\"") != null);
-    try testing.expect(std.mem.indexOf(u8, first, "\"grammar\":[") == null);
-    try testing.expect(std.mem.indexOf(u8, first, "First-draft strict-mode hazards") == null);
+    try testing.expect(std.mem.find(u8, first, "\"operation\":\"meta\"") != null);
+    try testing.expect(std.mem.find(u8, first, "\"view\":\"bootstrap\"") != null);
+    try testing.expect(std.mem.find(u8, first, "\"grammar\":[") == null);
+    try testing.expect(std.mem.find(u8, first, "First-draft strict-mode hazards") == null);
 }

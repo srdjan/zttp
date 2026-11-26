@@ -1047,16 +1047,16 @@ test "graph refuses every hard admission producer" {
     var virtual = ModuleGraph.init(std.testing.allocator);
     defer virtual.deinit();
     try std.testing.expectError(error.UnsupportedSourceExtension, virtual.build("<virtual>", "const value: any = 1;", Reader.read));
-    const accepted_contrasts = [_][]const u8{
-        "const marker: \"open\n = \"open\"; export const value = 1;\n",
-        "const value: number = ;\n",
-    };
-    for (accepted_contrasts) |source| {
-        var graph = ModuleGraph.init(std.testing.allocator);
-        defer graph.deinit();
-        try graph.build("entry.ts", source, Reader.read);
-        try std.testing.expectEqual(@as(usize, 1), graph.module_list.items.len);
-    }
+    var caught_graph = ModuleGraph.init(std.testing.allocator);
+    defer caught_graph.deinit();
+    try std.testing.expectError(
+        error.UnterminatedString,
+        caught_graph.build("entry.ts", "const marker: \"open\n = \"open\"; export const value = 1;\n", Reader.read),
+    );
+    var invalid_graph = ModuleGraph.init(std.testing.allocator);
+    defer invalid_graph.deinit();
+    try invalid_graph.build("entry.ts", "const value: number = ;\n", Reader.read);
+    try std.testing.expectEqual(@as(usize, 1), invalid_graph.module_list.items.len);
     var unsupported = ModuleGraph.init(std.testing.allocator);
     defer unsupported.deinit();
     try std.testing.expectError(error.UnsupportedSourceExtension, unsupported.build("entry.js", "", Reader.read));

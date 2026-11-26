@@ -209,6 +209,7 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
     var attempt: i32 = 0;
     while (true) {
         last_response = try state.call_fn(state.runtime_ptr, handle, fetch_args);
+        if (last_response.isException()) return last_response;
         const deadline_passed = requestDeadlinePassed(state, handle);
 
         // If the response has ok=true, return immediately.
@@ -242,7 +243,6 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
             // Non-object response (network error path): always retry if attempts remain.
         }
 
-        if (attempt >= max_retries) return last_response;
         if (shouldStopBeforeBackoff(deadline_passed, attempt, max_retries)) return last_response;
 
         // Compute exponential delay: base * 2^attempt, capped at max.
@@ -366,4 +366,36 @@ test "fetchWithRetry deadline short-circuits before backoff" {
     try testing.expect(shouldStopBeforeBackoff(true, 0, MAX_ALLOWED_RETRIES));
     try testing.expect(!shouldStopBeforeBackoff(false, 0, MAX_ALLOWED_RETRIES));
     try testing.expect(shouldStopBeforeBackoff(false, MAX_ALLOWED_RETRIES, MAX_ALLOWED_RETRIES));
+}
+
+test "fetchWithRetryImpl returns immediately on exception_val without retrying" {
+    const test_shim = @import("zttp-sdk-test-shim");
+    defer test_shim.resetStrings();
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+
+    const Harness = struct {
+        var calls: u32 = 0;
+        var state: FetchState = .{
+            .runtime_ptr = @ptrFromInt(8),
+            .call_fn = callFn,
+        };
+
+        fn callFn(_: *anyopaque, _: *sdk.ModuleHandle, _: []const sdk.JSValue) anyerror!sdk.JSValue {
+            calls += 1;
+            return sdk.JSValue.exception_val;
+        }
+
+        fn noopDeinit(_: *anyopaque) callconv(.c) void {}
+    };
+
+    Harness.calls = 0;
+    try sdk.setModuleState(fake_handle, MODULE_STATE_SLOT, @ptrCast(&Harness.state), Harness.noopDeinit);
+
+    const result = try fetchWithRetryImpl(
+        fake_handle,
+        sdk.JSValue.undefined_val,
+        &.{test_shim.internString("https://example.com")},
+    );
+    try testing.expect(result.isException());
+    try testing.expectEqual(@as(u32, 1), Harness.calls);
 }

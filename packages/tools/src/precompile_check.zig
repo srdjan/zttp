@@ -245,7 +245,7 @@ fn computedCapsuleRepair(
 ) ?[]u8 {
     if (names.len == 0) return null;
     var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
+    defer buf.deinit(allocator);
     buf.appendSlice(allocator, "annotate the exported helper's return type with `" ++ capsule ++ "<T, ") catch return null;
     for (names, 0..) |name, i| {
         if (i > 0) buf.appendSlice(allocator, " | ") catch return null;
@@ -1077,13 +1077,13 @@ test "frozen signature corpus: the gate has an input before it has a verdict" {
     {
         const names = [_][]const u8{ "Dict", "Bytes", "FetchOptions", "MessageId" };
         for (names) |name| {
-            if (std.mem.indexOf(u8, emitted, name) == null) continue;
+            if (std.mem.find(u8, emitted, name) == null) continue;
             const declared_type = try allocator.print("type {s}", .{name});
             defer allocator.free(declared_type);
             const declared_iface = try allocator.print("interface {s}", .{name});
             defer allocator.free(declared_iface);
-            try std.testing.expect(std.mem.indexOf(u8, emitted, declared_type) != null or
-                std.mem.indexOf(u8, emitted, declared_iface) != null);
+            try std.testing.expect(std.mem.find(u8, emitted, declared_type) != null or
+                std.mem.find(u8, emitted, declared_iface) != null);
         }
     }
 
@@ -1093,7 +1093,7 @@ test "frozen signature corpus: the gate has an input before it has a verdict" {
     try std.testing.expectEqual(zts.builtinModules.len, std.mem.count(u8, emitted, "declare module \""));
     try std.testing.expectEqual(exports, std.mem.count(u8, emitted, "  export function "));
     for (zts.builtinModules) |binding| {
-        try std.testing.expect(std.mem.indexOf(u8, emitted, binding.specifier) != null);
+        try std.testing.expect(std.mem.find(u8, emitted, binding.specifier) != null);
     }
 }
 
@@ -1103,21 +1103,21 @@ test "type defs project the classified zttp core surface" {
     defer aw.deinit();
     generateTypeDefs(&aw.writer);
     const emitted = aw.written();
-    try std.testing.expect(std.mem.indexOf(u8, emitted, "type Proof<Value, Properties> = Value;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, emitted, "type Effects<Value, Ceiling> = Value;") != null);
+    try std.testing.expect(std.mem.find(u8, emitted, "type Proof<Value, Properties> = Value;") != null);
+    try std.testing.expect(std.mem.find(u8, emitted, "type Effects<Value, Ceiling> = Value;") != null);
 
-    try std.testing.expect(std.mem.indexOf(u8, emitted,
+    try std.testing.expect(std.mem.find(u8, emitted,
         \\declare module "zttp:core" {
         \\  type Nominal<Base extends Scalar, Identity extends symbol> =
     ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, emitted, "  function nominal<T extends Nominal<Scalar, symbol>>(base: BaseOf<T>): T;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, emitted, "  function match<Value>(subject: Value): Matcher<Value, never>;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, emitted, "  function assert(condition: boolean): asserts condition;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, emitted, "  const P: {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, emitted, "  export { Nominal, nominal, match, assert, P };") != null);
-    try std.testing.expect(std.mem.indexOf(u8, emitted, "export type Matcher") == null);
-    try std.testing.expect(std.mem.indexOf(u8, emitted, "export type Dict") == null);
-    try std.testing.expect(std.mem.indexOf(u8, emitted, "export type Bytes") == null);
+    try std.testing.expect(std.mem.find(u8, emitted, "  function nominal<T extends Nominal<Scalar, symbol>>(base: BaseOf<T>): T;") != null);
+    try std.testing.expect(std.mem.find(u8, emitted, "  function match<Value>(subject: Value): Matcher<Value, never>;") != null);
+    try std.testing.expect(std.mem.find(u8, emitted, "  function assert(condition: boolean): asserts condition;") != null);
+    try std.testing.expect(std.mem.find(u8, emitted, "  const P: {") != null);
+    try std.testing.expect(std.mem.find(u8, emitted, "  export { Nominal, nominal, match, assert, P };") != null);
+    try std.testing.expect(std.mem.find(u8, emitted, "export type Matcher") == null);
+    try std.testing.expect(std.mem.find(u8, emitted, "export type Dict") == null);
+    try std.testing.expect(std.mem.find(u8, emitted, "export type Bytes") == null);
 
     const core = zts.builtin_modules.fromSpecifier("zttp:core") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), core.type_exports.len);
@@ -1298,7 +1298,7 @@ fn typeDefsContain(line: []const u8) !bool {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     generateTypeDefs(&aw.writer);
-    return std.mem.indexOf(u8, aw.written(), line) != null;
+    return std.mem.find(u8, aw.written(), line) != null;
 }
 
 test "type defs: a Result whose runtime error is a record declares an unknown error" {

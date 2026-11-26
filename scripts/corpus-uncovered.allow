@@ -63,9 +63,6 @@ ZTS014 no producer for invalid_unicode_escape; `"\u{zz}"` is reported as ZTS013
 ZTS015 no producer for expected_property_name; `{ : 1 }` is reported as ZTS002 and ZTS003
 ZTS017 no producer for invalid_destructuring; `const { a } = req;` is reported as ZTS001 (declaration destructuring is unsupported)
 ZTS020 no producer for undeclared_variable; a read of an undeclared name is reported as ZTS629 (unpublished ambient global)
-ZTS021 no producer for const_without_initializer; `const a: number;` is reported as ZTS002
-ZTS022 the default check reports `break;` outside a loop as ZTS022; no recorded handler holds a `break` outside a loop
-ZTS023 the default check reports `continue;` outside a loop as ZTS023; no recorded handler holds a `continue` outside a loop
 ZTS024 no producer for invalid_return; a top-level `return 1;` is reported as ZTS002
 ZTS025 no producer for invalid_yield; `yield 1` is reported as ZTS001 (unsupported feature)
 ZTS027 no producer for invalid_super; `super.x` is reported as ZTS001 (unsupported feature)
@@ -87,7 +84,6 @@ ZTS009 unterminated_template is constructed only under the expression profile; i
 # refuses it without a diagnostic. Observed 2026-10-07 with `zts check --json`.
 
 ZTS011 DEFECT: a block comment with no closing `*/` is refused with no diagnostic: `{"success":false,"diagnostics":[]}` and only the log line "TypeScript strip error: error.UnterminatedComment"
-ZTS016 DEFECT: `1 = 2;` inside a handler with a narrow capsule passes with exit 0; invalid_assignment_target has no producer
 ZTS031 needs more than 65536 distinct string or number constants, a source of about 600 KB that the corpus does not carry; the parser tests "a program with more distinct constants than a u16 indexes fails the parse with too_many_constants" and "a constant overflow inside a function body fails the parse once with too_many_constants" pin the diagnostic
 ZTS039 DEFECT: two `export function f(): number` declarations in one file pass the duplicate (only ZTS061 appears, once per export); duplicate_export has no producer
 

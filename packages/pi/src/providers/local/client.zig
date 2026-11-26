@@ -534,8 +534,8 @@ fn decodeResponseValue(
 }
 
 fn containsToolMarker(text: []const u8) bool {
-    return std.mem.indexOf(u8, text, "<|tool_call") != null or
-        std.mem.indexOf(u8, text, "tool_call_end|>") != null;
+    return std.mem.find(u8, text, "<|tool_call") != null or
+        std.mem.find(u8, text, "tool_call_end|>") != null;
 }
 
 fn parseToolEnvelopes(
@@ -561,7 +561,7 @@ fn parseToolEnvelopes(
             return ClientError.MalformedToolEnvelope;
         }
         const payload_start = cursor + tool_call_start.len;
-        const payload_end = std.mem.indexOfPos(u8, trimmed, payload_start, tool_call_end) orelse
+        const payload_end = std.mem.findPos(u8, trimmed, payload_start, tool_call_end) orelse
             return ClientError.MalformedToolEnvelope;
         var parser: EnvelopeParser = .{
             .allocator = arena,
@@ -890,6 +890,12 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
         error.RequestTimedOut => return error.RequestTimedOut,
         else => return ClientError.LocalServerUnavailable,
     };
+    const socket = connection.stream_reader.stream.socket.handle;
+    // Raise SO_RCVTIMEO to the full generation ceiling, matching deepseek/client.zig:
+    // connectWithin installs the shorter idle/remaining timeout, and an expired
+    // SO_RCVTIMEO surfaces as POSIX EAGAIN inside a blocking read (which panics).
+    // The polls in receiveHead / readBodyWithin enforce the actual timeouts.
+    http_errors.setReadTimeoutMs(socket, @intCast(response_head_timeout_ms));
     const headers = [_]std.http.Header{
         .{ .name = "content-type", .value = "application/json" },
         .{ .name = "accept", .value = "application/json" },
@@ -910,7 +916,6 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
         else => return ClientError.LocalServerUnavailable,
     };
 
-    const socket = connection.stream_reader.stream.socket.handle;
     const request_timeout_ms = http_errors.effectiveRequestTimeoutMs(config.request_timeout_ms, response_head_timeout_ms);
     const wait_started_ns = monotonicNowNs();
     var response = try receiveHead(&request, request_timeout_ms);
@@ -980,7 +985,7 @@ const DiagnosticsProbe = struct {
         const self: *DiagnosticsProbe = @ptrCast(@alignCast(context));
         self.capture_calls += 1;
         try testing.expectEqual(@as(usize, 0), call_index);
-        try testing.expect(std.mem.indexOf(u8, sanitized_response, "private chain") == null);
+        try testing.expect(std.mem.find(u8, sanitized_response, "private chain") == null);
     }
 
     fn diagnose(
@@ -1329,7 +1334,7 @@ test "local response prefers structured tool calls and discards reasoning" {
     try testing.expectEqualStrings("{\"path\":\"handler.ts\"}", first_calls[0].args_json);
     try testing.expectEqualStrings(first_calls[0].id, second_calls[0].id);
     try testing.expect(std.mem.startsWith(u8, first_calls[0].id, "call_local_"));
-    try testing.expect(std.mem.indexOf(u8, response, "private chain") != null);
+    try testing.expect(std.mem.find(u8, response, "private chain") != null);
 }
 
 test "local response decodes plain text and usage without reasoning" {
@@ -1372,9 +1377,9 @@ test "local response sanitization removes nested reasoning before capture" {
         arena.allocator(),
         "{\"reasoning\":\"root\",\"choices\":[{\"message\":{\"reasoning\":\"private\",\"content\":\"ok\"}}]}",
     );
-    try std.testing.expect(std.mem.indexOf(u8, sanitized, "reasoning") == null);
-    try std.testing.expect(std.mem.indexOf(u8, sanitized, "private") == null);
-    try std.testing.expect(std.mem.indexOf(u8, sanitized, "\"content\":\"ok\"") != null);
+    try std.testing.expect(std.mem.find(u8, sanitized, "reasoning") == null);
+    try std.testing.expect(std.mem.find(u8, sanitized, "private") == null);
+    try std.testing.expect(std.mem.find(u8, sanitized, "\"content\":\"ok\"") != null);
 }
 
 test "local response normalizes multiple raw calls with nested arguments" {

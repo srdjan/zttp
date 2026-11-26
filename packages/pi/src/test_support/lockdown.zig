@@ -64,7 +64,7 @@ test "lockdown: pi source tree contains no runtime-extension footprints" {
         defer allocator.free(contents);
 
         for (forbidden) |needle| {
-            if (std.mem.indexOf(u8, contents, needle)) |pos| {
+            if (std.mem.find(u8, contents, needle)) |pos| {
                 std.debug.print(
                     "\n[lockdown] forbidden substring \"{s}\" found in {s} at byte {d}\n",
                     .{ needle, full_path, pos },

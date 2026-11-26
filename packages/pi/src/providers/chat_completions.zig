@@ -64,9 +64,6 @@ pub fn buildRequestBodyFromSnapshot(
     arena: std.mem.Allocator,
     snapshot: *const model_request.ModelRequestSnapshot,
 ) ![]u8 {
-    if (snapshot.config.provider != .local and snapshot.config.provider != .deepseek) {
-        return error.InvalidProvider;
-    }
     var buf = TextBuffer.init(arena);
     defer buf.deinit();
     const writer = buf.writer();
@@ -262,11 +259,11 @@ test "buildRequestBody carries system, user, tool call, and tool result turns" {
     }, &transcript, "and then stop");
 
     try testing.expect(std.mem.startsWith(u8, body, "{\"model\":\"test-model\",\"max_tokens\":128,\"stream\":false,"));
-    try testing.expect(std.mem.indexOf(u8, body, "{\"role\":\"system\",\"content\":\"be exact\"}") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "{\"role\":\"user\",\"content\":\"read the handler\"}") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "\"tool_calls\":[{\"id\":\"call_1\"") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "{\"role\":\"tool\",\"tool_call_id\":\"call_1\"") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "{\"role\":\"user\",\"content\":\"and then stop\"}") != null);
+    try testing.expect(std.mem.find(u8, body, "{\"role\":\"system\",\"content\":\"be exact\"}") != null);
+    try testing.expect(std.mem.find(u8, body, "{\"role\":\"user\",\"content\":\"read the handler\"}") != null);
+    try testing.expect(std.mem.find(u8, body, "\"tool_calls\":[{\"id\":\"call_1\"") != null);
+    try testing.expect(std.mem.find(u8, body, "{\"role\":\"tool\",\"tool_call_id\":\"call_1\"") != null);
+    try testing.expect(std.mem.find(u8, body, "{\"role\":\"user\",\"content\":\"and then stop\"}") != null);
     try testing.expect(std.mem.endsWith(u8, body, ",\"tools\":[],\"tool_choice\":\"auto\"}"));
 }
 
@@ -299,8 +296,8 @@ test "DeepSeek tool turns preserve opaque reasoning and omit tool_choice" {
         .tools_json = "[]",
     }, &transcript, null);
 
-    try testing.expect(std.mem.indexOf(u8, body, "\"content\":\"\",\"reasoning_content\":\"opaque continuation\"") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "\"tool_choice\"") == null);
+    try testing.expect(std.mem.find(u8, body, "\"content\":\"\",\"reasoning_content\":\"opaque continuation\"") != null);
+    try testing.expect(std.mem.find(u8, body, "\"tool_choice\"") == null);
 }
 
 test "a DeepSeek preamble rejoins the tool-call message it introduced" {
@@ -338,7 +335,7 @@ test "a DeepSeek preamble rejoins the tool-call message it introduced" {
     // preamble, the continuation, and the calls. Asserted as the value expected,
     // not as the absence of the old one - a body that stopped emitting the
     // preamble at all would satisfy an absence check.
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         body,
         "{\"role\":\"assistant\",\"content\":\"I will read it first.\"," ++
@@ -377,12 +374,12 @@ test "a local preamble stays its own message" {
 
     // The rejoin is DeepSeek's requirement, and folding here would change the
     // local corpus's wire bytes for nothing.
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         body,
         "{\"role\":\"assistant\",\"content\":\"I will read it first.\"}",
     ) != null);
-    try testing.expect(std.mem.indexOf(u8, body, "\"content\":null,\"tool_calls\":") != null);
+    try testing.expect(std.mem.find(u8, body, "\"content\":null,\"tool_calls\":") != null);
 }
 
 test "a DeepSeek answer with no tool call after it stays its own message" {
@@ -405,7 +402,7 @@ test "a DeepSeek answer with no tool call after it stays its own message" {
 
     // Nothing to rejoin it to, and no reasoning to pass back: final-answer
     // reasoning is scrubbed before the transcript ever sees it.
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         body,
         "{\"role\":\"assistant\",\"content\":\"Yes, it is pure.\"}",
@@ -425,7 +422,7 @@ test "buildRequestBody omits the tools field when no catalog is supplied" {
         .max_tokens = 8,
         .system_prompt = "s",
     }, &transcript, null);
-    try testing.expect(std.mem.indexOf(u8, body, "\"tools\"") == null);
+    try testing.expect(std.mem.find(u8, body, "\"tools\"") == null);
     try testing.expect(std.mem.endsWith(u8, body, "]}"));
 }
 
@@ -452,12 +449,12 @@ test "local and DeepSeek summarization bodies are standalone and tool-free" {
         });
         defer snapshot.deinit(ta);
         const body = try buildRequestBodyFromSnapshot(ta, &snapshot);
-        try testing.expect(std.mem.indexOf(u8, body, "\"tools\"") == null);
-        try testing.expect(std.mem.indexOf(u8, body, "summary payload") != null);
+        try testing.expect(std.mem.find(u8, body, "\"tools\"") == null);
+        try testing.expect(std.mem.find(u8, body, "summary payload") != null);
         if (provider == .deepseek) {
-            try testing.expect(std.mem.indexOf(u8, body, "\"thinking\":{\"type\":\"disabled\"}") != null);
+            try testing.expect(std.mem.find(u8, body, "\"thinking\":{\"type\":\"disabled\"}") != null);
         } else {
-            try testing.expect(std.mem.indexOf(u8, body, "\"thinking\"") == null);
+            try testing.expect(std.mem.find(u8, body, "\"thinking\"") == null);
         }
         try testing.expectEqual(model_request.Purpose.summarization, snapshot.config.purpose);
     }
@@ -482,5 +479,5 @@ test "an empty tool result still sends a non-empty content field" {
         .max_tokens = 8,
         .system_prompt = "s",
     }, &transcript, null);
-    try testing.expect(std.mem.indexOf(u8, body, "\"content\":\"(no output)\"") != null);
+    try testing.expect(std.mem.find(u8, body, "\"content\":\"(no output)\"") != null);
 }

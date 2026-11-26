@@ -297,6 +297,14 @@ pub const PropertyVerdicts = struct {
     /// assessment carries a mark.
     checked: [count]bool = @as([count]bool, @splat(false)),
 
+    comptime {
+        for (@typeInfo(proof_system.Property).@"enum".field_names, 0..) |field, i| {
+            if (@backingInt(@field(proof_system.Property, field)) != i + 1) {
+                @compileError("Property wire values must stay contiguous 1..N");
+            }
+        }
+    }
+
     fn slot(property: proof_system.Property) usize {
         @setRuntimeSafety(true);
         return @backingInt(property) - 1;

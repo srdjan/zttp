@@ -20,8 +20,10 @@ pub fn generate(allocator: std.mem.Allocator) ![]u8 {
     }
     out[16] = '-';
 
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
     var rand_bytes: [5]u8 = undefined;
-    fillRandom(&rand_bytes);
+    try io_backend.io().randomSecure(&rand_bytes);
     // 5 bytes = 10 hex chars; use the first 9.
     for (0..9) |j| {
         const b = rand_bytes[j / 2];
@@ -30,19 +32,6 @@ pub fn generate(allocator: std.mem.Allocator) ![]u8 {
     }
 
     return out;
-}
-
-var counter: std.atomic.Value(u64) = .init(0);
-
-fn fillRandom(buf: []u8) void {
-    var ts: std.posix.timespec = undefined;
-    _ = std.c.clock_gettime(@fromBackingInt(@intCast(@backingInt(std.posix.CLOCK.REALTIME))), &ts);
-    const salt = counter.fetchAdd(1, .seq_cst);
-    var seed: u64 = @as(u64, @bitCast(@as(i64, ts.nsec))) ^ (salt *% 0x9E3779B97F4A7C15);
-    for (buf) |*b| {
-        seed = seed *% 6364136223846793005 +% 1442695040888963407;
-        b.* = @intCast((seed >> 56) & 0xFF);
-    }
 }
 
 fn nowUnixMs() i64 {

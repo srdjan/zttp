@@ -283,7 +283,7 @@ test "a bound canonicalize candidate round-trips unchanged through simulate" {
     defer simulated.deinit();
     const simulated_payload = simulated.value.object.get("payload").?.object;
     try testing.expect(simulated_payload.get("ok").?.bool);
-    try testing.expect(std.mem.indexOf(u8, simulated_payload.get("proposed_content").?.string, "const name") != null);
+    try testing.expect(std.mem.find(u8, simulated_payload.get("proposed_content").?.string, "const name") != null);
 
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
     defer a.free(on_disk);
@@ -461,7 +461,7 @@ test "an external client completes propose, simulate, verify over the wire" {
     // The file on disk never changed: the whole cycle is read-only.
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
     defer a.free(on_disk);
-    try testing.expect(std.mem.indexOf(u8, on_disk, "let name") != null);
+    try testing.expect(std.mem.find(u8, on_disk, "let name") != null);
 }
 
 test "every diagnostic publishes a span, and it is not vacuous" {
@@ -668,7 +668,7 @@ test "every published example exercises the form it names" {
             },
             .source_text => |text| blk: {
                 for (text.needles) |needle| {
-                    if (std.mem.indexOf(u8, entry.source, needle) == null) break :blk false;
+                    if (std.mem.find(u8, entry.source, needle) == null) break :blk false;
                 }
                 break :blk true;
             },

@@ -182,6 +182,7 @@ fn decodeSection(
     if (enabled_byte > 1) return error.ReservedFieldNonZero;
     const count = try reader.int(u16);
     if (count > residual.max_policy_entries) return error.CountExceedsLimit;
+    if (enabled_byte == 0 and count > 0) return error.ReservedFieldNonZero;
 
     var section = Section{
         .enabled = enabled_byte == 1,
@@ -472,6 +473,13 @@ test "an SQL flag outside the closed boolean encoding is refused" {
 test "an enabled byte outside the closed boolean encoding is refused" {
     var b = sample();
     b.buffer[0] = 2;
+    try testing.expectError(error.ReservedFieldNonZero, decode(b.bytes(), b.digest()));
+}
+
+test "a disabled section carrying nonzero entries is refused" {
+    var b = sample();
+    // Toggle env section to disabled (0) while keeping its count (1) nonzero.
+    b.buffer[0] = 0;
     try testing.expectError(error.ReservedFieldNonZero, decode(b.bytes(), b.digest()));
 }
 

@@ -332,8 +332,13 @@ fn parseManifest(
         if (line.len == 0) continue;
         var words = std.mem.tokenizeAny(u8, line, " \t");
         const tier_word = words.next() orelse continue;
-        const relative = words.next();
-        if (relative == null or words.next() != null) {
+        const relative = words.next() orelse {
+            if (errors == 0) std.debug.print("zts layering: the manifest does not match the tree:\n", .{});
+            errors += 1;
+            std.debug.print("  {s}:{d}: expected '<tier> <path>', got {s}\n", .{ manifest_path, line_number, line });
+            continue;
+        };
+        if (words.next() != null) {
             if (errors == 0) std.debug.print("zts layering: the manifest does not match the tree:\n", .{});
             errors += 1;
             std.debug.print("  {s}:{d}: expected '<tier> <path>', got {s}\n", .{ manifest_path, line_number, line });
@@ -345,18 +350,18 @@ fn parseManifest(
             std.debug.print("  {s}:{d}: unknown tier {s}\n", .{ manifest_path, line_number, tier_word });
             continue;
         };
-        const full_path = try allocator.print("{s}{s}", .{ prefix, relative.? });
+        const full_path = try allocator.print("{s}{s}", .{ prefix, relative });
         defer allocator.free(full_path);
         const index = pathIndex(files, full_path) orelse {
             if (errors == 0) std.debug.print("zts layering: the manifest does not match the tree:\n", .{});
             errors += 1;
-            std.debug.print("  {s}:{d}: names no source file: {s}\n", .{ manifest_path, line_number, relative.? });
+            std.debug.print("  {s}:{d}: names no source file: {s}\n", .{ manifest_path, line_number, relative });
             continue;
         };
         if (files[index].tier) |present| {
             if (errors == 0) std.debug.print("zts layering: the manifest does not match the tree:\n", .{});
             errors += 1;
-            std.debug.print("  {s}:{d}: {s} already assigned to {s}\n", .{ manifest_path, line_number, relative.?, tier_names[present] });
+            std.debug.print("  {s}:{d}: {s} already assigned to {s}\n", .{ manifest_path, line_number, relative, tier_names[present] });
             continue;
         }
         files[index].tier = tier;
@@ -402,14 +407,14 @@ const LayeringCounts = struct {
 fn countLayering(files: []const File) LayeringCounts {
     var counts: LayeringCounts = .{};
     for (files) |file| {
-        const source_tier = file.tier.?;
+        const source_tier = file.tier orelse continue;
         counts.edges += file.edges.items.len;
         counts.named += file.named_tiers.items.len;
         for (file.named_tiers.items) |target_tier| {
             if (namedImportViolates(source_tier, target_tier)) counts.named_violations += 1;
         }
         for (file.edges.items) |target_index| {
-            const target_tier = files[target_index].tier.?;
+            const target_tier = files[target_index].tier orelse continue;
             if (source_tier == target_tier) continue;
             counts.cross += 1;
             if (relativeImportViolates(source_tier, target_tier)) counts.relative_violations += 1;
@@ -435,7 +440,7 @@ fn reportLayering(
     if (named_violations != 0) {
         std.debug.print("zts layering: {d} module-name imports point from a lower tier to a higher one:\n", .{named_violations});
         for (graph.files) |file| {
-            const source_tier = file.tier.?;
+            const source_tier = file.tier orelse continue;
             for (file.named_tiers.items) |target_tier| {
                 if (namedImportViolates(source_tier, target_tier)) {
                     std.debug.print("    {s}  ->  @import(\"{s}\")\n", .{ file.path[prefix.len..], roots[target_tier].module_name });
@@ -451,8 +456,10 @@ fn reportLayering(
     if (relative_violations != 0) {
         std.debug.print("zts layering: {d} relative imports cross a module line illegally:\n", .{relative_violations});
         for (graph.files) |file| {
+            const source_tier = file.tier orelse continue;
             for (file.edges.items) |target_index| {
-                if (relativeImportViolates(file.tier.?, graph.files[target_index].tier.?)) {
+                const target_tier = graph.files[target_index].tier orelse continue;
+                if (relativeImportViolates(source_tier, target_tier)) {
                     std.debug.print("    {s}  ->  {s}\n", .{ file.path[prefix.len..], graph.files[target_index].path[prefix.len..] });
                 }
             }
@@ -470,7 +477,10 @@ fn reportLayering(
     }
 
     var tier_sizes = @as([tier_count]usize, @splat(0));
-    for (graph.files) |file| tier_sizes[file.tier.?] += 1;
+    for (graph.files) |file| {
+        const file_tier = file.tier orelse return error.ManifestMismatch;
+        tier_sizes[file_tier] += 1;
+    }
     var reached_count: usize = 0;
     var unreachable_count: usize = 0;
     const seen = try allocator.alloc(bool, graph.files.len);
@@ -483,7 +493,8 @@ fn reportLayering(
             std.debug.print("zts layering: tier {s} names a missing root: {s}\n", .{ tier_names[tier], root.source_root });
             return error.MissingTierRoot;
         };
-        if (graph.files[root_index].tier.? != tier) {
+        const root_tier = graph.files[root_index].tier orelse return error.WrongTierRoot;
+        if (root_tier != tier) {
             std.debug.print("zts layering: {s} has the wrong manifest tier\n", .{root.source_root});
             return error.WrongTierRoot;
         }
@@ -494,7 +505,8 @@ fn reportLayering(
             stack_len -= 1;
             const current = stack[stack_len];
             for (graph.files[current].edges.items) |target| {
-                if (graph.files[target].tier.? == tier and !seen[target]) {
+                const target_tier = graph.files[target].tier orelse continue;
+                if (target_tier == tier and !seen[target]) {
                     seen[target] = true;
                     stack[stack_len] = target;
                     stack_len += 1;
@@ -502,7 +514,8 @@ fn reportLayering(
             }
         }
         for (graph.files, 0..) |file, index| {
-            if (file.tier.? != tier) continue;
+            const file_tier = file.tier orelse continue;
+            if (file_tier != tier) continue;
             if (seen[index]) {
                 reached_count += 1;
             } else {
@@ -567,7 +580,7 @@ const Tarjan = struct {
         var component: std.ArrayListUnmanaged(usize) = .empty;
         errdefer component.deinit(self.allocator);
         while (true) {
-            const member = self.stack.pop().?;
+            const member = self.stack.pop() orelse return error.InvalidTarjanState;
             self.on_stack[member] = false;
             try component.append(self.allocator, member);
             if (member == node) break;
@@ -830,19 +843,15 @@ fn usage() noreturn {
     std.process.exit(2);
 }
 
-pub fn main(init: std.process.Init.Minimal) !void {
+pub fn main(init: std.process.Init) !void {
     var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = init.environ });
-    defer io_backend.deinit();
-    const io = io_backend.io();
+    const io = init.io;
 
-    var args = std.process.Args.Iterator.init(init.args);
-    defer args.deinit();
-    _ = args.next();
-    const command = args.next() orelse usage();
-    if (args.next() != null) usage();
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len != 2) usage();
+    const command = args[1];
 
     // The two package-boundary checks read their own inputs and need no zts graph.
     if (std.mem.eql(u8, command, "module-boundary") or std.mem.eql(u8, command, "kernel-leaf")) {

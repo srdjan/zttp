@@ -29,9 +29,12 @@ runtime_bench_dep: *std.Build.Dependency,
 pi_dep: *std.Build.Dependency,
 pi_host_dep: *std.Build.Dependency,
 pi_zts_cli_host_mod: *std.Build.Module,
+project_config_host_mod: *std.Build.Module,
 zttp_sdk_dep: *std.Build.Dependency,
 zttp_modules_dep: *std.Build.Dependency,
 proof_checker_dep: *std.Build.Dependency,
+proof_checker_host_dep: *std.Build.Dependency,
+proof_checker_host_fast_dep: *std.Build.Dependency,
 
 /// The `-D` options that drive handler precompilation (`-Dhandler`).
 pub const PrecompileOptions = struct {
@@ -141,6 +144,14 @@ pub fn init(b: *std.Build) Context {
         .target = target,
         .optimize = optimize,
     });
+    const proof_checker_host_dep = b.dependency("zttp_proof_checker", .{
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const proof_checker_host_fast_dep = b.dependency("zttp_proof_checker", .{
+        .target = b.graph.host,
+        .optimize = .fast,
+    });
 
     // Host-side builds of tools and pi, for the host test roots and the
     // repository-only executables that run on the build machine.
@@ -177,15 +188,28 @@ pub fn init(b: *std.Build) Context {
         .pi_dep = pi_dep,
         .pi_host_dep = pi_host_dep,
         .pi_zts_cli_host_mod = pi_host_tools_dep.module("zts_cli"),
+        .project_config_host_mod = pi_host_tools_dep.module("project_config"),
         .zttp_sdk_dep = zttp_sdk_dep,
         .zttp_modules_dep = zttp_modules_dep,
         .proof_checker_dep = proof_checker_dep,
+        .proof_checker_host_dep = proof_checker_host_dep,
+        .proof_checker_host_fast_dep = proof_checker_host_fast_dep,
     };
 }
 
 /// The acceptance kernel module, a leaf that takes no options.
 pub fn proofCheckerMod(ctx: Context) *std.Build.Module {
     return ctx.proof_checker_dep.module("zttp_proof_checker");
+}
+
+/// Host-targeted acceptance kernel module for tools and tests executing on the build host.
+pub fn proofCheckerHostMod(ctx: Context) *std.Build.Module {
+    return ctx.proof_checker_host_dep.module("zttp_proof_checker");
+}
+
+/// Host-targeted ReleaseFast acceptance kernel module for the safety probe.
+pub fn proofCheckerHostFastMod(ctx: Context) *std.Build.Module {
+    return ctx.proof_checker_host_fast_dep.module("zttp_proof_checker");
 }
 
 /// Developer filters retain the package runner but must collect real tests.

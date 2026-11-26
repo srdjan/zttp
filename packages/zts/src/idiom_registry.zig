@@ -196,13 +196,9 @@ pub fn findByRewriteRule(intent_name: []const u8) ?*const IdiomEntry {
 /// Deterministic SHA-256 over the idiom table, field-wise with `\0` separators
 /// and a `\x01` record terminator - the pre-image shape the policy hash uses
 /// (D3 §3). Published as `idiom_table_hash`, so a client can tell whether the
-/// preference set it cached still matches this compiler's. Cached on first call
-/// because SHA-256 exceeds the comptime branch budget.
-var cached_hash: ?[64]u8 = null;
-
+/// preference set it cached still matches this compiler's. Computed directly
+/// on each call to avoid unsynchronized global mutable state.
 pub fn tableHash() [64]u8 {
-    if (cached_hash) |h| return h;
-
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     for (&entries) |*entry| {
         hasher.update(entry.id);
@@ -221,8 +217,7 @@ pub fn tableHash() [64]u8 {
         hasher.update("\x01");
     }
 
-    cached_hash = std.fmt.bytesToHex(hasher.finalResult(), .lower);
-    return cached_hash.?;
+    return std.fmt.bytesToHex(hasher.finalResult(), .lower);
 }
 
 test "tableHash is stable and covers the rewrite column" {

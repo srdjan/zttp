@@ -139,7 +139,7 @@ fn appendChangeSet(
     const llm_text = try allocator.dupe(u8, "verified");
     errdefer allocator.free(llm_text);
 
-    try tr.entries.append(allocator, .{ .verified_change_set = .{
+    try tr.appendOwned(allocator, .{ .verified_change_set = .{
         .llm_text = llm_text,
         .ui_payload = receipt,
     } });

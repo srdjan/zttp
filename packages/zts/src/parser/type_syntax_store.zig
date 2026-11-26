@@ -237,7 +237,6 @@ pub const AdmissionCollector = struct {
         self: *AdmissionCollector,
         diagnostic: AdmissionDiagnostic,
     ) !void {
-        if (self.mode == .compile) return;
         try self.recordRecoverable(diagnostic);
     }
 
@@ -1309,22 +1308,27 @@ pub const Store = struct {
             return error.InvalidFunctionSignature;
         }
         try self.validateSpan(source_span);
-        pending.reserved = true;
         const parameter_count = self.parameter_annotations.items.len -
             pending.parameter_start;
-        if (parameter_count == 0 and pending.return_syntax == null) return;
+        if (parameter_count == 0 and pending.return_syntax == null) {
+            pending.reserved = true;
+            return;
+        }
         const record_index = std.math.cast(u32, self.function_signatures.items.len) orelse
+            return error.TooManyTypeItems;
+        const param_start_u32 = std.math.cast(u32, pending.parameter_start) orelse
+            return error.TooManyTypeItems;
+        const param_count_u32 = std.math.cast(u32, parameter_count) orelse
             return error.TooManyTypeItems;
         try self.function_signatures.ensureUnusedCapacity(self.allocator, 1);
         self.function_signatures.appendAssumeCapacity(undefined);
+        pending.reserved = true;
         pending.record_index = record_index;
         pending.final_record = .{
             .owner = ir.null_node,
             .parameters = .{
-                .start = std.math.cast(u32, pending.parameter_start) orelse
-                    return error.TooManyTypeItems,
-                .count = std.math.cast(u32, parameter_count) orelse
-                    return error.TooManyTypeItems,
+                .start = param_start_u32,
+                .count = param_count_u32,
             },
             .return_syntax = pending.return_syntax,
             .source_span = source_span,
@@ -1360,6 +1364,8 @@ pub const Store = struct {
     }
 
     pub fn appendTypeOnlyModule(self: *Store, module: TypeOnlyModule) !void {
+        const previous = self.checkpoint();
+        errdefer self.rollback(previous);
         try self.validateTypeOnlyModule(module);
         if (self.type_only_modules.items.len > 0) {
             const prior = self.type_only_modules.items[self.type_only_modules.items.len - 1].raw_span;
@@ -1546,8 +1552,21 @@ pub const Store = struct {
     }
 
     pub fn validateParsed(self: *const Store, root: Child, raw_span: Span) !void {
+        try self.validateParsedRange(0, 0, root, raw_span);
+    }
+
+    pub fn validateParsedRange(
+        self: *const Store,
+        node_start: usize,
+        param_start: usize,
+        root: Child,
+        raw_span: Span,
+    ) !void {
         try self.validateSpan(raw_span);
-        for (self.nodes.items, 0..) |syntax_node, index| {
+        if (node_start > self.nodes.items.len or param_start > self.params.items.len) {
+            return error.InvalidTypeRange;
+        }
+        for (self.nodes.items[node_start..], node_start..) |syntax_node, index| {
             try self.validateSpan(syntax_node.semantic_span);
             if (std.meta.activeTag(syntax_node.data) != syntax_node.tag) {
                 return error.InvalidTypeNodeTag;
@@ -1613,20 +1632,36 @@ pub const Store = struct {
             }
         }
         var parameter_count: usize = 0;
-        for (self.nodes.items, 0..) |syntax_node, index| {
+        var expected_param_cursor = param_start;
+        var monotonic = true;
+        const added_nodes = self.nodes.items[node_start..];
+        for (added_nodes) |syntax_node| {
             const parameter_range = parameterRange(syntax_node) orelse continue;
             const parameters = self.paramSlice(parameter_range) orelse
                 return error.InvalidTypeRange;
+            if (parameters.len == 0) continue;
+            if (parameter_range.start < param_start) return error.SharedTypeParameter;
             parameter_count = std.math.add(usize, parameter_count, parameters.len) catch
                 return error.InvalidTypeRange;
-            for (self.nodes.items[0..index]) |prior_node| {
-                const prior_range = parameterRange(prior_node) orelse continue;
-                if (rangesOverlap(parameter_range, prior_range)) {
-                    return error.SharedTypeParameter;
+            if (monotonic and parameter_range.start == expected_param_cursor) {
+                expected_param_cursor += parameters.len;
+            } else {
+                monotonic = false;
+            }
+        }
+        if (!monotonic) {
+            for (added_nodes, 0..) |syntax_node, index| {
+                const parameter_range = parameterRange(syntax_node) orelse continue;
+                if (parameter_range.count == 0) continue;
+                for (added_nodes[0..index]) |prior_node| {
+                    const prior_range = parameterRange(prior_node) orelse continue;
+                    if (rangesOverlap(parameter_range, prior_range)) {
+                        return error.SharedTypeParameter;
+                    }
                 }
             }
         }
-        if (parameter_count != self.params.items.len) return error.UnownedTypeParameter;
+        if (parameter_count != self.params.items.len - param_start) return error.UnownedTypeParameter;
         try validateChild(root, self.nodes.items.len);
     }
 
@@ -2725,10 +2760,10 @@ test "explicit call reservation owns its record and rolls back every array" {
         "second<Proof<Readonly<{ data: Dict<string, number> }>>, \"pure\">(b);";
     const Context = struct {
         fn run(allocator: std.mem.Allocator, observed_later_failures: *usize) !void {
-            const first_start: u32 = @intCast(std.mem.indexOf(u8, source, "<Outer").?);
-            const first_lparen: u32 = @intCast(std.mem.indexOf(u8, source, "(a)").?);
-            const second_start: u32 = @intCast(std.mem.indexOf(u8, source, "<Proof").?);
-            const second_lparen: u32 = @intCast(std.mem.indexOf(u8, source, "(b)").?);
+            const first_start: u32 = @intCast(std.mem.find(u8, source, "<Outer").?);
+            const first_lparen: u32 = @intCast(std.mem.find(u8, source, "(a)").?);
+            const second_start: u32 = @intCast(std.mem.find(u8, source, "<Proof").?);
+            const second_lparen: u32 = @intCast(std.mem.find(u8, source, "(b)").?);
             var store = Store.init(allocator, source);
             defer store.deinit();
             var runtime = TestRuntime.init(std.testing.allocator);
@@ -2810,8 +2845,8 @@ test "explicit call reservation owns its record and rolls back every array" {
 
 test "explicit call validation rejects more than eight projected arguments" {
     const source = "id<A,B,C,D,E,F,G,H,I>(value);";
-    const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
-    const lparen: u32 = @intCast(std.mem.indexOf(u8, source, "(value)").?);
+    const list_start: u32 = @intCast(std.mem.findScalar(u8, source, '<').?);
+    const lparen: u32 = @intCast(std.mem.find(u8, source, "(value)").?);
     var store = Store.init(std.testing.allocator, source);
     defer store.deinit();
     var runtime = TestRuntime.init(std.testing.allocator);
@@ -2945,7 +2980,7 @@ test "only ignored named functions accept one bounded after-list comment gap" {
             tag: ir.NodeTag,
             accepted: bool,
         ) !void {
-            const opener: u32 = @intCast(std.mem.indexOfScalar(u8, source, '(') orelse
+            const opener: u32 = @intCast(std.mem.findScalar(u8, source, '(') orelse
                 return error.TestUnexpectedResult);
             var store = Store.init(std.testing.allocator, source);
             defer store.deinit();
@@ -3491,10 +3526,10 @@ test "admission collector preserves mode order deduplication and fatal selection
         .kind = .unterminated_string,
         .span = .{ .start = 0, .end = 1 },
     });
-    try std.testing.expectEqual(@as(u64, 0), compiled.generation());
-    try std.testing.expectEqual(@as(usize, 0), compiled.items().len);
+    try std.testing.expectEqual(@as(u64, 1), compiled.generation());
+    try std.testing.expectEqual(@as(usize, 1), compiled.items().len);
     try std.testing.expect(!compiled.hasFatal());
-    try std.testing.expect(!compiled.shouldStop());
+    try std.testing.expect(compiled.shouldStop());
     try compiled.recordRecoverable(.{
         .kind = .any_type,
         .span = .{ .start = 1, .end = 4 },
@@ -3505,9 +3540,9 @@ test "admission collector preserves mode order deduplication and fatal selection
     });
     try std.testing.expect(compiled.isCompile());
     try std.testing.expect(compiled.shouldStop());
-    try std.testing.expectEqual(@as(u64, 2), compiled.generation());
+    try std.testing.expectEqual(@as(u64, 3), compiled.generation());
     try std.testing.expectEqual(@as(usize, 1), compiled.items().len);
-    try std.testing.expectEqual(AdmissionKind.any_type, compiled.items()[0].kind);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, compiled.items()[0].kind);
 }
 
 test "admission observation history preserves the first kind at one position" {
@@ -3672,10 +3707,10 @@ test "admission presentation composes tracked prefixes and parameter rewinds" {
     try std.testing.expectEqual(@as(u32, 0), first.offset);
     try std.testing.expectEqualDeep(AdmissionPosition{ .line = 1, .column = 4 }, first.position);
     try std.testing.expectEqualDeep(AdmissionPosition{ .line = 1, .column = 8 }, try first.positionAt(4));
-    const second_colon: u32 = @intCast(std.mem.indexOfPos(u8, source, 1, ":").?);
+    const second_colon: u32 = @intCast(std.mem.findPos(u8, source, 1, ":").?);
     const second = try first.declinedParameterColon(second_colon);
     try std.testing.expectEqualDeep(AdmissionPosition{ .line = 2, .column = 2 }, second.position);
-    const third_colon: u32 = @intCast(std.mem.indexOfPos(u8, source, second_colon + 1, ":").?);
+    const third_colon: u32 = @intCast(std.mem.findPos(u8, source, second_colon + 1, ":").?);
     const third = try second.trackedWhitespaceAt(third_colon + 1);
     try std.testing.expectEqualDeep(AdmissionPosition{ .line = 3, .column = 10 }, third.position);
     try std.testing.expectEqualDeep(AdmissionPosition{ .line = 4, .column = 1 }, try third.positionAt(@intCast(source.len - 3)));
@@ -3711,4 +3746,32 @@ test "admission deduplicates raw positions before conversion" {
     try std.testing.expectEqualDeep(physical, collector.items()[0]);
     try std.testing.expectEqualDeep(shifted, history.last().?);
     try std.testing.expectEqual(@as(u64, 3), collector.generation());
+}
+
+test "appendTypeOnlyModule rolls back bindings and specifiers on OOM" {
+    const source = "import type { Alpha, Beta } from \"./mod.ts\";";
+    const bindings_start: u32 = @intCast(std.mem.findScalar(u8, source, '{').?);
+    const bindings_end: u32 = @intCast(std.mem.findScalar(u8, source, '}').? + 1);
+    const spec_start: u32 = @intCast(std.mem.findScalar(u8, source, '"').? + 1);
+    const spec_end: u32 = @intCast(std.mem.findScalarLast(u8, source, '"').?);
+    const mod: TypeOnlyModule = .{
+        .kind = .import_type,
+        .raw_span = .{ .start = 0, .end = @intCast(source.len) },
+        .specifier_span = .{ .start = spec_start, .end = spec_end },
+        .bindings_span = .{ .start = bindings_start, .end = bindings_end },
+    };
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, src: []const u8, m: TypeOnlyModule) !void {
+            var store = Store.init(allocator, src);
+            defer store.deinit();
+            const before = store.checkpoint();
+            store.appendTypeOnlyModule(m) catch |err| {
+                try std.testing.expect(std.meta.eql(before, store.checkpoint()));
+                return err;
+            };
+            try std.testing.expectEqual(@as(usize, 1), store.type_only_modules.items.len);
+            try std.testing.expectEqual(@as(usize, 2), store.type_only_bindings.items.len);
+        }
+    }.run, .{ source, mod });
 }

@@ -14,6 +14,184 @@ For releases prior to v0.16 see git tags and
 
 ## [Unreleased]
 
+## [0.27.2] - 2026-11-26
+
+### Highlights
+
+This release hardens the `zts` type checker, bytecode VM and verifier, runtime
+HTTP/pool/self-extract handling, and built-in virtual modules against soundness
+gaps, memory leaks, and fail-open edge cases. It also tightens consumer
+proof-checker binding and URL normalization, aligns release version checks
+across all eight package manifests, and updates repository docs and native
+gates.
+
+### Breaking changes
+
+None.
+
+### Fixed
+
+- **Type checker soundness (`packages/zts/src/type_checker.zig`):**
+  - `Response.json` now refuses a `Dict` from `let d = dictEmpty()`, a `Dict`
+    with an `unknown` key (such as `isDict(u)` on `unknown`), and a `Dict` with
+    an unconstrained or non-string-bounded type-parameter key (`ZTS213`), while
+    `isDict` on parsed JSON narrows to `Dict<string, unknown>`.
+  - Container write tracking (`targetAllowsWriteWidening`) now walks the target
+    chain so writes into declared fields, elements, or arrays held inside an
+    unannotated literal initializer (`const q = { a: s }; q.a.kind = "c";`) no
+    longer widen declared types.
+  - Union discriminant narrowing (`extractDiscriminantGuard`) now retains
+    structural record and non-primitive union members that omit the tested
+    property in both branches instead of excluding them.
+- **Engine, bytecode, and built-ins (`packages/zts/src/`):**
+  - `http.zig`: `writeJson` / `writeJsonDepth` now return
+    `RenderError.NonStringDictKey` instead of `RenderError.OutOfMemory` on
+    non-string `Dict` keys, escape object property keys, support `SliceString`
+    and floats in `Response` and `renderToString`, and guard reentrant
+    `renderToString`; `JSON.stringify` now throws on `error.NonStringDictKey`.
+  - `file_io.zig`: `writeFile` now inspects destination metadata without
+    following symlinks, refuses symlink targets with `error.SymlinkRefused`
+    without modifying the link or target, preserves `0o644`/`0o755` mode bits on
+    overwritten regular files, and keeps `0o600` for new files.
+  - `builtins/string_builtins.zig`: `String.prototype.repeat` now throws
+    `RangeError` on negative counts, `±Infinity`, multiplication overflow, and
+    results exceeding `max_built_string_len`, while preserving `""` for `0`,
+    `NaN`, and `-0.0` and returning `this` for `1`.
+  - `interpreter/ic.zig`, `bytecode_opt.zig`, `parser/codegen.zig`,
+    `bytecode_verifier.zig`, `bytecode.zig`, `object.zig`: added property atom
+    checks to `PICEntry` to prevent cross-module inline-cache aliasing; removed
+    the broken `if_false +0; goto` peephole fusion and fixed `.loop`,
+    `.for_of_next_put_loc`, and `.drop_goto` jump handling; fixed `128..255`
+    integer sign-wrapping in `emitSmallInt`/`emitIntValue`, Wyhash collision
+    checks in `registerShape`, and OOM propagation in `tryEmitMathBuiltin`;
+    enforced consistent stack heights at merges and bounds-checked locals,
+    constants, `make_function`, `set_slot`, and `tail_call` metadata.
+  - `string.zig`, `context.zig`, `gc.zig`, `pool.zig`, `builtins/*`,
+    `modules/data/*`, `module_binding/bridge.zig`, `module_binding_adapter.zig`:
+    fixed lexicographical string ordering (`"b" < "aa"` is false), sparse and
+    overflow array reads, `JSON.parse` RFC 8259 trailing-comma/hex-escape/surrogate
+    handling, overflow-safe `parseInt`/`parseFloat`, `LockFreePool` and
+    `env_cache` concurrency, unwind exception preservation in `frame.zig`,
+    own-property lookups (`getOwnProperty`) and `SQLITE_TRANSIENT` text bindings
+    with `c_int` length bounds in the SDK bridge, and unified export capability
+    plus cost-meter wrapping.
+- **Parser, contracts, and static analysis (`packages/zts/src/`):**
+  - Removed unsynchronized global hash caches across registries, validated string
+    escapes on quoted object-literal keys in compile mode, removed the
+    8-specifier import cap, enforced a 512 nesting-depth cap in `printer.zig`
+    and `ir_json_literal.zig`, fixed `unescapeJson` escapes and surrogate pairs,
+    hardened tokenizer/trivia scanning, fixed OOM rollbacks in scope and
+    type-syntax stores, and replaced cubic `Store.validateParsed` checks.
+  - Fixed scope-blind global and parameter lookups across `bool_checker.zig`,
+    `strict_checker.zig`, `handler_verifier.zig`, `path_generator.zig`,
+    `effect_inference.zig`, and `contract_builder.zig`; recognized
+    `zttp:fetch` `fetch`/`fetchWithRetry` egress; closed conditional-return and
+    nested `for...of` gaps in `path_generator.zig`; stripped SQL comments in
+    `LIMIT` and `firstSqlToken` operation checks; fixed recursive-alias cycle
+    detection in `api_schema.zig`, `copyGenericAlias` UAF in
+    `import_signatures.zig`, OOM double-frees and contravariant request-schema
+    diffs in `contract_diff.zig`, and OOM propagation in
+    `property_diagnostics.zig`.
+- **Virtual modules and SDK (`packages/modules/src/`, `packages/zttp-sdk/src/`):**
+  - `data/cache.zig`: pruned empty namespaces on eviction, TTL expiry, and
+    deletion, incremented `misses` before entry removal on expiry, and deferred
+    namespace creation past capacity and entry allocation so distinct-namespace
+    churn stays bounded without leaks.
+  - `http/http_mod.zig` & `security/validate.zig`: guarded empty/comma-only
+    `Accept` headers in `negotiate`, defaulted non-finite/invalid `q` weights to
+    `0.0`, rejected control characters in CORS options, rejected non-finite
+    floats in numeric schema validation, added `errdefer` cleanup in
+    `getOrCreateRegistry`, tightened email validation, and expanded the float
+    coercion buffer to `[345]u8`.
+  - `data/sql.zig`, `security/{auth,decode}.zig`, `data/ratelimit.zig`,
+    `net/fetch.zig`, `platform/{time,text}.zig`, `zttp-sdk/src/value.zig`:
+    gated `lastInsertRowId` on `changes > 0` for `INSERT`/`REPLACE` statements
+    (including comment/CTE prefixes) and checked unused-param binding objects;
+    rejected duplicate JWT header fields and non-object/array claims and
+    switched to `std.crypto.timing_safe`; tightened multipart closing-boundary
+    and quoted-parameter parsing; guarded `JSValue.exception_val` against retries
+    in `fetchWithRetry`, saturating arithmetic in `ratelimit`, strict ISO
+    timestamp parsing, and UTF-8 continuation-byte handling in `mask`.
+- **Runtime, HTTP server, self-extract, and proofs (`packages/runtime/src/`):**
+  - `self_extract.zig` & `runtime_cli.zig`: `detectPath` now fails closed with
+    `error.UnreadableSelf` on open/stat/pread failures instead of falling back
+    to plain runtime mode; `ServeRequest.deinit` and `errdefer`/flag cleanup fix
+    leaks of `-e`/`--eval` source buffers and `project` configuration on clean
+    shutdown, duplicate `-e`, or argument errors.
+  - `server_connection_pool.zig`, `server.zig`, `server_static.zig`,
+    `http_parser.zig`, `proof_adapter.zig`: moved `contract_lock.lockShared()`
+    in `handleSingleRequestSync` after request parsing so idle keep-alive
+    connections do not block `--watch` live reloads; returned `431` on header
+    overflow and `400` on malformed framing; required `stat.kind == .file` and
+    no symlinks in static file serving; keyed proof cache by `(method, url)`
+    and rejected uncacheable responses; fixed keep-alive arena retention,
+    ephemeral port wakeup, and `BytecodeCache.getRawAlloc` ownership.
+  - `handler_instance.zig`, `runtime_pool.zig`, `live_reload.zig`,
+    `proofs/{bundle,pr_gate,guard_report}.zig`, `proofs_cli.zig`, `verify_cli.zig`,
+    `cli_auth.zig`, `attest/{envelope,identity}.zig`, `trace_request_recorder.zig`,
+    `trace_helpers.zig`, `runtime_http.zig`: reset `cost_meter` on pool release
+    and checked `hybrid.arena` for constant-envelope arena ceilings; fixed
+    fast-path routing and trace-recorder ownership; failed closed on `--prove`
+    live-reload errors; verified bundle SHA-256 digests in memory without
+    TOCTOU; fixed trailing-backslash OOB in `trace_helpers`, `guard_report`
+    buffer sizing, negative timestamps in `formatTimestampShort`, `verify` client
+    reuse and JWK validation, `cli_auth` exclusive file writes and secret
+    zeroing, and outbound header validation.
+- **Consumer proof-checker (`packages/proof-checker/src/`):**
+  - Verified `contract_bytes` and `runtime_policy_bytes` graph member digests and
+    failed closed on graph read errors or missing members; charged work budget in
+    `anyTotal`/`allTotal`/`anyDerived`/`allDerived` loops; ran rewrite checks
+    when translation witnesses are empty; surfaced exact decode error codes;
+    rejected disabled capability sections carrying nonzero counts; tightened
+    endpoint authority bounds, backslash, bracket, and port checks in
+    `residual.zig`.
+- **Tools and `zttp expert` (`packages/tools/src/`, `packages/pi/src/`, `zts_main.zig`):**
+  - Fixed `import type` handling during proof-evidence emission, removed the
+    32-specifier virtual import cap, replaced fixed 256 KiB stack buffers,
+    propagated OOM and non-zero exit codes on missing CLI arguments, fixed
+    multi-file diagnostic attribution, fixed `module_audit`, `canonicalize`, and
+    `edit_simulate` memory/discovery bugs, and tightened `proof_checker_mutants`
+    timeout and floor checks.
+  - Fixed `Transcript.appendOwned`, `proof_enrichment`, `pi_goal_candidate`, and
+    `zts_expert_fill_hole` OOM leaks, unified context SHA-256 hashing, added
+    local model client read timeouts, added cycle guards in ledger/tree
+    walkers, enforced workspace containment in `gen_tests` and
+    `zts_expert_verify_modules`, and JSON-escaped tool output.
+
+### Changed
+
+- Version alignment checks in `scripts/release.sh`, `tooling/release_version.zig`,
+  `tooling/release_check.zig`, and `RELEASE_CHECKLIST.md` now cover all eight
+  package manifests (`build.zig.zon` and
+  `packages/{zts,runtime,modules,pi,proof-checker,tools,zttp-sdk}/build.zig.zon`)
+  alongside `VERSION`, `packages/zts/src/root.zig`, and `install.sh`.
+- `cacheStats` in `packages/modules/src/data/cache.zig` /
+  `packages/modules/module-specs/data/cache.json` now declares
+  `cache_namespace` contract extraction so `policy_check` covers both
+  store-wide and namespace-scoped calls.
+- Updated repository URLs and documentation (`README.md`, `SECURITY.md`,
+  `CONTRIBUTING.md`, `install.sh`, `scripts/render-release-notes.sh`,
+  `docs/user-guide.md`, `docs/cli.md`, `docs/verification.md`,
+  `docs/internals/testing.md`, `docs/roadmap.md`, `examples/README.md`,
+  `tests/corpus/README.md`, `advisor-plans/README.md`,
+  `docs/examples/proof-gate.yml`, `docs/spec/semantics.spec.ts`) to match
+  `srdjan/zttp` and current `0.17.1` / `zts-model-1` behavior, and added four
+  parse refusal cases (`const_without_initializer`, `invalid_assignment_target`,
+  `invalid_break`, `invalid_continue`) under `tests/corpus/parse/bad/`.
+- Consolidated repository gates (`test-script-reachability`, `test-zts-layering`,
+  `test-release-workflow`, `production-branch-metric`) into native Zig tooling
+  and updated build wiring in `build.zig` and `build/`.
+
+### Removed
+
+- Deleted obsolete shell gates (`scripts/check-script-reachability.sh`,
+  `scripts/check-zts-layering.sh`, `scripts/run-production-branch-metric.sh`,
+  `scripts/test-release-workflow.sh`, `scripts/zts-import-graph.sh`), unused
+  `packages/pi/src/auto_repair.zig`, `packages/zttp-sdk/src/callable.zig`,
+  duplicate `examples/handler/handler.test.jsonl`,
+  `.agents/skills/zig-expert/zig-expert.skill`, and the redundant `zig build
+  release` alias in `build.zig`.
+
 ## [0.27.1] - 2026-11-24
 
 ### Highlights
@@ -2167,7 +2345,8 @@ Known-issue notes from that era include:
 - HandlerPool test flake under the build runner (root cause was the closure
   destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zttp/compare/v0.27.1...HEAD
+[Unreleased]: https://github.com/srdjan/zttp/compare/v0.27.2...HEAD
+[0.27.2]: https://github.com/srdjan/zttp/compare/v0.27.1...v0.27.2
 [0.27.1]: https://github.com/srdjan/zttp/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/srdjan/zttp/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/srdjan/zttp/compare/v0.25.0...v0.26.0

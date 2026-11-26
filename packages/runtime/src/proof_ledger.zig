@@ -159,7 +159,8 @@ pub fn readEvents(allocator: std.mem.Allocator) ![]Event {
     while (line_iter.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
-        const event = try parseLine(allocator, trimmed);
+        var event = try parseLine(allocator, trimmed);
+        errdefer event.deinit(allocator);
         try out.append(allocator, event);
     }
 
@@ -629,7 +630,7 @@ test "an old kind=perf row with a payload that is not an object still loads" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try ensureLedgerDir();
-    const row_prefix = comptime old_perf_row[0..(std.mem.indexOf(u8, old_perf_row, ",\"perf\":") orelse unreachable)];
+    const row_prefix = comptime old_perf_row[0..(std.mem.find(u8, old_perf_row, ",\"perf\":") orelse unreachable)];
     try zts.file_io.writeFile(testing.allocator, ledgerPath(), row_prefix ++ ",\"perf\":\"not-an-object\"}\n");
 
     const events = try readEvents(testing.allocator);

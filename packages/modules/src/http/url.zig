@@ -27,25 +27,25 @@ fn parseUrlComponents(input: []const u8) UrlComponents {
     var result = UrlComponents{};
     var rest = input;
 
-    if (std.mem.indexOfScalar(u8, rest, '#')) |hash_pos| {
+    if (std.mem.findScalar(u8, rest, '#')) |hash_pos| {
         result.hash = rest[hash_pos + 1 ..];
         rest = rest[0..hash_pos];
     }
 
-    if (std.mem.indexOfScalar(u8, rest, '?')) |query_pos| {
+    if (std.mem.findScalar(u8, rest, '?')) |query_pos| {
         result.query = rest[query_pos + 1 ..];
         rest = rest[0..query_pos];
     }
 
-    if (std.mem.indexOf(u8, rest, "://")) |scheme_end| {
+    if (std.mem.find(u8, rest, "://")) |scheme_end| {
         result.protocol = rest[0..scheme_end];
         rest = rest[scheme_end + 3 ..];
 
-        const host_end = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+        const host_end = std.mem.findScalar(u8, rest, '/') orelse rest.len;
         const authority = rest[0..host_end];
 
         // Strip userinfo (user:password@) if present
-        const hostport = if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at|
+        const hostport = if (std.mem.findScalarLast(u8, authority, '@')) |at|
             authority[at + 1 ..]
         else
             authority;
@@ -53,7 +53,7 @@ fn parseUrlComponents(input: []const u8) UrlComponents {
         // A bracketed IPv6 literal (`[::1]`) contains colons inside the address,
         // so the port separator is only the colon AFTER the closing bracket.
         if (hostport.len > 0 and hostport[0] == '[') {
-            if (std.mem.indexOfScalar(u8, hostport, ']')) |close| {
+            if (std.mem.findScalar(u8, hostport, ']')) |close| {
                 result.host = hostport[0 .. close + 1];
                 if (close + 1 < hostport.len and hostport[close + 1] == ':') {
                     result.port = hostport[close + 2 ..];
@@ -62,7 +62,7 @@ fn parseUrlComponents(input: []const u8) UrlComponents {
                 // Malformed (no closing bracket): treat the whole thing as host.
                 result.host = hostport;
             }
-        } else if (std.mem.lastIndexOfScalar(u8, hostport, ':')) |colon| {
+        } else if (std.mem.findScalarLast(u8, hostport, ':')) |colon| {
             result.host = hostport[0..colon];
             result.port = hostport[colon + 1 ..];
         } else {
@@ -106,7 +106,7 @@ fn buildSearchParamsObject(handle: *sdk.ModuleHandle, query: []const u8) !sdk.JS
     while (pairs.next()) |pair| {
         if (pair.len == 0) continue;
 
-        const eq_pos = std.mem.indexOfScalar(u8, pair, '=');
+        const eq_pos = std.mem.findScalar(u8, pair, '=');
         const raw_key = if (eq_pos) |pos| pair[0..pos] else pair;
         const raw_val = if (eq_pos) |pos| pair[pos + 1 ..] else "";
 

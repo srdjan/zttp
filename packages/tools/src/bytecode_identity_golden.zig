@@ -129,7 +129,7 @@ fn run(init: std.process.Init) !void {
     for (paths) |path| {
         const line = try goldenLine(allocator, path);
         errdefer allocator.free(line);
-        if (std.mem.indexOf(u8, line, " refused ") == null) digested += 1;
+        if (std.mem.find(u8, line, " refused ") == null) digested += 1;
         try actual.append(allocator, line);
     }
     // Refusing every input would satisfy the floor over a broken compile path.
@@ -159,7 +159,7 @@ fn run(init: std.process.Init) !void {
     var drifted: usize = 0;
     for (actual.items) |line| {
         if (containsLine(golden_lines.items, line)) continue;
-        std.debug.print("bytecode identity drift: {s}\n  actual line: {s}\n", .{ line[0 .. std.mem.indexOfScalar(u8, line, ' ') orelse line.len], line });
+        std.debug.print("bytecode identity drift: {s}\n  actual line: {s}\n", .{ line[0 .. std.mem.findScalar(u8, line, ' ') orelse line.len], line });
         drifted += 1;
     }
     for (golden_lines.items) |line| {

@@ -33,6 +33,7 @@ pub fn resolveStaticFile(
     etag_buf: *[34]u8,
 ) !StaticFileLookup {
     if (!isPathSafe(path)) return .forbidden;
+    if (path[path.len - 1] == '/' or path[path.len - 1] == '\\') return .not_found;
 
     const full_path = std.fmt.bufPrint(path_buf, "{s}/{s}", .{ static_dir, path }) catch return error.PathTooLong;
     switch (canonicalPathStatusInsideRoot(allocator, io, static_dir, full_path)) {
@@ -41,10 +42,31 @@ pub fn resolveStaticFile(
         .outside => return .forbidden,
     }
 
-    const file = Dir.openFile(Dir.cwd(), io, full_path, .{ .follow_symlinks = false }) catch return .not_found;
+    // Walk every directory component with follow_symlinks = false to prevent
+    // intermediate-symlink TOCTOU races between canonicalization and open.
+    var current = Dir.openDir(Dir.cwd(), io, static_dir, .{}) catch return .not_found;
+    defer current.close(io);
+
+    var iter = std.mem.tokenizeAny(u8, path, "/\\");
+    var pending_component: ?[]const u8 = null;
+    while (iter.next()) |comp| {
+        if (pending_component) |dir_comp| {
+            const next_dir = current.openDir(io, dir_comp, .{ .follow_symlinks = false }) catch return .not_found;
+            current.close(io);
+            current = next_dir;
+        }
+        pending_component = comp;
+    }
+    const leaf = pending_component orelse return .not_found;
+
+    const file = current.openFile(io, leaf, .{ .follow_symlinks = false }) catch return .not_found;
     errdefer file.close(io);
 
     const stat = try file.stat(io);
+    if (stat.kind != .file) {
+        file.close(io);
+        return .not_found;
+    }
     const size: usize = std.math.cast(usize, stat.size) orelse return error.FileTooLarge;
 
     return .{ .ok = .{
@@ -65,7 +87,7 @@ pub fn isPathSafe(path: []const u8) bool {
     // Reject NUL bytes anywhere in the path. Matches the CRLF/NUL guard
     // for header names/values (commit 6e65bb7); a NUL byte is never
     // legitimately part of a static-file URL path.
-    if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    if (std.mem.findScalar(u8, path, 0) != null) return false;
 
     // Reject absolute paths (Unix and Windows)
     if (path[0] == '/' or path[0] == '\\') return false;
@@ -262,9 +284,42 @@ test "resolveStaticFile contains symlinks within the static root" {
     const inside_final_link = try resolveStaticFile(allocator, io, static_dir, "inside-file", &path_buf, &etag_buf);
     try std.testing.expectEqual(StaticFileLookup.not_found, inside_final_link);
 
+    // Intermediate directory symlinks are refused too (component-wise O_NOFOLLOW
+    // prevents symlink-swap TOCTOU races).
     const inside_directory_link = try resolveStaticFile(allocator, io, static_dir, "inside-dir/inside.txt", &path_buf, &etag_buf);
-    switch (inside_directory_link) {
-        .ok => |file| file.file.close(io),
-        else => return error.ExpectedInternalDirectorySymlink,
+    try std.testing.expectEqual(StaticFileLookup.not_found, inside_directory_link);
+
+    // Regular nested files inside real subdirectories still resolve cleanly.
+    const real_nested = try resolveStaticFile(allocator, io, static_dir, "real-dir/inside.txt", &path_buf, &etag_buf);
+    switch (real_nested) {
+        .ok => |file| {
+            defer file.file.close(io);
+            try std.testing.expectEqual(@as(usize, "inside dir".len), file.size);
+        },
+        else => return error.ExpectedRegularNestedFile,
     }
+}
+
+test "resolveStaticFile refuses directories under static_dir" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "static/subdir");
+    try tmp.dir.writeFile(io, .{ .sub_path = "static/subdir/file.txt", .data = "hello" });
+
+    const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(tmp_path);
+    const static_dir = try std.fs.path.join(allocator, &.{ tmp_path, "static" });
+    defer allocator.free(static_dir);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var etag_buf: [34]u8 = undefined;
+
+    const dir_lookup = try resolveStaticFile(allocator, io, static_dir, "subdir", &path_buf, &etag_buf);
+    try std.testing.expectEqual(StaticFileLookup.not_found, dir_lookup);
+
+    const dir_slash_lookup = try resolveStaticFile(allocator, io, static_dir, "subdir/", &path_buf, &etag_buf);
+    try std.testing.expectEqual(StaticFileLookup.not_found, dir_slash_lookup);
 }

@@ -25,7 +25,7 @@ fn parseCookiesImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk
         const trimmed = std.mem.trim(u8, pair, " ");
         if (trimmed.len == 0) continue;
 
-        const eq_pos = std.mem.indexOfScalar(u8, trimmed, '=') orelse continue;
+        const eq_pos = std.mem.findScalar(u8, trimmed, '=') orelse continue;
         const name = std.mem.trim(u8, trimmed[0..eq_pos], " ");
         if (name.len == 0) continue;
         const val = trimmed[eq_pos + 1 ..];
@@ -35,6 +35,13 @@ fn parseCookiesImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk
     }
 
     return obj;
+}
+
+fn headerValueHasControl(s: []const u8) bool {
+    for (s) |c| {
+        if (c < 0x20 or c == 0x7F) return true;
+    }
+    return false;
 }
 
 /// True if `s` carries a cookie-injection vector: a control char (incl. CR/LF,
@@ -133,20 +140,21 @@ fn negotiateImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
         var iter = std.mem.splitScalar(u8, available_str, ',');
         while (iter.next()) |t| {
             if (available_count >= 16) break;
-            const trimmed = std.mem.trim(u8, t, " ");
+            const trimmed = std.mem.trim(u8, t, " \t");
             if (trimmed.len > 0) {
                 available_types[available_count] = trimmed;
                 available_count += 1;
             }
         }
     }
+    if (available_count == 0) return sdk.JSValue.undefined_val;
 
     var entries: [32]struct { media_type: []const u8, quality: f32 } = undefined;
     var entry_count: usize = 0;
     var accept_iter = std.mem.splitScalar(u8, accept_header, ',');
     while (accept_iter.next()) |entry| {
         if (entry_count >= 32) break;
-        const trimmed = std.mem.trim(u8, entry, " ");
+        const trimmed = std.mem.trim(u8, entry, " \t");
         if (trimmed.len == 0) continue;
 
         var quality: f32 = 1.0;
@@ -154,19 +162,23 @@ fn negotiateImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
         // Split on the first ';' and trim OWS so an RFC-valid `text/html; q=0.9`
         // (whitespace around the parameter separator) parses the q factor, not
         // just the literal ";q=" form.
-        if (std.mem.indexOfScalar(u8, trimmed, ';')) |semi| {
+        if (std.mem.findScalar(u8, trimmed, ';')) |semi| {
             media_type = std.mem.trim(u8, trimmed[0..semi], " \t");
             var param_iter = std.mem.splitScalar(u8, trimmed[semi + 1 ..], ';');
             while (param_iter.next()) |param| {
                 const p = std.mem.trim(u8, param, " \t");
-                if (std.mem.indexOfScalar(u8, p, '=')) |eq| {
+                if (std.mem.findScalar(u8, p, '=')) |eq| {
                     const k = std.mem.trim(u8, p[0..eq], " \t");
                     if (std.mem.eql(u8, k, "q")) {
                         const v = std.mem.trim(u8, p[eq + 1 ..], " \t");
-                        const parsed = std.fmt.parseFloat(f32, v) catch 1.0;
+                        const parsed = std.fmt.parseFloat(f32, v) catch 0.0;
                         // Clamp to the RFC 7231 [0, 1] range so an out-of-range
                         // q (e.g. q=5) cannot outrank a legitimate q=1.0 entry.
-                        quality = std.math.clamp(parsed, 0.0, 1.0);
+                        // Invalid or non-finite q values fail closed to 0.0.
+                        quality = if (std.math.isFinite(parsed))
+                            std.math.clamp(parsed, 0.0, 1.0)
+                        else
+                            0.0;
                     }
                 }
             }
@@ -175,6 +187,8 @@ fn negotiateImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
         entries[entry_count] = .{ .media_type = media_type, .quality = quality };
         entry_count += 1;
     }
+
+    if (entry_count == 0) return sdk.JSValue.undefined_val;
 
     for (1..entry_count) |i| {
         const key = entries[i];
@@ -203,7 +217,7 @@ fn mediaTypeMatches(accept: []const u8, available: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(accept, available)) return true;
     if (std.mem.endsWith(u8, accept, "/*")) {
         const accept_type = accept[0 .. accept.len - 2];
-        if (std.mem.indexOf(u8, available, "/")) |slash| {
+        if (std.mem.find(u8, available, "/")) |slash| {
             if (std.ascii.eqlIgnoreCase(accept_type, available[0..slash])) return true;
         }
     }
@@ -215,10 +229,10 @@ fn parseContentTypeImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const
 
     const obj = try sdk.createObject(handle);
 
-    const semi_pos = std.mem.indexOfScalar(u8, header, ';');
+    const semi_pos = std.mem.findScalar(u8, header, ';');
     const media_type = std.mem.trim(u8, if (semi_pos) |p| header[0..p] else header, " ");
 
-    if (std.mem.indexOfScalar(u8, media_type, '/')) |slash| {
+    if (std.mem.findScalar(u8, media_type, '/')) |slash| {
         try sdk.objectSet(handle, obj, "type", try sdk.createString(handle, media_type[0..slash]));
         try sdk.objectSet(handle, obj, "subtype", try sdk.createString(handle, media_type[slash + 1 ..]));
     } else {
@@ -240,38 +254,70 @@ fn parseContentTypeImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const
     return obj;
 }
 
+const CorsFields = struct {
+    origin: []const u8,
+    methods: ?[]const u8 = null,
+    headers: ?[]const u8 = null,
+};
+
+fn corsFieldsValid(fields: CorsFields) bool {
+    if (headerValueHasControl(fields.origin)) return false;
+    if (fields.methods) |methods| {
+        if (headerValueHasControl(methods)) return false;
+    }
+    if (fields.headers) |headers| {
+        if (headerValueHasControl(headers)) return false;
+    }
+    return true;
+}
+
 fn corsImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
     if (args.len == 0) return sdk.JSValue.undefined_val;
     const origin = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
 
-    const obj = try sdk.createObject(handle);
-    try sdk.objectSet(handle, obj, "Access-Control-Allow-Origin", try sdk.createString(handle, origin));
+    var methods_opt: ?[]const u8 = null;
+    var headers_opt: ?[]const u8 = null;
+    var max_age_opt: ?f64 = null;
+    var creds_opt: ?bool = null;
 
     if (args.len > 1 and sdk.isObject(args[1])) {
         const opts = args[1];
+        methods_opt = getStringProp(handle, opts, "methods");
+        headers_opt = getStringProp(handle, opts, "headers");
+        max_age_opt = getNumberProp(handle, opts, "maxAge");
+        creds_opt = getBoolProp(handle, opts, "credentials");
+    }
 
-        if (getStringProp(handle, opts, "methods")) |methods| {
-            try sdk.objectSet(handle, obj, "Access-Control-Allow-Methods", try sdk.createString(handle, methods));
-        }
-        if (getStringProp(handle, opts, "headers")) |headers| {
-            try sdk.objectSet(handle, obj, "Access-Control-Allow-Headers", try sdk.createString(handle, headers));
-        }
-        if (getNumberProp(handle, opts, "maxAge")) |max_age| {
-            var num_buf: [20]u8 = undefined;
-            // lossyCast saturates a non-finite or out-of-range maxAge; a raw
-            // @intFromFloat (e.g. cors({maxAge: Infinity})) is illegal behaviour.
-            // Mirrors setCookie's maxAge handling.
-            const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{std.math.lossyCast(i64, max_age)}) catch "0";
-            try sdk.objectSet(handle, obj, "Access-Control-Max-Age", try sdk.createString(handle, num_str));
-        }
-        if (getBoolProp(handle, opts, "credentials")) |creds| {
-            // CORS forbids `Access-Control-Allow-Origin: *` together with
-            // credentials (browsers reject it, and the wildcard+credentials
-            // combination is a credential-leak footgun). Only emit the
-            // credentials header for a specific origin; for `*` it is dropped.
-            if (creds and !std.mem.eql(u8, origin, "*")) {
-                try sdk.objectSet(handle, obj, "Access-Control-Allow-Credentials", try sdk.createString(handle, "true"));
-            }
+    // Reject control characters (including CR/LF header-splitting vectors) in
+    // reflected CORS header values, matching setCookieImpl's fail-closed check.
+    if (!corsFieldsValid(.{ .origin = origin, .methods = methods_opt, .headers = headers_opt })) {
+        return sdk.JSValue.undefined_val;
+    }
+
+    const obj = try sdk.createObject(handle);
+    try sdk.objectSet(handle, obj, "Access-Control-Allow-Origin", try sdk.createString(handle, origin));
+
+    if (methods_opt) |methods| {
+        try sdk.objectSet(handle, obj, "Access-Control-Allow-Methods", try sdk.createString(handle, methods));
+    }
+    if (headers_opt) |headers| {
+        try sdk.objectSet(handle, obj, "Access-Control-Allow-Headers", try sdk.createString(handle, headers));
+    }
+    if (max_age_opt) |max_age| {
+        var num_buf: [20]u8 = undefined;
+        // lossyCast saturates a non-finite or out-of-range maxAge; a raw
+        // @intFromFloat (e.g. cors({maxAge: Infinity})) is illegal behaviour.
+        // Mirrors setCookie's maxAge handling.
+        const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{std.math.lossyCast(i64, max_age)}) catch "0";
+        try sdk.objectSet(handle, obj, "Access-Control-Max-Age", try sdk.createString(handle, num_str));
+    }
+    if (creds_opt) |creds| {
+        // CORS forbids `Access-Control-Allow-Origin: *` together with
+        // credentials (browsers reject it, and the wildcard+credentials
+        // combination is a credential-leak footgun). Only emit the
+        // credentials header for a specific origin; for `*` it is dropped.
+        if (creds and !std.mem.eql(u8, origin, "*")) {
+            try sdk.objectSet(handle, obj, "Access-Control-Allow-Credentials", try sdk.createString(handle, "true"));
         }
     }
 
@@ -313,4 +359,83 @@ test "mediaTypeMatches: type wildcard" {
 
 test "mediaTypeMatches: case insensitive" {
     try std.testing.expect(mediaTypeMatches("Text/HTML", "text/html"));
+}
+
+test "negotiateImpl: empty, whitespace, and comma-only Accept return undefined without panicking" {
+    const test_shim = @import("zttp-sdk-test-shim");
+    defer test_shim.resetStrings();
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+
+    const avail = test_shim.internString("text/html, application/json");
+
+    const empty_res = try negotiateImpl(fake_handle, sdk.JSValue.undefined_val, &.{ test_shim.internString(""), avail });
+    try std.testing.expect(empty_res.isUndefined());
+
+    const ws_res = try negotiateImpl(fake_handle, sdk.JSValue.undefined_val, &.{ test_shim.internString("   "), avail });
+    try std.testing.expect(ws_res.isUndefined());
+
+    const comma_res = try negotiateImpl(fake_handle, sdk.JSValue.undefined_val, &.{ test_shim.internString(",,,"), avail });
+    try std.testing.expect(comma_res.isUndefined());
+
+    const no_avail = try negotiateImpl(fake_handle, sdk.JSValue.undefined_val, &.{ test_shim.internString("text/html"), test_shim.internString(",,,") });
+    try std.testing.expect(no_avail.isUndefined());
+}
+
+test "negotiateImpl: invalid or non-finite q defaults to 0.0" {
+    const test_shim = @import("zttp-sdk-test-shim");
+    defer test_shim.resetStrings();
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+
+    const avail_both = test_shim.internString("text/html, text/plain");
+
+    const nan_only = try negotiateImpl(fake_handle, sdk.JSValue.undefined_val, &.{
+        test_shim.internString("text/html;q=NaN"),
+        test_shim.internString("text/html"),
+    });
+    try std.testing.expect(nan_only.isUndefined());
+
+    const nan_fallback = try negotiateImpl(fake_handle, sdk.JSValue.undefined_val, &.{
+        test_shim.internString("text/html;q=NaN, text/plain;q=0.5"),
+        avail_both,
+    });
+    try std.testing.expectEqualStrings("text/plain", sdk.extractString(nan_fallback).?);
+
+    const garbage_only = try negotiateImpl(fake_handle, sdk.JSValue.undefined_val, &.{
+        test_shim.internString("text/html;q=garbage"),
+        test_shim.internString("text/html"),
+    });
+    try std.testing.expect(garbage_only.isUndefined());
+
+    const garbage_fallback = try negotiateImpl(fake_handle, sdk.JSValue.undefined_val, &.{
+        test_shim.internString("text/html;q=garbage, text/plain;q=0.5"),
+        avail_both,
+    });
+    try std.testing.expectEqualStrings("text/plain", sdk.extractString(garbage_fallback).?);
+
+    const inf_only = try negotiateImpl(fake_handle, sdk.JSValue.undefined_val, &.{
+        test_shim.internString("text/html;q=inf"),
+        test_shim.internString("text/html"),
+    });
+    try std.testing.expect(inf_only.isUndefined());
+}
+
+test "corsFieldsValid rejects CR, LF, and other control chars in origin, methods, and headers" {
+    try std.testing.expect(corsFieldsValid(.{
+        .origin = "https://app.example.com",
+        .methods = "GET, POST",
+        .headers = "Content-Type, Authorization",
+    }));
+    try std.testing.expect(!corsFieldsValid(.{ .origin = "https://a.com\r\nX-Injected: 1" }));
+    try std.testing.expect(!corsFieldsValid(.{ .origin = "https://a.com\nX-Injected: 1" }));
+    try std.testing.expect(!corsFieldsValid(.{ .origin = "https://a.com\r" }));
+    try std.testing.expect(!corsFieldsValid(.{ .origin = "https://a.com\x00" }));
+    try std.testing.expect(!corsFieldsValid(.{ .origin = "https://a.com\x7f" }));
+    try std.testing.expect(!corsFieldsValid(.{
+        .origin = "https://a.com",
+        .methods = "GET\r\nSet-Cookie: a=b",
+    }));
+    try std.testing.expect(!corsFieldsValid(.{
+        .origin = "https://a.com",
+        .headers = "Authorization\nX-Evil: 1",
+    }));
 }

@@ -49,14 +49,14 @@ Pre-built binaries are published for Linux on x86_64 and aarch64, and for macOS
 on aarch64. There is no Intel macOS binary; build from source there.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/srdjan/zttp/main/install.sh | sh
 ```
 
 Or build from source with Zig `0.17.1`:
 
 ```bash
-git clone https://github.com/srdjan/zigttp.git
-cd zigttp
+git clone https://github.com/srdjan/zttp.git
+cd zttp
 zig build -Doptimize=fast
 ```
 

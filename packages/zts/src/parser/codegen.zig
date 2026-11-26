@@ -16,7 +16,6 @@ const heap = @import("../heap.zig");
 const string = @import("../string.zig");
 const js_object = @import("../object.zig");
 const atom_table = @import("../atom_table.zig");
-const handler_analyzer = @import("../handler_analyzer.zig");
 const node_types = @import("../node_types.zig");
 const builtin_modules = @import("../builtin_modules.zig");
 const module_specifier = @import("zts-base").module_specifier;
@@ -193,15 +192,11 @@ pub const CodeGen = struct {
         self.freeConstantsContents(self.constants.items);
     }
 
-    /// Free heap-allocated objects stored in constants array (FunctionBytecode, Float64Box)
+    /// Free heap-allocated objects stored in constants array (FunctionBytecode)
     fn freeConstantsContents(self: *CodeGen, constants: []const JSValue) void {
         for (constants) |val| {
             if (val.isExternPtr()) {
                 const func_bc = val.toExternPtr(FunctionBytecode);
-                if (func_bc.pattern_dispatch) |dispatch| {
-                    dispatch.deinit();
-                    self.allocator.destroy(dispatch);
-                }
                 // Recursively free nested constants
                 self.freeConstantsContents(func_bc.constants);
                 // Free the duped slices
@@ -219,12 +214,8 @@ pub const CodeGen = struct {
                 }
                 // Free the FunctionBytecode struct itself
                 self.allocator.destroy(func_bc);
-            } else if (val.isFloat64()) {
-                // Free Float64Box allocations
-                const float_box = val.toPtr(JSValue.Float64Box);
-                self.allocator.destroy(float_box);
             }
-            // Note: Strings are managed by StringTable, don't free them here
+            // Note: Floats are inline NaN-boxed; strings are managed by StringTable.
         }
     }
 
@@ -388,8 +379,14 @@ pub const CodeGen = struct {
             .lit_float => try self.emitFloat(self.ir.getFloatIdx(index).?),
             .lit_string => try self.emitString(self.ir.getStringIdx(index).?),
             .lit_bool => try self.emitBool(self.ir.getBoolValue(index).?),
-            .lit_null => try self.emit(.push_null),
-            .lit_undefined => try self.emit(.push_undefined),
+            .lit_null => {
+                try self.emit(.push_null);
+                self.pushStack(1);
+            },
+            .lit_undefined => {
+                try self.emit(.push_undefined);
+                self.pushStack(1);
+            },
 
             // Identifiers
             .identifier => try self.emitIdentifier(self.ir.getBinding(index).?),
@@ -412,6 +409,7 @@ pub const CodeGen = struct {
                 if (self.ir.getOptValue(index)) |expr| {
                     try self.emitNode(expr);
                     try self.emit(.drop);
+                    self.popStack(1);
                 }
             },
             .var_decl, .function_decl => try self.emitVarDecl(self.ir.getVarDecl(index).?),
@@ -477,18 +475,7 @@ pub const CodeGen = struct {
     }
 
     fn emitFloatValue(self: *CodeGen, f: f64) !void {
-        // Float64 needs heap allocation via Float64Box
-        const float_box = try self.allocator.create(JSValue.Float64Box);
-        float_box.* = .{
-            .header = heap.MemBlockHeader.init(.float64, @sizeOf(JSValue.Float64Box)),
-            ._pad = 0,
-            .value = f,
-        };
-        const idx = self.addConstant(JSValue.fromPtr(float_box)) catch |err| {
-            self.allocator.destroy(float_box);
-            return err;
-        };
-
+        const idx = try self.addConstant(JSValue.fromFloat(f));
         try self.emitPushConst(idx);
         self.pushStack(1);
     }
@@ -925,14 +912,17 @@ pub const CodeGen = struct {
 
         try self.emitJump(.if_false, else_label);
         self.popStack(1);
+        const branch_depth = self.current_stack_depth;
 
         try self.emitNode(ternary.then_branch);
         try self.emitJump(.goto, end_label);
 
         try self.placeLabel(else_label);
+        self.current_stack_depth = branch_depth;
         try self.emitNode(ternary.else_branch);
 
         try self.placeLabel(end_label);
+        self.current_stack_depth = branch_depth + 1;
     }
 
     fn emitCall(self: *CodeGen, call: Node.CallExpr) !void {
@@ -954,7 +944,7 @@ pub const CodeGen = struct {
             // Check for Math.* pattern (compile-time specialization).
             // Math globals are always defined, so an optional short-circuit
             // can never fire here; specialization stays correct.
-            if (self.tryEmitMathBuiltin(member, call)) {
+            if (try self.tryEmitMathBuiltin(member, call)) {
                 return;
             }
 
@@ -1079,7 +1069,7 @@ pub const CodeGen = struct {
 
     /// Try to emit specialized Math.* opcode for known patterns.
     /// Returns true if pattern was matched and opcode emitted.
-    fn tryEmitMathBuiltin(self: *CodeGen, member: Node.MemberExpr, call: Node.CallExpr) bool {
+    fn tryEmitMathBuiltin(self: *CodeGen, member: Node.MemberExpr, call: Node.CallExpr) !bool {
         // Check if object is identifier
         const obj_tag = self.ir.getTag(member.object) orelse return false;
         if (obj_tag != .identifier) return false;
@@ -1107,23 +1097,23 @@ pub const CodeGen = struct {
         // floor/ceil/round/abs require 1 argument
         if (call.args_count == 1) {
             if (prop == floor_atom) {
-                self.emitCallArgs(call) catch return false;
-                self.emit(.math_floor) catch return false;
+                try self.emitCallArgs(call);
+                try self.emit(.math_floor);
                 return true;
             }
             if (prop == ceil_atom) {
-                self.emitCallArgs(call) catch return false;
-                self.emit(.math_ceil) catch return false;
+                try self.emitCallArgs(call);
+                try self.emit(.math_ceil);
                 return true;
             }
             if (prop == round_atom) {
-                self.emitCallArgs(call) catch return false;
-                self.emit(.math_round) catch return false;
+                try self.emitCallArgs(call);
+                try self.emit(.math_round);
                 return true;
             }
             if (prop == abs_atom) {
-                self.emitCallArgs(call) catch return false;
-                self.emit(.math_abs) catch return false;
+                try self.emitCallArgs(call);
+                try self.emit(.math_abs);
                 return true;
             }
         }
@@ -1131,14 +1121,14 @@ pub const CodeGen = struct {
         // min/max require 2 arguments (for the specialized opcode)
         if (call.args_count == 2) {
             if (prop == min_atom) {
-                self.emitCallArgs(call) catch return false;
-                self.emit(.math_min2) catch return false;
+                try self.emitCallArgs(call);
+                try self.emit(.math_min2);
                 self.popStack(1); // Two args pushed, one result
                 return true;
             }
             if (prop == max_atom) {
-                self.emitCallArgs(call) catch return false;
-                self.emit(.math_max2) catch return false;
+                try self.emitCallArgs(call);
+                try self.emit(.math_max2);
                 self.popStack(1);
                 return true;
             }
@@ -1365,9 +1355,17 @@ pub const CodeGen = struct {
         }
         const hash = hasher.final();
 
-        // Check for existing shape with same hash
+        // Check for existing shape with same hash, verifying exact atom equality
+        // to guard against hash collisions.
         if (self.shape_dedup.get(hash)) |existing_idx| {
-            return existing_idx;
+            if (std.mem.eql(js_object.Atom, self.shapes.items[existing_idx], atoms)) {
+                return existing_idx;
+            }
+            for (self.shapes.items, 0..) |registered, idx| {
+                if (std.mem.eql(js_object.Atom, registered, atoms)) {
+                    return @intCast(idx);
+                }
+            }
         }
 
         // Register new shape
@@ -1378,7 +1376,9 @@ pub const CodeGen = struct {
             self.allocator.free(atoms_copy);
             return err;
         };
-        try self.shape_dedup.put(self.allocator, hash, shape_idx);
+        if (!self.shape_dedup.contains(hash)) {
+            try self.shape_dedup.put(self.allocator, hash, shape_idx);
+        }
         return shape_idx;
     }
 
@@ -1653,22 +1653,6 @@ pub const CodeGen = struct {
             .line_table = line_table_copy,
         };
 
-        // Check if this is a handler function candidate and analyze for fast path
-        if (self.isHandlerCandidate(func)) {
-            if (self.analyzeHandlerPatterns(node_idx, func_bc)) |dispatch| {
-                func_bc.pattern_dispatch = dispatch;
-                func_bc.handler_flags.is_http_handler = true;
-                func_bc.handler_flags.has_static_routes = dispatch.patterns.len > 0;
-            }
-        }
-
-        errdefer if (!payload_published) {
-            if (func_bc.pattern_dispatch) |dispatch| {
-                dispatch.deinit();
-                self.allocator.destroy(dispatch);
-            }
-        };
-
         // Clean up function-local state (code/constants are now owned by func_bc copies)
         self.code.deinit(self.allocator);
         self.constants.deinit(self.allocator);
@@ -1729,17 +1713,7 @@ pub const CodeGen = struct {
     }
 
     fn emitSmallInt(self: *CodeGen, val: u8) !void {
-        switch (val) {
-            0 => try self.emit(.push_0),
-            1 => try self.emit(.push_1),
-            2 => try self.emit(.push_2),
-            3 => try self.emit(.push_3),
-            else => {
-                try self.emit(.push_i8);
-                try self.emitByte(val);
-            },
-        }
-        self.pushStack(1);
+        return self.emitInteger(@intCast(val));
     }
 
     fn emitIfStmt(self: *CodeGen, if_stmt: Node.IfStmt) !void {
@@ -1752,19 +1726,24 @@ pub const CodeGen = struct {
 
             try self.emitJump(.if_false, else_label);
             self.popStack(1);
+            const branch_depth = self.current_stack_depth;
 
             try self.emitNode(if_stmt.then_branch);
             try self.emitJump(.goto, end_label);
 
             try self.placeLabel(else_label);
+            self.current_stack_depth = branch_depth;
             try self.emitNode(if_stmt.else_branch);
 
             try self.placeLabel(end_label);
+            self.current_stack_depth = branch_depth;
         } else {
             try self.emitJump(.if_false, else_label);
             self.popStack(1);
+            const branch_depth = self.current_stack_depth;
             try self.emitNode(if_stmt.then_branch);
             try self.placeLabel(else_label);
+            self.current_stack_depth = branch_depth;
         }
     }
 
@@ -1847,6 +1826,7 @@ pub const CodeGen = struct {
         if (value_opt) |val| {
             try self.emitNode(val);
             try self.emit(.ret);
+            self.popStack(1);
         } else {
             try self.emit(.ret_undefined);
         }
@@ -1863,6 +1843,7 @@ pub const CodeGen = struct {
         if (assert.error_expr != null_node) {
             try self.emitNode(assert.error_expr);
             try self.emit(.ret);
+            self.popStack(1);
         } else {
             // `halt` returns the stack top, which here is whatever the frame
             // left there: a local holding a secret became the response body.
@@ -1880,6 +1861,7 @@ pub const CodeGen = struct {
     fn emitMatchExpr(self: *CodeGen, match_expr: Node.MatchExpr) !void {
         // Emit discriminant (stays on stack during pattern testing)
         try self.emitNode(match_expr.discriminant);
+        const match_depth = self.current_stack_depth;
 
         const end_label = try self.createLabel();
         var body_labels: [255]u32 = undefined;
@@ -1926,6 +1908,7 @@ pub const CodeGen = struct {
         i = 0;
         while (i < match_expr.arms_count) : (i += 1) {
             try self.placeLabel(body_labels[i]);
+            self.current_stack_depth = match_depth;
 
             const arm_idx = self.ir.getListIndex(match_expr.arms_start, i);
             const arm = self.ir.getMatchArm(arm_idx) orelse continue;
@@ -1955,6 +1938,7 @@ pub const CodeGen = struct {
         }
 
         try self.placeLabel(end_label);
+        self.current_stack_depth = match_depth;
     }
 
     /// Store every field a record pattern binds into its arm-scoped local.
@@ -2028,6 +2012,7 @@ pub const CodeGen = struct {
 
     fn emitObjectPatternTest(self: *CodeGen, pattern_node: NodeIndex, target_label: u32) !void {
         const pattern = self.ir.getMatchPattern(pattern_node) orelse return;
+        const entry_depth = self.current_stack_depth;
 
         // If any test fails, skip to after this arm's test block. An empty
         // pattern still tests the shape: it matches every record and nothing
@@ -2064,16 +2049,19 @@ pub const CodeGen = struct {
         try self.emitJump(.goto, target_label);
 
         try self.placeLabel(skip_label);
+        self.current_stack_depth = entry_depth;
     }
 
     fn emitArrayPatternTest(self: *CodeGen, pattern_node: NodeIndex, target_label: u32) !void {
         const pattern = self.ir.getArray(pattern_node) orelse return;
+        const entry_depth = self.current_stack_depth;
         const skip_label = try self.createLabel();
 
         try self.emitArrayLengthAndElementTests(pattern.elements_start, pattern.elements_count, skip_label);
 
         try self.emitJump(.goto, target_label);
         try self.placeLabel(skip_label);
+        self.current_stack_depth = entry_depth;
     }
 
     fn emitPatternValueTest(self: *CodeGen, pattern_node: NodeIndex, fail_label: u32) anyerror!void {
@@ -2132,6 +2120,7 @@ pub const CodeGen = struct {
     /// If the value is undefined, jumps to fail_label. Otherwise dispatches
     /// to the appropriate nested test.
     fn emitGuardedNestedTest(self: *CodeGen, pattern_node: NodeIndex, fail_label: u32, kind: NestedPatternKind) anyerror!void {
+        const entry_depth = self.current_stack_depth;
         const cleanup_label = try self.createLabel();
         const done_label = try self.createLabel();
         try self.emitUndefinedCheck(cleanup_label);
@@ -2141,10 +2130,12 @@ pub const CodeGen = struct {
         }
         try self.emitJump(.goto, done_label);
         try self.placeLabel(cleanup_label);
+        self.current_stack_depth = entry_depth;
         try self.emit(.drop);
         self.popStack(1);
         try self.emitJump(.goto, fail_label);
         try self.placeLabel(done_label);
+        self.current_stack_depth = entry_depth - 1;
     }
 
     /// Emit: dup, push_undefined, strict_eq, if_true -> target_label
@@ -2162,6 +2153,7 @@ pub const CodeGen = struct {
     /// Emit wildcard presence check: if TOS is undefined, jump to fail_label;
     /// otherwise drop the value and continue.
     fn emitWildcardPresenceCheck(self: *CodeGen, fail_label: u32) !void {
+        const entry_depth = self.current_stack_depth;
         const missing_label = try self.createLabel();
         const next_label = try self.createLabel();
         try self.emitUndefinedCheck(missing_label);
@@ -2169,24 +2161,23 @@ pub const CodeGen = struct {
         self.popStack(1);
         try self.emitJump(.goto, next_label);
         try self.placeLabel(missing_label);
+        self.current_stack_depth = entry_depth;
         try self.emit(.drop);
         self.popStack(1);
         try self.emitJump(.goto, fail_label);
         try self.placeLabel(next_label);
+        self.current_stack_depth = entry_depth - 1;
     }
 
     /// Push an integer value, using small-int optimization when possible.
     fn emitIntValue(self: *CodeGen, val: i32) !void {
-        if (val >= 0 and val <= std.math.maxInt(u8)) {
-            try self.emitSmallInt(@intCast(val));
-        } else {
-            try self.emitPushConst(try self.addConstant(JSValue.fromInt(val)));
-        }
+        return self.emitInteger(val);
     }
 
     /// Shared core of object pattern property testing with cleanup/done labels.
     fn emitObjectPatternProps(self: *CodeGen, pattern_node: NodeIndex, fail_label: u32) anyerror!void {
         const pattern = self.ir.getMatchPattern(pattern_node) orelse return;
+        const entry_depth = self.current_stack_depth;
         const cleanup_label = try self.createLabel();
         const done_label = try self.createLabel();
 
@@ -2220,15 +2211,18 @@ pub const CodeGen = struct {
         try self.emitJump(.goto, done_label);
 
         try self.placeLabel(cleanup_label);
+        self.current_stack_depth = entry_depth;
         try self.emit(.drop);
         self.popStack(1);
         try self.emitJump(.goto, fail_label);
         try self.placeLabel(done_label);
+        self.current_stack_depth = entry_depth - 1;
     }
 
     /// Shared core of array pattern length check + element testing with cleanup/done labels.
     fn emitArrayPatternElements(self: *CodeGen, pattern_node: NodeIndex, fail_label: u32) anyerror!void {
         const pattern = self.ir.getArray(pattern_node) orelse return;
+        const entry_depth = self.current_stack_depth;
         const cleanup_label = try self.createLabel();
         const done_label = try self.createLabel();
 
@@ -2239,10 +2233,12 @@ pub const CodeGen = struct {
         try self.emitJump(.goto, done_label);
 
         try self.placeLabel(cleanup_label);
+        self.current_stack_depth = entry_depth;
         try self.emit(.drop);
         self.popStack(1);
         try self.emitJump(.goto, fail_label);
         try self.placeLabel(done_label);
+        self.current_stack_depth = entry_depth - 1;
     }
 
     /// Emit length check + per-element tests for an array pattern.
@@ -2481,48 +2477,10 @@ pub const CodeGen = struct {
         }
     }
 
-    // ============ Handler Analysis ============
-
-    /// Check if a function is a candidate for HTTP handler optimization.
-    /// Candidates are functions named "handler" with exactly 1 parameter.
-    fn isHandlerCandidate(self: *const CodeGen, func: Node.FunctionExpr) bool {
-        // Must have exactly 1 parameter (request)
-        if (func.params_count != 1) return false;
-
-        // Check if name is "handler" atom (159)
-        if (func.name_atom == @backingInt(js_object.Atom.handler)) return true;
-
-        // Also check by string lookup if atoms table is available
-        if (self.atoms) |atoms| {
-            const name = atoms.getName(@fromBackingInt(@intCast(func.name_atom)));
-            if (name != null and std.mem.eql(u8, name.?, "handler")) return true;
-        }
-
-        return false;
-    }
-
-    /// Analyze a handler function for static patterns and build a dispatch table.
-    fn analyzeHandlerPatterns(
-        self: *CodeGen,
-        func_node: NodeIndex,
-        func_bc: *FunctionBytecode,
-    ) ?*bytecode.PatternDispatchTable {
-        _ = func_bc;
-
-        var analyzer = handler_analyzer.HandlerAnalyzer.init(
-            self.allocator,
-            self.ir,
-            self.atoms,
-        );
-        defer analyzer.deinit();
-
-        return analyzer.analyze(func_node) catch null;
-    }
-
     // ============ Stack Tracking ============
 
     fn pushStack(self: *CodeGen, count: u16) void {
-        self.current_stack_depth += count;
+        self.current_stack_depth +|= count;
         if (self.current_stack_depth > self.max_stack_depth) {
             self.max_stack_depth = self.current_stack_depth;
         }
@@ -2821,4 +2779,47 @@ test "a jump past the i16 range is refused in codegen" {
     defer gen.deinit();
     defer gen.freeOwnedConstantPayloads();
     try std.testing.expectError(error.JumpTooFar, gen.generate(root));
+}
+
+test "registerShape checks exact atom equality on hash collision" {
+    const allocator = std.testing.allocator;
+    var nodes = IRStore.init(allocator);
+    defer nodes.deinit();
+    var constants = ConstantPool.init(allocator);
+    defer constants.deinit();
+    var scopes = try ScopeAnalyzer.init(allocator);
+    defer scopes.deinit();
+    var gen = CodeGen.initWithIRStore(allocator, &nodes, &constants, &scopes, null, null);
+    defer gen.deinit();
+
+    const shape_a = [_]js_object.Atom{ .length, .name };
+    const shape_b = [_]js_object.Atom{ .status, .body };
+    const idx_a = try gen.registerShape(&shape_a);
+    try std.testing.expectEqual(@as(u16, 0), idx_a);
+
+    // Seed shape_dedup with shape_b's hash pointing to shape_a to simulate a Wyhash collision.
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(std.mem.asBytes(&@backingInt(shape_b[0])));
+    hasher.update(std.mem.asBytes(&@backingInt(shape_b[1])));
+    try gen.shape_dedup.put(allocator, hasher.final(), idx_a);
+
+    const idx_b = try gen.registerShape(&shape_b);
+    try std.testing.expectEqual(@as(u16, 1), idx_b);
+    try std.testing.expectEqual(@as(u16, 1), try gen.registerShape(&shape_b));
+}
+
+test "emitIntValue does not sign-wrap indices 128..255 into push_i8" {
+    const allocator = std.testing.allocator;
+    var nodes = IRStore.init(allocator);
+    defer nodes.deinit();
+    var constants = ConstantPool.init(allocator);
+    defer constants.deinit();
+    var scopes = try ScopeAnalyzer.init(allocator);
+    defer scopes.deinit();
+    var gen = CodeGen.initWithIRStore(allocator, &nodes, &constants, &scopes, null, null);
+    defer gen.deinit();
+
+    try gen.emitIntValue(128);
+    try std.testing.expectEqual(@backingInt(Opcode.push_const), gen.code.items[0]);
+    try std.testing.expectEqual(@as(i32, 128), gen.constants.items[0].getInt());
 }

@@ -19,18 +19,14 @@ DEPLOY_PORT=$((BASE_PORT + 2))
 IMPORTS_PORT=$((BASE_PORT + 3))
 GUARD_PORT=$((BASE_PORT + 4))
 
-TMP_DIR=$(mktemp -d -t zttp-smoke-XXXXXX)
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/zttp-smoke.XXXXXX")
 APP_NAME="smoke-app"
 APP_DIR="$TMP_DIR/$APP_NAME"
 BROKEN_APP_DIR="$TMP_DIR/broken-app"
-RUNTIME_BIN="$REPO_ROOT/zig-out/bin/zttp-runtime"
-RUNTIME_BAK="$RUNTIME_BIN.smoke-bak"
 
 cleanup() {
     pkill -f "$APP_DIR/.zttp/build/$APP_NAME" 2>/dev/null || true
     pkill -f "$APP_DIR/.zttp/deploy/$APP_NAME" 2>/dev/null || true
-    # Restore runtime if the missing-runtime negative test was interrupted.
-    [ -e "$RUNTIME_BAK" ] && mv "$RUNTIME_BAK" "$RUNTIME_BIN" 2>/dev/null
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -534,10 +530,12 @@ build_body=$(wait_for_http "http://127.0.0.1:$BUILD_PORT/" 25) || fail "build ar
 stop_bg "$BUILD_PID" "$APP_DIR/.zttp/build/$APP_NAME"
 
 step "negative: deploy without zttp-runtime emits an install hint"
-mv "$RUNTIME_BIN" "$RUNTIME_BAK"
+NO_RUNTIME_DIR="$TMP_DIR/no-runtime"
+mkdir -p "$NO_RUNTIME_DIR"
+cp "$ZTTP" "$NO_RUNTIME_DIR/zttp"
+chmod +x "$NO_RUNTIME_DIR/zttp"
 missing_runtime_status=0
-missing_runtime_out=$("$ZTTP" deploy 2>&1) || missing_runtime_status=$?
-mv "$RUNTIME_BAK" "$RUNTIME_BIN"
+missing_runtime_out=$("$NO_RUNTIME_DIR/zttp" deploy 2>&1) || missing_runtime_status=$?
 [ "$missing_runtime_status" -ne 0 ] || fail "deploy succeeded with zttp-runtime missing"
 printf '%s' "$missing_runtime_out" | grep -q "zttp-runtime template not found" || fail "missing-runtime diagnostic was not actionable: $missing_runtime_out"
 [ ! -e "$APP_DIR/.zttp/deploy/$APP_NAME" ] || fail "deploy artifact was created despite missing runtime"

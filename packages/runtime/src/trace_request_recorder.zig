@@ -20,6 +20,11 @@ const HttpResponse = @import("http_types.zig").HttpResponse;
 const HttpRequestView = http_types.HttpRequestView;
 const splitHeaderKV = @import("runtime_http.zig").splitHeaderKV;
 
+/// No-op destructor for TRACE_STATE_SLOT: HandlerInstance is the sole owner of
+/// `trace_recorder` and frees it in `HandlerInstance.deinit`, preventing double-free
+/// or UAF if a handler panics before `finishRequestRecorder` runs.
+fn noopTraceDestructor(_: *anyopaque, _: std.mem.Allocator) void {}
+
 /// Set up the per-request recorder (lazily creating it on first request) and
 /// record the inbound request. Returns the timer to hand to
 /// `finishRequestRecorder`, or null when tracing is not configured.
@@ -27,10 +32,10 @@ pub fn setupRequestRecorder(rt: *HandlerInstance, request: HttpRequestView) ?com
     var trace_timer: ?compat.Timer = null;
     if (rt.trace_file != null and rt.trace_mutex != null) {
         if (rt.trace_recorder == null) {
-            rt.trace_recorder = rt.allocator.create(zq.TraceRecorder) catch null;
+            rt.trace_recorder = rt.response_allocator.create(zq.TraceRecorder) catch null;
             if (rt.trace_recorder) |rec| {
                 rec.* = zq.TraceRecorder.init(
-                    rt.allocator,
+                    rt.response_allocator,
                     rt.trace_file.?,
                     rt.trace_mutex.?,
                 );
@@ -41,7 +46,7 @@ pub fn setupRequestRecorder(rt: *HandlerInstance, request: HttpRequestView) ?com
             rt.ctx.setModuleState(
                 zq.TRACE_STATE_SLOT,
                 @ptrCast(rec),
-                &zq.TraceRecorder.deinitOpaque,
+                &noopTraceDestructor,
             );
 
             var h_names: [64][]const u8 = undefined;

@@ -55,6 +55,7 @@ pub fn performanceNow(ctx: *context.Context, this: value.JSValue, args: []const 
         return allocFloat(ctx, 0);
     }
     while (perf_origin_state.load(.acquire) != origin_ready) std.atomic.spinLoopHint();
+    if (now.ns < perf_time_origin.ns) return allocFloat(ctx, 0);
     const elapsed_ns = now.since(perf_time_origin);
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
     return allocFloat(ctx, elapsed_ms);

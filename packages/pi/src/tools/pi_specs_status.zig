@@ -194,8 +194,8 @@ const testing = std.testing;
 test "tool registers expected name and label" {
     try testing.expectEqualStrings("pi_specs_status", tool.name);
     try testing.expectEqualStrings("specs-status", tool.label);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "Proof<T, P>") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "ZTS500") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "Proof<T, P>") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "ZTS500") != null);
 }
 
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
@@ -220,5 +220,5 @@ test "pi_specs_status runs in a workspace that has no build.zig" {
     var result = try execute(allocator, &.{"handler.ts"});
     defer result.deinit(allocator);
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"declared_specs\":[\"deterministic\"]") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"declared_specs\":[\"deterministic\"]") != null);
 }

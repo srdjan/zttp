@@ -51,7 +51,6 @@ comptime {
     _ = @import("expert_evidence_identity.zig");
     _ = @import("expert_security_probes.zig");
     _ = @import("expert_codegen_record.zig");
-    _ = @import("auto_repair.zig");
     _ = @import("expert_persona.zig");
     _ = @import("loop.zig");
     _ = @import("proof_enrichment.zig");
@@ -89,4 +88,11 @@ comptime {
     _ = @import("simulator/recording_storage_test.zig");
     _ = @import("simulator/recorder.zig");
     _ = @import("simulator/recorder_test.zig");
+    _ = @import("simulator/workspace.zig");
+    _ = @import("ledger.zig");
+    _ = @import("ui_payload.zig");
+    _ = @import("tools/pi_specs_status.zig");
+    _ = @import("providers/http_errors.zig");
+    _ = @import("providers/models.zig");
+    _ = @import("providers/tool_catalog.zig");
 }

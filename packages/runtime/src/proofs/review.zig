@@ -587,7 +587,6 @@ pub fn classify(delta: *const ReviewDelta) Verdict {
 pub const DeployReview = struct {
     handler_path: []const u8, // borrowed
     service_name: []const u8, // borrowed
-    region: []const u8, // borrowed
     current: ReviewFacts,
     baseline: ?*const ReviewFacts = null,
     delta: ReviewDelta,
@@ -645,7 +644,6 @@ pub const CounterexamplePreview = struct {
 pub const ProofCard = struct {
     handler_path: []const u8,
     service_name: []const u8,
-    region: []const u8,
     current: *const ReviewFacts,
     baseline: ?*const ReviewFacts = null,
     delta: *const ReviewDelta,
@@ -665,7 +663,6 @@ pub const ProofCard = struct {
         return .{
             .handler_path = review.handler_path,
             .service_name = review.service_name,
-            .region = review.region,
             .current = &review.current,
             .baseline = review.baseline,
             .delta = &review.delta,
@@ -681,7 +678,6 @@ pub fn writeProofCardPlaintext(card: *const ProofCard, writer: *std.Io.Writer) !
     try writer.writeAll("Proof review:\n");
     try writeKv(writer, "  Handler:    ", card.handler_path);
     try writeKv(writer, "  Service:    ", card.service_name);
-    try writeKv(writer, "  Region:     ", card.region);
     try writeKv(writer, "  Contract:   ", card.current.contract_sha);
     try writeKv(writer, "  Proof:      ", card.current.proof_level.toString());
 
@@ -1481,10 +1477,10 @@ test "ReviewFacts.setIntentSummary surfaces intent fields in JSON" {
     try facts.writeJson(&json);
     const bytes = aw.writer.buffered();
 
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"intentAssertionCount\":3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"intentDynamic\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"behaviorPathCount\":7") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"failurePathCount\":2") != null);
+    try std.testing.expect(std.mem.find(u8, bytes, "\"intentAssertionCount\":3") != null);
+    try std.testing.expect(std.mem.find(u8, bytes, "\"intentDynamic\":false") != null);
+    try std.testing.expect(std.mem.find(u8, bytes, "\"behaviorPathCount\":7") != null);
+    try std.testing.expect(std.mem.find(u8, bytes, "\"failurePathCount\":2") != null);
 }
 
 test "ReviewFacts intent fields default to zero in JSON" {
@@ -1507,8 +1503,8 @@ test "ReviewFacts intent fields default to zero in JSON" {
     try facts.writeJson(&json);
     const bytes = aw.writer.buffered();
 
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"intentAssertionCount\":0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"intentDynamic\":false") != null);
+    try std.testing.expect(std.mem.find(u8, bytes, "\"intentAssertionCount\":0") != null);
+    try std.testing.expect(std.mem.find(u8, bytes, "\"intentDynamic\":false") != null);
 }
 
 test "ReviewFacts.parseJson tolerates missing optional fields" {
@@ -1546,7 +1542,6 @@ test "renderReviewCard: first deploy shows baseline none and no blockers" {
     var review = DeployReview{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "us-east",
         .current = current,
         .baseline = null,
         .delta = delta,
@@ -1559,14 +1554,14 @@ test "renderReviewCard: first deploy shows baseline none and no blockers" {
     try renderReviewCard(&review, &aw.writer);
 
     const out = aw.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "Proof review:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Handler:    src/handler.ts") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Service:    demo") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Proof:      complete") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "results-safe") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Baseline:   none (first deploy)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    safe") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Blockers:   none") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Proof review:") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Handler:    src/handler.ts") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Service:    demo") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Proof:      complete") != null);
+    try std.testing.expect(std.mem.find(u8, out, "results-safe") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Baseline:   none (first deploy)") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Verdict:    safe") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Blockers:   none") != null);
 }
 
 test "renderReviewCard: additive deploy shows added route and env" {
@@ -1608,7 +1603,6 @@ test "renderReviewCard: additive deploy shows added route and env" {
     var review = DeployReview{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "us-east",
         .current = current,
         .baseline = &baseline,
         .delta = try deriveDelta(allocator, &current, &baseline),
@@ -1619,11 +1613,11 @@ test "renderReviewCard: additive deploy shows added route and env" {
     defer aw.deinit();
     try renderReviewCard(&review, &aw.writer);
     const out = aw.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "Baseline:   sha-old") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "+ env DB_URL") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "+ route /healthz") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    safe_with_additions") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Blockers:   none") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Baseline:   sha-old") != null);
+    try std.testing.expect(std.mem.find(u8, out, "+ env DB_URL") != null);
+    try std.testing.expect(std.mem.find(u8, out, "+ route /healthz") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Verdict:    safe_with_additions") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Blockers:   none") != null);
 }
 
 test "renderReviewCard: demoted property is breaking with bullet" {
@@ -1652,7 +1646,6 @@ test "renderReviewCard: demoted property is breaking with bullet" {
     var review = DeployReview{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "us-east",
         .current = current,
         .baseline = &baseline,
         .delta = try deriveDelta(allocator, &current, &baseline),
@@ -1663,8 +1656,8 @@ test "renderReviewCard: demoted property is breaking with bullet" {
     defer aw.deinit();
     try renderReviewCard(&review, &aw.writer);
     const out = aw.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "- property read-only") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    breaking") != null);
+    try std.testing.expect(std.mem.find(u8, out, "- property read-only") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Verdict:    breaking") != null);
 }
 
 test "renderReviewCard: promoted property renders + bullet" {
@@ -1693,7 +1686,6 @@ test "renderReviewCard: promoted property renders + bullet" {
     var review = DeployReview{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "us-east",
         .current = current,
         .baseline = &baseline,
         .delta = try deriveDelta(allocator, &current, &baseline),
@@ -1704,8 +1696,8 @@ test "renderReviewCard: promoted property renders + bullet" {
     defer aw.deinit();
     try renderReviewCard(&review, &aw.writer);
     const out = aw.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "+ property read-only") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    safe_with_additions") != null);
+    try std.testing.expect(std.mem.find(u8, out, "+ property read-only") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Verdict:    safe_with_additions") != null);
 }
 
 test "writeProofCardPlaintext: renders a card built without a DeployReview" {
@@ -1731,7 +1723,6 @@ test "writeProofCardPlaintext: renders a card built without a DeployReview" {
     const card = ProofCard{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "us-east",
         .current = &current,
         .baseline = null,
         .delta = &delta,
@@ -1742,10 +1733,10 @@ test "writeProofCardPlaintext: renders a card built without a DeployReview" {
     try writeProofCardPlaintext(&card, &aw.writer);
     const out = aw.writer.buffered();
 
-    try std.testing.expect(std.mem.indexOf(u8, out, "Contract:   sha-card") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "read-only") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Baseline:   none (first deploy)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    safe") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Contract:   sha-card") != null);
+    try std.testing.expect(std.mem.find(u8, out, "read-only") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Baseline:   none (first deploy)") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Verdict:    safe") != null);
 }
 
 fn expectNoPropertyHeld(properties: Properties) !void {

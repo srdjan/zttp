@@ -15,7 +15,6 @@ const json_writer = @import("providers/json_writer.zig");
 const session_events = @import("session/events.zig");
 const expert_workflow = @import("expert_workflow.zig");
 const codegen_types = @import("expert_codegen_types.zig");
-const auto_repair = @import("auto_repair.zig");
 const pi_goal_candidate = @import("tools/pi_goal_candidate.zig");
 const compaction = @import("compaction.zig");
 const change_set = @import("change_set.zig");
@@ -26,6 +25,7 @@ const change_transaction = @import("change_transaction.zig");
 const change_set_receipt = @import("change_set_receipt.zig");
 const contract_gate = @import("contract_gate.zig");
 const gate_record = @import("gate_record.zig");
+const fd_io = @import("fd_io.zig");
 
 pub const ModelCallResult = struct {
     reply: turn.AssistantReply,
@@ -161,7 +161,6 @@ pub fn providerErrorRemediation(err: anyerror) ?[]const u8 {
         error.ModelNotFound => "The configured model was not found. Switch with `/model <id>` or check the model name.",
         error.ProviderOverloaded => "The provider is overloaded. Try again shortly.",
         error.ProviderServerError => "The provider returned a server error. Try again shortly.",
-        error.ApiError => "The provider returned an error mid-response (details logged above).",
         error.PromptTooLong => "The conversation is too large for the model's context window. Run `/compact` to shrink it, then retry.",
         error.RequestTooLarge,
         error.CompactedRequestStillTooLarge,
@@ -206,7 +205,7 @@ pub fn writeTurnErrorToStderr(err: anyerror) void {
         std.fmt.bufPrint(&buf, "error: {s}\n{s}\n", .{ @errorName(err), hint }) catch "error\n"
     else
         std.fmt.bufPrint(&buf, "error: {s}\n", .{@errorName(err)}) catch "error\n";
-    _ = std.c.write(std.c.STDERR_FILENO, text.ptr, text.len);
+    fd_io.writeAll(std.c.STDERR_FILENO, text);
 }
 
 pub fn resolveApprovalFn(policy: ApprovalPolicy, ask_fn: ?ApprovalFn) ApprovalFn {
@@ -772,11 +771,6 @@ fn runTurnBody(
                                     continue;
                                 },
                             }
-
-                            if (auto_repair.buildRetryBlock(ta, candidate.plans_json) catch null) |block| {
-                                const note = try ta.print(compiler_repair_prefix ++ ". Apply these changes verbatim, then fix any remaining flagged violations:\n\n{s}", .{block});
-                                try transcript.append(allocator, .{ .system_note = note });
-                            }
                         }
                         try appendEditToolResult(allocator, transcript, call_id, false, body);
                         next_event = .{ .change_set_verified = .{
@@ -971,16 +965,6 @@ fn runTurnBody(
                     progress,
                 );
             },
-            .end_turn => return finishTurn(
-                &machine,
-                turn_usage,
-                if (hit_tool_budget) .budget_tool_calls else .approved,
-                model_roundtrips,
-                workflow_hint,
-                workflow_hint_injected,
-                tool_calls_used,
-                progress,
-            ),
             .none => return finishTurn(
                 &machine,
                 turn_usage,
@@ -1101,6 +1085,18 @@ fn propertyChanges(
     return visitor.list.items;
 }
 
+fn countPrimaryProperties(primary_opt: ?ui_payload_mod.PropertiesSnapshot) struct { proven: u32, tracked: u32 } {
+    const props = primary_opt orelse return .{ .proven = 0, .tracked = 0 };
+    var proven: u32 = 0;
+    var tracked: u32 = 0;
+    inline for (@typeInfo(ui_payload_mod.PropertiesSnapshot).@"struct".field_names) |field| {
+        if (@FieldType(ui_payload_mod.PropertiesSnapshot, field) != bool) continue;
+        tracked += 1;
+        if (@field(props, field)) proven += 1;
+    }
+    return .{ .proven = proven, .tracked = tracked };
+}
+
 fn applyVerifiedChangeSet(
     allocator: std.mem.Allocator,
     arena: std.mem.Allocator,
@@ -1111,30 +1107,34 @@ fn applyVerifiedChangeSet(
     snapshot: *const workspace_snapshot.Snapshot,
     proof: *const aggregate_proof.AggregateProof,
 ) !ApplyState {
-    if (options.approval_fn) |approve| {
-        const previews = try arena.alloc(ChangePreview, prepared.changes.len);
-        for (prepared.changes, 0..) |change, index| previews[index] = .{
-            .file = change.authored_path,
-            .before = change.baseline.bytes(),
-            .after = change.candidate,
-            .rewrite_trace = change.rewrite_trace,
-        };
-        const property_changes = try propertyChanges(arena, proof);
-        const test_run = try suite_run.run(allocator, arena, options.test_binary, options.test_timeout_ms, snapshot, prepared);
-        if (!try approve.call(.{
-            .proof_id = &proof.proof_id,
-            .changes = previews,
-            .system_proven = proof.system_proven,
-            .carried_over_diagnostics = proof.diagnostics.len,
-            .property_changes = property_changes,
-            .contract_changes = proof.contract_changes,
-            .test_run = test_run,
-        })) {
-            try transcript.append(allocator, .{
-                .system_note = "change set proved but was not applied by the user approval policy",
-            });
-            return .{ .denied = true };
-        }
+    const approve = options.approval_fn orelse {
+        try transcript.append(allocator, .{
+            .system_note = "change set proved but was not applied: no approval policy configured",
+        });
+        return .{ .denied = true };
+    };
+    const previews = try arena.alloc(ChangePreview, prepared.changes.len);
+    for (prepared.changes, 0..) |change, index| previews[index] = .{
+        .file = change.authored_path,
+        .before = change.baseline.bytes(),
+        .after = change.candidate,
+        .rewrite_trace = change.rewrite_trace,
+    };
+    const property_changes = try propertyChanges(arena, proof);
+    const test_run = try suite_run.run(allocator, arena, options.test_binary, options.test_timeout_ms, snapshot, prepared);
+    if (!try approve.call(.{
+        .proof_id = &proof.proof_id,
+        .changes = previews,
+        .system_proven = proof.system_proven,
+        .carried_over_diagnostics = proof.diagnostics.len,
+        .property_changes = property_changes,
+        .contract_changes = proof.contract_changes,
+        .test_run = test_run,
+    })) {
+        try transcript.append(allocator, .{
+            .system_note = "change set proved but was not applied by the user approval policy",
+        });
+        return .{ .denied = true };
     }
 
     var receipt_payload: ui_payload_mod.UiPayload = .{ .verified_change_set = try change_set_receipt.build(
@@ -1171,16 +1171,19 @@ fn applyVerifiedChangeSet(
         if (prepared.changes.len == 1) "" else "s",
         proof.proof_id,
     });
-    errdefer allocator.free(summary);
-    try transcript.entries.append(allocator, .{ .verified_change_set = .{
+    var summary_owned = true;
+    defer if (summary_owned) allocator.free(summary);
+    try transcript.appendOwned(allocator, .{ .verified_change_set = .{
         .llm_text = summary,
         .ui_payload = receipt_payload,
     } });
+    summary_owned = false;
     receipt_owned = false;
     if (options.receipt_durability == .workspace) {
         try workspace.markReceipted(&proof.proof_id);
     }
-    return .{ .applied = true };
+    const counts = countPrimaryProperties(proof.primary_properties);
+    return .{ .applied = true, .proven = counts.proven, .tracked = counts.tracked };
 }
 const testing = std.testing;
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
@@ -1205,7 +1208,7 @@ const CannedClient = struct {
         for (transcript.entries.items) |entry| {
             switch (entry) {
                 .system_note => |body| {
-                    if (std.mem.indexOf(u8, body, expert_workflow.workflow_note_prefix) != null) {
+                    if (std.mem.find(u8, body, expert_workflow.workflow_note_prefix) != null) {
                         self.saw_workflow_note = true;
                     }
                 },
@@ -1358,7 +1361,7 @@ const RetryCaptureClient = struct {
         _ = arena;
         _ = transcript;
         if (extra_user_text) |t| {
-            if (std.mem.indexOf(u8, t, "COMPILER-AUTHORED FIX") != null) self.saw_repair_block = true;
+            if (std.mem.find(u8, t, "COMPILER-AUTHORED FIX") != null) self.saw_repair_block = true;
         }
         if (self.index >= self.replies.len) return error.TestSequenceExhausted;
         const reply = self.replies[self.index];
@@ -1407,7 +1410,7 @@ test "veto failure triggers model-free compiler-authored apply" {
     // The compiler-authored guard is what actually landed on disk.
     const written = try file_io.readFile(testing.allocator, written_path, 1 << 20);
     defer testing.allocator.free(written);
-    try testing.expect(std.mem.indexOf(u8, written, "if (!result.ok)") != null);
+    try testing.expect(std.mem.find(u8, written, "if (!result.ok)") != null);
 }
 
 // A client that records, on each roundtrip after the first, whether the failed
@@ -1430,18 +1433,18 @@ const DraftVisibilityClient = struct {
                 .assistant_tool_use => |calls| {
                     for (calls) |call| {
                         if (std.mem.eql(u8, call.name, "propose_change_set") and
-                            std.mem.indexOf(u8, call.args_json, "var x = 1") != null)
+                            std.mem.find(u8, call.args_json, "var x = 1") != null)
                         {
                             saw_draft = true;
                             saw_digest_without_baseline_copy =
-                                std.mem.indexOf(u8, call.args_json, "baseline_sha256") != null and
-                                std.mem.indexOf(u8, call.args_json, "\"before\"") == null and
-                                std.mem.indexOf(u8, call.args_json, clean_handler) == null;
+                                std.mem.find(u8, call.args_json, "baseline_sha256") != null and
+                                std.mem.find(u8, call.args_json, "\"before\"") == null and
+                                std.mem.find(u8, call.args_json, clean_handler) == null;
                         }
                     }
                 },
                 .tool_result => |result| {
-                    if (!result.ok and std.mem.indexOf(u8, result.llm_text, "compiler rejected") != null)
+                    if (!result.ok and std.mem.find(u8, result.llm_text, "compiler rejected") != null)
                         saw_diag = true;
                 },
                 else => {},
@@ -1544,8 +1547,8 @@ test "bounded context policy rejects oversized output without slicing it" {
     @memset(big, 'a');
     const rejected = try projectToolResult(ta, &registry, "bounded", true, big);
     try testing.expect(!rejected.ok);
-    try testing.expect(std.mem.indexOf(u8, rejected.llm_text, "violated") != null);
-    try testing.expect(std.mem.indexOf(u8, rejected.llm_text, "aaaa") == null);
+    try testing.expect(std.mem.find(u8, rejected.llm_text, "violated") != null);
+    try testing.expect(std.mem.find(u8, rejected.llm_text, "aaaa") == null);
 
     const small = "ok";
     const passthrough = try projectToolResult(ta, &registry, "bounded", true, small);
@@ -1620,7 +1623,7 @@ test "text reply path injects workflow note before model text" {
         else => return error.TestFailed,
     }
     switch (tr.at(1).*) {
-        .system_note => |body| try testing.expect(std.mem.indexOf(u8, body, "submit exactly one `propose_change_set` call so the host veto checks the draft") != null),
+        .system_note => |body| try testing.expect(std.mem.find(u8, body, "submit exactly one `propose_change_set` call so the host veto checks the draft") != null),
         else => return error.TestFailed,
     }
     switch (tr.at(2).*) {
@@ -1654,17 +1657,59 @@ test "clean edit path: veto passes and writes file" {
         &registry,
         &tr,
         "add an ok response",
-        .{ .workspace_root = workspace_root },
+        .{
+            .workspace_root = workspace_root,
+            .approval_fn = ApprovalFn.fromFn(autoApprove),
+        },
     );
 
     try testing.expectEqual(turn.TurnState.done, result.final_state);
+    try testing.expect(result.applied_change_set);
+    try testing.expect(result.tracked_guarantees > 0);
+    try testing.expect(result.proven_guarantees > 0);
+    try testing.expect(result.proven_guarantees <= result.tracked_guarantees);
     switch (tr.at(tr.len() - 1).*) {
-        .proof_card => |body| try testing.expect(std.mem.indexOf(u8, body.llm_text, "aggregate proof passed") != null),
+        .proof_card => |body| try testing.expect(std.mem.find(u8, body.llm_text, "aggregate proof passed") != null),
         else => return error.TestFailed,
     }
     const written = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
     defer testing.allocator.free(written);
     try testing.expectEqualStrings(clean_handler, written);
+}
+
+test "omitted approval_fn refuses apply and preserves disk" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const written_path = try testing.allocator.print("{s}/src/handler.ts", .{workspace_root});
+    defer testing.allocator.free(written_path);
+
+    var canned: CannedClient = .{ .reply = .{
+        .response = .{ .change_set = .{
+            .file = "src/handler.ts",
+            .content = clean_handler,
+        } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const result = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "add an ok response",
+        .{ .workspace_root = workspace_root },
+    );
+
+    try testing.expectEqual(session_events.TurnEndReason.approval_denied, result.end_reason);
+    try testing.expect(!result.applied_change_set);
+    try testing.expectEqual(@as(u32, 0), result.proven_guarantees);
+    try testing.expectEqual(@as(u32, 0), result.tracked_guarantees);
+    try testing.expect(!file_io.fileExists(testing.allocator, written_path));
 }
 
 test "coordinated two-file change proves once approves once and commits one receipt" {
@@ -1728,8 +1773,8 @@ test "coordinated two-file change proves once approves once and commits one rece
     defer testing.allocator.free(handler_bytes);
     const helper_bytes = try file_io.readFile(testing.allocator, helper_path, 1024 * 1024);
     defer testing.allocator.free(helper_bytes);
-    try testing.expect(std.mem.indexOf(u8, handler_bytes, "newValue") != null);
-    try testing.expect(std.mem.indexOf(u8, helper_bytes, "return \"new\"") != null);
+    try testing.expect(std.mem.find(u8, handler_bytes, "newValue") != null);
+    try testing.expect(std.mem.find(u8, helper_bytes, "return \"new\"") != null);
 }
 
 test "broken edit path: veto fails with diagnostic box" {
@@ -1763,10 +1808,10 @@ test "broken edit path: veto fails with diagnostic box" {
     switch (tr.at(tr.len() - 1).*) {
         .diagnostic_box => |body| {
             // The recurring diagnostic is still present...
-            try testing.expect(std.mem.indexOf(u8, body.llm_text, "ZTS001") != null);
+            try testing.expect(std.mem.find(u8, body.llm_text, "ZTS001") != null);
             // ...and the box now ends with a concrete next step rather than a
             // silent dead end (Set C: veto-exhaustion off-ramp).
-            try testing.expect(std.mem.indexOf(u8, body.llm_text, veto_exhausted_next_step) != null);
+            try testing.expect(std.mem.find(u8, body.llm_text, veto_exhausted_next_step) != null);
         },
         else => return error.TestFailed,
     }
@@ -2013,7 +2058,10 @@ test "retry: one bad draft then one good draft lands a proof card" {
         &registry,
         &tr,
         "add a GET route",
-        .{ .workspace_root = workspace_root },
+        .{
+            .workspace_root = workspace_root,
+            .approval_fn = ApprovalFn.fromFn(autoApprove),
+        },
     );
 
     try testing.expectEqual(@as(u8, 2), result.attempt);
@@ -2061,7 +2109,7 @@ test "approval callback can block an otherwise verified edit from being written"
     );
 
     switch (tr.at(tr.len() - 1).*) {
-        .system_note => |note| try testing.expect(std.mem.indexOf(u8, note, "not applied") != null),
+        .system_note => |note| try testing.expect(std.mem.find(u8, note, "not applied") != null),
         else => return error.TestFailed,
     }
     var apply_results: usize = 0;
@@ -2119,7 +2167,7 @@ test "workspace change during approval fails closed without overwriting concurre
     try testing.expect(!result.applied_change_set);
     try testing.expect(race.saw_authoritative_before);
     switch (tr.at(tr.len() - 1).*) {
-        .system_note => |note| try testing.expect(std.mem.indexOf(u8, note, "proof input changed") != null),
+        .system_note => |note| try testing.expect(std.mem.find(u8, note, "proof input changed") != null),
         else => return error.TestFailed,
     }
     const after = try file_io.readFile(testing.allocator, written_path, 1024);
@@ -2161,8 +2209,8 @@ test "edit path outside the workspace is surfaced as a recoverable diagnostic, n
     for (tr.entries.items) |*entry| {
         switch (entry.*) {
             .diagnostic_box => |box| {
-                if (std.mem.indexOf(u8, box.llm_text, "PathOutsideWorkspace") != null and
-                    std.mem.indexOf(u8, box.llm_text, "no source was written") != null)
+                if (std.mem.find(u8, box.llm_text, "PathOutsideWorkspace") != null and
+                    std.mem.find(u8, box.llm_text, "no source was written") != null)
                 {
                     saw_path_diag = true;
                 }
@@ -2202,7 +2250,7 @@ test "unreadable edit target fails closed as a recoverable baseline diagnostic" 
     var saw_verified_change_set = false;
     for (tr.entries.items) |*entry| switch (entry.*) {
         .diagnostic_box => |box| {
-            if (std.mem.indexOf(u8, box.llm_text, "authoritative source baselines") != null) {
+            if (std.mem.find(u8, box.llm_text, "authoritative source baselines") != null) {
                 saw_baseline_failure = true;
             }
         },
@@ -2273,7 +2321,7 @@ test "recorded propose_change_set arguments carry a host digest without baseline
     try testing.expect(object.get("before") == null);
     try testing.expectEqualStrings("present", object.get("baseline_state").?.string);
     try testing.expectEqual(@as(usize, 64), object.get("baseline_sha256").?.string.len);
-    try testing.expect(std.mem.indexOf(u8, args, host_bytes) == null);
+    try testing.expect(std.mem.find(u8, args, host_bytes) == null);
 }
 
 test "autoApprove returns true for any preview" {
@@ -2439,7 +2487,11 @@ test "replay_mode off preserves existing write behavior" {
         &registry,
         &tr,
         "add an ok response",
-        .{ .workspace_root = workspace_root, .replay_mode = false },
+        .{
+            .workspace_root = workspace_root,
+            .approval_fn = ApprovalFn.fromFn(autoApprove),
+            .replay_mode = false,
+        },
     );
 
     switch (tr.at(tr.len() - 1).*) {
@@ -2474,7 +2526,10 @@ test "verified edit path appends one aggregate receipt before the proof card" {
         &registry,
         &tr,
         "write the handler",
-        .{ .workspace_root = workspace_root },
+        .{
+            .workspace_root = workspace_root,
+            .approval_fn = ApprovalFn.fromFn(autoApprove),
+        },
     );
     try testing.expectEqual(turn.TurnState.done, result.final_state);
 
@@ -2551,7 +2606,10 @@ test "legal first draft lands in one attempt and disk equals the aggregate recei
         &registry,
         &tr,
         "add an ok response",
-        .{ .workspace_root = workspace_root },
+        .{
+            .workspace_root = workspace_root,
+            .approval_fn = ApprovalFn.fromFn(autoApprove),
+        },
     );
 
     // One attempt: the draft passed the veto without any retry_draft round.
@@ -2619,7 +2677,7 @@ test "failed veto does not append a verified change-set receipt" {
 test "budget-exhausted prompt carries a concrete next step" {
     // EXP-9: the bare "budget exhausted" line must end with an actionable step.
     try testing.expect(budget_exhausted_next_step.len > 0);
-    try testing.expect(std.mem.indexOf(u8, budget_exhausted_next_step, "zttp check") != null);
+    try testing.expect(std.mem.find(u8, budget_exhausted_next_step, "zttp check") != null);
 }
 
 test "gate instrument: a proposed change set is counted as one tool call" {
@@ -2649,7 +2707,12 @@ test "gate instrument: a proposed change set is counted as one tool call" {
         &registry,
         &tr,
         "add an ok response",
-        .{ .workspace_root = workspace_root, .gate_sink = &sink, .task_class = "change_set" },
+        .{
+            .workspace_root = workspace_root,
+            .approval_fn = ApprovalFn.fromFn(autoApprove),
+            .gate_sink = &sink,
+            .task_class = "change_set",
+        },
     );
 
     const rec = collector.records.items[0];
@@ -2664,7 +2727,7 @@ test "gate instrument: a proposed change set is counted as one tool call" {
     var buf = TextBuffer.init(testing.allocator);
     defer buf.deinit();
     try gate_record.writeJsonl(rec, buf.writer());
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"tool_calls_total\":0") == null);
+    try testing.expect(std.mem.find(u8, buf.written(), "\"tool_calls_total\":0") == null);
 }
 
 test "a secret path reaches the model as the deny-list refusal, not its content" {
@@ -2684,8 +2747,8 @@ test "a secret path reaches the model as the deny-list refusal, not its content"
     });
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "deny list") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "hunter2") == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "deny list") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "hunter2") == null);
 }
 
 test "a turn that exceeded the tool-call budget ends with budget_tool_calls after the model answers" {
@@ -2743,7 +2806,11 @@ test "a turn that exceeded the tool-call budget and then applied a verified edit
         &registry,
         &tr,
         "add an ok response",
-        .{ .workspace_root = workspace_root, .max_tool_calls_per_turn = 1 },
+        .{
+            .workspace_root = workspace_root,
+            .approval_fn = ApprovalFn.fromFn(autoApprove),
+            .max_tool_calls_per_turn = 1,
+        },
     );
     const written = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
     defer testing.allocator.free(written);

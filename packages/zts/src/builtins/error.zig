@@ -39,7 +39,7 @@ pub fn createErrorObject(ctx: *context.Context, this: value.JSValue, args: []con
     const obj: *object.JSObject = if (this.isObject() and !this.isUndefined())
         object.JSObject.fromValue(this)
     else blk: {
-        break :blk ctx.createObject(ctx.object_prototype) catch return value.JSValue.undefined_val;
+        break :blk ctx.createObject(ctx.error_prototype orelse ctx.object_prototype) catch return value.JSValue.undefined_val;
     };
 
     // Set the 'name' property (return undefined on allocation failure)
@@ -107,4 +107,30 @@ pub fn errorToString(ctx: *context.Context, this: value.JSValue, args: []const v
     buffer.appendSlice(ra, msg_text) catch return value.JSValue.undefined_val;
 
     return ctx.createString(buffer.items) catch return value.JSValue.undefined_val;
+}
+
+test "createErrorObject attaches error_prototype and resolves toString" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    try @import("root.zig").initBuiltins(ctx);
+
+    const msg = try ctx.createString("boom");
+    const err_val = errorConstructor(ctx, value.JSValue.undefined_val, &.{msg});
+    const err_obj = object.JSObject.fromValue(err_val);
+    try std.testing.expectEqual(ctx.error_prototype.?, err_obj.prototype.?);
+    const to_str_fn = err_obj.getProperty(ctx.hidden_class_pool.?, .toString);
+    try std.testing.expect(to_str_fn != null and to_str_fn.?.isCallable());
+
+    const rendered = errorToString(ctx, err_val, &.{});
+    try std.testing.expectEqualStrings("Error: boom", rendered.stringBytes().?);
+
+    // Also verify Fragment global is null_val (not undefined_val)
+    try std.testing.expect(ctx.getGlobal(.Fragment).?.isNull());
 }

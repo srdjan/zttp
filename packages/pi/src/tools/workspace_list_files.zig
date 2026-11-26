@@ -208,7 +208,8 @@ fn collectFiles(
                     return;
                 }
                 const rel = common.relativeToRoot(root, child_abs);
-                try files.append(allocator, try allocator.dupe(u8, rel));
+                try files.ensureUnusedCapacity(allocator, 1);
+                files.appendAssumeCapacity(try allocator.dupe(u8, rel));
             },
             else => {},
         }
@@ -225,21 +226,21 @@ test "workspace_list_files: malformed JSON args returns structured error" {
     var result = try execute(testing.allocator, &.{"{not json"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "invalid JSON input") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "invalid JSON input") != null);
 }
 
 test "workspace_list_files: non-string path returns structured error" {
     var result = try execute(testing.allocator, &.{"{\"path\":123}"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "path must be a string") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "path must be a string") != null);
 }
 
 test "workspace_list_files: limit must be a positive integer" {
     var result = try execute(testing.allocator, &.{"{\"limit\":0}"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "limit must be between") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "limit must be between") != null);
 }
 
 test "workspace_list_files: ../ escape is rejected by resolveInsideWorkspace" {
@@ -295,10 +296,10 @@ test "collectFiles: in-process walk lists files relative to root and skips noise
         // Nothing from an excluded directory may appear. `.zttp` matters most:
         // its paths carry a per-workspace hash, so listing it would make this
         // tool's output differ between two runs of the same recorded flow.
-        try testing.expect(std.mem.indexOf(u8, f, ".git") == null);
-        try testing.expect(std.mem.indexOf(u8, f, "zig-out") == null);
-        try testing.expect(std.mem.indexOf(u8, f, "node_modules") == null);
-        try testing.expect(std.mem.indexOf(u8, f, ".zttp") == null);
+        try testing.expect(std.mem.find(u8, f, ".git") == null);
+        try testing.expect(std.mem.find(u8, f, "zig-out") == null);
+        try testing.expect(std.mem.find(u8, f, "node_modules") == null);
+        try testing.expect(std.mem.find(u8, f, ".zttp") == null);
     }
     try testing.expect(saw_handler);
     try testing.expect(saw_readme);

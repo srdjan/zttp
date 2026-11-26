@@ -71,6 +71,7 @@ pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
             summary.record(failed_result);
             continue;
         };
+        errdefer result.deinit(allocator);
         try results.append(allocator, result);
         summary.record(result);
     }
@@ -499,7 +500,7 @@ test "witness round-trip: solved witness replays into an executable leak" {
     // returns: "secret-sentinel". No divergences on the stub consumption.
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expect(
-        std.mem.indexOf(u8, response.body, "secret-sentinel") != null,
+        std.mem.find(u8, response.body, "secret-sentinel") != null,
     );
     try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
 }
@@ -616,7 +617,7 @@ test "a direct credential witness supplies authorization and replays the leak" {
         \\  return Response.json({ token: req.headers.authorization });
         \\}
     , .no_credential_leakage, null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "Bearer counterexample-token") != null);
+    try std.testing.expect(std.mem.find(u8, body, "Bearer counterexample-token") != null);
 }
 
 test "a flow witness preserves native Bytes and Dict values during replay" {
@@ -636,9 +637,9 @@ test "a flow witness preserves native Bytes and Dict values during replay" {
         \\  return Response.json({ bytes: count, entries: entries.length, leaked: secret });
         \\}
     , .no_secret_leakage, &.{.{ .module = "env", .func = "env", .returns = .optional_string }});
-    try std.testing.expect(std.mem.indexOf(u8, body, "secret-sentinel") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"bytes\":2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"entries\":1") != null);
+    try std.testing.expect(std.mem.find(u8, body, "secret-sentinel") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"bytes\":2") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"entries\":1") != null);
 }
 
 test "a flow witness for a leak behind a failed fetch replays into the leak" {
@@ -687,7 +688,7 @@ test "a flow witness for a leak behind a failed fetch replays into the leak" {
     };
     for (sources) |source| {
         const body = try replayFlowWitnessBody(allocator, source);
-        try std.testing.expect(std.mem.indexOf(u8, body, "secret-sentinel") != null);
+        try std.testing.expect(std.mem.find(u8, body, "secret-sentinel") != null);
     }
 }
 
@@ -708,7 +709,7 @@ test "a flow witness for a leak on the fetch success side still replays into the
         \\  return Response.json({ error: "upstream" }, { status: 502 });
         \\}
     );
-    try std.testing.expect(std.mem.indexOf(u8, body, "secret-sentinel") != null);
+    try std.testing.expect(std.mem.find(u8, body, "secret-sentinel") != null);
 }
 
 // Build a replay runtime, install a single recorded crypto.sha256 entry, run a

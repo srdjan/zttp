@@ -511,33 +511,9 @@ pub fn scalarIndexOf(haystack: []const u8, needle: []const u8) ?u32 {
 // SIMD String Comparison
 // ============================================================================
 
-/// SIMD string comparison (256-bit AVX2 when available)
+/// Lexicographical string comparison (matches JS `<` / `>` UTF-8 / byte order)
 pub fn compareStrings(a: []const u8, b: []const u8) std.math.Order {
-    if (a.len != b.len) return std.math.order(a.len, b.len);
-    if (a.len == 0) return .eq;
-
-    const Vec = @Vector(32, u8);
-    var i: usize = 0;
-
-    // SIMD comparison for 32-byte chunks
-    while (i + 32 <= a.len) : (i += 32) {
-        const va: Vec = a[i..][0..32].*;
-        const vb: Vec = b[i..][0..32].*;
-        if (@reduce(.Or, va != vb)) {
-            return scalarCompare(a[i..], b[i..]);
-        }
-    }
-
-    // Handle remainder
-    return scalarCompare(a[i..], b[i..]);
-}
-
-fn scalarCompare(a: []const u8, b: []const u8) std.math.Order {
-    const min_len = @min(a.len, b.len);
-    for (a[0..min_len], b[0..min_len]) |ca, cb| {
-        if (ca != cb) return std.math.order(ca, cb);
-    }
-    return std.math.order(a.len, b.len);
+    return std.mem.order(u8, a, b);
 }
 
 /// Fast string equality check (SIMD-accelerated for long strings)
@@ -919,7 +895,9 @@ test "SIMD string comparison" {
     try std.testing.expectEqual(std.math.Order.eq, compareStrings("hello", "hello"));
     try std.testing.expectEqual(std.math.Order.lt, compareStrings("abc", "abd"));
     try std.testing.expectEqual(std.math.Order.gt, compareStrings("xyz", "abc"));
-    try std.testing.expectEqual(std.math.Order.lt, compareStrings("short", "longer string"));
+    try std.testing.expectEqual(std.math.Order.gt, compareStrings("short", "longer string"));
+    try std.testing.expectEqual(std.math.Order.gt, compareStrings("b", "aa"));
+    try std.testing.expectEqual(std.math.Order.lt, compareStrings("aa", "aaa"));
 }
 
 test "SIMD string equality" {

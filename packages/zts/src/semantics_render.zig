@@ -25,7 +25,7 @@ fn binSym(k: BinKind) []const u8 {
         .sub => "-",
         .mul => "*",
         .lt => "<",
-        .eq => "===",
+        .eq => "==",
     };
 }
 
@@ -228,7 +228,7 @@ pub fn renderSpecTs(caller: std.mem.Allocator) ![]u8 {
 /// TS is well-formed (the params named by the denotation's leaf operands).
 fn denoteParams(r: semantics.NodeRule) []const u8 {
     return switch (r.tag) {
-        .lit_int, .lit_bool => "imm",
+        .lit_int, .lit_bool, .lit_null => "imm",
         .identifier => "locals",
         .binary_op => "c0, c1",
         .unary_op => "c0",
@@ -254,17 +254,17 @@ test "rendered spec carries every named semantic disposition" {
     defer allocator.free(ts);
 
     const sh = semantics.semanticsHash();
-    try std.testing.expect(std.mem.indexOf(u8, ts, &sh) != null);
+    try std.testing.expect(std.mem.find(u8, ts, &sh) != null);
 
     inline for (@typeInfo(semantics.NodeTag).@"enum".field_names) |field| {
         const row = try allocator.print("  {s}: {{ disposition:", .{field});
         defer allocator.free(row);
-        try std.testing.expect(std.mem.indexOf(u8, ts, row) != null);
+        try std.testing.expect(std.mem.find(u8, ts, row) != null);
     }
     inline for (@typeInfo(semantics.Opcode).@"enum".field_names) |field| {
         const row = try allocator.print("  {s}: {{ disposition:", .{field});
         defer allocator.free(row);
-        try std.testing.expect(std.mem.indexOf(u8, ts, row) != null);
+        try std.testing.expect(std.mem.find(u8, ts, row) != null);
     }
 }
 
@@ -282,8 +282,8 @@ test "denotations render as readable infix" {
     const ts = try renderSpecTs(allocator);
     defer allocator.free(ts);
     // binary_op renders its generic infix form; ternary renders the conditional.
-    try std.testing.expect(std.mem.indexOf(u8, ts, "(c0 <op> c1)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ts, "(c0 ? c1 : c2)") != null);
+    try std.testing.expect(std.mem.find(u8, ts, "(c0 <op> c1)") != null);
+    try std.testing.expect(std.mem.find(u8, ts, "(c0 ? c1 : c2)") != null);
 }
 
 test "rendered spec lists the algebraic and excluded laws" {
@@ -292,10 +292,10 @@ test "rendered spec lists the algebraic and excluded laws" {
     defer allocator.free(ts);
     // every declared (and excluded) law name appears in the readable spec.
     for (semantics.algebraic_laws) |law| {
-        try std.testing.expect(std.mem.indexOf(u8, ts, law.name) != null);
+        try std.testing.expect(std.mem.find(u8, ts, law.name) != null);
     }
     for (semantics.excluded_laws) |law| {
-        try std.testing.expect(std.mem.indexOf(u8, ts, law.name) != null);
+        try std.testing.expect(std.mem.find(u8, ts, law.name) != null);
     }
-    try std.testing.expect(std.mem.indexOf(u8, ts, "excluded laws") != null);
+    try std.testing.expect(std.mem.find(u8, ts, "excluded laws") != null);
 }

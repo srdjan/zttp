@@ -102,16 +102,16 @@ pub fn arrayIndexOf(ctx: *context.Context, this: value.JSValue, args: []const va
     if (start >= len) return value.JSValue.fromInt(-1);
 
     // NaN never equals anything via strict equality
-    if (search_elem.isRawDouble() and std.math.isNan(@as(f64, @bitCast(search_elem.raw)))) {
+    if (search_elem.isFloat64() and std.math.isNan(search_elem.getFloat64())) {
         return value.JSValue.fromInt(-1);
     }
 
-    // Strings and boxed floats need content comparison via strictEquals
-    if (search_elem.isAnyString() or search_elem.isBoxedFloat64()) {
+    // Numbers (cross int<->float and -0/+0), strings, and Bytes need strictEquals
+    if (search_elem.isNumber() or search_elem.isAnyString() or search_elem.isBytes()) {
         return arrayIndexOfSlow(obj, search_elem, start, len);
     }
 
-    // Fast path: raw u64 comparison for ints, raw floats, bools, null, undefined, object identity
+    // Fast path: raw u64 comparison for bools, null, undefined, object identity
     return arrayIndexOfRaw(obj, search_elem.raw, start, len);
 }
 
@@ -128,10 +128,10 @@ fn arrayIndexOfSlow(obj: *const object.JSObject, search_elem: value.JSValue, sta
 
 /// Fast path: scan inline and overflow slots as contiguous u64 arrays
 fn arrayIndexOfRaw(obj: *const object.JSObject, search_raw: u64, start: u32, len: u32) value.JSValue {
-    const INLINE_CAP = object.JSObject.INLINE_SLOT_COUNT - 1; // 7 elements inline (slot 0 = length)
+    const INLINE_CAP: u32 = object.JSObject.INLINE_SLOT_COUNT - 1; // 7 elements inline (slot 0 = length)
 
     // Scan inline slots (elements 0..min(len, 7))
-    const inline_count = @min(len, INLINE_CAP);
+    const inline_count: u32 = @min(len, INLINE_CAP);
     if (start < inline_count) {
         const slots_ptr: [*]const u64 = @ptrCast(&obj.inline_slots);
         var slot: u32 = start + 1; // slot = element_index + 1
@@ -143,11 +143,12 @@ fn arrayIndexOfRaw(obj: *const object.JSObject, search_raw: u64, start: u32, len
         }
     }
 
-    // Scan overflow slots (elements 7..len)
+    // Scan overflow slots (elements 7..len), clamped to allocated overflow_capacity
+    // so sparse arrays (length > backing) never read past the overflow buffer.
     if (len > INLINE_CAP) {
         if (obj.overflow_slots) |overflow| {
             const begin: u32 = if (start > INLINE_CAP) start - INLINE_CAP else 0;
-            const count: u32 = len - INLINE_CAP;
+            const count: u32 = @min(len - INLINE_CAP, @as(u32, obj.overflow_capacity));
             const overflow_ptr: [*]const u64 = @ptrCast(overflow);
             var i: u32 = begin;
             while (i < count) : (i += 1) {
@@ -167,7 +168,7 @@ pub fn arrayIncludes(ctx: *context.Context, this: value.JSValue, args: []const v
     // SameValueZero treats NaN as equal to NaN (unlike ===)
     if (args.len > 0) {
         const search = args[0];
-        if (search.isRawDouble() and std.math.isNan(@as(f64, @bitCast(search.raw)))) {
+        if (search.isFloat64() and std.math.isNan(search.getFloat64())) {
             const obj = getObject(this) orelse return value.JSValue.false_val;
             if (obj.class_id != .array) return value.JSValue.false_val;
             const len = obj.getArrayLength();
@@ -175,14 +176,14 @@ pub fn arrayIncludes(ctx: *context.Context, this: value.JSValue, args: []const v
             if (args.len > 1 and args[1].isInt()) {
                 const from = args[1].getInt();
                 if (from < 0) {
-                    i = @intCast(@max(0, @as(i32, @intCast(len)) + from));
+                    i = @intCast(@max(0, @as(i64, len) + @as(i64, from)));
                 } else {
                     i = @intCast(@max(from, 0));
                 }
             }
             while (i < len) : (i += 1) {
                 const val = obj.getIndexUnchecked(i);
-                if (val.isRawDouble() and std.math.isNan(@as(f64, @bitCast(val.raw)))) {
+                if (val.isFloat64() and std.math.isNan(val.getFloat64())) {
                     return value.JSValue.true_val;
                 }
             }
@@ -350,37 +351,43 @@ fn createStringForJoin(ctx: *context.Context, data: []const u8) ?*string.JSStrin
 /// Array.prototype.slice(start?, end?) - Return shallow copy of portion
 pub fn arraySlice(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    const len = getArrayLength(obj, ctx.hidden_class_pool);
+    const len: i32 = @max(0, getArrayLength(obj, ctx.hidden_class_pool));
+    const len_i64: i64 = len;
 
-    var start: i32 = 0;
-    var end: i32 = len;
+    var start_i64: i64 = 0;
+    var end_i64: i64 = len_i64;
 
     if (args.len > 0 and !args[0].isUndefined()) {
         if (args[0].isInt()) {
-            start = args[0].getInt();
+            start_i64 = args[0].getInt();
         } else if (args[0].toNumber()) |n| {
             if (std.math.isFinite(n)) {
-                start = std.math.lossyCast(i32, @trunc(n));
+                start_i64 = std.math.lossyCast(i64, @trunc(n));
             } else if (n > 0) {
-                start = len;
+                start_i64 = len_i64;
             } // NaN / -Infinity -> start stays 0
         }
-        if (start < 0) start = @max(0, len + start);
+        if (start_i64 < 0) start_i64 = @max(@as(i64, 0), len_i64 + start_i64);
+        start_i64 = @min(start_i64, len_i64);
     }
     if (args.len > 1 and !args[1].isUndefined()) {
         if (args[1].isInt()) {
-            end = args[1].getInt();
+            end_i64 = args[1].getInt();
         } else if (args[1].toNumber()) |n| {
             if (std.math.isFinite(n)) {
-                end = std.math.lossyCast(i32, @trunc(n));
+                end_i64 = std.math.lossyCast(i64, @trunc(n));
             } else if (n > 0) {
-                end = len; // +Infinity -> end = len
+                end_i64 = len_i64; // +Infinity -> end = len
             } else {
-                end = 0; // -Infinity / NaN -> 0
+                end_i64 = 0; // -Infinity / NaN -> 0
             }
         }
-        if (end < 0) end = @max(0, len + end);
+        if (end_i64 < 0) end_i64 = @max(@as(i64, 0), len_i64 + end_i64);
+        end_i64 = @min(end_i64, len_i64);
     }
+
+    const start: i32 = @intCast(start_i64);
+    const end: i32 = @intCast(end_i64);
 
     if (end <= start) {
         const result = ctx.createArray() catch return value.JSValue.undefined_val;
@@ -495,6 +502,7 @@ pub fn arrayEvery(ctx: *context.Context, this: value.JSValue, args: []const valu
     const callback = getCallbackArg(args) orelse return value.JSValue.true_val;
     const call_fn = getCallFn(ctx) orelse return value.JSValue.true_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
+    if (len <= 0) return value.JSValue.true_val;
 
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
@@ -513,6 +521,7 @@ pub fn arraySome(ctx: *context.Context, this: value.JSValue, args: []const value
     const callback = getCallbackArg(args) orelse return value.JSValue.false_val;
     const call_fn = getCallFn(ctx) orelse return value.JSValue.false_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
+    if (len <= 0) return value.JSValue.false_val;
 
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
@@ -531,6 +540,7 @@ pub fn arrayFind(ctx: *context.Context, this: value.JSValue, args: []const value
     const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
     const call_fn = getCallFn(ctx) orelse return value.JSValue.undefined_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
+    if (len <= 0) return value.JSValue.undefined_val;
 
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
@@ -549,6 +559,7 @@ pub fn arrayFindIndex(ctx: *context.Context, this: value.JSValue, args: []const 
     const callback = getCallbackArg(args) orelse return value.JSValue.fromInt(-1);
     const call_fn = getCallFn(ctx) orelse return value.JSValue.fromInt(-1);
     const len = getArrayLength(obj, ctx.hidden_class_pool);
+    if (len <= 0) return value.JSValue.fromInt(-1);
 
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
@@ -905,4 +916,76 @@ test "arrayToSorted returns the comparator's error" {
     arr.setArrayLength(2);
 
     try std.testing.expectError(error.CallStackOverflow, arrayToSorted(ctx, arr.toValue(), &.{cmp.toValue()}));
+}
+
+test "arrayIndexOf and arrayIncludes handle sparse arrays, cross-type numbers, and boxed NaN" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Sparse array with overflow slots allocated smaller than length must not OOB-read.
+    const sparse = try ctx.createArray();
+    try sparse.setIndex(allocator, 8, value.JSValue.true_val);
+    sparse.setArrayLength(100);
+    const not_found = arrayIndexOf(ctx, sparse.toValue(), &.{value.JSValue.false_val});
+    try std.testing.expectEqual(@as(i32, -1), not_found.getInt());
+    const found_true = arrayIndexOf(ctx, sparse.toValue(), &.{value.JSValue.true_val});
+    try std.testing.expectEqual(@as(i32, 8), found_true.getInt());
+
+    // Numeric equality across int / float64 and -0.0 / +0.0.
+    const nums = try ctx.createArray();
+    try nums.setIndex(allocator, 0, value.JSValue.fromFloat(3.0));
+    try nums.setIndex(allocator, 1, value.JSValue.fromFloat(-0.0));
+    try nums.setIndex(allocator, 2, value.JSValue.fromFloat(std.math.nan(f64)));
+    try std.testing.expectEqual(@as(i32, 0), arrayIndexOf(ctx, nums.toValue(), &.{value.JSValue.fromInt(3)}).getInt());
+    try std.testing.expectEqual(@as(i32, 1), arrayIndexOf(ctx, nums.toValue(), &.{value.JSValue.fromInt(0)}).getInt());
+    try std.testing.expectEqual(@as(i32, -1), arrayIndexOf(ctx, nums.toValue(), &.{value.JSValue.fromFloat(std.math.nan(f64))}).getInt());
+    try std.testing.expect(arrayIncludes(ctx, nums.toValue(), &.{value.JSValue.fromFloat(std.math.nan(f64))}).isTrue());
+    try std.testing.expect(arrayIncludes(ctx, nums.toValue(), &.{value.JSValue.fromInt(3)}).isTrue());
+}
+
+test "arraySlice clamps start and end to array length and HOFs guard negative length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const arr = try ctx.createArray();
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
+    try arr.setIndex(allocator, 1, value.JSValue.fromInt(20));
+
+    const sliced = arraySlice(ctx, arr.toValue(), &.{ value.JSValue.fromInt(0), value.JSValue.fromInt(1_000_000) });
+    const sliced_obj = getObject(sliced) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 2), sliced_obj.getArrayLength());
+    try std.testing.expectEqual(@as(i32, 10), sliced_obj.getIndex(0).?.getInt());
+    try std.testing.expectEqual(@as(i32, 20), sliced_obj.getIndex(1).?.getInt());
+
+    const stub = struct {
+        fn call(_: *context.Context, _: *object.JSObject, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.true_val;
+        }
+    };
+    http.setCallFunctionCallback(ctx, stub.call);
+    defer http.clearCallFunctionCallback(ctx);
+
+    const cb = try ctx.createObject(null);
+    cb.flags.is_callable = true;
+    const neg_like = try ctx.createObject(null);
+    try ctx.setPropertyChecked(neg_like, .length, value.JSValue.fromInt(-5));
+
+    try std.testing.expect((try arrayEvery(ctx, neg_like.toValue(), &.{cb.toValue()})).isTrue());
+    try std.testing.expect((try arraySome(ctx, neg_like.toValue(), &.{cb.toValue()})).isFalse());
+    try std.testing.expect((try arrayFind(ctx, neg_like.toValue(), &.{cb.toValue()})).isUndefined());
+    try std.testing.expectEqual(@as(i32, -1), (try arrayFindIndex(ctx, neg_like.toValue(), &.{cb.toValue()})).getInt());
 }

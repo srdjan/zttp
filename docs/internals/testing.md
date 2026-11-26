@@ -218,9 +218,9 @@ exact output and does not replace `test-standin`, which checks veto outcomes.
 The gate also measures the instructions that each case's check call retires, and
 fails a case above `case_budget` as `over_budget`. This holds only on an
 instruction source (`instructions_darwin`, `instructions_linux_perf`). On the
-CPU-time fallback the gate prints the numbers and fails nothing, because the
-GitHub runners' counter source has not been read yet. Every run prints one line
-that names the source. The budget is for a Debug build of the gate. The
+CPU-time fallback (used when no hardware counter source is available or under
+`--cpu-time`), the gate prints the numbers and fails nothing. Every run prints
+one line that names the source. The budget is for a Debug build of the gate. The
 measurement table, the headroom, and the thread caveat are in
 `tests/corpus/README.md`.
 
@@ -271,9 +271,9 @@ benchmarks separately.
 The benchmark sampler, threshold policy, and atomic baseline writer live in
 `tooling/benchmark.zig`, a native Zig test root.
 
-Root `VERSION` is the release-version authority. The package manifests,
-`packages/zts/src/root.zig`, the `README.md` heading, and the `install.sh`
-"current:" comment must each equal it. `test-release-check` reads those real
+Root `VERSION` is the release-version authority. All package manifests
+(`build.zig.zon` and `packages/*/build.zig.zon`), `packages/zts/src/root.zig`, and
+the `install.sh` "current:" comment must each equal it. `test-release-check` reads those real
 files, runs inside `zig build test`, and fails with the name of the first
 source that differs. It also rejects a missing, malformed, or stale marker.
 
@@ -319,7 +319,7 @@ Each shell gate that wraps a built tool takes the tool as an argument and refuse
 with a usage message and a non-zero exit. The build steps pass the tool. No script rebuilds it.
 
 The general form now has an execution-route gate.
-`scripts/check-script-reachability.sh` receives a census of scripts executed
+`zig build test-script-reachability` receives a census of scripts executed
 by covered build Run steps and the canonical driver. It compares these with
 the NUL-delimited tracked script inventory. Other scripts require a reason in
 `scripts/manual-scripts.allow`; stale rows fail. Copied fixture scripts do not
@@ -357,8 +357,9 @@ drift and residual guards through aggregate `test` once. Meta drift and agent
 determinism receive the current build's `repo-gate` and analyzer artifacts;
 they do not rebuild helpers in temporary cold caches in the canonical path.
 
-It also runs seven registry-drift and determinism gates, most of which need the
-built binary. `scripts/verify.sh` runs the same seven:
+Seven registry-drift and determinism gates run under `scripts/verify.sh`; six
+also run in `zig build test`, while `check-normalize-idempotent.sh` runs only
+under `scripts/verify.sh`:
 
 | Gate | Asserts |
 |---|---|
@@ -494,7 +495,7 @@ isolate safety from the root module when measured on Zig 0.16.0, so every
 non-test kernel function begins with `@setRuntimeSafety(true)`. The gate parses each kernel file.
 It fails when a function omits that first statement. It also refuses
 `std.debug.assert` or `@setRuntimeSafety(false)` outside a test.
-Its floors are 13 files and 248 non-test functions.
+Its floors are 13 files and 246 non-test functions.
 A ReleaseFast probe must abort on an out-of-bounds index in an
 annotated function of an imported module, which only happens when the setting
 works.

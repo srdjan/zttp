@@ -41,9 +41,10 @@ pub inline fn updatePic(
     self: *Interpreter,
     pic: *PolymorphicInlineCache,
     hidden_class_idx: object.HiddenClassIndex,
+    atom: object.Atom,
     slot_offset: u16,
 ) void {
-    _ = pic.update(hidden_class_idx, slot_offset);
+    _ = pic.update(hidden_class_idx, atom, slot_offset);
     if (pic.just_recovered) {
         pic.just_recovered = false;
         self.mega_recoveries +%= 1;

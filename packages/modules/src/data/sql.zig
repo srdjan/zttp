@@ -287,7 +287,7 @@ fn executeQuery(handle: *sdk.ModuleHandle, args: []const sdk.JSValue, mode: Exec
     return (switch (mode) {
         .one => executeOne(handle, stmt),
         .many => executeMany(handle, stmt),
-        .exec => executeExec(handle, db, stmt),
+        .exec => executeExec(handle, db, stmt, statement),
     }) catch |err| switch (err) {
         error.UnsupportedBlobColumn => sdk.throwError(handle, "SqlError", "BLOB columns are not supported"),
         error.IntegerPrecisionLoss => sdk.throwError(handle, "SqlError", "INTEGER value exceeds the safe range for a JS number (+/-2^53)"),
@@ -314,36 +314,197 @@ fn executeMany(handle: *sdk.ModuleHandle, stmt: *sdk.SqliteStmt) !sdk.JSValue {
     return result;
 }
 
-fn executeExec(handle: *sdk.ModuleHandle, db: *sdk.SqliteDb, stmt: *sdk.SqliteStmt) !sdk.JSValue {
+fn executeExec(handle: *sdk.ModuleHandle, db: *sdk.SqliteDb, stmt: *sdk.SqliteStmt, statement: []const u8) !sdk.JSValue {
     const rc = sdk.sqliteStep(stmt);
     if (rc != sdk.sqlite_done) return sdk.throwError(handle, "SqlError", sdk.sqliteStmtErrmsg(stmt));
 
     const result = try sdk.createObject(handle);
-    try sdk.objectSet(handle, result, "rowsAffected", sdk.JSValue.fromInt(sdk.sqliteChanges(db)));
+    const changes = sdk.sqliteChanges(db);
+    try sdk.objectSet(handle, result, "rowsAffected", sdk.JSValue.fromInt(changes));
 
-    // last_insert_rowid() returns 0 both for "no INSERT on this connection" and
-    // for the (legal but exotic) case of an explicit `rowid`/INTEGER-PRIMARY-KEY
-    // value of 0; we surface the field only for the non-zero case. Do NOT relax
-    // this to `sqliteChanges(db) > 0`: that would attach a stale-connection rowid
-    // to UPDATE/DELETE writes. Correctly surfacing rowid 0 needs INSERT detection
-    // (statement SQL text), which is not available here; the field is optional
-    // (`lastInsertRowId?`) so its absence stays within the declared shape.
-    const insert_id = sdk.sqliteLastInsertRowId(db);
-    if (insert_id != 0) {
+    // Only surface lastInsertRowId when an INSERT/REPLACE statement actually
+    // inserted at least one row. sqlite3_last_insert_rowid() is sticky on the
+    // connection across UPDATE/DELETE statements and pooled requests, so
+    // reading it unconditionally leaks a prior INSERT's rowid.
+    if (changes > 0 and isInsertStatement(statement)) {
+        const insert_id = sdk.sqliteLastInsertRowId(db);
         try sdk.objectSet(handle, result, "lastInsertRowId", try int64ToJsNumber(insert_id));
     }
     return result;
+}
+
+fn skipSqlTrivia(sql: []const u8, start: usize) usize {
+    var i = start;
+    while (i < sql.len) {
+        if (std.ascii.isWhitespace(sql[i])) {
+            i += 1;
+            continue;
+        }
+        if (sql[i] == '-' and i + 1 < sql.len and sql[i + 1] == '-') {
+            i += 2;
+            while (i < sql.len and sql[i] != '\n') : (i += 1) {}
+            continue;
+        }
+        if (sql[i] == '/' and i + 1 < sql.len and sql[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < sql.len and !(sql[i] == '*' and sql[i + 1] == '/')) : (i += 1) {}
+            if (i + 1 < sql.len) {
+                i += 2;
+            } else {
+                i = sql.len;
+            }
+            continue;
+        }
+        break;
+    }
+    return i;
+}
+
+fn readSqlWord(sql: []const u8, start: usize) struct { word: []const u8, next: usize } {
+    var i = start;
+    while (i < sql.len and (std.ascii.isAlphanumeric(sql[i]) or sql[i] == '_')) : (i += 1) {}
+    return .{ .word = sql[start..i], .next = i };
+}
+
+fn skipSqlQuoted(sql: []const u8, start: usize, quote: u8) ?usize {
+    var i = start + 1;
+    while (i < sql.len) {
+        if (sql[i] == quote) {
+            if (i + 1 < sql.len and sql[i + 1] == quote) {
+                i += 2;
+                continue;
+            }
+            return i + 1;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+fn skipSqlIdentifier(sql: []const u8, start: usize) ?usize {
+    if (start >= sql.len) return null;
+    switch (sql[start]) {
+        '"', '`' => return skipSqlQuoted(sql, start, sql[start]),
+        '[' => {
+            const close = std.mem.findScalarPos(u8, sql, start + 1, ']') orelse return null;
+            return close + 1;
+        },
+        else => {
+            const tok = readSqlWord(sql, start);
+            if (tok.word.len == 0) return null;
+            return tok.next;
+        },
+    }
+}
+
+fn skipBalancedParens(sql: []const u8, start: usize) ?usize {
+    if (start >= sql.len or sql[start] != '(') return null;
+    var depth: usize = 1;
+    var i = start + 1;
+    while (i < sql.len and depth > 0) {
+        const c = sql[i];
+        if (c == '-' and i + 1 < sql.len and sql[i + 1] == '-') {
+            i += 2;
+            while (i < sql.len and sql[i] != '\n') : (i += 1) {}
+            continue;
+        }
+        if (c == '/' and i + 1 < sql.len and sql[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < sql.len and !(sql[i] == '*' and sql[i + 1] == '/')) : (i += 1) {}
+            if (i + 1 < sql.len) {
+                i += 2;
+            } else {
+                return null;
+            }
+            continue;
+        }
+        if (c == '\'' or c == '"' or c == '`') {
+            i = skipSqlQuoted(sql, i, c) orelse return null;
+            continue;
+        }
+        if (c == '[') {
+            const close = std.mem.findScalarPos(u8, sql, i + 1, ']') orelse return null;
+            i = close + 1;
+            continue;
+        }
+        if (c == '(') {
+            depth += 1;
+        } else if (c == ')') {
+            depth -= 1;
+        }
+        i += 1;
+    }
+    return if (depth == 0) i else null;
+}
+
+/// True when `sql` is an `INSERT` or `REPLACE` statement, including when
+/// preceded by whitespace, SQL comments, or a `WITH [RECURSIVE] ...` CTE clause.
+fn isInsertStatement(sql: []const u8) bool {
+    var pos = skipSqlTrivia(sql, 0);
+    const first = readSqlWord(sql, pos);
+    if (first.word.len == 0) return false;
+    if (std.ascii.eqlIgnoreCase(first.word, "INSERT") or
+        std.ascii.eqlIgnoreCase(first.word, "REPLACE")) return true;
+    if (!std.ascii.eqlIgnoreCase(first.word, "WITH")) return false;
+
+    pos = skipSqlTrivia(sql, first.next);
+    const maybe_recursive = readSqlWord(sql, pos);
+    if (std.ascii.eqlIgnoreCase(maybe_recursive.word, "RECURSIVE")) {
+        const after_rec = skipSqlTrivia(sql, maybe_recursive.next);
+        const peek = readSqlWord(sql, after_rec);
+        if (after_rec < sql.len and sql[after_rec] != '(' and !std.ascii.eqlIgnoreCase(peek.word, "AS")) {
+            pos = after_rec;
+        }
+    }
+
+    while (true) {
+        pos = skipSqlIdentifier(sql, pos) orelse return false;
+        pos = skipSqlTrivia(sql, pos);
+
+        // Optional CTE column list: (col1, col2, ...)
+        if (pos < sql.len and sql[pos] == '(') {
+            pos = skipBalancedParens(sql, pos) orelse return false;
+            pos = skipSqlTrivia(sql, pos);
+        }
+
+        const as_tok = readSqlWord(sql, pos);
+        if (!std.ascii.eqlIgnoreCase(as_tok.word, "AS")) return false;
+        pos = skipSqlTrivia(sql, as_tok.next);
+
+        // Optional [NOT] MATERIALIZED modifier
+        const mod1 = readSqlWord(sql, pos);
+        if (std.ascii.eqlIgnoreCase(mod1.word, "NOT")) {
+            pos = skipSqlTrivia(sql, mod1.next);
+            const mod2 = readSqlWord(sql, pos);
+            if (!std.ascii.eqlIgnoreCase(mod2.word, "MATERIALIZED")) return false;
+            pos = skipSqlTrivia(sql, mod2.next);
+        } else if (std.ascii.eqlIgnoreCase(mod1.word, "MATERIALIZED")) {
+            pos = skipSqlTrivia(sql, mod1.next);
+        }
+
+        pos = skipBalancedParens(sql, pos) orelse return false;
+        pos = skipSqlTrivia(sql, pos);
+
+        if (pos < sql.len and sql[pos] == ',') {
+            pos = skipSqlTrivia(sql, pos + 1);
+            continue;
+        }
+        break;
+    }
+
+    const main_verb = readSqlWord(sql, pos);
+    return std.ascii.eqlIgnoreCase(main_verb.word, "INSERT") or
+        std.ascii.eqlIgnoreCase(main_verb.word, "REPLACE");
 }
 
 fn bindParams(handle: *sdk.ModuleHandle, stmt: *sdk.SqliteStmt, params_val: sdk.JSValue) !void {
     const param_count = sdk.sqliteParamCount(stmt);
     if (param_count == 0) {
         if (!params_val.isUndefined()) {
-            if (sdk.isObject(params_val)) {
-                const keys = try sdk.objectKeys(handle, params_val);
-                const keys_len = sdk.arrayLength(keys) orelse 0;
-                if (keys_len > 0) return error.ExtraParameter;
-            }
+            if (!sdk.isObject(params_val)) return error.ExpectedParamsObject;
+            const keys = try sdk.objectKeys(handle, params_val);
+            const keys_len = sdk.arrayLength(keys) orelse 0;
+            if (keys_len > 0) return error.ExtraParameter;
         }
         return;
     }
@@ -440,4 +601,41 @@ fn buildColumnValue(handle: *sdk.ModuleHandle, stmt: *sdk.SqliteStmt, index: u32
         sdk.sqlite_blob => error.UnsupportedBlobColumn,
         else => sdk.JSValue.undefined_val,
     };
+}
+
+test "bindParams rejects non-object params even when statement has zero parameters" {
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    const fake_stmt: *sdk.SqliteStmt = @ptrFromInt(8);
+
+    try bindParams(fake_handle, fake_stmt, sdk.JSValue.undefined_val);
+    try std.testing.expectError(
+        error.ExpectedParamsObject,
+        bindParams(fake_handle, fake_stmt, sdk.JSValue.fromInt(42)),
+    );
+}
+
+test "isInsertStatement classifies direct, commented, and CTE SQL statements" {
+    try std.testing.expect(!isInsertStatement(""));
+    try std.testing.expect(!isInsertStatement("SELECT * FROM users"));
+    try std.testing.expect(!isInsertStatement("UPDATE users SET name = 'a' WHERE id = 1"));
+    try std.testing.expect(!isInsertStatement("DELETE FROM users WHERE id = 1"));
+    try std.testing.expect(!isInsertStatement("CREATE TABLE t (id INTEGER)"));
+    try std.testing.expect(!isInsertStatement("-- only a comment"));
+    try std.testing.expect(!isInsertStatement("/* unterminated comment INSERT INTO t VALUES (1)"));
+
+    try std.testing.expect(isInsertStatement("INSERT INTO users (name) VALUES ('a')"));
+    try std.testing.expect(isInsertStatement("  \t\r\ninsert into users (name) values ('a')"));
+    try std.testing.expect(isInsertStatement("REPLACE INTO users (id, name) VALUES (1, 'a')"));
+    try std.testing.expect(isInsertStatement("-- leading line comment\nINSERT INTO users VALUES (1)"));
+    try std.testing.expect(isInsertStatement("/* block comment */ -- line comment\n INSERT INTO users VALUES (1)"));
+
+    try std.testing.expect(isInsertStatement("WITH cte AS (SELECT 1 AS x) INSERT INTO t SELECT x FROM cte"));
+    try std.testing.expect(isInsertStatement("WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM cnt WHERE x < 3) INSERT INTO t SELECT x FROM cnt"));
+    try std.testing.expect(isInsertStatement("WITH a AS NOT MATERIALIZED (SELECT 1), b(y) AS MATERIALIZED (SELECT 2) REPLACE INTO t SELECT * FROM b"));
+
+    try std.testing.expect(!isInsertStatement("WITH cte AS (SELECT 1 AS x) UPDATE t SET v = (SELECT x FROM cte)"));
+    try std.testing.expect(!isInsertStatement("WITH cte AS (SELECT 'INSERT' AS x /* ) */) UPDATE t SET v = 1"));
+    try std.testing.expect(!isInsertStatement("WITH \"insert\" AS (SELECT 1) UPDATE t SET v = 1"));
+    try std.testing.expect(!isInsertStatement("WITH cte AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM cte)"));
+    try std.testing.expect(!isInsertStatement("WITH cte AS (SELECT 1) SELECT * FROM cte"));
 }

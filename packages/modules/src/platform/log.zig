@@ -18,7 +18,7 @@ pub const binding = sdk.ModuleBinding{
 fn makeLogImpl(comptime level: []const u8) sdk.ModuleFn {
     return struct {
         fn f(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-            emitLog(handle, level, args) catch {};
+            try emitLog(handle, level, args);
             return sdk.JSValue.undefined_val;
         }
     }.f;
@@ -43,7 +43,7 @@ fn emitLog(handle: *sdk.ModuleHandle, level: []const u8, args: []const sdk.JSVal
     if (args.len > 1 and sdk.isObject(args[1])) {
         const keys = sdk.objectKeys(handle, args[1]) catch {
             try buf.appendSlice(allocator, "}\n");
-            _ = sdk.writeStderr(handle, buf.items) catch {};
+            try sdk.writeStderr(handle, buf.items);
             return;
         };
         const key_count = sdk.arrayLength(keys) orelse 0;
@@ -61,7 +61,7 @@ fn emitLog(handle: *sdk.ModuleHandle, level: []const u8, args: []const sdk.JSVal
     }
 
     try buf.appendSlice(allocator, "}\n");
-    _ = sdk.writeStderr(handle, buf.items) catch {};
+    try sdk.writeStderr(handle, buf.items);
 }
 
 fn appendInt(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, n: i64) !void {
@@ -101,9 +101,7 @@ fn appendJsonValue(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, val: s
         const s = std.fmt.bufPrint(&tmp, "{d}", .{val.getInt()}) catch return;
         try buf.appendSlice(allocator, s);
     } else if (sdk.extractFloat(val)) |f| {
-        if (val.isInt()) {
-            // already handled
-        } else if (std.math.isNan(f) or std.math.isInf(f)) {
+        if (std.math.isNan(f) or std.math.isInf(f)) {
             try buf.appendSlice(allocator, "null");
         } else {
             // `{d}` prints an f64 in full decimal (no scientific notation), so

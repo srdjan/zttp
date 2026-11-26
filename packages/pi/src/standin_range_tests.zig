@@ -256,7 +256,7 @@ test "stand-in gate: negative corpus dispatches to misses without edit instructi
         const outcome = try local_client.decodeResponse(allocator, "", body);
         switch (outcome.reply.response) {
             .final_text => |reply| {
-                if (std.mem.indexOf(u8, reply, "[standin-miss]") == null) false_fires += 1;
+                if (std.mem.find(u8, reply, "[standin-miss]") == null) false_fires += 1;
             },
             else => false_fires += 1,
         }
@@ -352,7 +352,7 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
                         "No further step is available.";
                     try testing.expect(std.mem.endsWith(u8, text, expected));
                 },
-                .blocked => try testing.expect(std.mem.indexOf(u8, text, "source-only") != null),
+                .blocked => try testing.expect(std.mem.find(u8, text, "source-only") != null),
             },
             else => return error.ExpectedFinalText,
         }
@@ -413,6 +413,8 @@ test "stand-in gate: every test in the stand-in roots is reachable through the p
         .{ .name = "standin/defect_seeds.zig", .text = @embedFile("standin/defect_seeds.zig") },
         .{ .name = "standin/hole_seeds.zig", .text = @embedFile("standin/hole_seeds.zig") },
         .{ .name = "standin/source_grammar.zig", .text = @embedFile("standin/source_grammar.zig") },
+        .{ .name = "standin_main.zig", .text = @embedFile("standin_main.zig") },
+        .{ .name = "standin/main.zig", .text = @embedFile("standin/main.zig") },
     };
 
     var checked: usize = 0;
@@ -423,7 +425,7 @@ test "stand-in gate: every test in the stand-in roots is reachable through the p
             // literal (such as the one on this line) is not a declaration.
             if (!std.mem.startsWith(u8, line, "test \"")) continue;
             checked += 1;
-            if (std.mem.indexOf(u8, line, "stand-in") == null) {
+            if (std.mem.find(u8, line, "stand-in") == null) {
                 std.debug.print(
                     "[standin-gate] {s}: test name omits \"stand-in\" and would never run: {s}\n",
                     .{ source.name, line },
@@ -667,10 +669,10 @@ test "stand-in gate: every enabled guard family has rejection and property-prese
             if (!violation.introduced_by_patch) continue;
             if (!std.mem.eql(u8, violation.code, "ZTS602")) continue;
             const help = violation.help orelse continue;
-            if (std.mem.indexOf(u8, help, "env.allow") != null) seed_family = .env;
-            if (std.mem.indexOf(u8, help, "egress.allow_endpoints") != null) seed_family = .egress;
-            if (std.mem.indexOf(u8, help, "cache.allow_namespaces") != null) seed_family = .cache;
-            if (std.mem.indexOf(u8, help, "sql.allow_queries") != null) seed_family = .sql;
+            if (std.mem.find(u8, help, "env.allow") != null) seed_family = .env;
+            if (std.mem.find(u8, help, "egress.allow_endpoints") != null) seed_family = .egress;
+            if (std.mem.find(u8, help, "cache.allow_namespaces") != null) seed_family = .cache;
+            if (std.mem.find(u8, help, "sql.allow_queries") != null) seed_family = .sql;
         }
         const family = seed_family orelse return error.CapabilitySeedHasNoFamily;
         covered = covered.with(family);
@@ -1217,7 +1219,7 @@ fn parseUnseededAllow(allocator: std.mem.Allocator) !UnseededAllow {
 
     var lines = std.mem.splitScalar(u8, unseeded_rules.contents, '\n');
     while (lines.next()) |raw| {
-        const body = if (std.mem.indexOfScalar(u8, raw, '#')) |hash| raw[0..hash] else raw;
+        const body = if (std.mem.findScalar(u8, raw, '#')) |hash| raw[0..hash] else raw;
         const line = std.mem.trim(u8, body, " \t\r");
         if (line.len == 0) continue;
 
@@ -1287,8 +1289,8 @@ test "stand-in gate: every generated route source keeps the synthesized draft ve
         // And it must actually be the route that was asked for, not merely a
         // file the compiler accepts. A synthesizer that returned the source
         // unchanged would pass every assertion above.
-        try testing.expect(std.mem.indexOf(u8, proposed, "\"GET /health\": handleGetHealth") != null);
-        try testing.expect(std.mem.indexOf(u8, proposed, "function handleGetHealth") != null);
+        try testing.expect(std.mem.find(u8, proposed, "\"GET /health\": handleGetHealth") != null);
+        try testing.expect(std.mem.find(u8, proposed, "function handleGetHealth") != null);
 
         if (variant.has_router) router_true += 1;
         if (variant.has_routes) routes_true += 1;
@@ -1363,7 +1365,7 @@ test "stand-in gate: every generated env source gets the answer its shape implie
         // Exactly one import, whether or not the source already had one. A
         // second `import { env }` is the duplicate this branch exists to avoid.
         try testing.expectEqual(@as(usize, 1), countOccurrences(proposed, "import { env } from \"zttp:env\";"));
-        try testing.expect(std.mem.indexOf(u8, proposed, "env(\"" ++ source_grammar.env_variable ++ "\")") != null);
+        try testing.expect(std.mem.find(u8, proposed, "env(\"" ++ source_grammar.env_variable ++ "\")") != null);
         edits += 1;
     }
 
@@ -1380,7 +1382,7 @@ test "stand-in gate: every generated env source gets the answer its shape implie
 fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     var n: usize = 0;
     var i: usize = 0;
-    while (std.mem.indexOfPos(u8, haystack, i, needle)) |pos| : (i = pos + needle.len) {
+    while (std.mem.findPos(u8, haystack, i, needle)) |pos| : (i = pos + needle.len) {
         n += 1;
     }
     return n;
@@ -1475,15 +1477,15 @@ test "stand-in gate: generated out-of-range prompts never reach a playbook" {
                 .step_index = 0,
                 .source = "function handler(req: Request): Response { return Response.json({ ok: true }); }\n",
             });
-            if (std.mem.indexOf(u8, reply, "[standin-miss]") == null) false_fires += 1;
+            if (std.mem.find(u8, reply, "[standin-miss]") == null) false_fires += 1;
             // The miss marker alone cannot fail here: renderResponse
             // re-classifies and returns renderMiss for any kind outside the
             // range table, so the counter above is structurally zero and the
             // `hasPlaybook` guard is what carries this gate. Assert the reply
             // is a usable refusal rather than merely a marker, which is the
             // part that can actually regress.
-            try testing.expect(std.mem.indexOf(u8, reply, "supported range is") != null);
-            try testing.expect(std.mem.indexOf(u8, reply, "propose_change_set") == null);
+            try testing.expect(std.mem.find(u8, reply, "supported range is") != null);
+            try testing.expect(std.mem.find(u8, reply, "propose_change_set") == null);
         }
     }
 

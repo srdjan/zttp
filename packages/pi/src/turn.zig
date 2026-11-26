@@ -152,7 +152,6 @@ pub const Action = union(enum) {
     retry_draft: RetryPayload,
     render: Message,
     prompt_user: []const u8,
-    end_turn,
 };
 
 pub const TurnMachine = struct {
@@ -383,7 +382,7 @@ test "budget_exhausted from any active state -> awaiting_user with prompt_user" 
         const action = m.transition(.budget_exhausted);
         try testing.expectEqual(TurnState.awaiting_user, m.state);
         switch (action) {
-            .prompt_user => |question| try testing.expect(std.mem.indexOf(u8, question, "budget exhausted") != null),
+            .prompt_user => |question| try testing.expect(std.mem.find(u8, question, "budget exhausted") != null),
             else => return error.TestFailed,
         }
     }

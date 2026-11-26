@@ -18,13 +18,28 @@ const writeJsonString = json_utils.writeJsonString;
 
 const JsonVersion = enum { v1, v2 };
 
+fn WriterError(comptime Writer: type) type {
+    return switch (@typeInfo(Writer)) {
+        .pointer => |ptr| ptr.child.Error,
+        else => Writer.Error,
+    };
+}
+
 /// Write the contract as JSON to a writer.
-pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !void {
+/// Keeps `error.OutOfMemory` in the returned error set for source compatibility
+/// with callers that switch exhaustively on serializer errors.
+pub fn writeContractJson(
+    contract: *const HandlerContract,
+    writer: anytype,
+) (WriterError(@TypeOf(writer)) || error{OutOfMemory})!void {
     return writeContractJsonVersion(.v1, contract, writer);
 }
 
 /// Version 2: the same contract, snake_case keys, for the version-2 agent wire.
-pub fn writeContractJsonV2(contract: *const HandlerContract, writer: anytype) !void {
+pub fn writeContractJsonV2(
+    contract: *const HandlerContract,
+    writer: anytype,
+) (WriterError(@TypeOf(writer)) || error{OutOfMemory})!void {
     return writeContractJsonVersion(.v2, contract, writer);
 }
 
@@ -643,12 +658,12 @@ fn writeExtensionsJson(
         return;
     }
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const spec_keys = try sortedHashMapKeys(a, &contract.extensions);
-    for (spec_keys, 0..) |spec, i| {
+    var spec_prev: ?[]const u8 = null;
+    var i: usize = 0;
+    while (nextSortedKey(&contract.extensions, spec_prev)) |spec| : ({
+        spec_prev = spec;
+        i += 1;
+    }) {
         const ext = contract.extensions.getPtr(spec).?;
         if (i > 0) try writer.writeAll(",");
         try writer.writeAll("\n    ");
@@ -662,8 +677,12 @@ fn writeExtensionsJson(
         try writer.print("      \"" ++ comptime contractKey(json_version, "egressDynamic") ++ "\": {s},\n", .{if (ext.egress_dynamic) "true" else "false"});
         try writer.writeAll("      \"categories\": {");
 
-        const tag_keys = try sortedHashMapKeys(a, &ext.categories);
-        for (tag_keys, 0..) |tag, j| {
+        var tag_prev: ?[]const u8 = null;
+        var j: usize = 0;
+        while (nextSortedKey(&ext.categories, tag_prev)) |tag| : ({
+            tag_prev = tag;
+            j += 1;
+        }) {
             const bucket = ext.categories.getPtr(tag).?;
             if (j > 0) try writer.writeAll(",");
             try writer.writeAll("\n        ");
@@ -676,7 +695,7 @@ fn writeExtensionsJson(
             try writer.print("], \"dynamic\": {s} }}", .{if (bucket.dynamic) "true" else "false"});
         }
 
-        if (tag_keys.len > 0) try writer.writeAll("\n      ");
+        if (j > 0) try writer.writeAll("\n      ");
         try writer.writeAll("}");
 
         if (ext.contract_section) |section| {
@@ -701,12 +720,8 @@ fn writePartnerContractSections(
 ) !void {
     if (contract.extensions.count() == 0) return;
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const spec_keys = try sortedHashMapKeys(a, &contract.extensions);
-    for (spec_keys) |spec| {
+    var spec_prev: ?[]const u8 = null;
+    while (nextSortedKey(&contract.extensions, spec_prev)) |spec| : (spec_prev = spec) {
         const ext = contract.extensions.getPtr(spec).?;
         const section = ext.contract_section orelse continue;
 
@@ -716,8 +731,12 @@ fn writePartnerContractSections(
         try writeJsonString(writer, spec);
         try writer.writeAll(",\n    \"categories\": {");
 
-        const tag_keys = try sortedHashMapKeys(a, &ext.categories);
-        for (tag_keys, 0..) |tag, j| {
+        var tag_prev: ?[]const u8 = null;
+        var j: usize = 0;
+        while (nextSortedKey(&ext.categories, tag_prev)) |tag| : ({
+            tag_prev = tag;
+            j += 1;
+        }) {
             const bucket = ext.categories.getPtr(tag).?;
             if (j > 0) try writer.writeAll(",");
             try writer.writeAll("\n      ");
@@ -730,30 +749,29 @@ fn writePartnerContractSections(
             try writer.print("], \"dynamic\": {s} }}", .{if (bucket.dynamic) "true" else "false"});
         }
 
-        if (tag_keys.len > 0) try writer.writeAll("\n    ");
+        if (j > 0) try writer.writeAll("\n    ");
         try writer.writeAll("}\n  }");
     }
 }
 
-/// Snapshot the keys of a string-keyed StringHashMapUnmanaged into a sorted
-/// slice. The slice borrows the map's key strings; callers must not mutate
-/// the map while iterating.
-fn sortedHashMapKeys(
-    allocator: std.mem.Allocator,
-    map: anytype,
-) ![]const []const u8 {
-    var keys = try allocator.alloc([]const u8, map.count());
+/// Return the lexicographically smallest key in `map` strictly greater than
+/// `after` (or the smallest key when `after == null`). Allows deterministic
+/// sorted emission without heap allocation.
+fn nextSortedKey(map: anytype, after: ?[]const u8) ?[]const u8 {
+    var best: ?[]const u8 = null;
     var it = map.iterator();
-    var i: usize = 0;
-    while (it.next()) |entry| : (i += 1) {
-        keys[i] = entry.key_ptr.*;
-    }
-    std.mem.sort([]const u8, keys, {}, struct {
-        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (after) |prev| {
+            if (!std.mem.lessThan(u8, prev, key)) continue;
         }
-    }.lessThan);
-    return keys;
+        if (best) |current| {
+            if (std.mem.lessThan(u8, key, current)) best = key;
+        } else {
+            best = key;
+        }
+    }
+    return best;
 }
 
 fn writeApiParamJson(writer: anytype, param: *const ApiParamInfo) !void {
@@ -1129,8 +1147,8 @@ test "version 1 keeps its version and camelCase keys" {
 
     const output = try writeTestContractJson(allocator, &contract, .v1);
     defer allocator.free(output);
-    try std.testing.expect(std.mem.indexOf(u8, output, "\"version\": 1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "\"sourceIdentity\": {") != null);
+    try std.testing.expect(std.mem.find(u8, output, "\"version\": 1") != null);
+    try std.testing.expect(std.mem.find(u8, output, "\"sourceIdentity\": {") != null);
 }
 
 fn collectJsonKeys(
@@ -1188,7 +1206,7 @@ test "version 1 never emits a snake_case key" {
     defer parsed.deinit();
 
     for (keys.items) |key| {
-        if (std.mem.indexOfScalar(u8, key, '_') != null) {
+        if (std.mem.findScalar(u8, key, '_') != null) {
             std.debug.print("version 1 emitted a snake_case key: {s}\n", .{key});
             return error.VersionOneKeyWentSnakeCase;
         }
@@ -1285,7 +1303,7 @@ test "env.public is written only when it is non-empty and survives a round trip"
     defer empty.deinit(allocator);
     const without = try writeTestContractJson(allocator, &empty, .v2);
     defer allocator.free(without);
-    try std.testing.expect(std.mem.indexOf(u8, without, "\"public\"") == null);
+    try std.testing.expect(std.mem.find(u8, without, "\"public\"") == null);
 
     var original = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
     defer original.deinit(allocator);
@@ -1295,11 +1313,11 @@ test "env.public is written only when it is non-empty and survives a round trip"
     inline for (.{ .v1, .v2 }) |style| {
         const written = try writeTestContractJson(allocator, &original, style);
         defer allocator.free(written);
-        try std.testing.expect(std.mem.indexOf(u8, written, "\"public\": [\"APP_NAME\", \"PORT\"]") != null);
+        try std.testing.expect(std.mem.find(u8, written, "\"public\": [\"APP_NAME\", \"PORT\"]") != null);
         const env_object =
             "  \"env\": {\n    \"literal\": [\"APP_NAME\"],\n    \"dynamic\": false,\n" ++
             "    \"public\": [\"APP_NAME\", \"PORT\"]\n  },\n";
-        try std.testing.expect(std.mem.indexOf(u8, written, env_object) != null);
+        try std.testing.expect(std.mem.find(u8, written, env_object) != null);
 
         var parsed = try handler_contract.parseFromJson(allocator, written);
         defer parsed.deinit(allocator);
@@ -1313,9 +1331,9 @@ test "env.public is written only when it is non-empty and survives a round trip"
 /// whole document does not round-trip from an empty contract, because a decoded
 /// sandbox recomputes its capability hash, so these tests compare this slice.
 fn faultCoverageSection(bytes: []const u8) ![]const u8 {
-    const start = std.mem.indexOf(u8, bytes, "\"faultCoverage\"") orelse
-        std.mem.indexOf(u8, bytes, "\"fault_coverage\"") orelse return error.TestUnexpectedResult;
-    const end = std.mem.indexOfPos(u8, bytes, start, "\n  },") orelse return error.TestUnexpectedResult;
+    const start = std.mem.find(u8, bytes, "\"faultCoverage\"") orelse
+        std.mem.find(u8, bytes, "\"fault_coverage\"") orelse return error.TestUnexpectedResult;
+    const end = std.mem.findPos(u8, bytes, start, "\n  },") orelse return error.TestUnexpectedResult;
     return bytes[start..end];
 }
 
@@ -1335,7 +1353,7 @@ test "a fault coverage record with unseen calls round-trips to the same isCovere
         };
         const written = try writeTestContractJson(allocator, &original, json_version);
         defer allocator.free(written);
-        try std.testing.expect(std.mem.indexOf(u8, written, ": false\n  },\n") != null);
+        try std.testing.expect(std.mem.find(u8, written, ": false\n  },\n") != null);
 
         var parsed = try handler_contract.parseFromJson(allocator, written);
         defer parsed.deinit(allocator);
@@ -1359,7 +1377,7 @@ test "a fault coverage record with an incomplete analysis writes isCovered false
     };
     const written = try writeTestContractJson(allocator, &original, .v2);
     defer allocator.free(written);
-    try std.testing.expect(std.mem.indexOf(u8, written, "\"is_covered\": false") != null);
+    try std.testing.expect(std.mem.find(u8, written, "\"is_covered\": false") != null);
 
     var parsed = try handler_contract.parseFromJson(allocator, written);
     defer parsed.deinit(allocator);

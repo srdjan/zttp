@@ -185,34 +185,38 @@ pub const Stream = struct {
 // Global singleton
 // -------------------------------------------------------------------------
 
-// Atomic pointer so hot-path emits stay lock-free. Init/deinit still hold a
-// small mutex to coordinate creation and prevent double-free.
-var global_stream: std.atomic.Value(?*Stream) = .init(null);
-var init_mutex: compat.Mutex = .{};
+// Protected by `global_mutex` across init, deinit, lookup, and emit so a
+// concurrent `deinitGlobal` cannot free the stream while `emitGlobal` is
+// pushing into it. Lock order is always `global_mutex` -> `Stream.mutex`.
+var global_stream: ?*Stream = null;
+var global_mutex: compat.Mutex = .{};
 
 pub fn initGlobal(allocator: std.mem.Allocator, capacity: usize) !void {
-    init_mutex.lock();
-    defer init_mutex.unlock();
-    if (global_stream.load(.acquire) != null) return;
-    const s = try Stream.init(allocator, capacity);
-    global_stream.store(s, .release);
+    global_mutex.lock();
+    defer global_mutex.unlock();
+    if (global_stream != null) return;
+    global_stream = try Stream.init(allocator, capacity);
 }
 
 pub fn deinitGlobal() void {
-    init_mutex.lock();
-    defer init_mutex.unlock();
-    if (global_stream.load(.acquire)) |s| {
-        global_stream.store(null, .release);
+    global_mutex.lock();
+    defer global_mutex.unlock();
+    if (global_stream) |s| {
+        global_stream = null;
         s.deinit();
     }
 }
 
 pub fn getGlobal() ?*Stream {
-    return global_stream.load(.acquire);
+    global_mutex.lock();
+    defer global_mutex.unlock();
+    return global_stream;
 }
 
 pub fn emitGlobal(event: SecurityEvent) void {
-    const stream = global_stream.load(.acquire) orelse return;
+    global_mutex.lock();
+    defer global_mutex.unlock();
+    const stream = global_stream orelse return;
     stream.emit(event);
 }
 
@@ -324,11 +328,11 @@ test "writeJsonLine emits valid JSONL" {
     try writeJsonLine(&event, &aw.writer);
     output = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"kind\":\"policy_denied_env\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"ts\":12345") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"module\":\"zttp:env\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "KEY\\\"with\\\\quotes") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"policyGeneration\":9") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"kind\":\"policy_denied_env\"") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"ts\":12345") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"module\":\"zttp:env\"") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "KEY\\\"with\\\\quotes") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"policyGeneration\":9") != null);
     try std.testing.expectEqual(@as(u8, '\n'), output.items[output.items.len - 1]);
 }
 
@@ -350,12 +354,12 @@ test "writeJsonLine emits spec-section-12 shape for policy_denied" {
     try writeJsonLine(&event, &aw.writer);
     output = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"event\":\"policy_denied\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"policyGeneration\":17") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"service\":\"zttp\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"action\":\"db.write\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"resource\":{\"kind\":\"sql_query\",\"id\":\"drop_table\"}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"reason\":\"not_in_allowlist\"") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"event\":\"policy_denied\"") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"policyGeneration\":17") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"service\":\"zttp\"") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"action\":\"db.write\"") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"resource\":{\"kind\":\"sql_query\",\"id\":\"drop_table\"}") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"reason\":\"not_in_allowlist\"") != null);
 }
 
 test "initPolicyDenied truncates over-long fields" {

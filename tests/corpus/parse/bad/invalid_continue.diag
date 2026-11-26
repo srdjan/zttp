@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS023","severity":"error","message":"'continue' outside of loop","file":"parse/bad/invalid_continue.ts","line":3,"column":5,"suggestion":"Remove `continue`, or move it inside a `for...of` loop.","repair_intent":null}

@@ -164,28 +164,20 @@ with the tool-profile recommendation. The recommendation remains at
     type, then iterate the tuple. A fix makes mutable array and record types
     invariant, which changes assignability for every such type and needs its own
     measurement.
-  - `Response.json` of a Dict from `let d = dictEmpty();` passes with a number
-    key, because the binding widens to `Dict<unknown, unknown>`.
-    `let d = dictEmpty(); d = dictSet(d, 2, "x"); return Response.json(d);`
-    proves `read_only`, and `zttp dev` answers 500. `writeJsonDepth` in
-    `packages/zts/src/http.zig` reports the key as `RenderError.OutOfMemory`,
-    which names the wrong cause.
-  - A write into a container widens the literal types of the slot when the root
-    binding has no annotation and a literal initializer. A declared type held in
-    a field of that literal widens too. With `s: { kind: "a" |
-    "b" }`,
-    `const q = { a: s }; q.a.kind = "c";` passes, and `s.kind` then holds `"c"`.
-    A fix widens only the literal types that the initializer itself wrote.
+  - `Response.json` now refuses a `Dict` from `let d = dictEmpty();`, a `Dict`
+    with an `unknown` key (such as `isDict(u)` on `unknown`), or an
+    unconstrained/non-string type-parameter key with ZTS213, while `isDict` on
+    a parsed JSON value narrows to `Dict<string, unknown>`. Any non-string
+    `Dict` key that still reaches runtime JSON encoding (such as from an untyped
+    `dictFromEntries` result or inline `-e` code) fails in `writeJson` /
+    `writeJsonDepth` (`packages/zts/src/http.zig`) with
+    `RenderError.NonStringDictKey` instead of `RenderError.OutOfMemory`.
   - A `dictFold` callback whose return type does not fit the seed type makes the
     result `unknown`, with no report. A seeded `reduce` reports ZTS200 for the
     same callback.
   - A partly annotated parameter list such as `(v, i: string)` binds the
     annotation to the first parameter, `v`. Strict mode refuses that form with
     ZTS601, so the effect is an extra, misleading ZTS200 and no false proof.
-  - A discriminant test treats a record without the field as a value where the
-    test is false. A record with an extra field can reach a union member that
-    omits that field, and the then-branch then reads a field that is absent. The
-    response was 200 with a wrong body.
   - `if (r.ok)` does not narrow a union of named records, and
     `typeof x ===
     "object"` does not narrow `unknown`. Each one refuses

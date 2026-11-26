@@ -514,6 +514,6 @@ test "agent tools refuse absolute aliases that the protocol resolves into secret
         const projection = try invokeForToolAtRoot(testing.allocator, testing.io, root, .{ .operation = .normalize, .input_json = input });
         defer testing.allocator.free(projection.llm_text);
         try testing.expect(!projection.ok);
-        try testing.expect(std.mem.indexOf(u8, projection.llm_text, "SECRET_MARKER") == null);
+        try testing.expect(std.mem.find(u8, projection.llm_text, "SECRET_MARKER") == null);
     }
 }

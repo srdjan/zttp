@@ -34,18 +34,6 @@ fn releaseMessage(failure: ReleaseFailure) []const u8 {
     };
 }
 
-fn collectArgs(allocator: std.mem.Allocator, vector: std.process.Args) ![]const []const u8 {
-    var iterator = std.process.Args.Iterator.init(vector);
-    defer iterator.deinit();
-    var args: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (args.items) |arg| allocator.free(arg);
-        args.deinit(allocator);
-    }
-    while (iterator.next()) |arg| try args.append(allocator, try allocator.dupe(u8, arg));
-    return args.toOwnedSlice(allocator);
-}
-
 fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {
     return std.Io.Dir.cwd().readFileAllocOptions(
         io,
@@ -459,18 +447,12 @@ fn usage() noreturn {
     std.process.exit(2);
 }
 
-pub fn main(init: std.process.Init.Minimal) !void {
+pub fn main(init: std.process.Init) !void {
     var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = init.environ });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-    const args = try collectArgs(allocator, init.args);
-    defer {
-        for (args) |arg| allocator.free(arg);
-        allocator.free(args);
-    }
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 2) usage();
 
     if (std.mem.eql(u8, args[1], "test-selection-count")) {
@@ -486,8 +468,24 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (std.mem.eql(u8, args[1], "script-reachability")) {
         if (args.len != 5) usage();
-        const inventory = try readFile(io, allocator, args[2]);
-        defer allocator.free(inventory);
+        var inventory_file: ?[:0]u8 = null;
+        defer if (inventory_file) |buf| allocator.free(buf);
+        var inventory_git: ?[]u8 = null;
+        defer if (inventory_git) |buf| allocator.free(buf);
+        const inventory: []const u8 = if (std.mem.eql(u8, args[2], "--git-scripts")) blk: {
+            const listed = try std.process.run(allocator, io, .{
+                .argv = &.{ "git", "ls-files", "-z", "scripts/*.sh" },
+                .stdout_limit = .limited(max_input_bytes),
+            });
+            defer allocator.free(listed.stderr);
+            inventory_git = listed.stdout;
+            if (listed.term != .exited or listed.term.exited != 0) return error.GitListFailed;
+            break :blk listed.stdout;
+        } else blk: {
+            const file_bytes = try readFile(io, allocator, args[2]);
+            inventory_file = file_bytes;
+            break :blk file_bytes;
+        };
         const routes = try readFile(io, allocator, args[3]);
         defer allocator.free(routes);
         const allow = try readFile(io, allocator, args[4]);

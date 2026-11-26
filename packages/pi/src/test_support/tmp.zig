@@ -25,6 +25,7 @@ pub const IsolatedTmp = struct {
         defer tmp_root.close(io);
         tmp_root.deleteTree(io, name) catch {};
         try std.Io.Dir.createDirPath(tmp_root, io, name);
+        errdefer tmp_root.deleteTree(io, name) catch {};
 
         const abs_path = try std.fs.path.resolve(allocator, &.{ "/tmp", name });
         errdefer allocator.free(abs_path);

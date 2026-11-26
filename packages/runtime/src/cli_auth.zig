@@ -136,7 +136,10 @@ fn authProviderSet(
         std.debug.print("\nFailed to read key: {}\n", .{err});
         return err;
     };
-    defer allocator.free(key);
+    defer {
+        std.crypto.secureZero(u8, key);
+        allocator.free(key);
+    }
     std.debug.print("\n", .{});
 
     if (key.len == 0) {
@@ -227,7 +230,10 @@ pub fn injectStoredProvidersIntoEnv(allocator: std.mem.Allocator) void {
         if (readEnvVar(p.env_var) != null) continue;
 
         const value_z = allocator.dupeSentinel(u8, file_value, 0) catch continue;
-        defer allocator.free(value_z);
+        defer {
+            std.crypto.secureZero(u8, value_z);
+            allocator.free(value_z);
+        }
         _ = setenv(p.env_var, value_z.ptr, 1);
     }
 }
@@ -262,7 +268,10 @@ const Store = struct {
             },
             else => return err,
         };
-        defer allocator.free(bytes);
+        defer {
+            std.crypto.secureZero(u8, bytes);
+            allocator.free(bytes);
+        }
 
         var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch {
             // A corrupt file should not poison `zttp dev`. Treat it as empty
@@ -290,6 +299,7 @@ const Store = struct {
     fn deinit(self: *Store) void {
         for (self.entries.items) |entry| {
             self.allocator.free(entry.name);
+            std.crypto.secureZero(u8, entry.api_key);
             self.allocator.free(entry.api_key);
         }
         self.entries.deinit(self.allocator);
@@ -318,6 +328,7 @@ const Store = struct {
     fn setOwned(self: *Store, provider_name: []const u8, api_key: []const u8) !void {
         if (self.findIndex(provider_name)) |idx| {
             const new_key = try self.allocator.dupe(u8, api_key);
+            std.crypto.secureZero(u8, self.entries.items[idx].api_key);
             self.allocator.free(self.entries.items[idx].api_key);
             self.entries.items[idx].api_key = new_key;
             return;
@@ -325,7 +336,10 @@ const Store = struct {
         const name_copy = try self.allocator.dupe(u8, provider_name);
         errdefer self.allocator.free(name_copy);
         const key_copy = try self.allocator.dupe(u8, api_key);
-        errdefer self.allocator.free(key_copy);
+        errdefer {
+            std.crypto.secureZero(u8, key_copy);
+            self.allocator.free(key_copy);
+        }
         try self.entries.append(self.allocator, .{ .name = name_copy, .api_key = key_copy });
     }
 
@@ -333,12 +347,16 @@ const Store = struct {
         const idx = self.findIndex(provider_name) orelse return;
         const removed = self.entries.orderedRemove(idx);
         self.allocator.free(removed.name);
+        std.crypto.secureZero(u8, removed.api_key);
         self.allocator.free(removed.api_key);
     }
 
     fn save(self: *Store) !void {
         var aw: std.Io.Writer.Allocating = .init(self.allocator);
-        defer aw.deinit();
+        defer {
+            std.crypto.secureZero(u8, aw.writer.buffer);
+            aw.deinit();
+        }
         var json: std.json.Stringify = .{ .writer = &aw.writer, .options = .{ .whitespace = .indent_2 } };
         try json.beginObject();
         for (self.entries.items) |entry| {
@@ -372,6 +390,8 @@ fn providersDirPath(allocator: std.mem.Allocator) ![]u8 {
     return std.fs.path.join(allocator, &.{ home, rel_dir });
 }
 
+const max_providers_bytes: usize = 64 * 1024;
+
 fn readProvidersFile(allocator: std.mem.Allocator) ![]u8 {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -389,10 +409,12 @@ fn readProvidersFile(allocator: std.mem.Allocator) ![]u8 {
     // Mirrors the attest keypair loader's permission check.
     const st = file.stat(io) catch return error.ProvidersStatFailed;
     if (st.permissions.toMode() & 0o077 != 0) return error.ProvidersPermissionsTooOpen;
+    if (st.size > max_providers_bytes) return error.ProvidersFileTooLarge;
 
     var buf: [4096]u8 = undefined;
+    defer std.crypto.secureZero(u8, &buf);
     var reader = file.reader(io, &buf);
-    return try reader.interface.allocRemaining(allocator, .unlimited);
+    return try reader.interface.allocRemaining(allocator, .limited(max_providers_bytes));
 }
 
 fn writeProvidersFile(allocator: std.mem.Allocator, bytes: []const u8) !void {
@@ -410,37 +432,61 @@ fn writeProvidersFile(allocator: std.mem.Allocator, bytes: []const u8) !void {
     const file_path = try providersFilePath(allocator);
     defer allocator.free(file_path);
 
-    // Write-then-rename for atomicity: a crash mid-write leaves the old file
-    // intact rather than a half-written credential.
-    const tmp_path = try allocator.print("{s}.tmp", .{file_path});
-    defer allocator.free(tmp_path);
+    // Write-then-rename for atomicity using a unique exclusive temp file so
+    // concurrent writers cannot collide and pre-existing symlinks are refused.
+    var tmp_z: [:0]u8 = undefined;
+    var fd: std.posix.fd_t = undefined;
+    var attempt: usize = 0;
+    while (true) : (attempt += 1) {
+        var rand_bytes: [8]u8 = undefined;
+        io.randomSecure(&rand_bytes) catch io.random(&rand_bytes);
+        const suffix = std.fmt.bytesToHex(rand_bytes, .lower);
+        const candidate = try std.fmt.allocPrintSentinel(allocator, "{s}.tmp.{s}", .{ file_path, suffix }, 0);
+        fd = std.posix.openatZ(
+            std.posix.AT.FDCWD,
+            candidate,
+            .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true },
+            0o600,
+        ) catch |err| {
+            allocator.free(candidate);
+            if (err == error.PathAlreadyExists and attempt < 8) continue;
+            return err;
+        };
+        tmp_z = candidate;
+        break;
+    }
+    defer allocator.free(tmp_z);
 
-    var tmp_file = try std.Io.Dir.createFileAbsolute(io, tmp_path, .{
-        .truncate = true,
-        .permissions = std.Io.File.Permissions.fromMode(0o600),
-    });
-    {
-        // Close the file before rename; on Windows rename requires no open handles.
-        defer tmp_file.close(io);
-
-        var buf: [512]u8 = undefined;
-        var writer = tmp_file.writer(io, &buf);
-        try writer.interface.writeAll(bytes);
-        try writer.interface.flush();
-
-        // Tighten permissions before rename so the final path is never
-        // readable at a looser mode.
-        try tmp_file.setPermissions(io, std.Io.File.Permissions.fromMode(0o600));
+    var write_ok = false;
+    var fd_open = true;
+    defer {
+        if (fd_open) std.Io.Threaded.closeFd(fd);
+        if (!write_ok) _ = std.c.unlink(tmp_z);
     }
 
-    const tmp_z = try allocator.dupeSentinel(u8, tmp_path, 0);
-    defer allocator.free(tmp_z);
+    var total: usize = 0;
+    while (total < bytes.len) {
+        const n = std.c.write(fd, bytes[total..].ptr, bytes.len - total);
+        if (n < 0) {
+            if (std.posix.errno(n) == .INTR) continue;
+            return error.WriteFailed;
+        }
+        if (n == 0) return error.WriteFailed;
+        total += @intCast(n);
+    }
+
+    // Tighten permissions before rename so the final path is never
+    // readable at a looser mode.
+    if (std.c.fchmod(fd, 0o600) != 0) return error.WriteFailed;
+    std.Io.Threaded.closeFd(fd);
+    fd_open = false;
+
     const file_z = try allocator.dupeSentinel(u8, file_path, 0);
     defer allocator.free(file_z);
     if (std.c.rename(tmp_z, file_z) != 0) {
-        _ = std.c.unlink(tmp_z);
         return error.WriteFailed;
     }
+    write_ok = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -472,9 +518,13 @@ fn readSecretLine(allocator: std.mem.Allocator) ![]u8 {
     defer std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, original) catch {};
 
     var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
+    errdefer {
+        std.crypto.secureZero(u8, buf.items);
+        buf.deinit(allocator);
+    }
 
     var byte: [1]u8 = undefined;
+    defer std.crypto.secureZero(u8, &byte);
     while (true) {
         const n = std.posix.read(std.posix.STDIN_FILENO, &byte) catch |err| switch (err) {
             error.WouldBlock => continue,
@@ -486,7 +536,10 @@ fn readSecretLine(allocator: std.mem.Allocator) ![]u8 {
     }
 
     const raw = try buf.toOwnedSlice(allocator);
-    errdefer allocator.free(raw);
+    errdefer {
+        std.crypto.secureZero(u8, raw);
+        allocator.free(raw);
+    }
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     if (trimmed.len == raw.len) return raw;
     const start: usize = @intFromPtr(trimmed.ptr) - @intFromPtr(raw.ptr);
@@ -636,4 +689,30 @@ test "writeProvidersFile re-tightens a pre-existing loose 0644 file to 0600" {
     // The rewrite must land back at 0600 despite the pre-existing 0644.
     const stat = try tmp.dir.statFile(std.testing.io, ".zttp/providers.json", .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+}
+
+test "readProvidersFile rejects files larger than 64 KiB" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_z = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(home_z);
+
+    const previous_home = std.c.getenv("HOME");
+    _ = setenv("HOME", home_z.ptr, 1);
+    defer if (previous_home) |p| {
+        _ = setenv("HOME", p, 1);
+    } else {
+        _ = unsetenv("HOME");
+    };
+
+    const oversized = try allocator.alloc(u8, max_providers_bytes + 1);
+    defer allocator.free(oversized);
+    @memset(oversized, ' ');
+    try writeProvidersFile(allocator, oversized);
+
+    try std.testing.expectError(error.ProvidersFileTooLarge, readProvidersFile(allocator));
 }

@@ -97,20 +97,20 @@ test "parse failure text names the code, file, line, and underline" {
     const allocator = std.testing.allocator;
     const text = try parseFailureText(allocator, "const a = 1;\nconst b = while;\n", "demo.ts");
     defer allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "error[ZTS") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "  --> demo.ts:2:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "  2 | const b = while;\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "^") != null);
+    try std.testing.expect(std.mem.find(u8, text, "error[ZTS") != null);
+    try std.testing.expect(std.mem.find(u8, text, "  --> demo.ts:2:") != null);
+    try std.testing.expect(std.mem.find(u8, text, "  2 | const b = while;\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "^") != null);
 }
 
 test "parse failure text underlines the unsupported keyword and keeps its suggestion" {
     const allocator = std.testing.allocator;
     const text = try parseFailureText(allocator, "let n = 0;\nwhile (n < 3) { n = n + 1; }\n", "loop.ts");
     defer allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "error[ZTS001]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "  --> loop.ts:2:1\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "  2 | while (n < 3) { n = n + 1; }\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | ^^^^^\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "error[ZTS001]") != null);
+    try std.testing.expect(std.mem.find(u8, text, "  --> loop.ts:2:1\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "  2 | while (n < 3) { n = n + 1; }\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "   | ^^^^^\n") != null);
 }
 
 test "parse failure text counts characters on a multi-byte line" {
@@ -119,5 +119,5 @@ test "parse failure text counts characters on a multi-byte line" {
     defer allocator.free(text);
     // Sixteen characters precede `while`, though the line holds twenty bytes
     // before it.
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ &@as([16:0]u8, @splat(' ')) ++ "^^^^^\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "   | " ++ &@as([16:0]u8, @splat(' ')) ++ "^^^^^\n") != null);
 }

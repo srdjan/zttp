@@ -57,8 +57,9 @@ pub const HandlerPool = struct {
     panics: std.atomic.Value(u64),
     /// Requests that exceeded the per-request timeout deadline.
     timeouts: std.atomic.Value(u64),
-    /// Contract-derived lifecycle policy. Set by the server after contract parse.
-    pooling_policy: contract_runtime.PoolingPolicy = .reuse_bounded_by_count,
+    /// Contract-derived lifecycle policy. Atomic because live-reload updates it
+    /// under runtime_init_mutex while request threads read it lock-free.
+    pooling_policy: std.atomic.Value(contract_runtime.PoolingPolicy) = std.atomic.Value(contract_runtime.PoolingPolicy).init(.reuse_bounded_by_count),
     pooling_thresholds: contract_runtime.PoolingThresholds = .{},
     pool: zq.LockFreePool,
     cache: zq.BytecodeCache,
@@ -515,20 +516,33 @@ pub const HandlerPool = struct {
     /// Context for parallel prewarm workers
     const PrewarmCtx = struct {
         pool: *HandlerPool,
+        base_rt: *zq.LockFreePool.Runtime,
         success: std.atomic.Value(bool),
     };
 
     fn prewarm(self: *Self) !void {
         const prewarm_count = @min(@as(usize, 2), self.max_size);
+        if (prewarm_count == 0) return;
+
+        // Acquire and hold all distinct slots before releasing so each
+        // prewarm iteration initializes a separate runtime instead of
+        // re-acquiring the same slot repeatedly.
+        var acquired: [2]*zq.LockFreePool.Runtime = undefined;
+        var acquired_count: usize = 0;
+        defer {
+            for (acquired[0..acquired_count]) |rt| self.pool.release(rt);
+        }
+        for (0..prewarm_count) |_| {
+            const base_rt = try self.pool.acquire();
+            acquired[acquired_count] = base_rt;
+            acquired_count += 1;
+        }
 
         // Single runtime or test mode - sequential prewarm
         // (test allocators aren't thread-safe)
         if (prewarm_count <= 1 or builtin.is_test) {
-            for (0..prewarm_count) |_| {
-                const base_rt = try self.pool.acquire();
-                errdefer self.pool.release(base_rt);
+            for (acquired[0..acquired_count]) |base_rt| {
                 _ = try self.ensureRuntime(base_rt);
-                self.pool.release(base_rt);
             }
             return;
         }
@@ -541,6 +555,7 @@ pub const HandlerPool = struct {
         for (0..prewarm_count) |i| {
             contexts[i] = .{
                 .pool = self,
+                .base_rt = acquired[i],
                 .success = std.atomic.Value(bool).init(false),
             };
             threads[i] = std.Thread.spawn(.{}, prewarmWorker, .{&contexts[i]}) catch null;
@@ -560,9 +575,7 @@ pub const HandlerPool = struct {
     }
 
     fn prewarmWorker(ctx: *PrewarmCtx) void {
-        const base_rt = ctx.pool.pool.acquire() catch return;
-        defer ctx.pool.pool.release(base_rt);
-        _ = ctx.pool.ensureRuntime(base_rt) catch return;
+        _ = ctx.pool.ensureRuntime(ctx.base_rt) catch return;
         ctx.success.store(true, .release);
     }
 
@@ -663,17 +676,25 @@ pub const HandlerPool = struct {
         }
 
         const rt = self.pool.acquire() catch |err| {
-            _ = self.in_use.fetchSub(1, .monotonic);
+            _ = self.in_use.fetchSub(1, .release);
             return err;
         };
 
         // TTL-based pooling is the only consumer of first_use_ns, so skip
         // the clock read for every other policy.
-        if (self.pooling_policy == .reuse_bounded_by_ttl and rt.first_use_ns == null) {
+        if (self.getPoolingPolicy() == .reuse_bounded_by_ttl and rt.first_use_ns == null) {
             rt.first_use_ns = compat.realtimeNowNs() catch 0;
         }
 
         return rt;
+    }
+
+    pub fn getPoolingPolicy(self: *const Self) contract_runtime.PoolingPolicy {
+        return self.pooling_policy.load(.acquire);
+    }
+
+    pub fn setPoolingPolicy(self: *Self, policy: contract_runtime.PoolingPolicy) void {
+        self.pooling_policy.store(policy, .release);
     }
 
     /// Metadata-only embedding updates must also retire warmed fault facts.
@@ -687,7 +708,7 @@ pub const HandlerPool = struct {
 
     fn applyServingSettingsLocked(self: *Self, settings: ServingSettings) void {
         self.config.handler_proof = settings.handler_proof;
-        self.pooling_policy = settings.pooling_policy;
+        self.pooling_policy.store(settings.pooling_policy, .release);
     }
 
     fn emitRuntimeEvent(kind: zq.security_events.SecurityEventKind, detail: []const u8) void {
@@ -749,7 +770,7 @@ pub const HandlerPool = struct {
         // request_count still reflects completed-BEFORE-this-one, so add
         // one when comparing against the policy threshold.
         const request_count_after: u64 = rt.request_count + 1;
-        const policy_recycle = switch (self.pooling_policy) {
+        const policy_recycle = switch (self.getPoolingPolicy()) {
             .reuse_unbounded => rt.ctx.atoms.count() >= self.pooling_thresholds.max_dynamic_atoms or
                 (if (rt.ctx.hidden_class_pool) |classes| classes.count >= self.pooling_thresholds.max_hidden_classes else false),
             .ephemeral => true,
@@ -768,12 +789,12 @@ pub const HandlerPool = struct {
             // capacity, and Server.shutdown, which drains getInUse(), waits for the build.
             // A failed audit keeps the on-demand rebuild.
             if (policy_recycle and !audit_poisoned and was_built) self.prebuildReplacement();
-            _ = self.in_use.fetchSub(1, .monotonic);
+            _ = self.in_use.fetchSub(1, .release);
             return;
         }
 
         self.pool.release(rt);
-        _ = self.in_use.fetchSub(1, .monotonic);
+        _ = self.in_use.fetchSub(1, .release);
     }
 
     pub fn getMetrics(self: *Self) struct {
@@ -796,7 +817,7 @@ pub const HandlerPool = struct {
             .prebuild_failures = self.prebuild_failures.load(.acquire),
             .panics = self.panics.load(.acquire),
             .timeouts = self.timeouts.load(.acquire),
-            .pooling_policy = self.pooling_policy,
+            .pooling_policy = self.getPoolingPolicy(),
         };
     }
 
@@ -822,7 +843,7 @@ pub const HandlerPool = struct {
     fn recycleSlot(self: *Self, base_rt: *zq.LockFreePool.Runtime) void {
         _ = self.recycles.fetchAdd(1, .monotonic);
         self.pool.dropRuntime(base_rt);
-        _ = self.in_use.fetchSub(1, .monotonic);
+        _ = self.in_use.fetchSub(1, .release);
     }
 
     fn recycleLeasedRuntime(self: *Self, lease: *WorkerRuntimeLease) void {
@@ -851,7 +872,9 @@ pub const HandlerPool = struct {
         var frame: panic_recovery.Frame = undefined;
         if (panic_recovery.setjmpFn(&frame.jb) != 0) {
             // Handler panicked. Defers in the skipped zruntime frames did NOT run.
-            std.log.err("handler panicked (isolated): {s}", .{frame.message()});
+            if (!builtin.is_test) {
+                std.log.err("handler panicked (isolated): {s}", .{frame.message()});
+            }
             return error.HandlerPanicked;
         }
         panic_recovery.arm(&frame);
@@ -861,7 +884,16 @@ pub const HandlerPool = struct {
             if (self.debug_panic_path) |pp| {
                 const effective_path = if (request.path.len > 0) request.path else request.url;
                 if (std.mem.eql(u8, effective_path, pp)) {
-                    @panic("zttp_debug_panic_path");
+                    // In Zig's default test runner root, `@panic` dispatches to
+                    // test_runner.zig's defaultPanic instead of panic_recovery.
+                    // Calling handlePanic directly in tests exercises the same
+                    // setjmp/longjmp unwind and slot-quarantine path without
+                    // crashing the test harness; binaries still invoke `@panic`.
+                    if (comptime builtin.is_test) {
+                        panic_recovery.handlePanic("zttp_debug_panic_path", null);
+                    } else {
+                        @panic("zttp_debug_panic_path");
+                    }
                 }
             }
         }
@@ -980,17 +1012,17 @@ pub const HandlerPool = struct {
         // Fallback: runtime compilation (for development without -Dhandler)
         const key = zq.sourceCacheKey(self.handler_code, self.handler_filename);
 
-        // Acquire lock for parsing (double-checked locking pattern).
-        // A lockless fast path is unsafe: getRaw() releases its internal
-        // lock before returning the slice, so a concurrent cache.clear() could
-        // free the backing memory while we were reading from it (UAF).
+        // Acquire lock for single-flight compilation on cache miss.
+        // `getRawAlloc` returns an owned copy taken under the cache's shared
+        // lock so deserialization is immune to concurrent eviction or clear().
         self.cache_mutex.lock();
         defer self.cache_mutex.unlock();
 
         // Double-check: another thread may have populated cache while we waited
         var slow_path_recovered = false;
         if (!self.cache_disabled.load(.monotonic)) {
-            if (self.cache.getRaw(key)) |cached_data| {
+            if (try self.cache.getRawAlloc(self.allocator, key)) |cached_data| {
+                defer self.allocator.free(cached_data);
                 rt.loadFromCachedBytecode(cached_data) catch |err| {
                     std.log.warn(
                         "bytecode cache deserialize failed for {s}: {}; recompiling from source",
@@ -1005,11 +1037,11 @@ pub const HandlerPool = struct {
         }
 
         // Cache MISS confirmed: parse and compile (only one thread does this)
-        var buffer: [65536]u8 = undefined;
         const serialized = if (self.prepared_eval)
-            try rt.loadPreparedEvalWithCaching(.{ .code = self.handler_code }, self.handler_filename, &buffer)
+            try rt.loadPreparedEvalWithCachingAlloc(.{ .code = self.handler_code }, self.handler_filename, self.allocator)
         else
-            try rt.loadCodeWithCaching(self.handler_code, self.handler_filename, &buffer);
+            try rt.loadCodeWithCachingAlloc(self.handler_code, self.handler_filename, self.allocator);
+        defer if (serialized) |data| self.allocator.free(data);
 
         // Store in cache for future hits, but only while caching is healthy.
         // Once cache_disabled latches, every request recompiles in-process.
@@ -1075,7 +1107,7 @@ test "a policy recycle leaves a built runtime in the pool" {
     const allocator = std.testing.allocator;
     var pool = try HandlerPool.init(allocator, .{}, "function handler(req) { return Response.text('ok'); }", "<runtime-pool-test>", 1, 0);
     defer pool.deinit();
-    try testing.expectEqual(contract_runtime.PoolingPolicy.reuse_bounded_by_count, pool.pooling_policy);
+    try testing.expectEqual(contract_runtime.PoolingPolicy.reuse_bounded_by_count, pool.getPoolingPolicy());
     pool.pooling_thresholds.max_requests = 3;
 
     var request = HttpRequestOwned{
@@ -1112,7 +1144,7 @@ test "a failed handler build does not prebuild" {
     const allocator = std.testing.allocator;
     var pool = try HandlerPool.init(allocator, .{}, "function handler(req) { return Response.text('ok'); }", "<runtime-pool-test>", 1, 0);
     defer pool.deinit();
-    pool.pooling_policy = .ephemeral;
+    pool.setPoolingPolicy(.ephemeral);
     // HandlerPool.init prewarms, so switch to source that fails to load afterwards.
     _ = try pool.reloadSourceGeneration("function handler(req) { return ; ", "<broken>", null, null);
 
@@ -1205,7 +1237,7 @@ test "reuse_unbounded runtime recycles once its dynamic atom count reaches the t
         0,
     );
     defer pool.deinit();
-    pool.pooling_policy = .reuse_unbounded;
+    pool.setPoolingPolicy(.reuse_unbounded);
 
     const rt1 = try pool.acquireForRequest();
     const baseline = rt1.ctx.atoms.count();
@@ -1236,7 +1268,7 @@ test "reuse_unbounded recycles layout permutations without growing atoms" {
         0,
     );
     defer pool.deinit();
-    pool.pooling_policy = .reuse_unbounded;
+    pool.setPoolingPolicy(.reuse_unbounded);
     const rt = try pool.acquireForRequest();
     const layouts = rt.ctx.hidden_class_pool.?;
     var names: [6]zq.Atom = undefined;
@@ -1286,7 +1318,7 @@ test "reuse_unbounded runtime under the atom threshold is not recycled" {
         0,
     );
     defer pool.deinit();
-    pool.pooling_policy = .reuse_unbounded;
+    pool.setPoolingPolicy(.reuse_unbounded);
 
     const rt1 = try pool.acquireForRequest();
     const baseline = rt1.ctx.atoms.count();
@@ -1339,7 +1371,7 @@ test "loadHandlerCached embedded path fails cleanly on corrupted bytecode instea
     defer allocator.free(blob);
 
     const marker_bytes = std.mem.asBytes(&marker);
-    const marker_pos = std.mem.indexOf(u8, blob, marker_bytes) orelse return error.MarkerNotFoundInSerializedBlob;
+    const marker_pos = std.mem.find(u8, blob, marker_bytes) orelse return error.MarkerNotFoundInSerializedBlob;
     try testing.expect(marker_pos > 0);
     blob[marker_pos - 1] = 0xFF; // corrupt the preceding ConstantTag byte (was .int = 0)
 
@@ -1398,7 +1430,7 @@ test "owned response outlives a recycled runtime slot" {
     var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 1, 0);
     defer pool.deinit();
     // Every release drops the slot, which destroys its lifetime arena.
-    pool.pooling_policy = .ephemeral;
+    pool.setPoolingPolicy(.ephemeral);
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1558,7 +1590,7 @@ pub fn guardRequest(allocator: std.mem.Allocator, case: LifetimeGuardCase) !Http
         .body = null,
     };
     errdefer request.deinit(allocator);
-    request.path = request.url[0 .. std.mem.indexOfScalar(u8, request.url, '?') orelse request.url.len];
+    request.path = request.url[0 .. std.mem.findScalar(u8, request.url, '?') orelse request.url.len];
     if (case.body) |body| request.body = try allocator.dupe(u8, body);
     for (case.headers) |pair| {
         const key = try allocator.dupe(u8, pair[0]);
@@ -2187,7 +2219,7 @@ fn runLifetimeGuardCase(case: LifetimeGuardCase) !void {
 fn expectGuardResponse(case: LifetimeGuardCase, response: *const HttpResponse) !void {
     try std.testing.expectEqual(case.expected_status, response.status);
     if (case.body_contains) {
-        try std.testing.expect(std.mem.indexOf(u8, response.body, case.expected_body) != null);
+        try std.testing.expect(std.mem.find(u8, response.body, case.expected_body) != null);
     } else {
         try std.testing.expectEqualStrings(case.expected_body, response.body);
     }
@@ -2280,7 +2312,7 @@ const FetchUpstream = struct {
             if (self.stopping.load(.acquire)) return;
             var seen: std.ArrayList(u8) = .empty;
             defer seen.deinit(self.allocator);
-            while (std.mem.indexOf(u8, seen.items, "\r\n\r\n") == null) {
+            while (std.mem.find(u8, seen.items, "\r\n\r\n") == null) {
                 var chunk: [1024]u8 = undefined;
                 var vecs: [1][]u8 = .{chunk[0..]};
                 const result = stream.readWithControl(io, &vecs, &.{}) catch return;
@@ -2849,8 +2881,8 @@ test "HandlerPool does not leak request data across pooled requests" {
         var tainted_resp = try pool.executeHandler(tainted_req.asView());
         defer tainted_resp.deinit();
         // The tainted request must see exactly its own data.
-        try std.testing.expect(std.mem.indexOf(u8, tainted_resp.body, "BODY-") != null);
-        try std.testing.expect(std.mem.indexOf(u8, tainted_resp.body, "SECRET-") != null);
+        try std.testing.expect(std.mem.find(u8, tainted_resp.body, "BODY-") != null);
+        try std.testing.expect(std.mem.find(u8, tainted_resp.body, "SECRET-") != null);
 
         var clean_req = try Probe.clean(allocator);
         defer clean_req.deinit(allocator);
@@ -2858,9 +2890,9 @@ test "HandlerPool does not leak request data across pooled requests" {
         defer clean_resp.deinit();
         // The clean request, on the same recycled runtime, must carry none of
         // the prior request's body, header, or url.
-        try std.testing.expect(std.mem.indexOf(u8, clean_resp.body, "BODY-") == null);
-        try std.testing.expect(std.mem.indexOf(u8, clean_resp.body, "SECRET-") == null);
-        try std.testing.expect(std.mem.indexOf(u8, clean_resp.body, "path-") == null);
+        try std.testing.expect(std.mem.find(u8, clean_resp.body, "BODY-") == null);
+        try std.testing.expect(std.mem.find(u8, clean_resp.body, "SECRET-") == null);
+        try std.testing.expect(std.mem.find(u8, clean_resp.body, "path-") == null);
     }
 }
 test "reloadSourceGeneration swaps handler code and new requests use new handler" {
@@ -3290,4 +3322,67 @@ test "prepared evaluation caches bytecode and reload refuses an any annotation i
     var response = try pool.executeHandler(request.asView());
     defer response.deinit();
     try std.testing.expectEqualStrings("reloaded", response.body);
+}
+
+test "prewarm initializes distinct slots when max_size >= 2" {
+    const allocator = std.testing.allocator;
+    var pool = try HandlerPool.init(
+        allocator,
+        .{},
+        "function handler(req) { return Response.text('warm'); }",
+        "<prewarm-distinct>",
+        2,
+        0,
+    );
+    defer pool.deinit();
+
+    // Both slots must be allocated and initialized during prewarm (slot 0 compiles
+    // into cache, slot 1 loads from cache on a distinct runtime).
+    try testing.expectEqual(@as(usize, 2), pool.pool.getSize());
+    try testing.expectEqual(@as(usize, 2), pool.pool.getAvailable());
+    try testing.expectEqual(@as(u64, 1), pool.cache.hits.load(.monotonic));
+    const slot0 = pool.pool.slots[0].load(.acquire) orelse return error.TestExpectedPooledRuntime;
+    const slot1 = pool.pool.slots[1].load(.acquire) orelse return error.TestExpectedPooledRuntime;
+    try testing.expect(slot0 != slot1);
+    try testing.expect(slot0.user_data != null);
+    try testing.expect(slot1.user_data != null);
+}
+
+test "bytecode cache serializes handlers larger than 64 KiB dynamically" {
+    const allocator = std.testing.allocator;
+
+    // Build a handler with 8 distinct 10 KiB string constants (each under the
+    // u16 single-string serialization limit, > 80 KiB total serialized bytecode)
+    // so serialization exceeds the old 64 KiB stack buffer.
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(allocator);
+    try src.appendSlice(allocator, "function handler(req) { const parts = [");
+    const digits = "01234567";
+    for (digits, 0..) |d, idx| {
+        if (idx > 0) try src.append(allocator, ',');
+        try src.append(allocator, '"');
+        try src.append(allocator, d);
+        try src.appendNTimes(allocator, 'a', 10 * 1024 - 1);
+        try src.append(allocator, '"');
+    }
+    try src.appendSlice(allocator, "]; return Response.text(String(parts.length)); }");
+
+    var pool = try HandlerPool.init(allocator, .{}, src.items, "<large-bytecode>", 2, 0);
+    defer pool.deinit();
+
+    // Slot 0 serialized > 64 KiB bytecode into cache; slot 1 loaded it as a cache hit.
+    try testing.expectEqual(@as(usize, 1), pool.cache.count());
+    try testing.expectEqual(@as(u64, 1), pool.cache.hits.load(.monotonic));
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try pool.executeHandler(request.asView());
+    defer response.deinit();
+    try testing.expectEqualStrings("8", response.body);
 }

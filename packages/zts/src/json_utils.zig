@@ -49,25 +49,48 @@ pub fn unescapeJson(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
             switch (input[i]) {
                 '"' => try result.append(allocator, '"'),
                 '\\' => try result.append(allocator, '\\'),
+                'b' => try result.append(allocator, 0x08),
+                'f' => try result.append(allocator, 0x0C),
                 'n' => try result.append(allocator, '\n'),
                 'r' => try result.append(allocator, '\r'),
                 't' => try result.append(allocator, '\t'),
                 '/' => try result.append(allocator, '/'),
                 'u' => {
-                    // \uXXXX unicode escape -> UTF-8
+                    // \uXXXX unicode escape (including UTF-16 surrogate pairs) -> UTF-8
                     if (i + 4 < input.len) {
                         const hex = input[i + 1 .. i + 5];
-                        const codepoint = std.fmt.parseInt(u21, hex, 16) catch {
+                        const code_unit = std.fmt.parseInt(u21, hex, 16) catch {
                             try result.append(allocator, 'u');
                             continue;
                         };
+                        var codepoint: u21 = code_unit;
+                        var advance: usize = 4;
+                        if (code_unit >= 0xD800 and code_unit <= 0xDBFF) {
+                            // High surrogate: require a paired low surrogate \uDC00..\uDFFF.
+                            if (i + 10 < input.len and input[i + 5] == '\\' and input[i + 6] == 'u') {
+                                const low = std.fmt.parseInt(u21, input[i + 7 .. i + 11], 16) catch {
+                                    try result.append(allocator, 'u');
+                                    continue;
+                                };
+                                if (low >= 0xDC00 and low <= 0xDFFF) {
+                                    codepoint = 0x10000 + ((code_unit - 0xD800) << 10) + (low - 0xDC00);
+                                    advance = 10;
+                                } else {
+                                    try result.append(allocator, 'u');
+                                    continue;
+                                }
+                            } else {
+                                try result.append(allocator, 'u');
+                                continue;
+                            }
+                        }
                         var buf: [4]u8 = undefined;
                         const len = std.unicode.utf8Encode(codepoint, &buf) catch {
                             try result.append(allocator, 'u');
                             continue;
                         };
                         try result.appendSlice(allocator, buf[0..len]);
-                        i += 4;
+                        i += advance;
                     } else {
                         try result.append(allocator, 'u');
                     }
@@ -79,4 +102,29 @@ pub fn unescapeJson(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
         }
     }
     return try result.toOwnedSlice(allocator);
+}
+
+test "unescapeJson decodes backspace, formfeed, BMP unicode, and UTF-16 surrogate pairs" {
+    const allocator = std.testing.allocator;
+
+    const bf = try unescapeJson(allocator, "a\\bb\\fc\\nd");
+    defer allocator.free(bf);
+    try std.testing.expectEqualStrings("a\x08b\x0Cc\nd", bf);
+
+    const bmp = try unescapeJson(allocator, "caf\\u00e9");
+    defer allocator.free(bmp);
+    try std.testing.expectEqualStrings("caf\xC3\xA9", bmp);
+
+    const emoji = try unescapeJson(allocator, "hi \\uD83D\\uDE00!");
+    defer allocator.free(emoji);
+    try std.testing.expectEqualStrings("hi \xF0\x9F\x98\x80!", emoji);
+
+    const clef = try unescapeJson(allocator, "\\uD834\\uDD1E");
+    defer allocator.free(clef);
+    try std.testing.expectEqualStrings("\xF0\x9D\x84\x9E", clef);
+
+    // Unpaired high surrogate falls back without panicking or corrupting UTF-8.
+    const lone_high = try unescapeJson(allocator, "\\uD83Dx");
+    defer allocator.free(lone_high);
+    try std.testing.expectEqualStrings("uD83Dx", lone_high);
 }

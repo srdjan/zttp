@@ -18,7 +18,7 @@ pub const std_options: std.Options = .{
     .logFn = log,
 };
 
-var log_err_count: usize = 0;
+var log_err_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
 
 const WatchState = struct {
     mutex: std.Io.Mutex = .init,
@@ -79,7 +79,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         });
         testing.log_level = .warn;
         testing.environ = init.environ;
-        log_err_count = 0;
+        log_err_count.store(0, .release);
 
         const status: TestStatus = if (test_fn.func()) |_| .pass else |err| switch (err) {
             error.SkipZigTest => .skip,
@@ -96,7 +96,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         testing.io_instance.deinit();
         const test_leaks = testing.allocator_instance.deinit();
-        const test_log_errors = log_err_count;
+        const test_log_errors = log_err_count.load(.acquire);
 
         switch (status) {
             .pass => ok_count += 1,
@@ -239,7 +239,7 @@ pub fn log(
 ) void {
     @disableInstrumentation();
     if (@backingInt(message_level) <= @backingInt(std.log.Level.err)) {
-        log_err_count +|= 1;
+        _ = log_err_count.fetchAdd(1, .acq_rel);
     }
     if (@backingInt(message_level) <= @backingInt(testing.log_level)) {
         std.debug.print(

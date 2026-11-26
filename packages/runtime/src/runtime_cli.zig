@@ -33,32 +33,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // would start the plain CLI on a binary somebody deployed as a service,
     // and that CLI serves whatever project is in the working directory. So
     // every error here stops the binary; only `null` means a plain runtime.
-    const self_payload = self_extract.detect(allocator) catch |err| switch (err) {
-        error.UnsupportedArtifactFormat => {
-            shared.writeStderrLine(
-                "This binary carries a handler payload in a format this runtime cannot read. Rebuild the artifact with the current toolchain.",
-            );
-            std.process.exit(1);
-        },
-        error.PayloadTooLarge => {
-            shared.writeStderrLine(
-                "This binary carries a handler payload larger than the 100 MiB this runtime reads. Refusing to start.",
-            );
-            std.process.exit(1);
-        },
-        error.CorruptArtifact => {
-            shared.writeStderrLine(
-                "This binary carries a handler payload that is damaged. Refusing to start; rebuild or redeploy the artifact.",
-            );
-            std.process.exit(1);
-        },
-        else => {
-            var buf: [256]u8 = undefined;
-            const line = std.fmt.bufPrint(&buf, "Could not inspect this binary for a handler payload: {s}. Refusing to start.", .{@errorName(err)}) catch
-                "Could not inspect this binary for a handler payload. Refusing to start.";
-            shared.writeStderrLine(line);
-            std.process.exit(1);
-        },
+    const self_payload = self_extract.detect(allocator) catch |err| {
+        var buf: [256]u8 = undefined;
+        shared.writeStderrLine(artifactDetectFailureMessage(err, &buf));
+        std.process.exit(1);
     };
 
     const args = try shared.collectArgs(allocator, init.args);
@@ -130,6 +108,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Bare `zttp-runtime <handler>` serves the handler.
     try serveRefusingSource(allocator, user_args, init.environ);
+}
+
+fn artifactDetectFailureMessage(err: anyerror, buf: []u8) []const u8 {
+    return switch (err) {
+        error.UnsupportedArtifactFormat => "This binary carries a handler payload in a format this runtime cannot read. Rebuild the artifact with the current toolchain.",
+        error.PayloadTooLarge => "This binary carries a handler payload larger than the 100 MiB this runtime reads. Refusing to start.",
+        error.CorruptArtifact => "This binary carries a handler payload that is damaged. Refusing to start; rebuild or redeploy the artifact.",
+        error.UnreadableSelf => "Could not read this binary to inspect it for a handler payload. Ensure the binary has read permissions. Refusing to start.",
+        else => std.fmt.bufPrint(buf, "Could not inspect this binary for a handler payload: {s}. Refusing to start.", .{@errorName(err)}) catch
+            "Could not inspect this binary for a handler payload. Refusing to start.",
+    };
 }
 
 /// Serve, and exit 1 when the source was refused. The refusal text is already printed,
@@ -269,6 +258,7 @@ pub fn serveCommandWithEnviron(
         if (err == error.HelpRequested) return;
         return err;
     };
+    defer request.deinit(allocator);
     const feature_flags = request.flags;
     var config = request.config;
     applyDebugPanicPathDefault(&config, debug_panic_path);
@@ -503,13 +493,30 @@ const ServeFeatureFlags = struct {
     force_swap: bool = false,
 };
 
-/// One parsed `serve` command line. `config` borrows strings from `project`,
-/// so the project stays alive for the rest of the process.
+/// One parsed `serve` command line. `ServeRequest` owns `project` and any
+/// `.prepared_eval.code` buffer allocated for `-e` / `--eval`; `config`
+/// borrows strings from both, so `deinit` must run after `Server.deinit()`.
 const ServeRequest = struct {
     config: ServerConfig,
     flags: ServeFeatureFlags,
     project: ?project_config_mod.ProjectConfig,
+
+    pub fn deinit(self: *ServeRequest, allocator: std.mem.Allocator) void {
+        freePreparedEval(allocator, &self.config);
+        if (self.project) |*project| project.deinit(allocator);
+        self.* = undefined;
+    }
 };
+
+fn freePreparedEval(allocator: std.mem.Allocator, config: *ServerConfig) void {
+    switch (config.handler) {
+        .prepared_eval => |prepared| {
+            allocator.free(prepared.code);
+            config.handler = .{ .inline_code = "" };
+        },
+        else => {},
+    }
+}
 
 /// Parse a single flag shared between `serve` and `serve --appended`.
 /// Returns true if `arg` (at index `i.*`) was recognized. Advances `i.*`
@@ -570,10 +577,10 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
 
     const explicit_path = shared.findPositionalPath(argv);
     var project = try project_config_mod.discover(allocator, io, explicit_path);
-    // ServerConfig borrows strings (host, entry, static_dir, ...) directly
-    // from `project`. Those references must outlive parseServeArgs, so we
-    // only deinit on error - on success the project is intentionally leaked
-    // for the rest of the process. serveCommand runs until the process exits.
+    // ServerConfig borrows strings (host, entry, static_dir, ...) from
+    // `project` and owns any `.prepared_eval.code` allocated by `-e` / `--eval`.
+    // Both stay owned by the returned `ServeRequest` and are freed by
+    // `ServeRequest.deinit` after `Server.deinit()`, or here via `errdefer`.
     errdefer if (project) |*p| p.deinit(allocator);
 
     const has_embedded = embedded_handler.bytecode.len > 0;
@@ -587,6 +594,7 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             .{ .inline_code = "" },
         .runtime_config = .{},
     };
+    errdefer freePreparedEval(allocator, &config);
 
     if (project) |*cfg| {
         config.port = cfg.port;
@@ -623,6 +631,7 @@ fn applyServeFlags(
     flags: *ServeFeatureFlags,
     rejected: ?*?[]const u8,
 ) !void {
+    errdefer freePreparedEval(allocator, config);
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
@@ -632,7 +641,9 @@ fn applyServeFlags(
             return error.HelpRequested;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--eval")) {
             const raw_eval = try shared.takeArg(&i, argv, error.MissingEvalCode);
-            config.handler = try shared.prepareInlineSource(allocator, raw_eval);
+            const prepared = try shared.prepareInlineSource(allocator, raw_eval);
+            freePreparedEval(allocator, config);
+            config.handler = prepared;
             handler_set.* = true;
         } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--memory")) {
             const value = try shared.takeArg(&i, argv, error.MissingMemoryValue);
@@ -671,6 +682,7 @@ fn applyServeFlags(
         } else if (std.mem.eql(u8, arg, "--force-swap")) {
             flags.force_swap = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
+            freePreparedEval(allocator, config);
             config.handler = .{ .file_path = arg };
             handler_set.* = true;
         } else {
@@ -822,6 +834,7 @@ fn appendedServerConfig(payload: *const self_extract.Payload) ServerConfig {
         // the allow-all stub and egress/env/cache/sql go unenforced.
         .runtime_config = .{
             .dev_capability_policy = payload.policy,
+            .outbound_http_enabled = payload.policy.egress.enabled and payload.policy.egress.values.len > 0,
         },
     };
 }
@@ -885,6 +898,8 @@ fn printAppendedHelp() !void {
         \\  --no-env-check        Skip required environment checks
         \\  --security-log <FILE> Write security decisions to FILE
         \\  --incident-log <FILE> Append runtime soundness incidents as JSONL
+        \\  --outbound-http       Enable native outbound HTTP bridge
+        \\  --outbound-host <H>   Restrict outbound bridge to exact host H (host only, not port)
         \\  --lifecycle <MODE>    ephemeral, bounded, ttl, or reuse
         \\
     ;
@@ -965,10 +980,22 @@ test "appendedServerConfig wires the embedded capability policy for enforcement"
         .attestation_jws = null,
     };
     const config = appendedServerConfig(&payload);
+    try std.testing.expect(config.runtime_config.outbound_http_enabled);
     const policy = config.runtime_config.dev_capability_policy orelse return error.EmbeddedPolicyNotWired;
     try std.testing.expect(policy.allowsEgressEndpoint("https://api.allowed.example:443"));
     try std.testing.expect(!policy.allowsEgressEndpoint("https://evil.example:443"));
     try std.testing.expectEqualSlices(u8, &payload.policy_section_sha256, &config.policy_section_sha256.?);
+
+    const disabled_payload = self_extract.Payload{
+        .bytecode = &.{},
+        .dep_bytecodes = &.{},
+        .contract_json = null,
+        .policy = .{},
+        .policy_strings = &.{},
+        .policy_section_sha256 = @as([32]u8, @splat(0)),
+        .attestation_jws = null,
+    };
+    try std.testing.expect(!appendedServerConfig(&disabled_payload).runtime_config.outbound_http_enabled);
 }
 
 test "parseCommonServeFlag: -p consumes next arg as port" {
@@ -1121,8 +1148,8 @@ test "source startup reports a parse refusal as SourceRefused and renders its co
     );
     const text = (try renderParseRefusal(allocator, source, "<eval>")).?;
     defer allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "ZTS047") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "<eval>:1:") != null);
+    try std.testing.expect(std.mem.find(u8, text, "ZTS047") != null);
+    try std.testing.expect(std.mem.find(u8, text, "<eval>:1:") != null);
 }
 
 test "source startup refuses retired authority in a local dependency" {
@@ -1341,11 +1368,11 @@ test "formatAddressInUse names the port and the remedy" {
     const line = try formatAddressInUse(&buf, 3000);
     // Must name the actual port and tell the user how to recover, instead of
     // the bare error.AddressInUse that read like a crash after the proof card.
-    try std.testing.expect(std.mem.indexOf(u8, line, "3000") != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "already in use") != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "with -p <PORT>") != null);
+    try std.testing.expect(std.mem.find(u8, line, "3000") != null);
+    try std.testing.expect(std.mem.find(u8, line, "already in use") != null);
+    try std.testing.expect(std.mem.find(u8, line, "with -p <PORT>") != null);
     // zttp serve and zttp dev share this line, so it names neither command.
-    try std.testing.expect(std.mem.indexOf(u8, line, "zttp dev") == null);
+    try std.testing.expect(std.mem.find(u8, line, "zttp dev") == null);
 }
 
 test "replay exit codes distinguish verification failures from invalid fixtures" {
@@ -1361,9 +1388,69 @@ test "the runtime help lists every verb the runtime dispatches" {
     for (dispatched_verbs) |verb| {
         var needle: [48]u8 = undefined;
         const line = try std.fmt.bufPrint(&needle, "  zttp-runtime {s}", .{verb});
-        std.testing.expect(std.mem.indexOf(u8, runtime_help_text, line) != null) catch |err| {
+        std.testing.expect(std.mem.find(u8, runtime_help_text, line) != null) catch |err| {
             std.debug.print("runtime help does not list `zttp-runtime {s}`\n", .{verb});
             return err;
         };
     }
+}
+
+test "parseServeArgs frees prepared eval and project without leaking across duplicates and errors" {
+    const allocator = std.testing.allocator;
+    const valid_a = "function handler(req) { return Response.text(\"a\"); }";
+    const valid_b = "function handler(req) { return Response.text(\"b\"); }";
+    const refused = "function handler(req: any): Response { return Response.text(\"bad\"); }";
+
+    // Single -e cleans up cleanly via ServeRequest.deinit.
+    {
+        var req = try parseServeArgs(allocator, &.{ "-e", valid_a });
+        defer req.deinit(allocator);
+        try std.testing.expectEqualStrings(valid_a, req.config.handler.prepared_eval.code);
+    }
+
+    // Duplicate -e must not leak the overwritten buffer.
+    {
+        var req = try parseServeArgs(allocator, &.{ "-e", valid_a, "-e", valid_b });
+        defer req.deinit(allocator);
+        try std.testing.expectEqualStrings(valid_b, req.config.handler.prepared_eval.code);
+    }
+
+    // Positional file path after -e overwrites prepared_eval without leaking it,
+    // and ServeRequest.deinit frees the discovered ProjectConfig as well.
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{
+            .sub_path = "zttp.json",
+            .data = "{\"entry\":\"handler.ts\"}",
+        });
+        try tmp.dir.writeFile(std.testing.io, .{
+            .sub_path = "handler.ts",
+            .data = valid_a,
+        });
+        const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
+        defer allocator.free(handler_path);
+
+        var req = try parseServeArgs(allocator, &.{ "-e", valid_a, handler_path });
+        defer req.deinit(allocator);
+        try std.testing.expectEqualStrings(handler_path, req.config.handler.file_path);
+        try std.testing.expect(req.project != null);
+    }
+
+    // Error after -e must not leak the already-allocated eval buffer.
+    try std.testing.expectError(
+        error.UnknownOption,
+        parseServeArgs(allocator, &.{ "-e", valid_a, "--unknown-flag" }),
+    );
+    try std.testing.expectError(
+        error.SourceRefused,
+        parseServeArgs(allocator, &.{ "-e", valid_a, "-e", refused }),
+    );
+}
+
+test "artifactDetectFailureMessage distinguishes UnreadableSelf from plain runtime" {
+    var buf: [256]u8 = undefined;
+    const msg = artifactDetectFailureMessage(error.UnreadableSelf, &buf);
+    try std.testing.expect(std.mem.find(u8, msg, "read permissions") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "Refusing to start") != null);
 }

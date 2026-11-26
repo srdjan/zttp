@@ -67,7 +67,7 @@ pub fn addRuntimeBench(ctx: Context, test_step: *std.Build.Step) *std.Build.Step
     return bench_exe;
 }
 
-pub fn addCompileBench(ctx: Context, test_step: *std.Build.Step, bench_exe: *std.Build.Step.Compile) void {
+pub fn addCompileBench(ctx: Context, test_step: *std.Build.Step) void {
     const b = ctx.b;
 
     // Compile-time microbench: parse + codegen ns/bytes/IR-nodes per compile
@@ -94,9 +94,14 @@ pub fn addCompileBench(ctx: Context, test_step: *std.Build.Step, bench_exe: *std
     compile_bench_test_step.dependOn(&run_compile_bench_tests.step);
     test_step.dependOn(&run_compile_bench_tests.step);
 
-    // Run fixture checks separately from timing comparisons. Compiling the
-    // compiler benchmark catches renamed engine symbols it imports directly.
-    const check_fixtures = b.addRunArtifact(bench_exe);
+    // Run fixture checks with the caller's optimize mode so Debug `zig build test`
+    // does not compile a second ReleaseFast stack only for return-value checks.
+    const bench_fixtures_exe = b.addExecutable(.{
+        .name = "zttp-bench-fixtures",
+        .root_module = ctx.runtime_dep.module("benchmark"),
+    });
+    Context.attachEmbeddedHandlerStub(bench_fixtures_exe, ctx.runtime_dep, ctx.zts_mod);
+    const check_fixtures = b.addRunArtifact(bench_fixtures_exe);
     check_fixtures.addArg("--check-fixtures");
     test_step.dependOn(&check_fixtures.step);
     test_step.dependOn(&compile_bench_exe.step);

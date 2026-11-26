@@ -33,13 +33,15 @@ fn writeToFd(fd: std.c.fd_t, data: []const u8) void {
 }
 
 fn printValue(fd: std.c.fd_t, val: value.JSValue) void {
-    if (val.isInt()) {
+    if (getStringData(val)) |s| {
+        writeToFd(fd, s);
+    } else if (val.isInt()) {
         var buf: [32]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return;
         writeToFd(fd, s);
     } else if (val.isFloat()) {
-        var buf: [32]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "{d}", .{val.getFloat64()}) catch return;
+        var buf: [345]u8 = undefined;
+        const s = h.string.formatFloatToBuf(&buf, val.getFloat64());
         writeToFd(fd, s);
     } else if (val.isNull()) {
         writeToFd(fd, "null");

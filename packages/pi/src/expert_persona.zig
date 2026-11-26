@@ -188,7 +188,7 @@ test "stable core contains workflow and live protocol routing only" {
         "Do not end the turn with a discovery status",
     };
     for (required) |needle| {
-        try testing.expect(std.mem.indexOf(u8, prompt, needle) != null);
+        try testing.expect(std.mem.find(u8, prompt, needle) != null);
     }
     try testing.expect(prompt.len <= PROTECTED_CORE_CAP_BYTES);
 }
@@ -216,7 +216,7 @@ test "the routing index never names a tool the model cannot call" {
     for (registry.list()) |tool| {
         if (tool.allowedOn(.model)) continue;
         checked += 1;
-        if (std.mem.indexOf(u8, prompt, tool.name) != null) {
+        if (std.mem.find(u8, prompt, tool.name) != null) {
             std.debug.print("prompt routes to non-model tool '{s}'\n", .{tool.name});
             return error.PromptRoutesToUnreachableTool;
         }
@@ -240,7 +240,7 @@ test "stable core contains no hidden syntax or policy identity" {
         "compiler version",
     };
     for (forbidden) |needle| {
-        try testing.expect(std.mem.indexOf(u8, prompt, needle) == null);
+        try testing.expect(std.mem.find(u8, prompt, needle) == null);
     }
 }
 
@@ -248,30 +248,30 @@ test "stable core routes language facts through schema-v2 discovery" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
 
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_query") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_meta") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_features") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_restrictions") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_modules") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "pi_recall_facts") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_reference") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "pi_witnesses") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "LIVE SNAPSHOT") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "CANONICAL EXAMPLES") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "WITNESSED FAILURES") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "PROJECT MEMORY") == null);
+    try testing.expect(std.mem.find(u8, prompt, "zts_expert_query") != null);
+    try testing.expect(std.mem.find(u8, prompt, "zts_expert_meta") == null);
+    try testing.expect(std.mem.find(u8, prompt, "zts_expert_features") == null);
+    try testing.expect(std.mem.find(u8, prompt, "zts_expert_restrictions") == null);
+    try testing.expect(std.mem.find(u8, prompt, "zts_expert_modules") == null);
+    try testing.expect(std.mem.find(u8, prompt, "pi_recall_facts") == null);
+    try testing.expect(std.mem.find(u8, prompt, "zts_expert_reference") == null);
+    try testing.expect(std.mem.find(u8, prompt, "pi_witnesses") == null);
+    try testing.expect(std.mem.find(u8, prompt, "LIVE SNAPSHOT") == null);
+    try testing.expect(std.mem.find(u8, prompt, "CANONICAL EXAMPLES") == null);
+    try testing.expect(std.mem.find(u8, prompt, "WITNESSED FAILURES") == null);
+    try testing.expect(std.mem.find(u8, prompt, "PROJECT MEMORY") == null);
 }
 
 test "skill and template names remain discoverable without embedded bodies" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
     inline for (skills_catalog.catalog) |skill| {
-        try testing.expect(std.mem.indexOf(u8, prompt, skill.name) != null);
-        try testing.expect(std.mem.indexOf(u8, prompt, skill.body) == null);
+        try testing.expect(std.mem.find(u8, prompt, skill.name) != null);
+        try testing.expect(std.mem.find(u8, prompt, skill.body) == null);
     }
     inline for (prompts_catalog.catalog) |template| {
-        try testing.expect(std.mem.indexOf(u8, prompt, template.name) != null);
-        try testing.expect(std.mem.indexOf(u8, prompt, template.body) == null);
+        try testing.expect(std.mem.find(u8, prompt, template.name) != null);
+        try testing.expect(std.mem.find(u8, prompt, template.body) == null);
     }
 }
 
@@ -282,12 +282,12 @@ test "project instructions are complete and preserve nested order" {
     const prompt = try buildSystemPromptWithContext(testing.allocator, context);
     defer testing.allocator.free(prompt);
 
-    try testing.expect(std.mem.indexOf(u8, prompt, context) != null);
-    const root_pos = std.mem.indexOf(u8, prompt, "root instruction sentinel") orelse
+    try testing.expect(std.mem.find(u8, prompt, context) != null);
+    const root_pos = std.mem.find(u8, prompt, "root instruction sentinel") orelse
         return error.TestExpected;
-    const nested_pos = std.mem.indexOf(u8, prompt, "nested instruction sentinel") orelse
+    const nested_pos = std.mem.find(u8, prompt, "nested instruction sentinel") orelse
         return error.TestExpected;
-    const end_pos = std.mem.indexOf(u8, prompt, "END OF PERSONA") orelse
+    const end_pos = std.mem.find(u8, prompt, "END OF PERSONA") orelse
         return error.TestExpected;
     try testing.expect(root_pos < nested_pos);
     try testing.expect(nested_pos < end_pos);

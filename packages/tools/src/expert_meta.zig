@@ -139,38 +139,34 @@ test "compute fills all fields" {
 }
 
 test "writeJson produces parseable v1 envelope" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
     const info = compute();
     try writeJson(&aw.writer, &info);
 
-    buf = aw.toArrayList();
-    const s = buf.items;
+    const s = aw.written();
 
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"compiler_version\":\"" ++ analyzer_surface_version ++ "\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"policy_version\":\"2026.04.2\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"module_registry_hash\":\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"mode\":\"embedded\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"categories\":{") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"compiler_version\":\"" ++ analyzer_surface_version ++ "\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"policy_version\":\"2026.04.2\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"module_registry_hash\":\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"mode\":\"embedded\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"categories\":{") != null);
     try std.testing.expectEqual(@as(u8, '\n'), s[s.len - 1]);
 }
 
 test "writeText emits the human-readable report with pinned versions" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
     const info = compute();
     try writeText(&aw.writer, &info);
 
-    buf = aw.toArrayList();
-    const s = buf.items;
+    const s = aw.written();
 
-    try std.testing.expect(std.mem.indexOf(u8, s, "zts policy") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "compiler: " ++ analyzer_surface_version) != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "policy:   2026.04.2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "modules:  ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "mode:     embedded") != null);
+    try std.testing.expect(std.mem.find(u8, s, "zts policy") != null);
+    try std.testing.expect(std.mem.find(u8, s, "compiler: " ++ analyzer_surface_version) != null);
+    try std.testing.expect(std.mem.find(u8, s, "policy:   2026.04.2") != null);
+    try std.testing.expect(std.mem.find(u8, s, "modules:  ") != null);
+    try std.testing.expect(std.mem.find(u8, s, "mode:     embedded") != null);
 }

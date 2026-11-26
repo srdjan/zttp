@@ -630,7 +630,7 @@ comptime {
     }
     for (seen, 0..) |s, idx| {
         if (!s) {
-            @compileError("flow_meta missing entry for flow_checker.DiagnosticKind." ++ fields[idx].name);
+            @compileError("flow_meta missing entry for flow_checker.DiagnosticKind." ++ fields[idx]);
         }
     }
 }
@@ -803,7 +803,7 @@ pub fn search(keyword: []const u8) SearchResults {
 fn containsSubstring(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
     if (needle.len > haystack.len) return false;
-    return std.mem.indexOf(u8, haystack, needle) != null;
+    return std.mem.find(u8, haystack, needle) != null;
 }
 
 // ---------------------------------------------------------------------------
@@ -812,13 +812,9 @@ fn containsSubstring(haystack: []const u8, needle: []const u8) bool {
 
 /// Deterministic SHA-256 hash of all rule metadata.
 /// Changes if and only if a rule is added, removed, or its metadata changes.
-/// Cannot be comptime due to SHA-256 branch budget; cached on first call.
-var cached_hash: ?[64]u8 = null;
-
+/// Computed directly on each call to avoid unsynchronized global mutable state.
 pub fn policyHash() [64]u8 {
-    if (cached_hash) |h| return h;
-    cached_hash = computePolicyHash();
-    return cached_hash.?;
+    return computePolicyHash();
 }
 
 fn computePolicyHash() [64]u8 {

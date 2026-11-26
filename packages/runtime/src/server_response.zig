@@ -344,7 +344,7 @@ test "dynamic response headers omit content length when status forbids a body" {
 
         var buf: [256]u8 = undefined;
         const len = try buildDynamicResponseHeader(&buf, &response, true, null);
-        try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "Content-Length:") == null);
+        try std.testing.expect(std.mem.find(u8, buf[0..len], "Content-Length:") == null);
     }
 }
 
@@ -355,7 +355,7 @@ test "dynamic 200 response header keeps content length" {
 
     var buf: [256]u8 = undefined;
     const len = try buildDynamicResponseHeader(&buf, &response, true, null);
-    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "Content-Length: 5\r\n") != null);
+    try std.testing.expect(std.mem.find(u8, buf[0..len], "Content-Length: 5\r\n") != null);
 }
 
 test "static 304 response remains bodyless without content length" {
@@ -374,5 +374,5 @@ test "well-known 304 omits content length" {
     };
     var buf: [512]u8 = undefined;
     const len = try formatWellKnownHeaders(&doc, true, true, &buf);
-    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "Content-Length:") == null);
+    try std.testing.expect(std.mem.find(u8, buf[0..len], "Content-Length:") == null);
 }

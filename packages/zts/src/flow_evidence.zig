@@ -236,7 +236,7 @@ pub fn candidateSatisfies(
 }
 
 fn requestPath(url: []const u8) []const u8 {
-    return url[0 .. std.mem.indexOfScalar(u8, url, '?') orelse url.len];
+    return url[0 .. std.mem.findScalar(u8, url, '?') orelse url.len];
 }
 
 const StubTest = enum { truthy, falsy, present, absent, ok, not_ok, status };

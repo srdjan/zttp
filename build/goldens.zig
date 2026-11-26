@@ -218,7 +218,7 @@ fn addExpertMetaGolden(
         std.debug.panic("missing expert golden fixture {s}: {s}", .{ golden_rel, @errorName(err) });
     };
     const marker = ",\"policy_version\":";
-    const idx = std.mem.indexOf(u8, golden, marker) orelse
+    const idx = std.mem.find(u8, golden, marker) orelse
         std.debug.panic("meta golden {s} is missing the {s} field", .{ golden_rel, marker });
     const version_independent_tail = golden[idx..];
 

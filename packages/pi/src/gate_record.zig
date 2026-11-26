@@ -178,14 +178,11 @@ pub const FileGateSink = struct {
     /// the owner's buffer, and neither can be taken before there is an address
     /// to take.
     ///
-    /// Seeds the write position from the file's current size, so reopening an
-    /// existing log appends to it instead of overwriting the measurement it
-    /// already holds.
+    /// Uses streaming writes so an `O_APPEND` file descriptor appends
+    /// atomically at EOF even when multiple processes share one `--gate-log`.
     pub fn bind(self: *FileGateSink) !void {
         self.sink.context = self;
-        self.out = self.file.writer(self.io, &self.out_buffer);
-        const info = try self.file.stat(self.io);
-        self.out.pos = info.size;
+        self.out = self.file.writerStreaming(self.io, &self.out_buffer);
     }
 
     fn writeRecord(context: *anyopaque, record: TurnRecord) anyerror!void {
@@ -203,17 +200,29 @@ pub const FileGateSink = struct {
 /// bound before it reaches its final address. Call `open` once, after
 /// placement, and do not move the value afterwards.
 pub const GateLog = struct {
+    allocator: std.mem.Allocator,
     backend: std.Io.Threaded,
     impl: FileGateSink = undefined,
     is_open: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) GateLog {
-        return .{ .backend = std.Io.Threaded.init(allocator, .{ .environ = .empty }) };
+        return .{
+            .allocator = allocator,
+            .backend = std.Io.Threaded.init(allocator, .{ .environ = .empty }),
+        };
     }
 
     pub fn open(self: *GateLog, path: []const u8) !void {
         const io = self.backend.io();
-        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
+        const path_z = try self.allocator.dupeSentinel(u8, path, 0);
+        defer self.allocator.free(path_z);
+        const fd = try std.posix.openatZ(
+            std.posix.AT.FDCWD,
+            path_z,
+            .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
+            0o600,
+        );
+        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
         errdefer file.close(io);
         self.impl = FileGateSink.init(file, io);
         try self.impl.bind();
@@ -298,6 +307,42 @@ test "a reopened gate log is appended to, never overwritten" {
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, contents, "\n"));
 }
 
+test "two concurrently open gate logs append without overwriting each other" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(testing.io, &root_buffer);
+    const path = try std.fs.path.join(
+        testing.allocator,
+        &.{ root_buffer[0..root_len], "concurrent.jsonl" },
+    );
+    defer testing.allocator.free(path);
+
+    var hash: ToolSetHash = undefined;
+    @memset(&hash, 0x00);
+
+    var log_a = GateLog.init(testing.allocator);
+    defer log_a.deinit();
+    try log_a.open(path);
+
+    var log_b = GateLog.init(testing.allocator);
+    defer log_b.deinit();
+    try log_b.open(path);
+
+    log_a.sink().record(emptyRecord(hash));
+    log_b.sink().record(emptyRecord(hash));
+    log_a.sink().record(emptyRecord(hash));
+
+    const contents = try tmp.dir.readFileAlloc(
+        testing.io,
+        "concurrent.jsonl",
+        testing.allocator,
+        .limited(64 * 1024),
+    );
+    defer testing.allocator.free(contents);
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, contents, "\n"));
+}
+
 test "tool set hash is stable under registration order" {
     const forward = [_]ToolDef{ probe("alpha", "{}"), probe("beta", "{\"type\":\"object\"}") };
     const reverse = [_]ToolDef{ probe("beta", "{\"type\":\"object\"}"), probe("alpha", "{}") };
@@ -365,11 +410,11 @@ test "a turn with no tool call serializes as zero of zero with a null first fail
 
     const line = buf.written();
     try testing.expect(std.mem.endsWith(u8, line, "\n"));
-    try testing.expect(std.mem.indexOf(u8, line, "\"tool_calls_total\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"tool_calls_gate_passed\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"first_failure\":null") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"adapter_id\":null") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"calls\":[]") != null);
+    try testing.expect(std.mem.find(u8, line, "\"tool_calls_total\":0") != null);
+    try testing.expect(std.mem.find(u8, line, "\"tool_calls_gate_passed\":0") != null);
+    try testing.expect(std.mem.find(u8, line, "\"first_failure\":null") != null);
+    try testing.expect(std.mem.find(u8, line, "\"adapter_id\":null") != null);
+    try testing.expect(std.mem.find(u8, line, "\"calls\":[]") != null);
 }
 
 test "a mixed turn records per-call verdicts and the first failure only" {
@@ -402,12 +447,12 @@ test "a mixed turn records per-call verdicts and the first failure only" {
     }, buf.writer());
 
     const line = buf.written();
-    try testing.expect(std.mem.indexOf(u8, line, "\"tool_calls_total\":3") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"tool_calls_gate_passed\":1") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"first_failure\":\"missing_required\"") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"adapter_id\":\"deadbeef\"") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"failure\":\"enum_violation\"") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"execution_ok\":null") != null);
+    try testing.expect(std.mem.find(u8, line, "\"tool_calls_total\":3") != null);
+    try testing.expect(std.mem.find(u8, line, "\"tool_calls_gate_passed\":1") != null);
+    try testing.expect(std.mem.find(u8, line, "\"first_failure\":\"missing_required\"") != null);
+    try testing.expect(std.mem.find(u8, line, "\"adapter_id\":\"deadbeef\"") != null);
+    try testing.expect(std.mem.find(u8, line, "\"failure\":\"enum_violation\"") != null);
+    try testing.expect(std.mem.find(u8, line, "\"execution_ok\":null") != null);
     // Exactly one newline, at the end: JSONL is one record per line.
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
 }
@@ -436,7 +481,7 @@ test "a record carries no argument text even when a tool name needs escaping" {
         .generated_tokens = 0,
         .wall_ns = 0,
     }, buf.writer());
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "quote\\\"name") != null);
+    try testing.expect(std.mem.find(u8, buf.written(), "quote\\\"name") != null);
 }
 
 test "a sink failure is swallowed and never reaches the caller" {

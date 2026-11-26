@@ -197,10 +197,6 @@ pub export fn zttpSdkIsArray(_: sdk.JSValue) bool {
     return false;
 }
 
-pub export fn zttpSdkIsCallable(_: sdk.JSValue) bool {
-    return false;
-}
-
 pub export fn zttpSdkArrayLength(_: sdk.JSValue, out: *u32) bool {
     out.* = 0;
     return true;
@@ -216,11 +212,6 @@ pub export fn zttpSdkArraySet(_: *sdk.ModuleHandle, _: sdk.JSValue, _: u32, _: s
 
 pub export fn zttpSdkCreateArray(_: *sdk.ModuleHandle, out: *sdk.JSValue) bool {
     out.* = sdk.JSValue.undefined_val;
-    return true;
-}
-
-pub export fn zttpSdkStringify(_: *sdk.ModuleHandle, val: sdk.JSValue, out: *sdk.JSValue) bool {
-    out.* = val;
     return true;
 }
 
@@ -342,69 +333,6 @@ pub export fn zttpSdkSqliteColumnText(_: *sdk.SqliteStmt, _: u32, out_ptr: *[*]c
 }
 
 // ---------------------------------------------------------------------------
-// Tests for the capability-denial wiring. Before these helpers existed, the
-// shim's `zttpSdkHasCapability` always returned true, so no SDK or modules
-// test could observe a denial — the entire negative path of
-// `requireCapability` was structurally unreachable in CI. The test below
-// pins the round-trip: deny via the shim's mask, call through
-// `sdk.requireCapability`, observe the `MissingModuleCapability` error.
-// ---------------------------------------------------------------------------
-
-test "denyCapability is observable through sdk.requireCapability" {
-    allowAllCapabilities();
-    defer allowAllCapabilities();
-
-    // ModuleHandle is opaque; the shim's hasCapability ignores it.
-    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
-
-    // Default state: every capability is allowed, so the call returns void.
-    try sdk.requireCapability(fake_handle, .crypto);
-
-    // After denying crypto, the same call must surface the documented error.
-    denyCapability(.crypto);
-    try std.testing.expectError(
-        error.MissingModuleCapability,
-        sdk.requireCapability(fake_handle, .crypto),
-    );
-
-    // Other capabilities remain unaffected; denials are bit-precise.
-    try sdk.requireCapability(fake_handle, .clock);
-
-    // Re-allowing crypto restores the default behavior.
-    allowCapability(.crypto);
-    try sdk.requireCapability(fake_handle, .crypto);
-}
-
-test "allowAllCapabilities clears every prior denial" {
-    allowAllCapabilities();
-    defer allowAllCapabilities();
-
-    denyCapability(.crypto);
-    denyCapability(.clock);
-    denyCapability(.network);
-
-    allowAllCapabilities();
-
-    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
-    try sdk.requireCapability(fake_handle, .crypto);
-    try sdk.requireCapability(fake_handle, .clock);
-    try sdk.requireCapability(fake_handle, .network);
-}
-
-test "denials are independent across capabilities" {
-    allowAllCapabilities();
-    defer allowAllCapabilities();
-
-    denyCapability(.clock);
-
-    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
-    // Denied:
-    try std.testing.expectError(
-        error.MissingModuleCapability,
-        sdk.requireCapability(fake_handle, .clock),
-    );
-    // All siblings still allowed:
-    try sdk.requireCapability(fake_handle, .crypto);
-    try sdk.requireCapability(fake_handle, .random);
-    try sdk.requireCapability(fake_handle, .stderr);
-}
+// Capability-denial round-trip tests live in `test_root.zig`: `test_shim.zig`
+// is imported as a separate named module, so `test` blocks placed here are
+// never collected by `zig build test-sdk`.

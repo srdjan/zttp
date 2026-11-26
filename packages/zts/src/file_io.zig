@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const module_graph = @import("modules/internal/module_graph.zig");
 
+var temp_file_counter: std.atomic.Value(u64) = .init(0);
+
 /// Read a file synchronously using POSIX operations (for use before Io is initialized).
 /// Reads in 4KB chunks without fstat to avoid libc/Linux compatibility issues.
 pub fn readFile(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
@@ -47,7 +49,10 @@ pub fn readFileTail(allocator: std.mem.Allocator, path: []const u8, window: usiz
     var chunk: [4096]u8 = undefined;
     while (true) {
         const result = std.c.pread(fd, &chunk, chunk.len, @intCast(offset));
-        if (result < 0) return error.ReadFailed;
+        if (result < 0) {
+            if (std.posix.errno(result) == .INTR) continue;
+            return error.ReadFailed;
+        }
         const n: usize = @intCast(result);
         if (n == 0) break;
         try buffer.appendSlice(allocator, chunk[0..n]);
@@ -56,7 +61,7 @@ pub fn readFileTail(allocator: std.mem.Allocator, path: []const u8, window: usiz
 
     var data: []const u8 = buffer.items;
     if (start > 0) {
-        if (std.mem.indexOfScalar(u8, data, '\n')) |nl| {
+        if (std.mem.findScalar(u8, data, '\n')) |nl| {
             data = data[nl + 1 ..];
         } else {
             data = data[0..0];
@@ -77,7 +82,8 @@ pub fn fileExists(allocator: std.mem.Allocator, path: []const u8) bool {
 /// Write a file synchronously and atomically using POSIX operations. New files
 /// are created 0600: callers include session transcripts, project memory, and
 /// edited handler source, which carry tool output that must not be
-/// world-readable.
+/// world-readable. Overwriting an existing regular file preserves its mode bits
+/// (`0o777`); symlink destinations are refused with `error.SymlinkRefused`.
 ///
 /// The write goes to a sibling temp file in the same directory, is fsynced,
 /// then renamed over the destination. A crash or a partial write therefore
@@ -85,11 +91,24 @@ pub fn fileExists(allocator: std.mem.Allocator, path: []const u8) bool {
 /// critical for the expert apply_edit path, which would otherwise leave the
 /// user's working handler corrupt and unrecoverable.
 pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
+    defer allocator.free(path_z);
+
+    // Inspect destination without following a leaf symlink: symlinks are
+    // refused, and existing regular files keep their mode bits on the temp fd
+    // before fsync/rename.
+    const preserved_mode: ?u32 = if (try lstatModeNoFollow(path_z)) |mode| blk: {
+        if (std.c.S.ISLNK(mode)) return error.SymlinkRefused;
+        if (std.c.S.ISREG(mode)) break :blk mode & 0o777;
+        break :blk null;
+    } else null;
+
     // Build a sibling temp path in the same directory so rename(2) is atomic
-    // (same filesystem). PID + address keeps concurrent writers from colliding.
+    // (same filesystem). PID + atomic counter keeps concurrent writers from colliding.
     const dir = std.fs.path.dirname(path) orelse ".";
     const base = std.fs.path.basename(path);
-    const tmp_path = try allocator.print("{s}/.{s}.tmp.{d}.{d}", .{ dir, base, std.c.getpid(), @intFromPtr(data.ptr) });
+    const seq = temp_file_counter.fetchAdd(1, .monotonic);
+    const tmp_path = try allocator.print("{s}/.{s}.tmp.{d}.{d}", .{ dir, base, std.c.getpid(), seq });
     defer allocator.free(tmp_path);
 
     const tmp_path_z = try allocator.dupeSentinel(u8, tmp_path, 0);
@@ -112,17 +131,54 @@ pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u
         var total_written: usize = 0;
         while (total_written < data.len) {
             const result = std.c.write(fd, data[total_written..].ptr, data.len - total_written);
-            if (result < 0) return error.WriteFailure;
+            if (result < 0) {
+                if (std.posix.errno(result) == .INTR) continue;
+                return error.WriteFailure;
+            }
             if (result == 0) return error.WriteFailure;
             total_written += @intCast(result);
         }
+        if (preserved_mode) |mode| {
+            while (true) {
+                const chmod_rc = std.c.fchmod(fd, @intCast(mode));
+                if (chmod_rc == 0) break;
+                if (std.c.errno(chmod_rc) == .INTR) continue;
+                return error.WriteFailure;
+            }
+        }
         // Flush to disk before the rename so the renamed file has full content.
-        _ = std.c.fsync(fd);
+        while (true) {
+            const sync_rc = std.c.fsync(fd);
+            if (sync_rc == 0) break;
+            if (std.posix.errno(sync_rc) == .INTR) continue;
+            return error.WriteFailure;
+        }
     }
 
-    const path_z = try allocator.dupeSentinel(u8, path, 0);
-    defer allocator.free(path_z);
+    if (try lstatModeNoFollow(path_z)) |mode| {
+        if (std.c.S.ISLNK(mode)) return error.SymlinkRefused;
+    }
     if (std.c.rename(tmp_path_z, path_z) != 0) return error.WriteFailure;
+}
+
+fn lstatModeNoFollow(path_z: [:0]const u8) error{StatFailed}!?u32 {
+    if (builtin.target.os.tag == .linux) {
+        const linux = std.os.linux;
+        var stx = std.mem.zeroes(linux.Statx);
+        const rc = linux.statx(linux.AT.FDCWD, path_z, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true, .MODE = true }, &stx);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return stx.mode,
+            .NOENT => return null,
+            else => return error.StatFailed,
+        }
+    }
+    var st: std.c.Stat = undefined;
+    const rc = std.c.fstatat(std.c.AT.FDCWD, path_z, &st, std.c.AT.SYMLINK_NOFOLLOW);
+    if (rc != 0) {
+        if (std.c.errno(rc) == .NOENT) return null;
+        return error.StatFailed;
+    }
+    return @intCast(st.mode);
 }
 
 const ExclusiveCommitCapability = struct {
@@ -245,6 +301,87 @@ test "writeFile creates new files with mode 0600" {
 
     const mode = try statMode(allocator, path);
     try testing.expectEqual(@as(u32, 0o600), mode & 0o777);
+}
+
+test "writeFile preserves mode 0644 and 0755 on existing regular files" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path_644 = try tmpFilePath(allocator, tmp, "config.json");
+    defer allocator.free(path_644);
+    try writeFile(allocator, path_644, "original\n");
+    const path_644_z = try allocator.dupeSentinel(u8, path_644, 0);
+    defer allocator.free(path_644_z);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(path_644_z, 0o644));
+    try testing.expectEqual(@as(u32, 0o644), (try statMode(allocator, path_644)) & 0o777);
+
+    try writeFile(allocator, path_644, "updated\n");
+    try testing.expectEqual(@as(u32, 0o644), (try statMode(allocator, path_644)) & 0o777);
+    const updated_644 = try readFile(allocator, path_644, 1024);
+    defer allocator.free(updated_644);
+    try testing.expectEqualStrings("updated\n", updated_644);
+
+    const path_755 = try tmpFilePath(allocator, tmp, "run.sh");
+    defer allocator.free(path_755);
+    try writeFile(allocator, path_755, "echo 1\n");
+    const path_755_z = try allocator.dupeSentinel(u8, path_755, 0);
+    defer allocator.free(path_755_z);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(path_755_z, 0o755));
+    try testing.expectEqual(@as(u32, 0o755), (try statMode(allocator, path_755)) & 0o777);
+
+    try writeFile(allocator, path_755, "echo 2\n");
+    try testing.expectEqual(@as(u32, 0o755), (try statMode(allocator, path_755)) & 0o777);
+    const updated_755 = try readFile(allocator, path_755, 1024);
+    defer allocator.free(updated_755);
+    try testing.expectEqualStrings("echo 2\n", updated_755);
+}
+
+test "writeFile refuses symlink without modifying symlink or target" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const target_path = try tmpFilePath(allocator, tmp, "target.txt");
+    defer allocator.free(target_path);
+    try writeFile(allocator, target_path, "keep-me\n");
+
+    const link_path = try tmpFilePath(allocator, tmp, "link.txt");
+    defer allocator.free(link_path);
+    const target_z = try allocator.dupeSentinel(u8, target_path, 0);
+    defer allocator.free(target_z);
+    const link_z = try allocator.dupeSentinel(u8, link_path, 0);
+    defer allocator.free(link_z);
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink(target_z, link_z));
+
+    try testing.expectError(error.SymlinkRefused, writeFile(allocator, link_path, "overwritten\n"));
+
+    var readlink_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.c.readlink(link_z, &readlink_buf, readlink_buf.len);
+    try testing.expectEqual(@as(isize, @intCast(target_path.len)), n);
+    try testing.expectEqualStrings(target_path, readlink_buf[0..target_path.len]);
+
+    const target_contents = try readFile(allocator, target_path, 1024);
+    defer allocator.free(target_contents);
+    try testing.expectEqualStrings("keep-me\n", target_contents);
+
+    const missing_target = try tmpFilePath(allocator, tmp, "missing.txt");
+    defer allocator.free(missing_target);
+    const missing_target_z = try allocator.dupeSentinel(u8, missing_target, 0);
+    defer allocator.free(missing_target_z);
+    const dangling_link = try tmpFilePath(allocator, tmp, "dangling.txt");
+    defer allocator.free(dangling_link);
+    const dangling_link_z = try allocator.dupeSentinel(u8, dangling_link, 0);
+    defer allocator.free(dangling_link_z);
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink(missing_target_z, dangling_link_z));
+
+    try testing.expectError(error.SymlinkRefused, writeFile(allocator, dangling_link, "new\n"));
+    const dn = std.c.readlink(dangling_link_z, &readlink_buf, readlink_buf.len);
+    try testing.expectEqual(@as(isize, @intCast(missing_target.len)), dn);
+    try testing.expectEqualStrings(missing_target, readlink_buf[0..missing_target.len]);
+    try testing.expect(!fileExists(allocator, missing_target));
 }
 
 test "writeFileCreateExclusive preserves an existing file" {

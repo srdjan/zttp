@@ -31,6 +31,7 @@ fn snippetForVaryingRead(object_name: []const u8, property_name: []const u8) []c
 const json_utils = @import("zts-base").json_utils;
 const validate_keywords = @import("zts-base").validate_keywords;
 const ir = @import("zts-engine").parser.ir;
+const handler_policy = @import("zts-engine").handler_policy;
 const object = @import("zts-engine").object;
 const atom_table = @import("zts-engine").atom_table;
 const module_binding = @import("zts-engine").module_binding;
@@ -1686,10 +1687,14 @@ pub const ContractBuilder = struct {
             return error.DuplicateSqlQueryName;
         }
 
+        const owned_name = try self.allocator.dupe(u8, query_name);
+        errdefer self.allocator.free(owned_name);
+        const owned_statement = try self.allocator.dupe(u8, statement);
+        errdefer self.allocator.free(owned_statement);
         try self.sql_queries.append(self.allocator, .{
-            .name = try self.allocator.dupe(u8, query_name),
-            .statement = try self.allocator.dupe(u8, statement),
-            .operation = "",
+            .name = owned_name,
+            .statement = owned_statement,
+            .operation = handler_policy.sqlOperationForStatement(statement),
             .tables = .empty,
         });
     }
@@ -1804,7 +1809,7 @@ pub const ContractBuilder = struct {
             .object_literal => return node_idx,
             .identifier => {
                 const binding = self.ir_view.getBinding(node_idx) orelse return null;
-                return self.findObjectLiteralBinding(binding.slot);
+                return self.findObjectLiteralBinding(binding);
             },
             // exhaustive: null means no object literal was resolved, which leaves
             // the fact unextracted rather than extracted wrongly.
@@ -1812,13 +1817,21 @@ pub const ContractBuilder = struct {
         }
     }
 
-    fn findObjectLiteralBinding(self: *const ContractBuilder, slot: u16) ?NodeIndex {
-        const init_node = self.findBindingInitNode(slot) orelse return null;
+    fn findObjectLiteralBinding(self: *const ContractBuilder, binding: ir.BindingRef) ?NodeIndex {
+        const init_node = self.findBindingInitNode(binding) orelse return null;
         if (self.ir_view.getTag(init_node) == .object_literal) return init_node;
         return null;
     }
 
-    fn findBindingInitNode(self: *const ContractBuilder, slot: u16) ?NodeIndex {
+    fn bindingMatchesDeclaration(reference: ir.BindingRef, declaration: ir.BindingRef) bool {
+        const ref_is_global = reference.kind == .global or reference.kind == .undeclared_global;
+        if (!ref_is_global and reference.kind != .local) return false;
+        const decl_is_global = declaration.kind == .global or declaration.kind == .undeclared_global;
+        if (ref_is_global != decl_is_global) return false;
+        return declaration.scope_id == reference.scope_id and declaration.slot == reference.slot;
+    }
+
+    fn findBindingInitNode(self: *const ContractBuilder, binding: ir.BindingRef) ?NodeIndex {
         const node_count = self.ir_view.nodeCount();
         for (0..node_count) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
@@ -1826,13 +1839,14 @@ pub const ContractBuilder = struct {
             if (tag != .var_decl) continue;
 
             const decl = self.ir_view.getVarDecl(idx) orelse continue;
-            if (decl.binding.slot != slot or decl.init == null_node) continue;
+            if (decl.init == null_node) continue;
+            if (!bindingMatchesDeclaration(binding, decl.binding)) continue;
             return decl.init;
         }
         return null;
     }
 
-    fn findFunctionNodeByBinding(self: *const ContractBuilder, slot: u16) ?NodeIndex {
+    fn findFunctionNodeByBinding(self: *const ContractBuilder, binding: ir.BindingRef) ?NodeIndex {
         const node_count = self.ir_view.nodeCount();
         for (0..node_count) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
@@ -1840,13 +1854,13 @@ pub const ContractBuilder = struct {
             switch (tag) {
                 .function_decl => {
                     const decl = self.ir_view.getVarDecl(idx) orelse continue;
-                    if (decl.binding.slot != slot or decl.init == null_node) continue;
+                    if (decl.init == null_node or !bindingMatchesDeclaration(binding, decl.binding)) continue;
                     const init_tag = self.ir_view.getTag(decl.init) orelse continue;
                     if (init_tag == .function_expr or init_tag == .arrow_function) return decl.init;
                 },
                 .var_decl => {
                     const decl = self.ir_view.getVarDecl(idx) orelse continue;
-                    if (decl.binding.slot != slot or decl.init == null_node) continue;
+                    if (decl.init == null_node or !bindingMatchesDeclaration(binding, decl.binding)) continue;
                     const init_tag = self.ir_view.getTag(decl.init) orelse continue;
                     if (init_tag == .function_expr or init_tag == .arrow_function) return decl.init;
                 },
@@ -1868,7 +1882,7 @@ pub const ContractBuilder = struct {
             .function_expr, .arrow_function => return node_idx,
             .identifier => {
                 const binding = self.ir_view.getBinding(node_idx) orelse return null;
-                return self.findFunctionNodeByBinding(binding.slot);
+                return self.findFunctionNodeByBinding(binding);
             },
             // exhaustive: null means the expression does not resolve to a function
             // body this can read, so the caller extracts no facts from it rather
@@ -1884,7 +1898,14 @@ pub const ContractBuilder = struct {
         while (i < obj.properties_count) : (i += 1) {
             const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
             const prop_tag = self.ir_view.getTag(prop_idx) orelse continue;
-            if (prop_tag != .object_property) continue;
+            if (prop_tag == .object_spread) {
+                self.api_routes_dynamic = true;
+                continue;
+            }
+            if (prop_tag != .object_property) {
+                self.api_routes_dynamic = true;
+                continue;
+            }
 
             const prop = self.ir_view.getProperty(prop_idx) orelse continue;
             const route_key = self.getObjectPropertyKey(prop.key) orelse {
@@ -1898,9 +1919,15 @@ pub const ContractBuilder = struct {
 
             if (self.hasApiRoute(parsed.method, parsed.path)) continue;
 
+            const method, const path = blk: {
+                const m = try self.allocator.dupe(u8, parsed.method);
+                errdefer self.allocator.free(m);
+                const p = try self.allocator.dupe(u8, parsed.path);
+                break :blk .{ m, p };
+            };
             var route = ApiRouteInfo{
-                .method = try self.allocator.dupe(u8, parsed.method),
-                .path = try self.allocator.dupe(u8, parsed.path),
+                .method = method,
+                .path = path,
                 .request_schema_refs = .empty,
                 .request_schema_dynamic = false,
                 .requires_bearer = false,
@@ -2499,12 +2526,10 @@ pub const ContractBuilder = struct {
     }
 
     fn serializeJsonValue(allocator: std.mem.Allocator, value_json: std.json.Value) ![]u8 {
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
         try writeJsonValue(value_json, &aw.writer);
-        output = aw.toArrayList();
-        return try output.toOwnedSlice(allocator);
+        return try allocator.dupe(u8, aw.written());
     }
 
     fn writeJsonValue(value_json: std.json.Value, writer: anytype) !void {
@@ -2557,7 +2582,14 @@ pub const ContractBuilder = struct {
         });
     }
 
+    const max_binding_resolve_depth: u8 = 32;
+
     fn extractResponseSchemaRef(self: *ContractBuilder, node_idx: NodeIndex) !?[]u8 {
+        return self.extractResponseSchemaRefAt(node_idx, 0);
+    }
+
+    fn extractResponseSchemaRefAt(self: *ContractBuilder, node_idx: NodeIndex, depth: u8) !?[]u8 {
+        if (depth >= max_binding_resolve_depth) return null;
         const tag = self.ir_view.getTag(node_idx) orelse return null;
         switch (tag) {
             .member_access => {
@@ -2568,12 +2600,13 @@ pub const ContractBuilder = struct {
                 const obj_tag = self.ir_view.getTag(member.object) orelse return null;
                 if (obj_tag != .identifier) return null;
                 const binding = self.ir_view.getBinding(member.object) orelse return null;
-                return try self.lookupSchemaRefForBinding(binding.slot);
+                return try self.lookupSchemaRefForBinding(binding);
             },
             .identifier => {
                 const binding = self.ir_view.getBinding(node_idx) orelse return null;
-                const init_node = self.findBindingInitNode(binding.slot) orelse return null;
-                return try self.extractResponseSchemaRef(init_node);
+                const init_node = self.findBindingInitNode(binding) orelse return null;
+                if (init_node == node_idx) return null;
+                return try self.extractResponseSchemaRefAt(init_node, depth + 1);
             },
             // exhaustive: null means no schema reference was found, leaving the
             // response undocumented rather than documented against the wrong
@@ -2582,8 +2615,8 @@ pub const ContractBuilder = struct {
         }
     }
 
-    fn lookupSchemaRefForBinding(self: *ContractBuilder, slot: u16) !?[]u8 {
-        const init_node = self.findBindingInitNode(slot) orelse return null;
+    fn lookupSchemaRefForBinding(self: *ContractBuilder, binding: ir.BindingRef) !?[]u8 {
+        const init_node = self.findBindingInitNode(binding) orelse return null;
         const tag = self.ir_view.getTag(init_node) orelse return null;
         if (tag != .call) return null;
 
@@ -2591,8 +2624,8 @@ pub const ContractBuilder = struct {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return null;
         if (callee_tag != .identifier) return null;
 
-        const binding = self.ir_view.getBinding(call.callee) orelse return null;
-        if (!self.isBindingCategory(binding, .request_schema)) return null;
+        const callee_binding = self.ir_view.getBinding(call.callee) orelse return null;
+        if (!self.isBindingCategory(callee_binding, .request_schema)) return null;
         if (call.args_count == 0) return null;
 
         const schema_idx = self.ir_view.getListIndex(call.args_start, 0);
@@ -2601,6 +2634,11 @@ pub const ContractBuilder = struct {
     }
 
     fn extractResponseSchemaJson(self: *ContractBuilder, node_idx: NodeIndex) !?[]u8 {
+        return self.extractResponseSchemaJsonAt(node_idx, 0);
+    }
+
+    fn extractResponseSchemaJsonAt(self: *ContractBuilder, node_idx: NodeIndex, depth: u8) !?[]u8 {
+        if (depth >= max_binding_resolve_depth) return null;
         if (self.type_checker == null or self.type_env == null) return null;
 
         const inferred = self.type_checker.?.inferTypeWithoutDiagnostics(node_idx);
@@ -2614,8 +2652,9 @@ pub const ContractBuilder = struct {
         const tag = self.ir_view.getTag(node_idx) orelse return null;
         if (tag == .identifier) {
             const binding = self.ir_view.getBinding(node_idx) orelse return null;
-            const init_node = self.findBindingInitNode(binding.slot) orelse return null;
-            return try self.extractResponseSchemaJson(init_node);
+            const init_node = self.findBindingInitNode(binding) orelse return null;
+            if (init_node == node_idx) return null;
+            return try self.extractResponseSchemaJsonAt(init_node, depth + 1);
         }
 
         return null;
@@ -2809,7 +2848,7 @@ const ParsedRouteKey = struct {
 };
 
 fn parseRouteKey(raw: []const u8) ?ParsedRouteKey {
-    const sep = std.mem.indexOfScalar(u8, raw, ' ') orelse return null;
+    const sep = std.mem.findScalar(u8, raw, ' ') orelse return null;
     if (sep == 0 or sep + 1 >= raw.len) return null;
 
     const method = raw[0..sep];
@@ -2820,15 +2859,6 @@ fn parseRouteKey(raw: []const u8) ?ParsedRouteKey {
         .method = method,
         .path = path,
     };
-}
-
-fn routeHasPathParam(raw: []const u8) bool {
-    const route = parseRouteKey(raw) orelse return false;
-    var segments = std.mem.splitScalar(u8, route.path, '/');
-    while (segments.next()) |segment| {
-        if (segment.len > 0 and segment[0] == ':') return true;
-    }
-    return false;
 }
 
 fn contentTypeFor(idx: u8) []const u8 {
@@ -3297,8 +3327,8 @@ test "routed cache reads and egress contribute their summary facts" {
     ;
     const egress_source =
         \\import { routerMatch } from "zttp:router";
-        \\import { fetchSync } from "zttp:fetch";
-        \\function fetchRoute(req) { return fetchSync("https://example.com"); }
+        \\import { fetch } from "zttp:fetch";
+        \\function fetchRoute(req) { return fetch("https://example.com"); }
         \\const routes = { "GET /fetch": fetchRoute };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
@@ -3307,8 +3337,8 @@ test "routed cache reads and egress contribute their summary facts" {
         \\}
     ;
     const direct_egress_source =
-        \\import { fetchSync } from "zttp:fetch";
-        \\function handler(req) { return fetchSync("https://example.com"); }
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) { return fetch("https://example.com"); }
     ;
     var cache_contract = try buildTestContract(cache_source);
     defer cache_contract.deinit(std.testing.allocator);
@@ -3322,8 +3352,10 @@ test "routed cache reads and egress contribute their summary facts" {
     try std.testing.expect(!cache_props.stateless);
     const direct_egress_props = direct_egress_contract.properties orelse return error.MissingProperties;
     const egress_props = egress_contract.properties orelse return error.MissingProperties;
-    try std.testing.expectEqual(direct_egress_props.has_egress, egress_props.has_egress);
-    try std.testing.expectEqual(direct_egress_props.read_only, egress_props.read_only);
+    try std.testing.expect(direct_egress_props.has_egress);
+    try std.testing.expect(!direct_egress_props.read_only);
+    try std.testing.expect(egress_props.has_egress);
+    try std.testing.expect(!egress_props.read_only);
 }
 
 test "computeProperties egress is conservative write" {
@@ -3686,7 +3718,7 @@ test "a schema zttp:validate cannot compile is refused where a call would fail" 
         for (contract.spec_diagnostics.items) |d| {
             if (d.kind != .schema_not_compilable) continue;
             refused += 1;
-            try std.testing.expect(std.mem.indexOf(u8, d.suggestion.?, "additionalProperties") != null);
+            try std.testing.expect(std.mem.find(u8, d.suggestion.?, "additionalProperties") != null);
         }
         if (refused != case.refused) std.debug.print("case '{s}': {d} ZTS514, expected {d}\n", .{ case.label, refused, case.refused });
         try std.testing.expectEqual(case.refused, refused);
@@ -3734,4 +3766,49 @@ test "an intent body is written by the shared literal writer and a value JSON ca
             try std.testing.expectEqualStrings(expected, intent.assertions.items[0].expected_body_json.?);
         }
     }
+}
+
+test "route object literal with spread marks api routes dynamic" {
+    var contract = try buildTestContract(
+        \\import { routerMatch } from "zttp:router";
+        \\function extra(req) { return Response.text("extra"); }
+        \\function ok(req) { return Response.text("ok"); }
+        \\const base = { "GET /extra": extra };
+        \\const routes = { ...base, "GET /ok": ok };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
+        \\  return found.handler(req);
+        \\}
+    );
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expect(contract.api.routes_dynamic);
+}
+
+test "sql registration populates query.operation skipping leading SQL comments" {
+    var contract = try buildTestContract(
+        \\import { sql } from "zttp:sql";
+        \\sql("listUsers", "/* read */ SELECT id FROM users");
+        \\sql("addUser", "-- write\nINSERT INTO users(id) VALUES (1)");
+        \\function handler(req) { return Response.text("ok"); }
+    );
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), contract.sql.queries.items.len);
+    try std.testing.expectEqualStrings("select", contract.sql.queries.items[0].operation);
+    try std.testing.expectEqualStrings("insert", contract.sql.queries.items[1].operation);
+}
+
+test "serializeJsonValue frees buffer on error without leaking" {
+    const allocator = std.testing.allocator;
+    var obj: std.json.ObjectMap = .empty;
+    defer obj.deinit(allocator);
+    try obj.put(allocator, "ok", .{ .string = "value" });
+    try obj.put(allocator, "bad", .{ .number_string = "123" });
+
+    try std.testing.expectError(
+        error.UnsupportedJsonValue,
+        ContractBuilder.serializeJsonValue(allocator, .{ .object = obj }),
+    );
 }

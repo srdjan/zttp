@@ -54,7 +54,7 @@ pub const ProviderBackend = struct {
             .local => null,
             .deepseek => try allocator.dupe(
                 u8,
-                options.auth orelse unreachable,
+                options.auth orelse return error.MissingProviderAuth,
             ),
         };
         errdefer if (auth_owned) |owned_auth| allocator.free(owned_auth);

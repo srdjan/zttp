@@ -215,7 +215,7 @@ pub const Counter = struct {
     }
 
     pub fn close(self: *Counter) void {
-        if (builtin.target.os.tag == .linux and self.source == .instructions_linux_perf) {
+        if (builtin.target.os.tag == .linux and self.source == .instructions_linux_perf and self.fd >= 0) {
             linux_perf.close(self.fd);
             self.fd = -1;
         }

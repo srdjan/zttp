@@ -58,7 +58,6 @@ const manifest_registry_mod = @import("manifest_registry.zig");
 const bytecode_mod = @import("zts-engine").bytecode;
 const source_diagnostics = @import("zts-base").source_diagnostics;
 const source_frontend_mod = @import("zts-engine").source_frontend;
-const compat_mod = @import("zts-base").compat;
 const string_mod = @import("zts-engine").string;
 const effect_inference = @import("effect_inference.zig");
 const intrinsic_lowering = @import("intrinsic_lowering.zig");
@@ -1139,7 +1138,7 @@ pub const StateWriterList = struct {
             const own_write: ?NodeIndex = if (write.module == module_id) write.node else null;
             for (write.stack) |entry| {
                 if (entry.module != module_id) continue;
-                if (std.mem.indexOfScalar(NodeIndex, list.flow_functions.items, entry.node)) |index| {
+                if (std.mem.findScalar(NodeIndex, list.flow_functions.items, entry.node)) |index| {
                     list.flow_function_writes.items[index] = function_specs_mod.earlierWrite(
                         ir_view,
                         list.flow_function_writes.items[index],

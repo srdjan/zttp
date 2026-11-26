@@ -346,27 +346,26 @@ fn writeJson(writer: *std.Io.Writer, report: Report) !void {
     try writer.writeAll("]}\n");
 }
 
-pub fn main(init: std.process.Init.Minimal) !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-
-    var args = std.process.Args.Iterator.init(init.args);
-    defer args.deinit();
-    _ = args.next();
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var json = false;
     var require_package_floor = false;
     var paths0_from_stdin = false;
+    var tracked = false;
     var paths: std.ArrayList([]const u8) = .empty;
     defer paths.deinit(allocator);
-    while (args.next()) |arg| {
+    for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
             json = true;
         } else if (std.mem.eql(u8, arg, "--require-package-floor")) {
             require_package_floor = true;
         } else if (std.mem.eql(u8, arg, "--paths0-from-stdin")) {
             paths0_from_stdin = true;
+        } else if (std.mem.eql(u8, arg, "--tracked")) {
+            tracked = true;
         } else if (std.mem.startsWith(u8, arg, "--")) {
             std.debug.print("production branch metric: unknown option {s}\n", .{arg});
             return error.InvalidArgument;
@@ -375,11 +374,29 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
+    var tracked_paths: ?[]u8 = null;
+    defer if (tracked_paths) |buffer| allocator.free(buffer);
+    if (tracked) {
+        const listed = try std.process.run(allocator, io, .{
+            .argv = &.{ "git", "ls-files", "-z", "--", "*.zig", ":!tooling/production_branch_metric.zig" },
+            .stdout_limit = .limited(64 * 1024 * 1024),
+        });
+        defer allocator.free(listed.stderr);
+        tracked_paths = listed.stdout;
+        if (listed.term != .exited or listed.term.exited != 0) return error.GitListFailed;
+        var path_iterator = std.mem.splitScalar(u8, listed.stdout, 0);
+        while (path_iterator.next()) |path| {
+            if (path.len == 0) continue;
+            std.Io.Dir.cwd().access(io, path, .{}) catch continue;
+            try paths.append(allocator, path);
+        }
+    }
+
     var stdin_paths: ?[]u8 = null;
     defer if (stdin_paths) |buffer| allocator.free(buffer);
     if (paths0_from_stdin) {
         var stdin_buffer: [4096]u8 = undefined;
-        var stdin_reader = std.Io.File.stdin().reader(io_backend.io(), &stdin_buffer);
+        var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buffer);
         const buffer = try stdin_reader.interface.allocRemaining(allocator, .limited(64 * 1024 * 1024));
         stdin_paths = buffer;
         var path_iterator = std.mem.splitScalar(u8, buffer, 0);
@@ -388,9 +405,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
-    const report = try collect(io_backend.io(), allocator, paths.items, require_package_floor);
+    const report = try collect(io, allocator, paths.items, require_package_floor);
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writerStreaming(io_backend.io(), &stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     if (json) try writeJson(&stdout_writer.interface, report) else try writeText(&stdout_writer.interface, report);
     try stdout_writer.interface.flush();
 }

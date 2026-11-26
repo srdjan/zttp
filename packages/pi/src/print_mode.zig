@@ -19,6 +19,7 @@ const transcript_mod = @import("transcript.zig");
 const session_events = @import("session/events.zig");
 const app = @import("app.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
+const fd_io = @import("fd_io.zig");
 
 const Registry = registry_mod.Registry;
 const ExpertFlags = app.ExpertFlags;
@@ -67,7 +68,7 @@ const PrintCompactionCtx = struct {
             "[context compacted ({s}): {d} -> {d} estimated input tokens]\n",
             .{ @tagName(reason), details.tokens_before, details.estimated_tokens_after },
         ) catch return;
-        _ = std.c.write(std.c.STDERR_FILENO, notice.ptr, notice.len);
+        fd_io.writeAll(std.c.STDERR_FILENO, notice);
     }
 };
 
@@ -224,7 +225,7 @@ fn writeOut(out: ?*std.Io.Writer, bytes: []const u8) !void {
     if (out) |w| {
         try w.writeAll(bytes);
     } else {
-        _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
+        fd_io.writeAll(std.c.STDOUT_FILENO, bytes);
     }
 }
 
@@ -410,7 +411,7 @@ fn buildMiniRegistry(allocator: std.mem.Allocator) !Registry {
 
 fn findLine(lines: []const []const u8, needle: []const u8) ?usize {
     for (lines, 0..) |line, i| {
-        if (std.mem.indexOf(u8, line, needle) != null) return i;
+        if (std.mem.find(u8, line, needle) != null) return i;
     }
     return null;
 }
@@ -453,9 +454,9 @@ test "runWithSession: json mode emits user_text, model_text, end in order" {
     const end_line = findLine(lines.items, "\"k\":\"end\"") orelse return error.TestFailed;
     try testing.expect(user_line < model_line);
     try testing.expect(model_line < end_line);
-    try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "hello") != null);
-    try testing.expect(std.mem.indexOf(u8, lines.items[model_line], "hi") != null);
-    try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "\"v\":4") != null);
+    try testing.expect(std.mem.find(u8, lines.items[user_line], "hello") != null);
+    try testing.expect(std.mem.find(u8, lines.items[model_line], "hi") != null);
+    try testing.expect(std.mem.find(u8, lines.items[user_line], "\"v\":4") != null);
 }
 
 test "runWithSession: non-json mode writes rendered text" {
@@ -482,7 +483,7 @@ test "runWithSession: non-json mode writes rendered text" {
         buf.writer(),
     );
 
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "hi there") != null);
+    try testing.expect(std.mem.find(u8, buf.written(), "hi there") != null);
     try testing.expect(buf.written()[buf.written().len - 1] == '\n');
 }
 
@@ -502,7 +503,7 @@ test "emitErrorEvent: known provider error carries name and remediation in-band"
     const d = obj.get("d").?.object;
     try testing.expectEqualStrings("AuthFailed", d.get("error").?.string);
     try testing.expect(d.get("remediation").? == .string);
-    try testing.expect(std.mem.indexOf(u8, d.get("remediation").?.string, "zttp auth") != null);
+    try testing.expect(std.mem.find(u8, d.get("remediation").?.string, "zttp auth") != null);
 }
 
 test "emitErrorEvent: non-provider error emits null remediation" {
@@ -536,15 +537,15 @@ test "json compaction lifecycle is ordered and structured" {
     try emitCompactionEvent(allocator, buf.writer(), .end, .threshold, &result);
     try emitEndEvent(allocator, buf.writer());
 
-    const start = std.mem.indexOf(u8, buf.written(), "\"phase\":\"start\"") orelse
+    const start = std.mem.find(u8, buf.written(), "\"phase\":\"start\"") orelse
         return error.TestFailed;
-    const finish = std.mem.indexOf(u8, buf.written(), "\"phase\":\"end\"") orelse
+    const finish = std.mem.find(u8, buf.written(), "\"phase\":\"end\"") orelse
         return error.TestFailed;
-    const stream_end = std.mem.indexOf(u8, buf.written(), "\"k\":\"end\"") orelse
+    const stream_end = std.mem.find(u8, buf.written(), "\"k\":\"end\"") orelse
         return error.TestFailed;
     try testing.expect(start < finish);
     try testing.expect(finish < stream_end);
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"first_kept_entry_id\":7") != null);
+    try testing.expect(std.mem.find(u8, buf.written(), "\"first_kept_entry_id\":7") != null);
 }
 
 test "exitCodeForOutcome maps every terminal reason to a distinct code" {
@@ -562,7 +563,7 @@ test "writeVerifiedSummary ignores verified change sets before current turn" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(allocator);
 
-    try tr.entries.append(allocator, .{ .verified_change_set = .{
+    try tr.appendOwned(allocator, .{ .verified_change_set = .{
         .llm_text = try allocator.dupe(u8, "verified change set: old.ts"),
         .ui_payload = null,
     } });
@@ -584,14 +585,14 @@ test "writeVerifiedSummary emits verified change set from current turn" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(allocator);
 
-    try tr.entries.append(allocator, .{ .verified_change_set = .{
+    try tr.appendOwned(allocator, .{ .verified_change_set = .{
         .llm_text = try allocator.dupe(u8, "verified change set: old.ts"),
         .ui_payload = null,
     } });
 
     const turn_start_len = tr.len();
     try tr.append(allocator, .{ .user_text = "apply edit" });
-    try tr.entries.append(allocator, .{ .verified_change_set = .{
+    try tr.appendOwned(allocator, .{ .verified_change_set = .{
         .llm_text = try allocator.dupe(u8, "verified change set: current.ts"),
         .ui_payload = null,
     } });
@@ -601,6 +602,38 @@ test "writeVerifiedSummary emits verified change set from current turn" {
 
     try writeVerifiedSummary(allocator, buf.writer(), &tr, turn_start_len);
 
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "current.ts") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "old.ts") == null);
+    try testing.expect(std.mem.find(u8, buf.written(), "current.ts") != null);
+    try testing.expect(std.mem.find(u8, buf.written(), "old.ts") == null);
+}
+
+test "json stream observer receives verified_change_set appended via appendOwned" {
+    const allocator = testing.allocator;
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(allocator);
+
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+
+    var stream_ctx = JsonStreamCtx{ .allocator = allocator, .out = buf.writer() };
+    tr.observer = .{
+        .context = &stream_ctx,
+        .on_append = JsonStreamCtx.onAppend,
+    };
+    defer tr.observer = null;
+
+    const llm_text = try allocator.dupe(u8, "verified change set: 1 source file (proof_1)");
+    errdefer allocator.free(llm_text);
+    try tr.appendOwned(allocator, .{ .verified_change_set = .{
+        .llm_text = llm_text,
+        .ui_payload = null,
+    } });
+
+    const line = std.mem.trim(u8, buf.written(), "\n");
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqual(@as(i64, 4), obj.get("v").?.integer);
+    try testing.expectEqualStrings("verified_change_set", obj.get("k").?.string);
+    const data = obj.get("d").?.object;
+    try testing.expectEqualStrings("verified change set: 1 source file (proof_1)", data.get("llm_text").?.string);
 }

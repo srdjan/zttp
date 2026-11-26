@@ -88,27 +88,37 @@ fn errNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anyerror!JS
 /// layout to be wrong.
 fn mapResultNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anyerror!JSValue {
     const ctx = util.castContext(ctx_ptr);
-    return result.resultMap(ctx, argAt(args, 0), rest(args));
+    const raw = argAt(args, 0);
+    const coerced = result.coerceResultLike(ctx, raw) orelse raw;
+    return result.resultMap(ctx, coerced, rest(args));
 }
 
 fn mapErrorNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anyerror!JSValue {
     const ctx = util.castContext(ctx_ptr);
-    return result.resultMapErr(ctx, argAt(args, 0), rest(args));
+    const raw = argAt(args, 0);
+    const coerced = result.coerceResultLike(ctx, raw) orelse raw;
+    return result.resultMapErr(ctx, coerced, rest(args));
 }
 
 fn andThenNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anyerror!JSValue {
     const ctx = util.castContext(ctx_ptr);
-    return result.resultAndThen(ctx, argAt(args, 0), rest(args));
+    const raw = argAt(args, 0);
+    const coerced = result.coerceResultLike(ctx, raw) orelse raw;
+    return result.resultAndThen(ctx, coerced, rest(args));
 }
 
 fn orElseNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anyerror!JSValue {
     const ctx = util.castContext(ctx_ptr);
-    return result.resultOrElse(ctx, argAt(args, 0), rest(args));
+    const raw = argAt(args, 0);
+    const coerced = result.coerceResultLike(ctx, raw) orelse raw;
+    return result.resultOrElse(ctx, coerced, rest(args));
 }
 
 fn unwrapOrNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anyerror!JSValue {
     const ctx = util.castContext(ctx_ptr);
-    return result.resultUnwrapOr(ctx, argAt(args, 0), rest(args));
+    const raw = argAt(args, 0);
+    const coerced = result.coerceResultLike(ctx, raw) orelse raw;
+    return result.resultUnwrapOr(ctx, coerced, rest(args));
 }
 
 /// Everything after the `Result`, which is where the prototype form's own
@@ -139,7 +149,7 @@ fn collectAllNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anye
     const len = list.getArrayLength();
     var i: u32 = 0;
     while (i < len) : (i += 1) {
-        const coerced = result.coerceResultLike(ctx, list.getSlot(@intCast(i + 1))) orelse
+        const coerced = result.coerceResultLike(ctx, list.getIndex(i) orelse JSValue.undefined_val) orelse
             return helpers.createResultErr(ctx, JSValue.undefined_val);
         const entry = JSObject.fromValue(coerced);
         // The first err is returned as it stands, so its payload reaches the
@@ -365,4 +375,36 @@ test "ok and err build the values the combinators read" {
     const bad = try errNative(h.ctx, JSValue.undefined_val, &.{JSValue.fromInt(2)});
     try testing.expect(!isOk(bad));
     try testing.expectEqual(@as(i32, 2), payload(bad).getInt());
+}
+
+test "result combinators coerce plain Result-shaped objects and collectAll handles sparse arrays" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    const plain_ok = try h.ctx.createObject(null);
+    try h.ctx.setPropertyChecked(plain_ok, .ok, JSValue.true_val);
+    try h.ctx.setPropertyChecked(plain_ok, .value, JSValue.fromInt(41));
+
+    const plain_err = try h.ctx.createObject(null);
+    try h.ctx.setPropertyChecked(plain_err, .ok, JSValue.false_val);
+    try h.ctx.setPropertyChecked(plain_err, .@"error", JSValue.fromInt(9));
+
+    const f = try nativeFn(h, addOne);
+    const mapped_ok = try mapResultNative(h.ctx, JSValue.undefined_val, &.{ plain_ok.toValue(), f });
+    try testing.expect(isOk(mapped_ok));
+    try testing.expectEqual(@as(i32, 42), payload(mapped_ok).getInt());
+
+    const mapped_err = try mapErrorNative(h.ctx, JSValue.undefined_val, &.{ plain_err.toValue(), f });
+    try testing.expect(!isOk(mapped_err));
+    try testing.expectEqual(@as(i32, 10), payload(mapped_err).getInt());
+
+    const unwrapped_ok = try unwrapOrNative(h.ctx, JSValue.undefined_val, &.{ plain_ok.toValue(), JSValue.fromInt(0) });
+    try testing.expectEqual(@as(i32, 41), unwrapped_ok.getInt());
+    const unwrapped_err = try unwrapOrNative(h.ctx, JSValue.undefined_val, &.{ plain_err.toValue(), JSValue.fromInt(99) });
+    try testing.expectEqual(@as(i32, 99), unwrapped_err.getInt());
+
+    const sparse = try h.ctx.createArray();
+    sparse.setArrayLength(10);
+    const collected = try collectAllNative(h.ctx, JSValue.undefined_val, &.{sparse.toValue()});
+    try testing.expect(!isOk(collected));
 }

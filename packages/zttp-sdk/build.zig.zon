@@ -1,6 +1,6 @@
 .{
     .name = .zttp_sdk,
-    .version = "0.0.0",
+    .version = "0.27.2",
     .fingerprint = 0x37dcd69f2fe3df9b, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.1",
     .paths = .{

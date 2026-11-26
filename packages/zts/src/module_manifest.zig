@@ -53,7 +53,6 @@ pub const ContractExtractionRule = struct {
     arg_position: u8 = 0,
     category: mb.ContractCategory,
     transform: ?mb.ContractTransform = null,
-    flag_only: bool = false,
     /// Owned. Non-null only when `category == .extension_specific`.
     extension_category: ?[]u8 = null,
 
@@ -267,7 +266,6 @@ const BindingHasher = struct {
         self.tag(extraction.category);
         self.boolean(extraction.transform != null);
         if (extraction.transform) |transform| self.tag(transform);
-        self.boolean(extraction.flag_only);
         self.optionalBytes(extraction.extension_category);
     }
 
@@ -341,8 +339,6 @@ const BindingHasher = struct {
         self.bytes(binding.summary);
         self.tagList(binding.required_capabilities);
         self.boolean(binding.stateful);
-        self.boolean(binding.state_init != null);
-        self.boolean(binding.state_deinit != null);
         self.optionalBytes(binding.contract_section);
         self.boolean(binding.sandboxable);
         if (hasCompileTimeSurface(binding)) {
@@ -437,8 +433,8 @@ pub fn registryHashFromBindings(comptime bindings: []const mb.ModuleBinding) [64
 
 test "intrinsic metadata has an exact registry and artifact identity" {
     const cases = .{
-        .{ mb.IntrinsicKind.nominal, "02d8165f34f07d864abb3370926e546278bdc39db28fb435c90dc63261af19a8", "bdfd5a8ae49b0046c6d49a5343e732f2e9dd4862b8fe56263cf25d81f6d5c9e7" },
-        .{ mb.IntrinsicKind.assert, "903f58ac1e5189a172fa842258ecc2ce8dc7015e73c1f786207692e00fcecbe9", "f30bdfd39dc10a909474584406bd25960a3a3d0ae8b78a942926086632ae7e65" },
+        .{ mb.IntrinsicKind.nominal, "02d8165f34f07d864abb3370926e546278bdc39db28fb435c90dc63261af19a8", "a23f8f1c8f99d78a319408a91a1ac4885c974ddfd054d3efb7f357106a0b6a11" },
+        .{ mb.IntrinsicKind.assert, "903f58ac1e5189a172fa842258ecc2ce8dc7015e73c1f786207692e00fcecbe9", "97ac84a515d49c2f0e5cdd417be1389d83d482e78ae6fe1ee7fd673abf8ecb6c" },
     };
     inline for (cases) |case| {
         const binding = mb.ModuleBinding{
@@ -457,8 +453,8 @@ test "intrinsic metadata has an exact registry and artifact identity" {
 
 test "erased type metadata has an exact registry and artifact identity" {
     const cases = .{
-        .{ &[_][]const u8{"Id"}, "", "f666dfa792891b269f3e90b777345497ca6c17c1cc1b3c5cd1c79fb87c888fdb", "965a7f2292a3c0c835e51858f96096ae879352f2102ea2d2fdde4e9bff4faeea" },
-        .{ &[_][]const u8{}, "type Scalar = string;", "d8355ba8103a33e32ff912a42569ad67d6dbc0b3ec655f24f481b04648d1a54b", "01d9a9615f095f7b8755a4893c868b1f0e6dd7ce4a0ed480055c872bf88eba70" },
+        .{ &[_][]const u8{"Id"}, "", "f666dfa792891b269f3e90b777345497ca6c17c1cc1b3c5cd1c79fb87c888fdb", "d6dc276593931170385c1c74bf818f686fd89f511b7ce0c9309f578615a03c8d" },
+        .{ &[_][]const u8{}, "type Scalar = string;", "d8355ba8103a33e32ff912a42569ad67d6dbc0b3ec655f24f481b04648d1a54b", "fb48fad1b1207792780d4aec992a2f02bf20258e554fa035fb61b6306528a9a3" },
     };
     inline for (cases) |case| {
         const binding = mb.ModuleBinding{
@@ -669,7 +665,6 @@ fn parseContractExtractions(
         }
         if (obj.get("flagOnly") orelse obj.get("flag_only")) |flag| {
             if (flag != .bool) return error.InvalidContractCategory;
-            rule.flag_only = flag.bool;
         }
 
         if (category == .extension_specific) {

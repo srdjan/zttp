@@ -26,7 +26,7 @@ fn bindLocalCassette(
     allocator: std.mem.Allocator,
     request_sha256: model_request.Sha256Hex,
 ) ![]u8 {
-    const newline = std.mem.indexOfScalar(u8, local_cassette, '\n') orelse
+    const newline = std.mem.findScalar(u8, local_cassette, '\n') orelse
         return error.MalformedTestCassette;
     if (newline == 0 or local_cassette[newline - 1] != '}') {
         return error.MalformedTestCassette;
@@ -147,9 +147,9 @@ test "canonical request snapshot hides host propose_change_set baseline while ra
 
     const wire_body = try chat_completions.buildRequestBodyFromSnapshot(testing.allocator, &snapshot);
     defer testing.allocator.free(wire_body);
-    try testing.expect(std.mem.indexOf(u8, wire_body, "baseline_state") == null);
-    try testing.expect(std.mem.indexOf(u8, wire_body, "baseline_sha256") == null);
-    try testing.expect(std.mem.indexOf(u8, wire_body, "\\\"before\\\"") == null);
+    try testing.expect(std.mem.find(u8, wire_body, "baseline_state") == null);
+    try testing.expect(std.mem.find(u8, wire_body, "baseline_sha256") == null);
+    try testing.expect(std.mem.find(u8, wire_body, "\\\"before\\\"") == null);
 }
 
 test "canonical request snapshot carries malformed propose_change_set history verbatim" {

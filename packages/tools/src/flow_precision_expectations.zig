@@ -193,6 +193,10 @@ fn observe(allocator: std.mem.Allocator, entry: Entry) !Set {
         std.debug.print("flow precision: {s} produced no handler properties\n", .{entry.path});
         return error.NoHandlerProperties;
     };
+    if (result.flow_unresolved != 0) {
+        std.debug.print("flow corpus: {s} left {d} construct(s) unresolved\n", .{ entry.path, result.flow_unresolved });
+        return error.FlowUnresolvedConstruct;
+    }
 
     var held = Set.empty;
     if (properties.no_secret_leakage) held.insert(.no_secret_leakage);
@@ -258,65 +262,19 @@ test "every expected property holds" {
 }
 
 /// Cases the whole frozen corpus holds: the precision manifest, the permanent
-/// unsafe fixtures, and the clean contrasts. The count keeps the floors below
-/// from passing over an emptied corpus.
+/// unsafe fixtures, and the clean contrasts. Each group enforces `flow_unresolved == 0`
+/// and full flow completion inside its own test pass (here for `entries`, and in
+/// `flow_false_proofs.zig` for `fixtures` and `contrasts`), avoiding a second 88-file
+/// full analysis pass.
 const frozen_corpus_cases: usize = 88;
 
-const CorpusTally = struct {
-    cases: usize = 0,
-    unresolved: usize = 0,
-    source_errors: usize = 0,
-};
-
-/// Run one case through the production check path. A read failure, a refused
-/// run, a missing flow stage, or missing properties counts as a source error.
-fn tallyCase(allocator: std.mem.Allocator, tally: *CorpusTally, name: []const u8, source: []const u8, path: []const u8, schema: ?[]const u8, policy: ?[]const u8) void {
-    tally.cases += 1;
-    var result = precompile.runCheckOnlyFromSourceWithOptions(allocator, source, path, .{ .json_mode = true, .sql_schema_path = schema, .policy_source = policy }) catch |err| {
-        std.debug.print("flow corpus: {s} failed to check: {s}\n", .{ name, @errorName(err) });
-        tally.source_errors += 1;
-        return;
-    };
-    defer result.deinit(allocator);
-    if (!result.stages_run.contains(.flow) or result.properties == null) {
-        std.debug.print("flow corpus: {s} reached no flow verdict\n", .{name});
-        tally.source_errors += 1;
-        return;
-    }
-    if (result.flow_unresolved != 0) {
-        std.debug.print("flow corpus: {s} left {d} construct(s) unresolved\n", .{ name, result.flow_unresolved });
-        tally.unresolved += result.flow_unresolved;
-    }
-}
-
-test "the frozen corpus leaves no construct unresolved and has no source error" {
-    const allocator = std.testing.allocator;
-    var tally: CorpusTally = .{};
-    for (entries) |entry| {
-        const source = file_io.readFile(allocator, entry.path, max_source_bytes) catch |err| {
-            std.debug.print("flow corpus: cannot read {s}: {s}\n", .{ entry.path, @errorName(err) });
-            tally.cases += 1;
-            tally.source_errors += 1;
-            continue;
-        };
-        defer allocator.free(source);
-        tallyCase(allocator, &tally, entry.path, source, entry.path, entry.sql_schema_path, entry.policy_source);
-    }
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    inline for (.{ false_proofs.fixtures, false_proofs.contrasts }) |group| {
-        for (group) |fixture| {
-            var schema_path: ?[:0]u8 = null;
-            defer if (schema_path) |path| allocator.free(path);
-            if (fixture.sql_schema) |schema| {
-                try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "schema.sql", .data = schema });
-                schema_path = try tmp.dir.realPathFileAlloc(std.testing.io, "schema.sql", allocator);
-            }
-            tallyCase(allocator, &tally, fixture.name, fixture.source, "flow-false-proof.ts", schema_path, fixture.policy_source);
-        }
-    }
-    try std.testing.expectEqual(frozen_corpus_cases, tally.cases);
-    try std.testing.expectEqual(frozen_entry_count + false_proofs.fixtures.len + false_proofs.contrasts.len, tally.cases);
-    try std.testing.expectEqual(@as(usize, 0), tally.source_errors);
-    try std.testing.expectEqual(@as(usize, 0), tally.unresolved);
+test "the frozen corpus count matches its committed floor" {
+    try std.testing.expectEqual(
+        frozen_corpus_cases,
+        entries.len + false_proofs.fixtures.len + false_proofs.contrasts.len,
+    );
+    try std.testing.expectEqual(
+        frozen_entry_count + false_proofs.fixtures.len + false_proofs.contrasts.len,
+        frozen_corpus_cases,
+    );
 }

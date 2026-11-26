@@ -198,6 +198,12 @@ pub const Copier = struct {
     /// Copy one exported alias. A recursive self-reference keeps its identity
     /// and adopts the import's local name.
     pub fn copyAlias(self: *Copier, idx: TypeIndex, source_name: []const u8, destination_name: []const u8) TypeIndex {
+        const saved_source_name = self.recursive_source_name;
+        const saved_destination_name = self.recursive_destination_name;
+        defer {
+            self.recursive_source_name = saved_source_name;
+            self.recursive_destination_name = saved_destination_name;
+        }
         self.recursive_source_name = source_name;
         self.recursive_destination_name = destination_name;
         return self.copy(idx);
@@ -210,14 +216,22 @@ pub const Copier = struct {
         source_name: []const u8,
         destination_name: []const u8,
     ) ?GenericAlias {
+        if (alias.param_count > alias.param_names.len) return null;
+        const saved_source_name = self.recursive_source_name;
+        const saved_destination_name = self.recursive_destination_name;
+        const saved_param_names = self.generic_param_names;
+        defer {
+            self.recursive_source_name = saved_source_name;
+            self.recursive_destination_name = saved_destination_name;
+            self.generic_param_names = saved_param_names;
+        }
         self.recursive_source_name = source_name;
         self.recursive_destination_name = destination_name;
         self.generic_param_names = alias.param_names[0..alias.param_count];
+
         var copied: GenericAlias = .{};
         copied.param_count = alias.param_count;
         for (0..alias.param_count) |i| {
-            const stored = self.dst.addName(self.allocator, alias.param_names[i]);
-            copied.param_names[i] = self.dst.getName(stored.start, stored.len);
             if (alias.param_constraints[i] != null_type_idx) {
                 copied.param_constraints[i] = self.copy(alias.param_constraints[i]);
                 if (copied.param_constraints[i] == null_type_idx) return null;
@@ -225,6 +239,19 @@ pub const Copier = struct {
         }
         copied.body = self.copy(alias.body);
         if (copied.body == null_type_idx) return null;
+
+        // Intern all parameter names into `dst` after every `copy` call and
+        // resolve their slices only once `dst.names` stops growing, so
+        // reallocating `dst.names` never leaves a dangling `param_names` slice.
+        const NameSlice = @TypeOf(self.dst.addName(self.allocator, ""));
+        var stored_names: [8]NameSlice = undefined;
+        for (0..alias.param_count) |i| {
+            stored_names[i] = self.dst.addName(self.allocator, alias.param_names[i]);
+            if (self.dst.failure != null) return null;
+        }
+        for (0..alias.param_count) |i| {
+            copied.param_names[i] = self.dst.getName(stored_names[i].start, stored_names[i].len);
+        }
         return copied;
     }
 
@@ -346,6 +373,12 @@ pub const ExportedSignatures = struct {
         for (self.rows.items) |row| {
             self.allocator.free(row.module_path);
             self.allocator.free(row.name);
+            if (row.type_alias) |ta| switch (ta) {
+                .direct => {},
+                .generic => |g| {
+                    for (0..g.param_count) |i| self.allocator.free(g.param_names[i]);
+                },
+            };
         }
         self.rows.deinit(self.allocator);
         self.pool.deinit(self.allocator);
@@ -399,11 +432,28 @@ pub const ExportedSignatures = struct {
         errdefer self.allocator.free(owned_module_path);
         const owned_name = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(owned_name);
+        var owned_alias = type_alias;
+        var duped_params: usize = 0;
+        errdefer switch (owned_alias) {
+            .direct => {},
+            .generic => |g| {
+                for (0..duped_params) |i| self.allocator.free(g.param_names[i]);
+            },
+        };
+        switch (owned_alias) {
+            .direct => {},
+            .generic => |*g| {
+                for (0..g.param_count) |i| {
+                    g.param_names[i] = try self.allocator.dupe(u8, g.param_names[i]);
+                    duped_params += 1;
+                }
+            },
+        }
         try self.rows.append(self.allocator, .{
             .module_path = owned_module_path,
             .name = owned_name,
             .sig = null,
-            .type_alias = type_alias,
+            .type_alias = owned_alias,
         });
     }
 
@@ -513,3 +563,69 @@ pub const FileImportSignatures = struct {
         try env.ensureHealthy();
     }
 };
+
+test "copyGenericAlias keeps param_names valid across destination name-buffer reallocations" {
+    const allocator = std.testing.allocator;
+    var src_pool = TypePool.init(allocator);
+    defer src_pool.deinit(allocator);
+    var src_env = TypeEnv.init(allocator, &src_pool);
+    defer src_env.deinit();
+
+    // Build a generic alias whose body has many long field names so copying the
+    // body forces `dst.names` to reallocate multiple times.
+    var fields: [12]RecordField = undefined;
+    const field_names = [_][]const u8{
+        "field_alpha_long_name_01",
+        "field_beta_long_name_02",
+        "field_gamma_long_name_03",
+        "field_delta_long_name_04",
+        "field_epsilon_long_name_05",
+        "field_zeta_long_name_06",
+        "field_eta_long_name_07",
+        "field_theta_long_name_08",
+        "field_iota_long_name_09",
+        "field_kappa_long_name_10",
+        "field_lambda_long_name_11",
+        "field_mu_long_name_12",
+    };
+    const t_ref = src_pool.addRef(allocator, "FirstParam");
+    const u_ref = src_pool.addRef(allocator, "SecondParam");
+    for (field_names, 0..) |fname, i| {
+        const stored = src_pool.addName(allocator, fname);
+        fields[i] = .{
+            .name_start = stored.start,
+            .name_len = stored.len,
+            .type_idx = if (i % 2 == 0) t_ref else u_ref,
+            .optional = false,
+        };
+    }
+    const body = src_pool.addRecord(allocator, &fields);
+
+    var alias: GenericAlias = .{};
+    alias.param_count = 2;
+    alias.param_names[0] = "FirstParam";
+    alias.param_names[1] = "SecondParam";
+    alias.body = body;
+
+    var exports = ExportedSignatures.init(allocator);
+    defer exports.deinit();
+    var copier = exports.copierFrom(&src_pool, &src_env);
+    defer copier.deinit();
+
+    const copied = copier.copyGenericAlias(alias, "Pair", "Pair") orelse return error.CopyFailed;
+    try std.testing.expectEqual(@as(u8, 2), copied.param_count);
+    try std.testing.expectEqualStrings("FirstParam", copied.param_names[0]);
+    try std.testing.expectEqualStrings("SecondParam", copied.param_names[1]);
+
+    try exports.addTypeAlias("/dep.ts", "Pair", .{ .generic = copied });
+
+    // Force `exports.pool.names` to grow and reallocate after `addTypeAlias`.
+    for (0..32) |_| {
+        _ = exports.pool.addName(allocator, "reallocation_trigger_padding_string_xyz");
+    }
+
+    const row = exports.findType("/dep.ts", "Pair") orelse return error.MissingExport;
+    const stored_alias = row.type_alias.?.generic;
+    try std.testing.expectEqualStrings("FirstParam", stored_alias.param_names[0]);
+    try std.testing.expectEqualStrings("SecondParam", stored_alias.param_names[1]);
+}

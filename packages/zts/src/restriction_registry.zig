@@ -711,14 +711,9 @@ pub const v1_count = blk: {
 
 /// Deterministic SHA-256 over the matrix, field-wise with `\0` separators and a
 /// `\x01` record terminator - the pre-image shape `rule_registry`'s policy hash
-/// uses (D3 §3). Published as `restriction_matrix_hash`. Cached on first call
-/// for the same reason the policy hash is: SHA-256 exceeds the comptime branch
-/// budget.
-var cached_hash: ?[64]u8 = null;
-
+/// uses (D3 §3). Published as `restriction_matrix_hash`. Computed directly on
+/// each call to avoid unsynchronized global mutable state.
 pub fn matrixHash() [64]u8 {
-    if (cached_hash) |h| return h;
-
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     for (&entries) |*entry| {
         hasher.update(entry.id);
@@ -740,8 +735,7 @@ pub fn matrixHash() [64]u8 {
         hasher.update("\x01");
     }
 
-    cached_hash = std.fmt.bytesToHex(hasher.finalResult(), .lower);
-    return cached_hash.?;
+    return std.fmt.bytesToHex(hasher.finalResult(), .lower);
 }
 
 // ---------------------------------------------------------------------------

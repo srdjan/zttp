@@ -258,7 +258,7 @@ pub fn loadCase(allocator: std.mem.Allocator, case_root_abs: []const u8) LoadSta
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     const arena_allocator = arena.allocator();
-    var io_backend = std.Io.Threaded.init(arena_allocator, .{ .environ = .empty });
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
     validateCaseRoot(arena_allocator, io, case_root_abs) catch |err| {

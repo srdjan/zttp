@@ -398,12 +398,6 @@ pub const ModuleBinding = struct {
     /// Whether this module needs per-runtime state.
     stateful: bool = false,
 
-    /// State initialization callback (called during runtime init).
-    state_init: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!void = null,
-
-    /// State cleanup callback (called during context deinit).
-    state_deinit: ?*const fn (*anyopaque, std.mem.Allocator) void = null,
-
     /// Contract section name for contract.json output.
     /// When non-null, the module gets its own top-level section.
     contract_section: ?[]const u8 = null,

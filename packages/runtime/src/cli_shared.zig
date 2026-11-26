@@ -61,9 +61,14 @@ pub fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) 
     defer args_iter.deinit();
 
     var args = std.ArrayList([]const u8).empty;
-    errdefer args.deinit(allocator);
+    errdefer {
+        for (args.items) |arg| allocator.free(arg);
+        args.deinit(allocator);
+    }
     while (args_iter.next()) |arg| {
-        try args.append(allocator, try allocator.dupe(u8, arg));
+        const duped = try allocator.dupe(u8, arg);
+        errdefer allocator.free(duped);
+        try args.append(allocator, duped);
     }
     return args.toOwnedSlice(allocator);
 }

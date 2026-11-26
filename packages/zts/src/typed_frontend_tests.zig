@@ -115,7 +115,7 @@ fn expectDirectAdmission(
 }
 
 fn directDiagnosticAt(source: []const u8, kind: TypeSyntax.AdmissionKind, marker: []const u8) !TypeSyntax.AdmissionDiagnostic {
-    const start = std.mem.indexOf(u8, source, marker) orelse return error.TestUnexpectedResult;
+    const start = std.mem.find(u8, source, marker) orelse return error.TestUnexpectedResult;
     return .{ .kind = kind, .span = .{
         .start = @intCast(start),
         .end = @intCast(start + marker.len),
@@ -606,8 +606,8 @@ fn expectFirstFunctionSliceRecords(parser: *const JsParser, source: []const u8) 
         .predicate => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqualStrings("string ", return_value.raw_span.text(source));
-    const opener = std.mem.indexOf(u8, source, "(value") orelse return error.TestUnexpectedResult;
-    const body = std.mem.indexOf(u8, source, "{ return") orelse return error.TestUnexpectedResult;
+    const opener = std.mem.find(u8, source, "(value") orelse return error.TestUnexpectedResult;
+    const body = std.mem.find(u8, source, "{ return") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, @intCast(opener)), signature.source_span.start);
     try std.testing.expectEqual(@as(u32, @intCast(body)), signature.source_span.end);
 }
@@ -737,7 +737,7 @@ fn expectFirstTypeOnlyModuleEquivalent(source: []const u8) !void {
         "import type { A } from \"./a\";",
         module.raw_span.text(source),
     );
-    const semicolon = std.mem.indexOfScalar(u8, source, ';') orelse
+    const semicolon = std.mem.findScalar(u8, source, ';') orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 0), module.raw_span.start);
     try std.testing.expectEqual(@as(u32, @intCast(semicolon + 1)), module.raw_span.end);
@@ -818,7 +818,7 @@ fn expectTypeOnlyModuleCaseRejectedAt(
         try std.testing.expect(direct_error != null);
         try std.testing.expect(direct.errors.getErrors().len > 0);
         const marker = rejected_at orelse return error.TestUnexpectedResult;
-        const expected_offset = std.mem.indexOf(u8, source, marker) orelse
+        const expected_offset = std.mem.find(u8, source, marker) orelse
             return error.TestUnexpectedResult;
         const errors = direct.errors.getErrors();
         try std.testing.expectEqual(@as(usize, 1), errors.len);
@@ -940,7 +940,7 @@ fn runExcludedModuleTypeAllocationSweep(
             }
             return err;
         },
-        error.MissingSemicolon => {
+        error.AdmissionRefused => {
             // Admission publishes the excluded module beside the seed.
             try std.testing.expectEqual(@as(usize, 2), parser.type_store.type_only_modules.items.len);
             try std.testing.expectEqual(@as(usize, 1), parser.type_only_module_diagnostics.items.len);
@@ -1150,7 +1150,7 @@ fn runHeaderTypeAllocation(
     var parser = try JsParser.initAdmission(std.testing.allocator, type_allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
-    const guard_offset: u32 = @intCast(std.mem.indexOf(u8, source, "const guard") orelse
+    const guard_offset: u32 = @intCast(std.mem.find(u8, source, "const guard") orelse
         return error.TestUnexpectedResult);
     const root = parser.parse() catch |err| {
         switch (err) {
@@ -1219,7 +1219,7 @@ fn runNamedFunctionCommentTypeAllocation(
     var parser = try JsParser.initAdmission(runtime_allocator, type_allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
-    const function_offset: u32 = @intCast(std.mem.indexOf(u8, source, "function") orelse
+    const function_offset: u32 = @intCast(std.mem.find(u8, source, "function") orelse
         return error.TestUnexpectedResult);
     const root = parser.parse() catch |err| {
         switch (err) {
@@ -1299,7 +1299,7 @@ test "adjacent erased prefix lists remain outside direct admission" {
         direct.setAtomTable(&direct_atoms);
 
         try std.testing.expectError(error.UnexpectedToken, direct.parse());
-        const first_list: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<') orelse
+        const first_list: u32 = @intCast(std.mem.findScalar(u8, source, '<') orelse
             return error.TestUnexpectedResult);
         const errors = direct.errors.getErrors();
         try std.testing.expectEqual(@as(usize, if (case.second_error == null) 1 else 2), errors.len);
@@ -1694,7 +1694,7 @@ test "type-only module matrix preserves template spill runtime validity" {
         std.testing.allocator,
         ";\nconst live: number = 1;\n",
     );
-    const semicolon = std.mem.indexOfScalar(u8, source.items, ';') orelse
+    const semicolon = std.mem.findScalar(u8, source.items, ';') orelse
         return error.TestUnexpectedResult;
     try expectTypeOnlyModuleCase(source.items, &.{.{
         .kind = .import_type,
@@ -1797,8 +1797,8 @@ test "typed predicate arrow owns its exact header syntax" {
     try std.testing.expectEqualStrings("candidate", predicate.target_span.text(source));
     try std.testing.expectEqualStrings("string", predicate.narrowed.raw_span.text(source));
     try std.testing.expectEqualStrings("candidate is string ", return_syntax.raw_span.text(source));
-    const opener = std.mem.indexOf(u8, source, "(candidate") orelse return error.TestUnexpectedResult;
-    const body = std.mem.indexOf(u8, source, "typeof") orelse return error.TestUnexpectedResult;
+    const opener = std.mem.find(u8, source, "(candidate") orelse return error.TestUnexpectedResult;
+    const body = std.mem.find(u8, source, "typeof") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, @intCast(opener)), signature.source_span.start);
     try std.testing.expectEqual(@as(u32, @intCast(body)), signature.source_span.end);
 
@@ -2243,8 +2243,8 @@ test "recovered predicate blocks retain surrounding annotations" {
         const view = parserIrView(&parser);
         try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
         const seed_node = try runtimeNodeAt(&parser, .var_decl, 0);
-        const after_offset: u32 = @intCast(std.mem.indexOf(u8, source, "const after").?);
-        const opener_offset: u32 = @intCast(std.mem.indexOf(u8, source, "(value").?);
+        const after_offset: u32 = @intCast(std.mem.find(u8, source, "const after").?);
+        const opener_offset: u32 = @intCast(std.mem.find(u8, source, "(value").?);
         var after_node: ?NodeIndex = null;
         var function_node: ?NodeIndex = null;
         for (parser.nodes.tags.items, parser.nodes.locs.items, 0..) |tag, loc, index| {
@@ -2278,7 +2278,7 @@ test "recovered predicate blocks retain surrounding annotations" {
         const retained_return = view.getListIndex(block.stmts_start, 0);
         try std.testing.expectEqual(engine.parser.NodeTag.return_stmt, view.getTag(retained_return).?);
         try std.testing.expectEqual(
-            @as(u32, @intCast(std.mem.indexOf(u8, source, "return true").?)),
+            @as(u32, @intCast(std.mem.find(u8, source, "return true").?)),
             view.getLoc(retained_return).?.offset,
         );
         const value = view.getOptValue(retained_return) orelse return error.TestUnexpectedResult;
@@ -2391,7 +2391,7 @@ test "function signature type allocation failures preserve published seed syntax
             observed_type_failures: *usize,
             observed_seed_rollbacks: *usize,
         ) !void {
-            const function_start: u32 = @intCast(std.mem.indexOf(u8, source, "function identity") orelse
+            const function_start: u32 = @intCast(std.mem.find(u8, source, "function identity") orelse
                 return error.TestUnexpectedResult);
             var atoms = AtomTable.init(std.testing.allocator);
             defer atoms.deinit();
@@ -3610,9 +3610,9 @@ fn assertRetainedRuntimeFunction(
     };
     const function = function_index orelse return error.TestUnexpectedResult;
     const return_statement = return_index orelse return error.TestUnexpectedResult;
-    const expected_function_offset = std.mem.indexOf(u8, source, "function") orelse
+    const expected_function_offset = std.mem.find(u8, source, "function") orelse
         return error.TestUnexpectedResult;
-    const expected_return_offset = std.mem.indexOf(u8, source, "return") orelse
+    const expected_return_offset = std.mem.find(u8, source, "return") orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, @intCast(expected_function_offset)), parser.nodes.getLoc(function).offset);
     try std.testing.expectEqual(@as(u32, @intCast(expected_return_offset)), parser.nodes.getLoc(return_statement).offset);
@@ -3678,7 +3678,7 @@ test "untyped generic function declaration retains its owner before runtime equi
     try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
     const owner = parser.type_store.generic_owners.items[0];
     const view = parserIrView(&parser);
-    const expected_paren = std.mem.indexOf(u8, source, "(value)") orelse
+    const expected_paren = std.mem.find(u8, source, "(value)") orelse
         return error.TestUnexpectedResult;
     switch (owner.identity) {
         .function => |node| {
@@ -3851,7 +3851,7 @@ fn expectNamedFunctionCommentCompatibility(case: NamedFunctionCommentCase) !void
         .function => |node| node,
         else => return error.TestUnexpectedResult,
     };
-    const opener: u32 = @intCast(std.mem.indexOf(u8, source, "(value)") orelse
+    const opener: u32 = @intCast(std.mem.find(u8, source, "(value)") orelse
         return error.TestUnexpectedResult);
     try std.testing.expectEqual(engine.parser.NodeTag.function_expr, view.getTag(function_owner).?);
     try std.testing.expectEqual(opener, view.getLoc(function_owner).?.offset);
@@ -3936,7 +3936,7 @@ test "typed named function comment gaps retain raw refusal locations" {
         "function identity<T>// gap\n(value: T): T { return value; }",
     };
     for (sources) |source| {
-        const colon: u32 = @intCast(std.mem.indexOf(u8, source, ": T") orelse
+        const colon: u32 = @intCast(std.mem.find(u8, source, ": T") orelse
             return error.TestUnexpectedResult);
         try expectNamedFunctionRawRefusal(source, colon, "')'");
     }
@@ -3946,7 +3946,7 @@ test "typed named function comment gaps retain raw refusal locations" {
 test "two named function comment gaps retain the raw generic refusal" {
     const source =
         "function /* before */ identity<T>/* after */(value) { return value; }";
-    const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<') orelse
+    const list_start: u32 = @intCast(std.mem.findScalar(u8, source, '<') orelse
         return error.TestUnexpectedResult);
     try expectNamedFunctionRawRefusal(source, list_start, "'('");
 }
@@ -3958,7 +3958,7 @@ test "named function comments retain rejected call grammar" {
         "function /* gap */ identity<T + U>(value) { return value; }",
     };
     for (sources) |source| {
-        const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<') orelse
+        const list_start: u32 = @intCast(std.mem.findScalar(u8, source, '<') orelse
             return error.TestUnexpectedResult);
         try expectNamedFunctionRawRefusal(source, list_start, "'('");
     }
@@ -4008,17 +4008,17 @@ test "generic owner validation rejects exchanged function nodes" {
 test "ignored policy retains syntax without generic declaration lowering" {
     {
         const source = "nominal UserId<T> = string;";
-        const name_start: u32 = @intCast(std.mem.indexOf(u8, source, "UserId") orelse
+        const name_start: u32 = @intCast(std.mem.find(u8, source, "UserId") orelse
             return error.TestUnexpectedResult);
-        const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<') orelse
+        const list_start: u32 = @intCast(std.mem.findScalar(u8, source, '<') orelse
             return error.TestUnexpectedResult);
-        const list_end: u32 = @intCast((std.mem.indexOfScalar(u8, source, '>') orelse
+        const list_end: u32 = @intCast((std.mem.findScalar(u8, source, '>') orelse
             return error.TestUnexpectedResult) + 1);
-        const equals_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '=') orelse
+        const equals_start: u32 = @intCast(std.mem.findScalar(u8, source, '=') orelse
             return error.TestUnexpectedResult);
-        const body_start: u32 = @intCast(std.mem.indexOf(u8, source, "string") orelse
+        const body_start: u32 = @intCast(std.mem.find(u8, source, "string") orelse
             return error.TestUnexpectedResult);
-        const terminator_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';') orelse
+        const terminator_start: u32 = @intCast(std.mem.findScalar(u8, source, ';') orelse
             return error.TestUnexpectedResult);
 
         var store = TypeSyntax.Store.init(std.testing.allocator, source);
@@ -4239,7 +4239,7 @@ test "nominal generic type allocation failures restore the published seed" {
                     observed_failures.* += 1;
                     try std.testing.expectEqual(@as(u16, 0), parser.scopes.current_scope);
                     const checkpoint = parser.type_store.checkpoint();
-                    const second_declaration = std.mem.indexOf(u8, source, "nominal Id") orelse
+                    const second_declaration = std.mem.find(u8, source, "nominal Id") orelse
                         return error.TestUnexpectedResult;
                     if (parser.current.type == .eof and checkpoint.declarations == 2) {
                         try parser.type_store.validate();
@@ -4462,7 +4462,7 @@ test "generic runtime syntax census observes every case" {
                     return error.TestUnexpectedResult;
                 try std.testing.expectEqual(TypeSyntax.NodeTag.primitive, root.tag);
                 try std.testing.expectEqual(TypeSyntax.Primitive.string, root.data.primitive);
-                const lparen = std.mem.indexOf(u8, fixture.source, "(seed)") orelse
+                const lparen = std.mem.find(u8, fixture.source, "(seed)") orelse
                     return error.TestUnexpectedResult;
                 try std.testing.expectEqual(
                     @as(u32, @intCast(lparen)),
@@ -4510,8 +4510,8 @@ test "nested explicit calls reserve outer records before value arguments" {
     const outer = calls[0];
     const inner = calls[1];
     const view = parserIrView(&parser);
-    const outer_lparen = std.mem.indexOf(u8, source, "(inner") orelse return error.TestUnexpectedResult;
-    const inner_lparen = std.mem.indexOf(u8, source, "(seed)") orelse return error.TestUnexpectedResult;
+    const outer_lparen = std.mem.find(u8, source, "(inner") orelse return error.TestUnexpectedResult;
+    const inner_lparen = std.mem.find(u8, source, "(seed)") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, @intCast(outer_lparen)), view.getLoc(outer.owner).?.offset);
     try std.testing.expectEqual(@as(u32, @intCast(inner_lparen)), view.getLoc(inner.owner).?.offset);
     try std.testing.expectEqual(@as(u32, 0), outer.authored_arguments.start);
@@ -4928,9 +4928,9 @@ test "function and declaration node allocation failures remove pending signature
     const source =
         "const seed: number = 1;\n" ++
         "function identity(value: string): string { return value; }\n";
-    const function_offset = std.mem.indexOf(u8, source, "function") orelse
+    const function_offset = std.mem.find(u8, source, "function") orelse
         return error.TestUnexpectedResult;
-    const parameter_offset = std.mem.indexOf(u8, source, "(value") orelse
+    const parameter_offset = std.mem.find(u8, source, "(value") orelse
         return error.TestUnexpectedResult;
     const common = FinalNodeRollbackCase{
         .source = source,
@@ -4966,7 +4966,7 @@ test "named function comment node failures remove pending compatibility owners" 
         const common = FinalNodeRollbackCase{
             .source = source,
             .target_tag = .function_expr,
-            .target_offset = @intCast(std.mem.lastIndexOf(u8, source, "(value)") orelse
+            .target_offset = @intCast(std.mem.findLast(u8, source, "(value)") orelse
                 return error.TestUnexpectedResult),
             .control_owners = 2,
             .control_calls = 1,
@@ -4975,7 +4975,7 @@ test "named function comment node failures remove pending compatibility owners" 
         try expectFinalNodeAllocationRollback(common);
         var wrapper = common;
         wrapper.target_tag = .function_decl;
-        wrapper.target_offset = @intCast(std.mem.lastIndexOf(u8, source, "function") orelse
+        wrapper.target_offset = @intCast(std.mem.findLast(u8, source, "function") orelse
             return error.TestUnexpectedResult);
         try expectFinalNodeAllocationRollback(wrapper);
     }
@@ -4989,12 +4989,12 @@ test "arrow and wrapper allocation failures restore all header arrays" {
     const export_source =
         "const seed: number = 1;\n" ++
         "export const guard = [0].map((candidate, marker: unknown): candidate is string => typeof candidate === \"string\");";
-    const final_paren = std.mem.lastIndexOfScalar(u8, variable_source, ')').?;
-    const last_newline = std.mem.lastIndexOfScalar(u8, variable_source, '\n').?;
+    const final_paren = std.mem.findScalarLast(u8, variable_source, ')').?;
+    const last_newline = std.mem.findScalarLast(u8, variable_source, '\n').?;
     const common = FinalNodeRollbackCase{
         .source = variable_source,
         .target_tag = .arrow_function,
-        .target_offset = @intCast(std.mem.indexOf(u8, variable_source, "(candidate").?),
+        .target_offset = @intCast(std.mem.find(u8, variable_source, "(candidate").?),
         .control_owners = 0,
         .control_calls = 0,
         .control_signatures = 1,
@@ -5021,14 +5021,14 @@ test "arrow and wrapper allocation failures restore all header arrays" {
 
     var variable = common;
     variable.target_tag = .var_decl;
-    variable.target_offset = @intCast(std.mem.indexOf(u8, variable_source, "const guard").?);
+    variable.target_offset = @intCast(std.mem.find(u8, variable_source, "const guard").?);
     variable.expected_current = .eof;
     try expectFinalNodeAllocationRollback(variable);
 
     var export_wrapper = common;
     export_wrapper.source = export_source;
     export_wrapper.target_tag = .export_decl;
-    export_wrapper.target_offset = @intCast(std.mem.indexOf(u8, export_source, "export").?);
+    export_wrapper.target_offset = @intCast(std.mem.find(u8, export_source, "export").?);
     export_wrapper.expected_current = .eof;
     try expectFinalNodeAllocationRollback(export_wrapper);
 }
@@ -5245,7 +5245,7 @@ test "declaration semantic census observes every case" {
                         const errors = parser.errors.getErrors();
                         try std.testing.expectEqual(@as(usize, 1), errors.len);
                         try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[0].kind);
-                        const keyword = std.mem.indexOf(u8, fixture.source, "type") orelse
+                        const keyword = std.mem.find(u8, fixture.source, "type") orelse
                             return error.TestUnexpectedResult;
                         try std.testing.expectEqual(@as(u32, @intCast(keyword)), errors[0].location.offset);
                         try std.testing.expectEqual(
@@ -5499,7 +5499,7 @@ test "comment-separated declaration terminator remains a runtime semicolon" {
     const errors = parser.errors.getErrors();
     try std.testing.expectEqual(@as(usize, 1), errors.len);
     try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
-    const semicolon = std.mem.indexOfScalar(u8, source, ';') orelse return error.TestUnexpectedResult;
+    const semicolon = std.mem.findScalar(u8, source, ';') orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, @intCast(semicolon)), errors[0].location.offset);
     try std.testing.expectEqual(@as(u32, 2), errors[0].location.line);
     try std.testing.expectEqual(@as(u32, 6), errors[0].location.column);
@@ -5514,7 +5514,7 @@ test "nominal refusal recovery preserves a comment-separated semicolon" {
     const diagnostics = parser.getAdmissionDiagnostics();
     try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
     try std.testing.expectEqual(TypeSyntax.AdmissionKind.nominal_base_not_scalar, diagnostics[0].kind);
-    try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOf(u8, separated, "void").?)), diagnostics[0].span.start);
+    try std.testing.expectEqual(@as(u32, @intCast(std.mem.find(u8, separated, "void").?)), diagnostics[0].span.start);
 
     const empty = "nominal Bad =\n;";
     inline for (.{ TypeSyntax.AdmissionMode.collect, TypeSyntax.AdmissionMode.compile }) |mode| {
@@ -6338,9 +6338,9 @@ test "runtime any and quoted names are admitted while unary void is refused" {
     try std.testing.expectEqual(@as(usize, 3), countRuntimeTag(&parser, .var_decl));
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
     const first = view.getVarDecl(try runtimeNodeAt(&parser, .var_decl, 0)) orelse return error.TestUnexpectedResult;
-    const value_offset = std.mem.indexOf(u8, accepted, "const value") orelse return error.TestUnexpectedResult;
+    const value_offset = std.mem.find(u8, accepted, "const value") orelse return error.TestUnexpectedResult;
     const value = view.getVarDecl(try runtimeNodeAt(&parser, .var_decl, @intCast(value_offset))) orelse return error.TestUnexpectedResult;
-    const text_offset = std.mem.indexOf(u8, accepted, "const text") orelse return error.TestUnexpectedResult;
+    const text_offset = std.mem.find(u8, accepted, "const text") orelse return error.TestUnexpectedResult;
     const text = view.getVarDecl(try runtimeNodeAt(&parser, .var_decl, @intCast(text_offset))) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, @intCast(@backingInt(try atoms.intern("any")))), first.binding.name_atom);
     try std.testing.expectEqual(@as(u16, @intCast(@backingInt(try atoms.intern("value")))), value.binding.name_atom);
@@ -6363,7 +6363,7 @@ test "runtime any and quoted names are admitted while unary void is refused" {
     const errors = admission.errors.getErrors();
     try std.testing.expectEqual(@as(usize, 1), errors.len);
     try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
-    const void_offset = std.mem.indexOf(u8, refused, "void") orelse return error.TestUnexpectedResult;
+    const void_offset = std.mem.find(u8, refused, "void") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, @intCast(void_offset)), errors[0].location.offset);
     try std.testing.expectEqual(@as(u32, @intCast(void_offset + 4)), errors[0].location.end_offset);
 }
@@ -6378,10 +6378,8 @@ test "direct admission preserves removed-type order and source spans" {
         .{ .source = "const value: any = 1;", .kind = .any_type, .marker = "any" },
         .{ .source = "const value: void = 1;", .kind = .void_type, .marker = "void" },
         .{ .source = "const value:\r\n any = 1;", .kind = .any_type, .marker = "any" },
-        .{ .source = "const value: number many = 1;", .kind = .any_type, .marker = "any" },
-        .{ .source = "type Many<A,B,C,D,E,F,G,H> = H;\nconst value: Many<string,string,string,string,string,string,string,number> = undefined;", .kind = .any_type, .marker = "any", .exact_span = .{ .start = 46, .end = 49 } },
-        .{ .source = "const value: number Array<string> = 1;", .kind = .array_type_alias, .marker = "Array" },
-        .{ .source = "const value: number ReadonlyArray<string> = 1;", .kind = .readonly_array_type_alias, .marker = "ReadonlyArray" },
+        .{ .source = "const value: Array<string> = 1;", .kind = .array_type_alias, .marker = "Array" },
+        .{ .source = "const value: ReadonlyArray<string> = 1;", .kind = .readonly_array_type_alias, .marker = "ReadonlyArray" },
     };
     for (single) |case| {
         const diagnostic = if (case.exact_span) |span|
@@ -6390,6 +6388,10 @@ test "direct admission preserves removed-type order and source spans" {
             try directDiagnosticAt(case.source, case.kind, case.marker);
         try expectDirectAdmission(std.testing.allocator, case.source, .collect, .recovered_admission_refused, &.{diagnostic}, null);
     }
+
+    // Identifiers ending in `any` (such as `Company` or `Many`) are valid names, not the `any` type.
+    try expectDirectAdmission(std.testing.allocator, "type Company = { name: string };\nconst value: Company = { name: \"ok\" };", .compile, .accepted, &.{}, null);
+    try expectDirectAdmission(std.testing.allocator, "type Many<A,B,C,D,E,F,G,H> = H;\nconst value: Many<string,string,string,string,string,string,string,number> = undefined;", .compile, .accepted, &.{}, null);
 
     const ordered = "const value: number void any = 1;";
     const any_diagnostic = try directDiagnosticAt(ordered, .any_type, "any");
@@ -6445,7 +6447,7 @@ test "direct calls and comparisons retain owners and operators" {
             const call = parser.type_store.explicit_call_arguments.items[0];
             try std.testing.expectEqual(declaration.init, call.owner);
             try std.testing.expectEqualStrings(
-                if (std.mem.indexOf(u8, case.source, "<string>") != null) "<string>" else "<any>",
+                if (std.mem.find(u8, case.source, "<string>") != null) "<string>" else "<any>",
                 call.list_span.text(case.source),
             );
         }
@@ -6541,7 +6543,7 @@ test "later semantic fragment rollback closes every allocation failure" {
             view: engine.parser.IrView,
         ) !void {
             errdefer store.rollback(prior);
-            const list_start = std.mem.indexOf(u8, source, "<Outer") orelse
+            const list_start = std.mem.find(u8, source, "<Outer") orelse
                 return error.TestUnexpectedResult;
             const lparen: u32 = @intCast(source.len - 1);
             var pending = try store.reserveExplicitCall(.{
@@ -6718,7 +6720,7 @@ test "direct admission keeps unsupported annotation roots in source" {
         try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
         const errors = parser.errors.getErrors();
         try std.testing.expectEqual(@as(usize, 2), errors.len);
-        const colon = std.mem.indexOfScalar(u8, source, ':') orelse return error.TestUnexpectedResult;
+        const colon = std.mem.findScalar(u8, source, ':') orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(u32, @intCast(colon)), errors[0].location.offset);
     }
 }
@@ -6746,7 +6748,7 @@ test "direct admission preserves optional parameter and record any refusal conte
         try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
         try std.testing.expectEqual(case.kind, diagnostics[0].kind);
         try std.testing.expectEqualStrings(case.text, diagnostics[0].span.text(source));
-        const start = std.mem.indexOf(u8, source, case.text) orelse return error.TestUnexpectedResult;
+        const start = std.mem.find(u8, source, case.text) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(u32, @intCast(start)), diagnostics[0].span.start);
         try std.testing.expectEqual(@as(u32, @intCast(start + case.text.len)), diagnostics[0].span.end);
     }
@@ -7141,7 +7143,7 @@ test "outer annotation keeps its index across a nested typed initializer" {
     const root = try parser.parse();
     try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
-    const inner_start: u32 = @intCast(std.mem.indexOf(u8, source, "const inner") orelse
+    const inner_start: u32 = @intCast(std.mem.find(u8, source, "const inner") orelse
         return error.TestUnexpectedResult);
     const outer_node = try runtimeNodeAt(&parser, .var_decl, 0);
     const inner_node = try runtimeNodeAt(&parser, .var_decl, inner_start);
@@ -7282,7 +7284,7 @@ test "variable and export allocation failures remove unfinished annotation owner
     const common = FinalNodeRollbackCase{
         .source = variable_source,
         .target_tag = .var_decl,
-        .target_offset = @intCast(std.mem.indexOf(u8, variable_source, "const value").?),
+        .target_offset = @intCast(std.mem.find(u8, variable_source, "const value").?),
         .control_annotations = 2,
         .control_owners = 0,
         .control_calls = 0,
@@ -7301,7 +7303,7 @@ test "variable and export allocation failures remove unfinished annotation owner
     var export_wrapper = common;
     export_wrapper.source = export_source;
     export_wrapper.target_tag = .export_decl;
-    export_wrapper.target_offset = @intCast(std.mem.indexOf(u8, export_source, "export").?);
+    export_wrapper.target_offset = @intCast(std.mem.find(u8, export_source, "export").?);
     try expectFinalNodeAllocationRollback(export_wrapper);
 }
 

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
+const project_config_mod = @import("project_config");
 const agent_identity = @import("agent_identity.zig");
 const module_graph_record = @import("module_graph_record.zig");
 const json_diagnostics = @import("json_diagnostics.zig");
@@ -35,9 +36,15 @@ pub fn runCheck(
 
     var diag_json: std.json.Stringify = .{ .writer = &diagnostics.writer };
 
+    var analysis_ctx = try project_config_mod.discoverAnalysisContext(allocator, file.absolute_path, canonical_root);
+    defer analysis_ctx.deinit(allocator);
+    const policy_source = try analysis_ctx.readPolicySource(allocator);
+    defer if (policy_source) |src| allocator.free(src);
+
     var result = precompile.runCheckOnlyFromSourceWithOptions(allocator, source, file.absolute_path, .{
         .json_mode = true,
-        .sql_schema_path = null,
+        .sql_schema_path = analysis_ctx.sqlite,
+        .policy_source = policy_source,
     }) catch |err| switch (err) {
         // The v1 path reports this as a ZTS700 diagnostic rather than a crash;
         // the v2 wire keeps it a diagnostic too, so the two surfaces agree on
@@ -63,7 +70,23 @@ pub fn runCheck(
 
     try diag_json.beginArray();
     for (result.json_diagnostics.items) |diag| {
-        try writeDiagnostic(&diag_json, allocator, io, canonical_root, diag, digest, source);
+        const is_entry = diag.file.len == 0 or
+            std.mem.eql(u8, diag.file, file.absolute_path) or
+            std.mem.eql(u8, diag.file, file.relative_path);
+        if (is_entry) {
+            try writeDiagnostic(&diag_json, allocator, io, canonical_root, diag, digest, source);
+        } else {
+            const target_abs = if (std.fs.path.isAbsolute(diag.file))
+                try allocator.dupe(u8, diag.file)
+            else
+                try std.fs.path.resolve(allocator, &.{ canonical_root, diag.file });
+            defer allocator.free(target_abs);
+            const target_source = zts.file_io.readFile(allocator, target_abs, module_graph_record.max_source_bytes) catch null;
+            defer if (target_source) |buf| allocator.free(buf);
+            const diag_source = target_source orelse source;
+            const diag_digest = if (target_source) |buf| agent_identity.sourceDigest(buf) else digest;
+            try writeDiagnostic(&diag_json, allocator, io, canonical_root, diag, diag_digest, diag_source);
+        }
     }
     try diag_json.endArray();
 
@@ -606,7 +629,7 @@ test "check on a rejected handler binds every diagnostic to the digest" {
             try testing.expectEqualStrings("error", d.get("severity").?.string);
             // The diagnostic anchors on the `?` of the outer conditional, the
             // first `?` in the fixture, and the span covers that one byte.
-            const outer_question = std.mem.indexOf(u8, ternary_chain_handler, "? 1 :").?;
+            const outer_question = std.mem.find(u8, ternary_chain_handler, "? 1 :").?;
             try testing.expectEqual(@as(i64, @intCast(outer_question)), d.get("byte_offset").?.integer);
             try testing.expectEqual(outer_question + 1, end);
             // A range, not a point: the diagnostic names the token it points
@@ -794,4 +817,98 @@ test "check never answers success false with an empty diagnostics array" {
     // the fixtures stopped being a mix.
     try testing.expect(saw_failure);
     try testing.expect(saw_success);
+}
+
+test "check attributes dependency diagnostics with the dependency digest and byte offset" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const entry_src =
+        \\import { greet } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(greet());
+        \\}
+        \\
+    ;
+    const dep_src =
+        \\export function greet(): string {
+        \\  // padding comment so dep byte offset differs from entry
+        \\  let msg = "hi";
+        \\  return msg;
+        \\}
+        \\
+    ;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = entry_src });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "dep.ts", .data = dep_src });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try a.print(
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const diags = parsed.value.object.get("diagnostics").?.array.items;
+    const dep_digest = agent_identity.sourceDigest(dep_src);
+    var found_dep_diag = false;
+    for (diags) |item| {
+        const d = item.object;
+        if (!std.mem.eql(u8, d.get("file").?.string, "dep.ts")) continue;
+        found_dep_diag = true;
+        try testing.expectEqualStrings(&dep_digest, d.get("source_digest").?.string);
+        const line: u32 = @intCast(d.get("line").?.integer);
+        const col: u32 = @intCast(d.get("column").?.integer);
+        try testing.expectEqual(
+            @as(i64, @intCast(byteOffsetOf(dep_src, line, col))),
+            d.get("byte_offset").?.integer,
+        );
+    }
+    try testing.expect(found_dep_diag);
+}
+
+test "check bounds zttp.json policy discovery to project_root" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "ancestor_policy.json", .data = "{\"env\":{\"allow\":[\"ONLY_OTHER\"]}}\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "zttp.json", .data = "{\"policy\":\"ancestor_policy.json\"}\n" });
+    try tmp.dir.createDirPath(testing.io, "workspace");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "workspace/h.ts",
+        .data =
+        \\import { env } from "zttp:env";
+        \\type G<T> = Proof<T, "state_isolated">;
+        \\export function handler(req: Request): G<Response> {
+        \\  const present = env("ANCESTOR_ENV") !== undefined;
+        \\  return Response.text(present ? "set" : "none");
+        \\}
+        \\
+        ,
+    });
+    const ws_root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, "workspace", a);
+    defer a.free(ws_root);
+
+    const req = try a.print(
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{ws_root});
+    defer a.free(req);
+    const out_without = try respond(a, req);
+    defer a.free(out_without);
+    var parsed_without = try parse(a, out_without);
+    defer parsed_without.deinit();
+    try testing.expect(parsed_without.value.object.get("success").?.bool);
+
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "workspace/local_policy.json", .data = "{\"env\":{\"allow\":[\"LOCAL_ONLY\"]}}\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "workspace/zttp.json", .data = "{\"policy\":\"local_policy.json\"}\n" });
+    const out_with = try respond(a, req);
+    defer a.free(out_with);
+    var parsed_with = try parse(a, out_with);
+    defer parsed_with.deinit();
+    try testing.expect(!parsed_with.value.object.get("success").?.bool);
 }

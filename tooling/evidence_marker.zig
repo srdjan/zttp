@@ -117,7 +117,7 @@ pub fn extract(
     var found: ?[]const u8 = null;
     var lines = std.mem.splitScalar(u8, log, '\n');
     while (lines.next()) |line| {
-        const marker_at = std.mem.indexOf(u8, line, marker) orelse continue;
+        const marker_at = std.mem.find(u8, line, marker) orelse continue;
         if (found != null) return error.MissingOrDuplicateMarker;
         found = std.mem.trim(u8, line[marker_at + marker.len ..], " \t\r");
     }
@@ -219,9 +219,9 @@ fn validateConvergence(object: std.json.ObjectMap) Failure!void {
         if (value < 0) return error.InvalidConvergenceEvidence;
     }
 
-    const raw = integerField(object, "rawFirstDraftPasses").?;
-    const assisted = integerField(object, "firstAttemptGreens").?;
-    const final = integerField(object, "finalGreens").?;
+    const raw = integerField(object, "rawFirstDraftPasses") orelse return error.InvalidConvergenceEvidence;
+    const assisted = integerField(object, "firstAttemptGreens") orelse return error.InvalidConvergenceEvidence;
+    const final = integerField(object, "finalGreens") orelse return error.InvalidConvergenceEvidence;
     if (!(raw <= assisted and assisted <= final and final <= case_count))
         return error.InvalidConvergenceEvidence;
     if (!percentMatches(object, "rawFirstDraftPasses", "rawFirstDraftPassPercent", case_count) or
@@ -229,16 +229,19 @@ fn validateConvergence(object: std.json.ObjectMap) Failure!void {
         !percentMatches(object, "finalGreens", "finalGreenPercent", case_count))
         return error.InvalidConvergenceEvidence;
 
-    const checked = integerField(object, "intentChecked").?;
-    const passed = integerField(object, "intentPasses").?;
+    const checked = integerField(object, "intentChecked") orelse return error.InvalidConvergenceEvidence;
+    const passed = integerField(object, "intentPasses") orelse return error.InvalidConvergenceEvidence;
     if (!(passed <= checked and checked <= case_count)) return error.InvalidConvergenceEvidence;
     const expected_intent_percent = if (checked == 0) 0 else @divTrunc(passed * 100, checked);
-    if (integerField(object, "intentPassPercent").? != expected_intent_percent)
+    const intent_pct = integerField(object, "intentPassPercent") orelse return error.InvalidConvergenceEvidence;
+    if (intent_pct != expected_intent_percent)
         return error.InvalidConvergenceEvidence;
-    if (integerField(object, "medianRoundtrips").? <= 0 or checked != intent_count)
+    const median_rt = integerField(object, "medianRoundtrips") orelse return error.InvalidConvergenceEvidence;
+    if (median_rt <= 0 or checked != intent_count)
         return error.InvalidConvergenceEvidence;
     for ([_][]const u8{ "emptyResponses", "timeoutFailures", "decodeFailures" }) |field| {
-        if (integerField(object, field).? != 0) return error.InvalidConvergenceEvidence;
+        const value = integerField(object, field) orelse return error.InvalidConvergenceEvidence;
+        if (value != 0) return error.InvalidConvergenceEvidence;
     }
 }
 
@@ -334,30 +337,12 @@ fn isLowerHex(value: []const u8, expected_len: usize) bool {
     return true;
 }
 
-fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
-    var args_iter = std.process.Args.Iterator.init(args_vector);
-    defer args_iter.deinit();
-    var list: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (list.items) |arg| allocator.free(arg);
-        list.deinit(allocator);
-    }
-    while (args_iter.next()) |arg| try list.append(allocator, try allocator.dupe(u8, arg));
-    return list.toOwnedSlice(allocator);
-}
-
-pub fn main(init: std.process.Init.Minimal) !void {
+pub fn main(init: std.process.Init) !void {
     var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = init.environ });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-    const args = try collectArgs(allocator, init.args);
-    defer {
-        for (args) |arg| allocator.free(arg);
-        allocator.free(args);
-    }
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 4) return error.Usage;
     const log = try std.Io.Dir.cwd().readFileAllocOptions(
         io,

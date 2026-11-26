@@ -167,8 +167,7 @@ pub fn main(init: std.process.Init) !void {
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
 
-    const argv = try collectArgs(allocator, init.minimal.args);
-    defer freeArgs(allocator, argv);
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
     var stdout_buffer: [4096]u8 = undefined;
     var stderr_buffer: [4096]u8 = undefined;
@@ -266,23 +265,6 @@ fn executeBrief(
         }
     }
     return .clean;
-}
-
-fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
-    var iterator = std.process.Args.Iterator.init(args_vector);
-    defer iterator.deinit();
-    var list: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (list.items) |arg| allocator.free(arg);
-        list.deinit(allocator);
-    }
-    while (iterator.next()) |arg| try list.append(allocator, try allocator.dupe(u8, arg));
-    return list.toOwnedSlice(allocator);
-}
-
-fn freeArgs(allocator: std.mem.Allocator, args: []const []const u8) void {
-    for (args) |arg| allocator.free(arg);
-    allocator.free(args);
 }
 
 fn parseCommand(argv: []const []const u8) !Command {
@@ -491,7 +473,7 @@ fn loadAreas(
             try reportLoadFailure(diagnostics, "area contract", path, err, "restore readable marked area content");
             return error.DiagnosticReported;
         };
-        if (std.mem.indexOf(u8, source, area_marker) == null) continue;
+        if (std.mem.find(u8, source, area_marker) == null) continue;
         try areas.append(allocator, try parseArea(allocator, path, source, spine.runner));
     }
     std.mem.sort(Area, areas.items, {}, struct {
@@ -505,7 +487,7 @@ fn loadAreas(
 fn parseArea(allocator: std.mem.Allocator, file: []const u8, source: []const u8, runner: []const u8) !Area {
     const dir = std.fs.path.dirname(file) orelse "";
     const title_start = findAreaTitle(source) orelse source.len;
-    const title_end = std.mem.indexOfScalarPos(u8, source, title_start, '\n') orelse source.len;
+    const title_end = std.mem.findScalarPos(u8, source, title_start, '\n') orelse source.len;
     const after_title = source[@min(title_end + 1, source.len)..];
     var paragraphs: std.ArrayList([]const u8) = .empty;
     var blocks = std.mem.splitSequence(u8, after_title, "\n\n");
@@ -556,7 +538,7 @@ fn parseArea(allocator: std.mem.Allocator, file: []const u8, source: []const u8,
 
 fn findAreaTitle(source: []const u8) ?usize {
     if (std.mem.startsWith(u8, source, "# ")) return 0;
-    if (std.mem.indexOf(u8, source, "\n# ")) |index| return index + 1;
+    if (std.mem.find(u8, source, "\n# ")) |index| return index + 1;
     return null;
 }
 
@@ -574,13 +556,13 @@ fn finishInvariant(
 
 fn section(source: []const u8, heading: []const u8) []const u8 {
     var cursor: usize = 0;
-    while (std.mem.indexOfPos(u8, source, cursor, "## ")) |start| {
+    while (std.mem.findPos(u8, source, cursor, "## ")) |start| {
         const name_start = start + 3;
-        const line_end = std.mem.indexOfScalarPos(u8, source, name_start, '\n') orelse source.len;
+        const line_end = std.mem.findScalarPos(u8, source, name_start, '\n') orelse source.len;
         if (std.mem.eql(u8, std.mem.trim(u8, source[name_start..line_end], " \t\r"), heading)) {
             const body_start = @min(line_end + 1, source.len);
             const body = source[body_start..];
-            const end = std.mem.indexOf(u8, body, "\n## ") orelse body.len;
+            const end = std.mem.find(u8, body, "\n## ") orelse body.len;
             return body[0..end];
         }
         cursor = line_end;
@@ -607,7 +589,7 @@ fn collectTaskMentions(
     out: *std.ArrayList([]const u8),
 ) !void {
     var rest = source;
-    while (std.mem.indexOf(u8, rest, runner)) |index| {
+    while (std.mem.find(u8, rest, runner)) |index| {
         var start = index + runner.len;
         while (start < rest.len and rest[start] == ' ') start += 1;
         var end = start;
@@ -653,7 +635,7 @@ fn foldDecisionMetadata(allocator: std.mem.Allocator, entry: []const u8) ![]cons
     var metadata_open = false;
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
-        const metadata_line = std.mem.startsWith(u8, line, "- ") and std.mem.indexOfScalar(u8, line, ':') != null;
+        const metadata_line = std.mem.startsWith(u8, line, "- ") and std.mem.findScalar(u8, line, ':') != null;
         const continuation = metadata_open and line.len != 0 and (line[0] == ' ' or line[0] == '\t') and
             !std.mem.startsWith(u8, trimmed, "- ") and !std.mem.startsWith(u8, trimmed, "* ") and !std.mem.startsWith(u8, trimmed, "+ ");
         if (continuation) {
@@ -672,9 +654,9 @@ const Heading = struct { start: usize, body_start: usize, id: []const u8, title:
 
 fn findDecisionHeading(source: []const u8, from: usize) ?Heading {
     var rest = source[from..];
-    while (std.mem.indexOf(u8, rest, "### D-")) |relative| {
+    while (std.mem.find(u8, rest, "### D-")) |relative| {
         const start = from + (source[from..].len - rest.len) + relative;
-        const line_end = std.mem.indexOfScalarPos(u8, source, start, '\n') orelse source.len;
+        const line_end = std.mem.findScalarPos(u8, source, start, '\n') orelse source.len;
         const line = source[start + 4 .. line_end];
         if (line.len >= 6 and line[0] == 'D' and line[1] == '-' and
             std.ascii.isDigit(line[2]) and std.ascii.isDigit(line[3]) and std.ascii.isDigit(line[4]) and line[5] == ' ')
@@ -712,7 +694,7 @@ fn decisionReason(entry: []const u8) []const u8 {
             }
             return "";
         }
-        if (std.mem.startsWith(u8, trimmed, "- ") and std.mem.indexOfScalar(u8, trimmed, ':') != null) {
+        if (std.mem.startsWith(u8, trimmed, "- ") and std.mem.findScalar(u8, trimmed, ':') != null) {
             saw_metadata = true;
             continue;
         }
@@ -744,7 +726,7 @@ fn loadSolutions(
 
 fn parseSolution(allocator: std.mem.Allocator, file: []const u8, source: []const u8) !Solution {
     if (!std.mem.startsWith(u8, source, "---\n")) return .{ .file = file, .binds = &.{}, .proves = "" };
-    const end = std.mem.indexOfPos(u8, source, 4, "\n---") orelse return .{ .file = file, .binds = &.{}, .proves = "" };
+    const end = std.mem.findPos(u8, source, 4, "\n---") orelse return .{ .file = file, .binds = &.{}, .proves = "" };
     const frontmatter = source[4..end];
     var binds: std.ArrayList([]const u8) = .empty;
     var proves: []const u8 = "";
@@ -838,7 +820,7 @@ fn checkRoutes(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
         };
         // A task with no row or with several rows is already reported by checkTasks.
         if (matches != 1) continue;
-        const command = found.?;
+        const command = found orelse continue;
         const graph = std.meta.stringToEnum(Route, graph_text) orelse {
             try addFailure(ctx, failures, .task_route, "the task census gives task {s} no graph route (got '{s}'); the build must pass how the graph reaches each task through --tasks", .{ task, graph_text });
             continue;
@@ -880,15 +862,15 @@ fn checkAreas(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
         if (lines > max_area_lines) try addFailure(ctx, failures, .area_contract, "{s} has {d} lines, over the {d}-line cap; move detail to a solution note", .{ area.file, lines, max_area_lines });
         if (area.owns.len == 0) try addFailure(ctx, failures, .area_contract, "{s} has no opening ownership paragraph; state what the area owns", .{area.file});
         if (area.boundary.len == 0) try addFailure(ctx, failures, .area_contract, "{s} has no second boundary paragraph; state what may cross the boundary", .{area.file});
-        if (area.boundary.len != 0 and std.mem.indexOf(u8, area.boundary, ctx.spine.runner) == null and
-            std.ascii.findIgnoreCase(area.boundary, "no import boundary") == null and std.mem.indexOf(u8, area.boundary, "D-") == null)
+        if (area.boundary.len != 0 and std.mem.find(u8, area.boundary, ctx.spine.runner) == null and
+            std.ascii.findIgnoreCase(area.boundary, "no import boundary") == null and std.mem.find(u8, area.boundary, "D-") == null)
         {
             try addFailure(ctx, failures, .area_contract, "{s}'s boundary names no enforcing task, no decision, and no explicit absence; state which condition applies", .{area.file});
         }
-        if (std.mem.indexOf(u8, source, "## Decisions that bind here") == null) try addFailure(ctx, failures, .area_contract, "{s} has no Decisions that bind here section; add the binding decision ids", .{area.file});
+        if (std.mem.find(u8, source, "## Decisions that bind here") == null) try addFailure(ctx, failures, .area_contract, "{s} has no Decisions that bind here section; add the binding decision ids", .{area.file});
         if (area.invariants.len == 0) try addFailure(ctx, failures, .area_contract, "{s} has no invariant; add one bold invariant with its proving gate", .{area.file});
         for (area.invariants) |invariant| {
-            if (!std.mem.startsWith(u8, invariant, "**") or std.mem.indexOfPos(u8, invariant, 2, "**") == null) try addFailure(ctx, failures, .area_contract, "{s} has an invariant without a bold lead sentence; wrap the lead in **", .{area.file});
+            if (!std.mem.startsWith(u8, invariant, "**") or std.mem.findPos(u8, invariant, 2, "**") == null) try addFailure(ctx, failures, .area_contract, "{s} has an invariant without a bold lead sentence; wrap the lead in **", .{area.file});
             var invariant_tasks: std.ArrayList([]const u8) = .empty;
             defer invariant_tasks.deinit(ctx.allocator);
             try collectTaskMentions(ctx.allocator, invariant, ctx.spine.runner, &invariant_tasks);
@@ -927,13 +909,21 @@ fn checkLedger(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
         if (std.mem.eql(u8, decision.status, "superseded") and decision.superseded_by == null) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} is superseded but names no Superseded-by entry; add the reciprocal link", .{ ctx.spine.docs.decisions, decision.id });
         if (decision.supersedes) |id| {
             if (!std.mem.lessThan(u8, id, decision.id)) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} Supersedes {s}, which is not an older decision; add a new ascending entry", .{ ctx.spine.docs.decisions, decision.id, id });
-            const old = findDecision(ctx.decisions, id);
-            if (old == null or !std.mem.eql(u8, old.?.status, "superseded") or old.?.superseded_by == null or !std.mem.eql(u8, old.?.superseded_by.?, decision.id)) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} Supersedes {s} without a superseded status and reciprocal Superseded-by link; update both entries", .{ ctx.spine.docs.decisions, decision.id, id });
+            const reciprocal = if (findDecision(ctx.decisions, id)) |old|
+                std.mem.eql(u8, old.status, "superseded") and
+                    if (old.superseded_by) |by| std.mem.eql(u8, by, decision.id) else false
+            else
+                false;
+            if (!reciprocal) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} Supersedes {s} without a superseded status and reciprocal Superseded-by link; update both entries", .{ ctx.spine.docs.decisions, decision.id, id });
         }
         if (decision.superseded_by) |id| {
             if (!std.mem.lessThan(u8, decision.id, id)) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} Superseded-by {s} is not a later decision; add a new ascending entry", .{ ctx.spine.docs.decisions, decision.id, id });
-            const replacement = findDecision(ctx.decisions, id);
-            if (!std.mem.eql(u8, decision.status, "superseded") or replacement == null or replacement.?.supersedes == null or !std.mem.eql(u8, replacement.?.supersedes.?, decision.id)) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} Superseded-by {s} lacks superseded status or a reciprocal Supersedes link; update both entries", .{ ctx.spine.docs.decisions, decision.id, id });
+            const reciprocal = if (findDecision(ctx.decisions, id)) |replacement|
+                std.mem.eql(u8, decision.status, "superseded") and
+                    if (replacement.supersedes) |sup| std.mem.eql(u8, sup, decision.id) else false
+            else
+                false;
+            if (!reciprocal) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} Superseded-by {s} lacks superseded status or a reciprocal Supersedes link; update both entries", .{ ctx.spine.docs.decisions, decision.id, id });
         }
     }
 }
@@ -950,7 +940,7 @@ fn checkSolutions(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
             }
             if (bindingHasWildcard(binding) and !bindingMatchesAny(ctx.tracked, &.{stripSymbol(binding)})) try addFailure(ctx, failures, .solution_binding, "{s} binds {s}, which matches no tracked path; correct the glob", .{ solution.file, binding });
             if (!bindingHasWildcard(binding)) {
-                if (std.mem.indexOfScalar(u8, binding, '#')) |hash| {
+                if (std.mem.findScalar(u8, binding, '#')) |hash| {
                     const symbol = binding[hash + 1 ..];
                     const source = try readFile(ctx.root_dir, ctx.io, ctx.a(), path);
                     if (!try declaresSymbol(ctx.a(), path, source, symbol)) try addFailure(ctx, failures, .solution_binding, "{s} binds {s}, but {s} declares no {s}; use a current declaration", .{ solution.file, binding, path, symbol });
@@ -971,18 +961,18 @@ fn checkAnchors(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
         var i: usize = 0;
         while (i < source.len) {
             if (i + 2 < source.len and std.mem.eql(u8, source[i .. i + 3], "```")) {
-                const end = std.mem.indexOfPos(u8, source, i + 3, "```") orelse break;
+                const end = std.mem.findPos(u8, source, i + 3, "```") orelse break;
                 i = end + 3;
                 continue;
             }
             if (source[i] == '`') {
-                const end = std.mem.indexOfScalarPos(u8, source, i + 1, '`') orelse break;
+                const end = std.mem.findScalarPos(u8, source, i + 1, '`') orelse break;
                 try checkAnchorText(ctx, failures, document, source[i + 1 .. end]);
                 i = end + 1;
                 continue;
             }
             if (i + 1 < source.len and source[i] == ']' and source[i + 1] == '(') {
-                const end = std.mem.indexOfScalarPos(u8, source, i + 2, ')') orelse break;
+                const end = std.mem.findScalarPos(u8, source, i + 2, ')') orelse break;
                 try checkAnchorText(ctx, failures, document, source[i + 2 .. end]);
                 i = end + 1;
                 continue;
@@ -994,22 +984,21 @@ fn checkAnchors(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
 
 fn checkAnchorText(ctx: *Context, failures: *std.ArrayList(Failure), document: []const u8, raw: []const u8) !void {
     const text = std.mem.trim(u8, raw, " <>\t\r\n");
-    if (std.mem.indexOf(u8, text, "://") != null) return;
+    if (std.mem.find(u8, text, "://") != null) return;
     const parsed = parseSourceAnchor(ctx.spine, text) orelse return;
     switch (parsed.kind) {
         .line => try addFailure(ctx, failures, .line_anchor, "{s} anchors {s} by line; replace it with a file or #symbol reference", .{ document, text }),
         .symbol => {
-            const target = try resolveAnchorPath(ctx, document, parsed.path);
-            if (target == null) {
+            const target = (try resolveAnchorPath(ctx, document, parsed.path)) orelse {
                 try addFailure(ctx, failures, .symbol_anchor, "{s} anchors {s}, but the target does not exist; correct the relative path", .{ document, text });
                 return;
-            }
-            if (!std.mem.endsWith(u8, target.?, ".zig")) {
+            };
+            if (!std.mem.endsWith(u8, target, ".zig")) {
                 try addFailure(ctx, failures, .symbol_anchor, "{s} anchors {s}, but only Zig files take a #symbol anchor; reference the file or a Zig declaration", .{ document, text });
                 return;
             }
-            const source = try readFile(ctx.root_dir, ctx.io, ctx.a(), target.?);
-            if (!try declaresSymbol(ctx.a(), target.?, source, parsed.value)) try addFailure(ctx, failures, .symbol_anchor, "{s} anchors {s}, but {s} declares no {s}; use a current top-level declaration", .{ document, text, target.?, parsed.value });
+            const source = try readFile(ctx.root_dir, ctx.io, ctx.a(), target);
+            if (!try declaresSymbol(ctx.a(), target, source, parsed.value)) try addFailure(ctx, failures, .symbol_anchor, "{s} anchors {s}, but {s} declares no {s}; use a current top-level declaration", .{ document, text, target, parsed.value });
         },
     }
 }
@@ -1021,11 +1010,11 @@ fn parseSourceAnchor(spine: Spine, text: []const u8) ?ParsedAnchor {
         const extension = std.mem.trimStart(u8, raw_extension, ".");
         var marker_buffer: [32]u8 = undefined;
         const marker = std.fmt.bufPrint(&marker_buffer, ".{s}", .{extension}) catch continue;
-        const ext_at = std.mem.indexOf(u8, text, marker) orelse continue;
+        const ext_at = std.mem.find(u8, text, marker) orelse continue;
         const after = ext_at + marker.len;
         if (after >= text.len) continue;
         const path = text[0..after];
-        if (std.mem.indexOfScalar(u8, path, ':') != null) continue;
+        if (std.mem.findScalar(u8, path, ':') != null) continue;
         if (text[after] == '#') {
             const symbol = text[after + 1 ..];
             if (isIdentifier(symbol)) return .{ .kind = .symbol, .path = path, .value = symbol };
@@ -1040,7 +1029,7 @@ fn parseSourceAnchor(spine: Spine, text: []const u8) ?ParsedAnchor {
 
 fn resolveAnchorPath(ctx: *Context, document: []const u8, path: []const u8) !?[]const u8 {
     const doc_dir = std.fs.path.dirname(document) orelse "";
-    if (std.mem.startsWith(u8, path, "./") or std.mem.startsWith(u8, path, "../") or std.mem.indexOfScalar(u8, path, '/') == null) {
+    if (std.mem.startsWith(u8, path, "./") or std.mem.startsWith(u8, path, "../") or std.mem.findScalar(u8, path, '/') == null) {
         const joined = try std.fs.path.join(ctx.a(), &.{ doc_dir, path });
         const relative = normalizePath(joined);
         if (try pathExists(ctx.root_dir, ctx.io, relative)) return relative;
@@ -1087,7 +1076,7 @@ fn checkDocsPolicy(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
         if (!std.mem.endsWith(u8, path, ".md") or isVendored(ctx.spine, path)) continue;
         const solutions_prefix = try ctx.a().print("{s}/", .{normalizePath(ctx.spine.docs.solutions)});
         if (containsString(ctx.spine.authorities, path) or std.mem.eql(u8, path, ctx.spine.docs.decisions) or
-            (ctx.spine.docs.concepts != null and std.mem.eql(u8, path, ctx.spine.docs.concepts.?)) or
+            (if (ctx.spine.docs.concepts) |concepts| std.mem.eql(u8, path, concepts) else false) or
             std.mem.startsWith(u8, path, solutions_prefix)) continue;
         var is_area = false;
         for (ctx.areas) |area| if (std.mem.eql(u8, area.file, path)) {
@@ -1122,15 +1111,17 @@ fn checkGenerated(ctx: *Context, write: bool, failures: *std.ArrayList(Failure))
 
 fn validMarkerPair(source: []const u8, open: []const u8, close: []const u8) bool {
     if (std.mem.count(u8, source, open) != 1 or std.mem.count(u8, source, close) != 1) return false;
-    return std.mem.indexOf(u8, source, open).? < std.mem.indexOf(u8, source, close).?;
+    const open_pos = std.mem.find(u8, source, open) orelse return false;
+    const close_pos = std.mem.find(u8, source, close) orelse return false;
+    return open_pos < close_pos;
 }
 
 fn validGeneratedMarkers(source: []const u8) bool {
     if (!validMarkerPair(source, area_open, area_close) or !validMarkerPair(source, gate_open, gate_close)) return false;
-    const areas_start = std.mem.indexOf(u8, source, area_open).?;
-    const areas_end = std.mem.indexOf(u8, source, area_close).?;
-    const gates_start = std.mem.indexOf(u8, source, gate_open).?;
-    const gates_end = std.mem.indexOf(u8, source, gate_close).?;
+    const areas_start = std.mem.find(u8, source, area_open) orelse return false;
+    const areas_end = std.mem.find(u8, source, area_close) orelse return false;
+    const gates_start = std.mem.find(u8, source, gate_open) orelse return false;
+    const gates_end = std.mem.find(u8, source, gate_close) orelse return false;
     return areas_start < areas_end and areas_end < gates_start and gates_start < gates_end;
 }
 
@@ -1170,8 +1161,8 @@ fn renderGates(ctx: *Context) ![]const u8 {
 }
 
 fn replaceBlock(allocator: std.mem.Allocator, source: []const u8, open: []const u8, close: []const u8, body: []const u8) ![]const u8 {
-    const start = std.mem.indexOf(u8, source, open).?;
-    const end = std.mem.indexOfPos(u8, source, start + open.len, close).?;
+    const start = std.mem.find(u8, source, open) orelse return error.GeneratedMarkersInvalid;
+    const end = std.mem.findPos(u8, source, start + open.len, close) orelse return error.GeneratedMarkersInvalid;
     return allocator.print("{s}{s}\n\n{s}\n{s}", .{ source[0..start], open, std.mem.trimEnd(u8, body, "\n"), source[end..] });
 }
 
@@ -1293,8 +1284,9 @@ fn writeGate(ctx: *Context, writer: *std.Io.Writer, command: SpineCommand) !void
 
 fn nearestArea(areas: []const Area, path: []const u8) ?Area {
     var result: ?Area = null;
-    for (areas) |area| if (matchesBinding(path, area.dir) and (result == null or area.dir.len > result.?.dir.len)) {
-        result = area;
+    for (areas) |area| if (matchesBinding(path, area.dir)) {
+        const is_deeper = if (result) |current| area.dir.len > current.dir.len else true;
+        if (is_deeper) result = area;
     };
     return result;
 }
@@ -1364,11 +1356,11 @@ fn bindingMatchesAny(paths: []const []const u8, bindings: []const []const u8) bo
 }
 
 fn bindingHasWildcard(binding: []const u8) bool {
-    return std.mem.indexOfScalar(u8, binding, '*') != null;
+    return std.mem.findScalar(u8, binding, '*') != null;
 }
 
 fn stripSymbol(binding: []const u8) []const u8 {
-    return binding[0 .. std.mem.indexOfScalar(u8, binding, '#') orelse binding.len];
+    return binding[0 .. std.mem.findScalar(u8, binding, '#') orelse binding.len];
 }
 
 fn normalizePath(value: []const u8) []const u8 {
@@ -1445,16 +1437,16 @@ fn collapseSpace(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
 }
 
 fn summarise(allocator: std.mem.Allocator, paragraph: []const u8) ![]const u8 {
-    const first = std.mem.indexOf(u8, paragraph, ". ") orelse return allocator.dupe(u8, paragraph);
+    const first = std.mem.find(u8, paragraph, ". ") orelse return allocator.dupe(u8, paragraph);
     if (first + 1 >= 45) return allocator.dupe(u8, paragraph[0 .. first + 1]);
     const second_start = first + 2;
-    const second = std.mem.indexOfPos(u8, paragraph, second_start, ". ") orelse return allocator.dupe(u8, paragraph);
+    const second = std.mem.findPos(u8, paragraph, second_start, ". ") orelse return allocator.dupe(u8, paragraph);
     return allocator.dupe(u8, paragraph[0 .. second + 1]);
 }
 
 fn boldLead(invariant: []const u8) []const u8 {
     if (!std.mem.startsWith(u8, invariant, "**")) return invariant;
-    const end = std.mem.indexOfPos(u8, invariant, 2, "**") orelse return invariant;
+    const end = std.mem.findPos(u8, invariant, 2, "**") orelse return invariant;
     return invariant[2..end];
 }
 
@@ -1722,8 +1714,8 @@ test "public brief navigates with an empty decision ledger" {
         .root = root,
         .paths = &.{"core/file.zig"},
     } }, &stdout.writer, &stderr.writer));
-    try testing.expect(std.mem.indexOf(u8, stdout.written(), "AREA  core (core/AGENTS.md)") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout.written(), "DECISIONS\n  none\n") != null);
+    try testing.expect(std.mem.find(u8, stdout.written(), "AREA  core (core/AGENTS.md)") != null);
+    try testing.expect(std.mem.find(u8, stdout.written(), "DECISIONS\n  none\n") != null);
     // A path brief lists only the gates bound to the path, so it names the full list.
     try testing.expect(std.mem.endsWith(u8, stdout.written(), "  every gate and when it is required: zig build brief\n"));
     try testing.expectEqualStrings("", stderr.written());
@@ -1875,7 +1867,7 @@ fn writeCommandManifest(io: std.Io, tmp: *std.testing.TmpDir, safe_approval: boo
 }
 
 fn expectDiagnosticLine(actual: []const u8, expected: []const u8) !void {
-    if (std.mem.indexOf(u8, actual, expected) != null) return;
+    if (std.mem.find(u8, actual, expected) != null) return;
     std.debug.print("expected diagnostic line:\n{s}\nactual diagnostics:\n{s}\n", .{ expected, actual });
     return error.MissingDiagnostic;
 }

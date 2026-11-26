@@ -100,8 +100,8 @@ test "mandatory routes cannot be moved out of ordinary verification" {
 
 test "build selection rejects empty named suites and filtered aggregate execution" {
     const cases = [_]struct { task: []const u8, filter: []const u8, diagnostic: ?[]const u8 }{
-        .{ .task = "test-zts", .filter = "Interpreter basic arithmetic", .diagnostic = null },
-        .{ .task = "test-zts", .filter = "__h3_nonexistent_test__", .diagnostic = "test filter selected zero tests" },
+        .{ .task = "test-sdk", .filter = "numberFromF64 folds safe-integer floats to int tag", .diagnostic = null },
+        .{ .task = "test-sdk", .filter = "__h3_nonexistent_test__", .diagnostic = "test filter selected zero tests" },
         .{ .task = "test", .filter = "__h3_nonexistent_test__", .diagnostic = "test rejects -Dtest-filter" },
     };
     var verdicts: usize = 0;

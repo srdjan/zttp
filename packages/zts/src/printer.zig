@@ -52,6 +52,8 @@ pub const Refusal = enum {
     /// Source admission rejected the source, so the type spans this printer
     /// needs do not exist. The public refusal name remains stable.
     strip_failed,
+    /// Bracket nesting exceeded the printer's recursion depth cap.
+    nesting_too_deep,
     /// The output did not re-lex to its input. A defect guard: the refusal is
     /// the failure, not the rewritten file.
     self_check,
@@ -65,6 +67,7 @@ pub const Refusal = enum {
             .missing_semicolon => "statement without a semicolon",
             .comment_position => "comment in an unplaceable position",
             .strip_failed => "TypeScript stripping failed",
+            .nesting_too_deep => "nesting depth limit exceeded",
             .self_check => "output did not re-lex to its input",
         };
     }
@@ -72,6 +75,9 @@ pub const Refusal = enum {
 
 /// The soft target. A line with no break point may exceed it.
 const line_width: u32 = 80;
+/// Explicit cap on bracket group nesting so deeply nested inputs refuse cleanly
+/// instead of overflowing the stack.
+const max_nesting_depth: u32 = 512;
 
 pub const Options = struct {
     /// Set to the reason when the printer refuses.
@@ -366,7 +372,7 @@ fn lex(arena: std.mem.Allocator, source: []const u8, options: Options) Error![]T
                 else => false,
             };
             if (restricted and tok.type != .semicolon and
-                std.mem.indexOfScalar(u8, gap, '\n') != null)
+                std.mem.findScalar(u8, gap, '\n') != null)
             {
                 return refuse(options, .missing_semicolon);
             }
@@ -389,6 +395,7 @@ const Builder = struct {
     trivia_items: []const trivia.Trivia,
     ti: usize = 0,
     ci: usize = 0,
+    depth: u32 = 0,
 
     fn build(self: *Builder) Error![]Chunk {
         const top = try self.children(null);
@@ -447,6 +454,10 @@ const Builder = struct {
     }
 
     fn group(self: *Builder, before: []const Chunk) Error!*Group {
+        if (self.depth >= max_nesting_depth) return refuse(self.options, .nesting_too_deep);
+        self.depth += 1;
+        defer self.depth -= 1;
+
         const open = self.tokens[self.ti];
         const head = lastTokenType(before);
         self.ti += 1;
@@ -946,14 +957,14 @@ const Printer = struct {
 };
 
 fn columnAfter(col: u32, text: []const u8) u32 {
-    if (std.mem.lastIndexOfScalar(u8, text, '\n')) |at| {
+    if (std.mem.findScalarLast(u8, text, '\n')) |at| {
         return @intCast(text.len - at - 1);
     }
     return col + @as(u32, @intCast(text.len));
 }
 
 fn firstLineWidth(text: []const u8) u32 {
-    const end = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
+    const end = std.mem.findScalar(u8, text, '\n') orelse text.len;
     return @intCast(end);
 }
 
@@ -1165,7 +1176,7 @@ const Renderer = struct {
         const hug = huggableCall(children) orelse return null;
         if (hug.head.len == 0) return hug;
         const head_flat = flatText(self.p.arena, self.p.options, hug.head) catch return null;
-        if (std.mem.indexOfScalar(u8, head_flat, '\n') != null) return null;
+        if (std.mem.findScalar(u8, head_flat, '\n') != null) return null;
         // `(`, the arguments before the last, and the bracket that opens it.
         if (self.p.col + 3 + firstLineWidth(head_flat) > self.width) return null;
         return hug;
@@ -1643,7 +1654,7 @@ fn printInto(
     source: []const u8,
     options: Options,
 ) Error![]const u8 {
-    if (std.mem.indexOfScalar(u8, source, '\r') != null) {
+    if (std.mem.findScalar(u8, source, '\r') != null) {
         return refuse(options, .carriage_return);
     }
 
@@ -2102,4 +2113,24 @@ test "source printer maps preparation allocation failures and propagates output 
     try testing.expectError(error.OutOfMemory, print(faulted.allocator(), source, .{ .reason_out = &reason }));
     try testing.expect(faulted.has_induced_failure);
     try testing.expectEqual(Refusal.self_check, reason);
+}
+
+test "printer refuses deeply nested brackets without overflowing the stack" {
+    const allocator = testing.allocator;
+    const depth = max_nesting_depth + 16;
+
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(allocator);
+    try source.appendSlice(allocator, "const x = ");
+    try source.appendNTimes(allocator, '[', depth);
+    try source.append(allocator, '1');
+    try source.appendNTimes(allocator, ']', depth);
+    try source.appendSlice(allocator, ";\n");
+
+    var reason: Refusal = .self_check;
+    try testing.expectError(
+        error.UnprintableConstruct,
+        print(allocator, source.items, .{ .reason_out = &reason }),
+    );
+    try testing.expectEqual(Refusal.nesting_too_deep, reason);
 }

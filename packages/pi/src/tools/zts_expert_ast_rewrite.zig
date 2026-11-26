@@ -445,8 +445,8 @@ test "ast rewrite: replace_let_with_const clears veto on a local let" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "  const count = 1;") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "  const count = 1;") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"applied\":false") != null);
     try expectPayloadIntent(result, "replace_let_with_const");
 }
 
@@ -469,8 +469,8 @@ test "ast rewrite: replace_compound_assign_with_explicit clears veto on a compou
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "  count = count + 2;") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "  count = count + 2;") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"applied\":false") != null);
     try expectPayloadIntent(result, "replace_compound_assign_with_explicit");
 }
 
@@ -495,7 +495,7 @@ test "ast rewrite: canonicalize_for_of_const clears veto on a for-of let" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "for (const item of items)") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "for (const item of items)") != null);
     try expectPayloadIntent(result, "canonicalize_for_of_const");
 }
 
@@ -519,7 +519,7 @@ test "ast rewrite: replace_arrow_with_function clears veto on reused arrow helpe
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "function parse(x: number): number { return x; }") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "function parse(x: number): number { return x; }") != null);
     try expectPayloadIntent(result, "replace_arrow_with_function");
 }
 
@@ -553,7 +553,7 @@ test "ast rewrite: replace_export_arrow_with_function clears veto" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "export function load(id: DocId): Response { return Response.text(id); }") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "export function load(id: DocId): Response { return Response.text(id); }") != null);
     try expectPayloadIntent(result, "replace_export_arrow_with_function");
 }
 
@@ -593,15 +593,15 @@ test "ast rewrite: canonicalize_capability_key_alias rewrites the alias line" {
 
     // llm_text is a JSON envelope; double-quotes inside source become
     // \" so we look for the json-escaped form.
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "  const key = \\\"API_KEY\\\";") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "  let key") == null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"intent\":\"canonicalize_capability_key_alias\"") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "  const key = \\\"API_KEY\\\";") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "  let key") == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"intent\":\"canonicalize_capability_key_alias\"") != null);
     try testing.expect(result.ui_payload != null);
     switch (result.ui_payload.?) {
         .repair_candidate => |candidate| {
             try testing.expectEqualStrings("canonicalize_capability_key_alias", candidate.intent_kind);
             // The ui_payload holds raw source (not json-escaped).
-            try testing.expect(std.mem.indexOf(u8, candidate.proposed_content, "  const key = \"API_KEY\";") != null);
+            try testing.expect(std.mem.find(u8, candidate.proposed_content, "  const key = \"API_KEY\";") != null);
         },
         else => return error.TestFailed,
     }
@@ -627,8 +627,8 @@ test "ast rewrite: replace_chained_ternary_with_match lifts a chained ternary" {
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
 
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "matchTernary(cond).with(true, () => 1).otherwise(() =>") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "matchTernary(cond).with(true, () => 1).otherwise(() =>") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"applied\":false") != null);
 }
 
 test "ast rewrite: a span-keyed intent refuses a source override" {
@@ -652,7 +652,7 @@ test "ast rewrite: a span-keyed intent refuses a source override" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "no source override supported") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "no source override supported") != null);
 }
 
 test "ast rewrite: unknown intent string returns typed failure" {
@@ -662,7 +662,7 @@ test "ast rewrite: unknown intent string returns typed failure" {
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unsupported_repair_intent") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "unsupported_repair_intent") != null);
     try testing.expect(result.ui_payload == null);
 }
 
@@ -673,7 +673,7 @@ test "ast rewrite: effectful ternary remains outside automatic application" {
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unsupported_repair_intent") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "unsupported_repair_intent") != null);
     try testing.expect(result.ui_payload == null);
 }
 
@@ -687,7 +687,7 @@ test "ast rewrite: insert_guard_before_line is not an AST primitive" {
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unsupported_repair_intent") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "unsupported_repair_intent") != null);
 }
 
 test "ast rewrite: end-to-end ZTS072 → repair_intent → AST primitive → veto passes" {
@@ -738,5 +738,5 @@ test "ast rewrite: end-to-end ZTS072 → repair_intent → AST primitive → vet
     // Step 3: the compiler veto loop on the proposed content reports
     // zero new diagnostics because the AST primitive cleared the violation.
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "function parse(x: number): number { return x; }") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "function parse(x: number): number { return x; }") != null);
 }

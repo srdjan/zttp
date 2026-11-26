@@ -13,10 +13,8 @@ marker_test_binary="$1"
 publisher_binary="$2"
 
 test_tmp="$(mktemp -d "${TMPDIR:-/tmp}/zttp-evidence-marker.XXXXXX")"
-dirty_probe=".zttp-evidence-dirty-probe.$$"
 cleanup() {
   rm -rf "$test_tmp"
-  rm -f "$dirty_probe"
 }
 trap cleanup EXIT HUP INT TERM
 log="$test_tmp/test.log"
@@ -229,9 +227,13 @@ for publisher in scripts/update-convergence.sh scripts/update-coverage.sh; do
   done
 done
 
-printf 'probe\n' > "$dirty_probe"
-for publisher in scripts/update-convergence.sh scripts/update-coverage.sh; do
-  if bash "$publisher" >"$log" 2>&1; then
+dirty_repo="$test_tmp/dirty-repo"
+mkdir -p "$dirty_repo/scripts"
+cp scripts/update-convergence.sh scripts/update-coverage.sh "$dirty_repo/scripts/"
+git -C "$dirty_repo" init -q
+printf 'probe\n' > "$dirty_repo/.zttp-evidence-dirty-probe"
+for publisher in update-convergence.sh update-coverage.sh; do
+  if bash "$dirty_repo/scripts/$publisher" >"$log" 2>&1; then
     printf 'evidence marker test: %s accepted a dirty working tree\n' "$publisher" >&2
     exit 1
   fi
@@ -242,7 +244,6 @@ for publisher in scripts/update-convergence.sh scripts/update-coverage.sh; do
   }
   checks=$((checks + 1))
 done
-rm -f "$dirty_probe"
 
 # A complete marker cannot replace evidence after its producer fails. Run
 # publisher copies so a broken probe cannot change the repository evidence.

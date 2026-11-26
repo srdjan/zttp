@@ -178,10 +178,10 @@ pub const SourceView = struct {
         var remaining = self.text;
         var current: u32 = 1;
         while (current < number) : (current += 1) {
-            const newline = std.mem.indexOfScalar(u8, remaining, '\n') orelse return null;
+            const newline = std.mem.findScalar(u8, remaining, '\n') orelse return null;
             remaining = remaining[newline + 1 ..];
         }
-        const end = std.mem.indexOfScalar(u8, remaining, '\n') orelse remaining.len;
+        const end = std.mem.findScalar(u8, remaining, '\n') orelse remaining.len;
         return remaining[0..end];
     }
 };
@@ -244,7 +244,7 @@ pub fn positionOfOffset(text: []const u8, offset: u32) Position {
 
 test "writeDiagnostic names the code and file and underlines the span" {
     const source = "let a = 1;\nlet b = oops + 2;\n";
-    const start = std.mem.indexOf(u8, source, "oops").?;
+    const start = std.mem.find(u8, source, "oops").?;
     var view = SourceView.of(source);
     view.name = "demo.ts";
     const text = try renderForTest(view, .{
@@ -274,7 +274,7 @@ test "writeDiagnostic keeps the underline aligned on a multi-byte line" {
     // "héllo" holds a two-byte character and "✓" a three-byte one, so the
     // byte column of `oops` is larger than the number of characters before it.
     const source = "const s = \"héllo ✓\"; oops;\n";
-    const start = std.mem.indexOf(u8, source, "oops").?;
+    const start = std.mem.find(u8, source, "oops").?;
     const text = try renderForTest(SourceView.of(source), .{
         .severity = "error",
         .message = "m",
@@ -285,12 +285,12 @@ test "writeDiagnostic keeps the underline aligned on a multi-byte line" {
     });
     defer std.testing.allocator.free(text);
     // 21 characters precede `oops`.
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ &@as([21:0]u8, @splat(' ')) ++ "^^^^\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "   | " ++ &@as([21:0]u8, @splat(' ')) ++ "^^^^\n") != null);
 }
 
 test "writeDiagnostic counts a multi-byte span in characters" {
     const source = "x = \"日本語\";\n";
-    const start = std.mem.indexOf(u8, source, "日").?;
+    const start = std.mem.find(u8, source, "日").?;
     const text = try renderForTest(SourceView.of(source), .{
         .severity = "error",
         .message = "m",
@@ -300,7 +300,7 @@ test "writeDiagnostic counts a multi-byte span in characters" {
         .end_offset = @intCast(start + 9),
     });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ &@as([5:0]u8, @splat(' ')) ++ "^^^\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "   | " ++ &@as([5:0]u8, @splat(' ')) ++ "^^^\n") != null);
 }
 
 test "writeDiagnostic clamps a span that crosses a line end" {
@@ -314,8 +314,8 @@ test "writeDiagnostic clamps a span that crosses a line end" {
         .end_offset = 11,
     });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ &@as([3:0]u8, @splat(' ')) ++ "^^^\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "^^^^") == null);
+    try std.testing.expect(std.mem.find(u8, text, "   | " ++ &@as([3:0]u8, @splat(' ')) ++ "^^^\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "^^^^") == null);
 }
 
 test "writeDiagnostic draws one caret for a zero-width span" {
@@ -329,8 +329,8 @@ test "writeDiagnostic draws one caret for a zero-width span" {
         .end_offset = 2,
     });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ &@as([2:0]u8, @splat(' ')) ++ "^\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "^^") == null);
+    try std.testing.expect(std.mem.find(u8, text, "   | " ++ &@as([2:0]u8, @splat(' ')) ++ "^\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "^^") == null);
 }
 
 test "writeDiagnostic draws a caret for a position past the line end" {
@@ -341,7 +341,7 @@ test "writeDiagnostic draws a caret for a position past the line end" {
         .column = 40,
     });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ &@as([2:0]u8, @splat(' ')) ++ "^\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "   | " ++ &@as([2:0]u8, @splat(' ')) ++ "^\n") != null);
 }
 
 test "writeDiagnostic with no source line still names the position" {

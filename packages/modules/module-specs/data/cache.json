@@ -122,6 +122,11 @@
       ],
       "requiredCapabilities": [
         "policy_check"
+      ],
+      "contractExtractions": [
+        {
+          "category": "cache_namespace"
+        }
       ]
     }
   ]

@@ -166,9 +166,11 @@ pub fn decodeStringLiteralContent(allocator: std.mem.Allocator, input: []const u
         if (escaped == '\n' or escaped == '\r') return error.StringLineContinuation;
         if (escaped == 'x') {
             if (pos + 3 >= input.len) return error.InvalidEscapeSequence;
-            result[out] = std.fmt.parseInt(u8, input[pos + 2 .. pos + 4], 16) catch
+            const codepoint = std.fmt.parseInt(u8, input[pos + 2 .. pos + 4], 16) catch
                 return error.InvalidEscapeSequence;
-            out += 1;
+            const width = std.unicode.utf8Encode(codepoint, result[out..]) catch
+                return error.InvalidEscapeSequence;
+            out += width;
             pos += 4;
             continue;
         }
@@ -200,7 +202,7 @@ pub fn decodeStringLiteralContent(allocator: std.mem.Allocator, input: []const u
 fn decodeTypeModuleUnicodeEscape(input: []const u8, at: usize) !struct { codepoint: u21, next: usize } {
     if (at + 2 < input.len and input[at + 2] == '{') {
         const limit = @min(at + 10, input.len);
-        const close = std.mem.indexOfScalarPos(u8, input[0..limit], at + 3, '}') orelse
+        const close = std.mem.findScalarPos(u8, input[0..limit], at + 3, '}') orelse
             return error.InvalidEscapeSequence;
         const hex = input[at + 3 .. close];
         if (hex.len == 0) return error.InvalidEscapeSequence;
@@ -226,8 +228,8 @@ fn literalKeywordAt(source: []const u8, start: usize, keyword: []const u8) bool 
 }
 
 fn containsRetiredTypesImport(statement: []const u8) bool {
-    return std.mem.indexOf(u8, statement, "\"" ++ retired_types_module ++ "\"") != null or
-        std.mem.indexOf(u8, statement, "'" ++ retired_types_module ++ "'") != null;
+    return std.mem.find(u8, statement, "\"" ++ retired_types_module ++ "\"") != null or
+        std.mem.find(u8, statement, "'" ++ retired_types_module ++ "'") != null;
 }
 
 const RawTemplateFrames = struct {
@@ -329,9 +331,9 @@ const RawModuleScanner = struct {
                 },
                 '`' => pos = try self.scanTemplate(pos),
                 '/' => if (pos + 1 < self.source.len and self.source[pos + 1] == '/') {
-                    pos = std.mem.indexOfScalarPos(u8, self.source, pos + 2, '\n') orelse self.source.len;
+                    pos = std.mem.findScalarPos(u8, self.source, pos + 2, '\n') orelse self.source.len;
                 } else if (pos + 1 < self.source.len and self.source[pos + 1] == '*') {
-                    const close = std.mem.indexOfPos(u8, self.source, pos + 2, "*/") orelse return self.source.len;
+                    const close = std.mem.findPos(u8, self.source, pos + 2, "*/") orelse return self.source.len;
                     pos = close + 2;
                 } else {
                     pos += 1;
@@ -891,6 +893,21 @@ fn scanObservedMatchingBracket(
     var pos = start + 1;
     while (pos < source.len and depth > 0) {
         const byte = source[pos];
+        if (byte == '/' and pos + 1 < source.len) {
+            if (source[pos + 1] == '/') {
+                pos += 2;
+                while (pos < source.len and source[pos] != '\n') pos += 1;
+                continue;
+            }
+            if (source[pos + 1] == '*') {
+                pos += 2;
+                while (pos + 1 < source.len and !(source[pos] == '*' and source[pos + 1] == '/')) {
+                    pos += 1;
+                }
+                pos = if (pos + 1 < source.len) pos + 2 else source.len;
+                continue;
+            }
+        }
         if (byte == '"' or byte == '\'' or byte == '`') {
             if (probe_position) |position| {
                 pos = (try scanProbeQuote(allocator, source, pos, caught orelse
@@ -2121,6 +2138,7 @@ fn classifyAnyInTypeSpan(
         }
         if (pos + "any".len > end or
             !std.mem.eql(u8, source[pos .. pos + "any".len], "any") or
+            (pos > span.start and isIdentifierContinue(source[pos - 1])) or
             (pos + "any".len < end and isIdentifierContinue(source[pos + "any".len])))
         {
             pos += 1;
@@ -2385,7 +2403,7 @@ test "explicit call scanner keeps operator and touching filters" {
 
 test "admission generic scanner separates lexical nonmatches from shape nonmatches" {
     const quoted_source = "function f<\"open\n>(x: number): number { return x; }\n";
-    const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, quoted_source, '<').?);
+    const list_start: u32 = @intCast(std.mem.findScalar(u8, quoted_source, '<').?);
     var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
     defer caught.deinit(std.testing.allocator);
 
@@ -2410,7 +2428,7 @@ test "admission generic scanner separates lexical nonmatches from shape nonmatch
     const comment_source = "function f<T /* unfinished\n";
     switch (try scanAdmissionGenericList(std.testing.allocator, .{
         .source = comment_source,
-        .start = @intCast(std.mem.indexOfScalar(u8, comment_source, '<').?),
+        .start = @intCast(std.mem.findScalar(u8, comment_source, '<').?),
         .caught = &caught,
     })) {
         .lexical_nonmatch => {},
@@ -2628,10 +2646,9 @@ test "compile caught observations preserve later hard selection" {
     }, AdmissionSink.init(&any_collector, &any_history));
     try std.testing.expectEqual(@as(u64, 1), any_collector.generation());
     try std.testing.expectEqual(@as(usize, 1), any_collector.items().len);
-    try std.testing.expectEqual(AdmissionKind.any_type, any_collector.items()[0].kind);
-    try std.testing.expectEqual(@as(usize, 2), any_history.items().len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, any_collector.items()[0].kind);
+    try std.testing.expectEqual(@as(usize, 1), any_history.items().len);
     try std.testing.expectEqual(AdmissionKind.unterminated_string, any_history.items()[0].kind);
-    try std.testing.expectEqual(AdmissionKind.any_type, any_history.items()[1].kind);
 
     const removed_source = "void \"open\n";
     var removed_collector = AdmissionCollector.init(std.testing.allocator, .compile);
@@ -2648,10 +2665,9 @@ test "compile caught observations preserve later hard selection" {
     }, AdmissionSink.init(&removed_collector, &removed_history));
     try std.testing.expectEqual(@as(u64, 1), removed_collector.generation());
     try std.testing.expectEqual(@as(usize, 1), removed_collector.items().len);
-    try std.testing.expectEqual(AdmissionKind.void_type, removed_collector.items()[0].kind);
-    try std.testing.expectEqual(@as(usize, 2), removed_history.items().len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, removed_collector.items()[0].kind);
+    try std.testing.expectEqual(@as(usize, 1), removed_history.items().len);
     try std.testing.expectEqual(AdmissionKind.unterminated_string, removed_history.items()[0].kind);
-    try std.testing.expectEqual(AdmissionKind.void_type, removed_history.items()[1].kind);
 }
 
 fn expectTypeSpanDiagnostics(
@@ -2670,7 +2686,7 @@ fn expectTypeSpanDiagnostics(
 }
 
 test "bounded admission policies preserve any and removed spelling order" {
-    const source = "{ any: string; value: many; alias: Array<string>; later: Many }";
+    const source = "{ any: string; value: any; alias: Array<string>; later: Many; other: Company }";
     const span: Span = .{ .start = 0, .end = @intCast(source.len) };
 
     const Case = struct {
@@ -2681,32 +2697,29 @@ test "bounded admission policies preserve any and removed spelling order" {
         .{
             .policy = .general_type,
             .expected = &.{
-                .{ .kind = .any_type, .span = .{ .start = 23, .end = 26 } },
-                .{ .kind = .any_type, .span = .{ .start = 58, .end = 61 } },
-                .{ .kind = .array_type_alias, .span = .{ .start = 35, .end = 40 } },
+                .{ .kind = .any_type, .span = .{ .start = 22, .end = 25 } },
+                .{ .kind = .array_type_alias, .span = .{ .start = 34, .end = 39 } },
             },
         },
         .{
             .policy = .parameter_type,
             .expected = &.{
                 .{ .kind = .any_type, .span = .{ .start = 2, .end = 5 } },
-                .{ .kind = .any_type, .span = .{ .start = 23, .end = 26 } },
-                .{ .kind = .any_type, .span = .{ .start = 58, .end = 61 } },
-                .{ .kind = .array_type_alias, .span = .{ .start = 35, .end = 40 } },
+                .{ .kind = .any_type, .span = .{ .start = 22, .end = 25 } },
+                .{ .kind = .array_type_alias, .span = .{ .start = 34, .end = 39 } },
             },
         },
         .{
             .policy = .any_only,
             .expected = &.{
-                .{ .kind = .any_type, .span = .{ .start = 23, .end = 26 } },
-                .{ .kind = .any_type, .span = .{ .start = 58, .end = 61 } },
+                .{ .kind = .any_type, .span = .{ .start = 22, .end = 25 } },
             },
         },
         .{
             .policy = .removed_only,
             .expected = &.{.{
                 .kind = .array_type_alias,
-                .span = .{ .start = 35, .end = 40 },
+                .span = .{ .start = 34, .end = 39 },
             }},
         },
     };
@@ -2725,7 +2738,7 @@ test "bounded admission policies preserve any and removed spelling order" {
     }, AdmissionSink.init(&compiled, null));
     try std.testing.expectEqual(@as(usize, 1), compiled.items().len);
     try std.testing.expectEqual(AdmissionKind.any_type, compiled.items()[0].kind);
-    try std.testing.expectEqual(@as(u32, 23), compiled.items()[0].span.start);
+    try std.testing.expectEqual(@as(u32, 22), compiled.items()[0].span.start);
 
     const prefix_source = "any void";
     var prefix_collector = AdmissionCollector.init(std.testing.allocator, .collect);
@@ -2741,17 +2754,17 @@ test "bounded admission policies preserve any and removed spelling order" {
     try expectTypeSpanDiagnostics(
         suffix_source,
         .{ .span = .{ .start = 13, .end = 24 }, .policy = .general_type },
-        &.{.{ .kind = .any_type, .span = .{ .start = 21, .end = 24 } }},
+        &.{},
     );
 
-    const nominal_body = "void | many";
+    const nominal_body = "Company | Many";
     try expectTypeSpanDiagnostics(
         nominal_body,
         .{
             .span = .{ .start = 0, .end = @intCast(nominal_body.len) },
             .policy = .any_only,
         },
-        &.{.{ .kind = .any_type, .span = .{ .start = 8, .end = 11 } }},
+        &.{},
     );
 
     const optional_function = "(value?: string) => number";
@@ -2833,8 +2846,8 @@ test "bounded admission classifier keeps strings comments and templates opaque" 
     }, AdmissionSink.init(&malformed_compile, null));
     try std.testing.expectEqual(@as(u64, 1), malformed_compile.generation());
     try std.testing.expectEqual(@as(usize, 1), malformed_compile.items().len);
-    try std.testing.expectEqual(AdmissionKind.any_type, malformed_compile.items()[0].kind);
-    try std.testing.expectEqual(Span{ .start = 6, .end = 9 }, malformed_compile.items()[0].span);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, malformed_compile.items()[0].kind);
+    try std.testing.expectEqual(Span{ .start = 5, .end = 6 }, malformed_compile.items()[0].span);
 
     const removed_after = "void \"open\n";
     const removed_options: AdmissionTypeSpanOptions = .{
@@ -2858,8 +2871,8 @@ test "bounded admission classifier keeps strings comments and templates opaque" 
     );
     try std.testing.expectEqual(@as(u64, 1), removed_compile.generation());
     try std.testing.expectEqual(@as(usize, 1), removed_compile.items().len);
-    try std.testing.expectEqual(AdmissionKind.void_type, removed_compile.items()[0].kind);
-    try std.testing.expectEqual(Span{ .start = 0, .end = 4 }, removed_compile.items()[0].span);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, removed_compile.items()[0].kind);
+    try std.testing.expectEqual(Span{ .start = 10, .end = 11 }, removed_compile.items()[0].span);
 
     var invalid_collector = AdmissionCollector.init(std.testing.allocator, .collect);
     defer invalid_collector.deinit();
@@ -2908,7 +2921,7 @@ test "type-only module records require the exact raw scanner result" {
         .not_type_only, .refused, .excluded => return error.TestExpectedTypeOnlyModule,
     };
     try std.testing.expectEqual(@as(usize, 0), diagnostics.items.len);
-    const semicolon = std.mem.indexOfScalar(u8, source, ';') orelse
+    const semicolon = std.mem.findScalar(u8, source, ';') orelse
         return error.TestExpectedTypeOnlyModule;
     try std.testing.expectEqual(TypeOnlyModuleKind.import_type, module.kind);
     try std.testing.expectEqual(
@@ -2959,7 +2972,7 @@ test "recovered type-only module validates its exact diagnostic-bearing record" 
         .excluded => |excluded| excluded,
         .not_type_only, .refused, .scanned => return error.TestExpectedTypeOnlyModule,
     };
-    const newline: u32 = @intCast(std.mem.indexOfScalar(u8, source, '\n').?);
+    const newline: u32 = @intCast(std.mem.findScalar(u8, source, '\n').?);
     try std.testing.expectEqual(
         TypeOnlyModule{ .kind = .import_type, .raw_span = .{ .start = 0, .end = newline } },
         module,
@@ -3045,7 +3058,7 @@ test "type-only module scanner preserves quoted and template statement ends" {
             .scanned => |module| module,
             .not_type_only, .refused, .excluded => return error.TestExpectedTypeOnlyModule,
         };
-        const semicolon = std.mem.lastIndexOfScalar(u8, source[0 .. source.len - "tail".len], ';') orelse
+        const semicolon = std.mem.findScalarLast(u8, source[0 .. source.len - "tail".len], ';') orelse
             return error.TestExpectedTypeOnlyModule;
         try std.testing.expectEqual(@as(u32, @intCast(semicolon + 1)), module.raw_span.end);
         try std.testing.expectEqual(@as(usize, 0), diagnostics.items.len);
@@ -3054,7 +3067,7 @@ test "type-only module scanner preserves quoted and template statement ends" {
 
 test "type-only module exclusion survives deduplication across diagnostic kinds" {
     const source = "import type \"open\n";
-    const fault = std.mem.indexOfScalar(u8, source, '\n') orelse return error.TestUnexpectedResult;
+    const fault = std.mem.findScalar(u8, source, '\n') orelse return error.TestUnexpectedResult;
     const prior: TypeOnlyModuleDiagnostic = .{
         .kind = .nesting_too_deep,
         .offset = @intCast(fault),
@@ -3091,7 +3104,7 @@ test "admission endpoints retain producer specific delimiters" {
     );
     try std.testing.expectEqual(@as(u32, 6), variable.complete.end);
 
-    const function_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '(').?);
+    const function_start: u32 = @intCast(std.mem.findScalar(u8, source, '(').?);
     const named = try scanAdmissionEndpointCore(
         std.testing.allocator,
         source,
@@ -3100,10 +3113,10 @@ test "admission endpoints retain producer specific delimiters" {
         &caught,
         null,
     );
-    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
+    const body_start: u32 = @intCast(std.mem.findScalar(u8, source, '{').?);
     try std.testing.expectEqual(body_start, named.complete.end);
 
-    const arrow_start: u32 = @intCast(std.mem.indexOf(u8, source, "string { body }").?);
+    const arrow_start: u32 = @intCast(std.mem.find(u8, source, "string { body }").?);
     const arrow = try scanAdmissionEndpointCore(
         std.testing.allocator,
         source,
@@ -3124,7 +3137,7 @@ test "admission endpoints retain producer specific delimiters" {
         null,
     );
     try std.testing.expectEqual(
-        @as(u32, @intCast(std.mem.indexOfScalar(u8, unmatched, ',').?)),
+        @as(u32, @intCast(std.mem.findScalar(u8, unmatched, ',').?)),
         continued.complete.end,
     );
 }
@@ -3166,8 +3179,8 @@ test "admission endpoint reports only committed unfinished comments" {
     try std.testing.expectEqual(@as(u32, @intCast(bare.len)), bare_failure.@"resume");
 
     const interface_body = "interface X extends { field: /* unfinished";
-    const extends_end: u32 = @intCast(std.mem.indexOf(u8, interface_body, "extends").? + "extends".len);
-    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, interface_body, '{').?);
+    const extends_end: u32 = @intCast(std.mem.find(u8, interface_body, "extends").? + "extends".len);
+    const body_start: u32 = @intCast(std.mem.findScalar(u8, interface_body, '{').?);
     const interface_result = try scanAdmissionEndpointCore(
         std.testing.allocator,
         interface_body,
@@ -3190,7 +3203,7 @@ test "admission endpoint reports only committed unfinished comments" {
         &caught,
         null,
     );
-    const semicolon: u32 = @intCast(std.mem.indexOfScalar(u8, quoted, ';').?);
+    const semicolon: u32 = @intCast(std.mem.findScalar(u8, quoted, ';').?);
     try std.testing.expectEqual(Span{ .start = 0, .end = semicolon }, quoted_result.complete);
 
     const template = "`/* unfinished`;";
@@ -3202,7 +3215,7 @@ test "admission endpoint reports only committed unfinished comments" {
         &caught,
         null,
     );
-    const template_semicolon: u32 = @intCast(std.mem.indexOfScalar(u8, template, ';').?);
+    const template_semicolon: u32 = @intCast(std.mem.findScalar(u8, template, ';').?);
     try std.testing.expectEqual(
         Span{ .start = 0, .end = template_semicolon },
         template_result.complete,
@@ -3222,7 +3235,7 @@ test "parameter endpoint follows delimiter depth rules" {
         &caught,
         null,
     );
-    const equals: u32 = @intCast(std.mem.indexOfScalar(u8, source, '=').?);
+    const equals: u32 = @intCast(std.mem.findScalar(u8, source, '=').?);
     try std.testing.expectEqual(equals, result.complete.end);
 
     const inside_brace = "{ value = fallback }, next)";
@@ -3235,7 +3248,7 @@ test "parameter endpoint follows delimiter depth rules" {
         null,
     );
     try std.testing.expectEqual(
-        @as(u32, @intCast(std.mem.indexOfScalar(u8, inside_brace, '=').?)),
+        @as(u32, @intCast(std.mem.findScalar(u8, inside_brace, '=').?)),
         nested_result.complete.end,
     );
 }
@@ -3254,12 +3267,12 @@ test "return endpoints preserve semicolon and unmatched brace distinctions" {
         null,
     );
     try std.testing.expectEqual(
-        @as(u32, @intCast(std.mem.indexOf(u8, arrow_source, "=>").?)),
+        @as(u32, @intCast(std.mem.find(u8, arrow_source, "=>").?)),
         arrow.complete.end,
     );
 
     const unmatched = "string } ; body";
-    const semicolon: u32 = @intCast(std.mem.indexOfScalar(u8, unmatched, ';').?);
+    const semicolon: u32 = @intCast(std.mem.findScalar(u8, unmatched, ';').?);
     const named = try scanAdmissionEndpointCore(
         std.testing.allocator,
         unmatched,
@@ -3280,8 +3293,8 @@ test "return endpoints preserve semicolon and unmatched brace distinctions" {
     try std.testing.expectEqual(semicolon, interface.complete.end);
 
     const full_interface = "interface X extends { field: any }";
-    const extends_end: u32 = @intCast(std.mem.indexOf(u8, full_interface, "extends").? + "extends".len);
-    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, full_interface, '{').?);
+    const extends_end: u32 = @intCast(std.mem.find(u8, full_interface, "extends").? + "extends".len);
+    const body_start: u32 = @intCast(std.mem.findScalar(u8, full_interface, '{').?);
     const full_result = try scanAdmissionEndpointCore(
         std.testing.allocator,
         full_interface,
@@ -3306,7 +3319,7 @@ test "assertion endpoint keeps object braces and stops at expression delimiters"
         null,
     );
     try std.testing.expectEqual(
-        @as(u32, @intCast(std.mem.indexOfScalar(u8, source, ',').?)),
+        @as(u32, @intCast(std.mem.findScalar(u8, source, ',').?)),
         result.complete.end,
     );
 }
@@ -3655,4 +3668,12 @@ test "classification rejects invalid removed spans before publishing the tail" {
     try std.testing.expectEqual(@as(usize, 2), collector.items().len);
     try std.testing.expectEqual(AdmissionKind.any_type, collector.items()[0].kind);
     try std.testing.expectEqual(AdmissionKind.void_type, collector.items()[1].kind);
+}
+
+test "decodeStringLiteralContent UTF-8 encodes hex escapes above 0x7F" {
+    const allocator = std.testing.allocator;
+    const decoded = try decodeStringLiteralContent(allocator, "caf\\xe9\\x80\\xff");
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings("caf\xC3\xA9\xC2\x80\xC3\xBF", decoded);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(decoded));
 }

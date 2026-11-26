@@ -120,12 +120,12 @@ test "build embeds attest, contract, and public key" {
     var doc = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &sampleSha());
     defer doc.deinit(testing.allocator);
 
-    try testing.expect(std.mem.indexOf(u8, doc.body, "\"v\":\"" ++ envelope.version_tag ++ "\"") != null);
-    try testing.expect(std.mem.indexOf(u8, doc.body, "\"attest\":\"eyJh.eyJ2.signature\"") != null);
-    try testing.expect(std.mem.indexOf(u8, doc.body, "\"contract\":{\"version\":14") != null);
-    try testing.expect(std.mem.indexOf(u8, doc.body, "\"publicKey\":{") != null);
-    try testing.expect(std.mem.indexOf(u8, doc.body, "\"kty\":\"OKP\"") != null);
-    try testing.expect(std.mem.indexOf(u8, doc.body, "\"crv\":\"Ed25519\"") != null);
+    try testing.expect(std.mem.find(u8, doc.body, "\"v\":\"" ++ envelope.version_tag ++ "\"") != null);
+    try testing.expect(std.mem.find(u8, doc.body, "\"attest\":\"eyJh.eyJ2.signature\"") != null);
+    try testing.expect(std.mem.find(u8, doc.body, "\"contract\":{\"version\":14") != null);
+    try testing.expect(std.mem.find(u8, doc.body, "\"publicKey\":{") != null);
+    try testing.expect(std.mem.find(u8, doc.body, "\"kty\":\"OKP\"") != null);
+    try testing.expect(std.mem.find(u8, doc.body, "\"crv\":\"Ed25519\"") != null);
 }
 
 test "identical inputs produce byte-identical bodies and ETags" {
@@ -190,7 +190,7 @@ test "kid in publicKey equals envelope.keyFingerprint of the embedded x" {
 
     const expected_fp = envelope.keyFingerprint(samplePubKey());
     const needle = "\"kid\":\"";
-    const start = std.mem.indexOf(u8, doc.body, needle).?;
+    const start = std.mem.find(u8, doc.body, needle).?;
     const after = start + needle.len;
     try testing.expectEqualSlices(u8, &expected_fp, doc.body[after .. after + 64]);
 }

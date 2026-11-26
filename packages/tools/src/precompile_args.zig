@@ -72,7 +72,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         // A flag this parser does not know is refused by name. Taking it as the
         // handler or output path would hide a misspelled flag behind an
         // unrelated error or none.
-        if (std.mem.startsWith(u8, arg, "--")) {
+        if (arg.len > 1 and arg[0] == '-') {
             errPrint("Unknown flag: {s}\n", .{arg});
             return error.UnknownFlag;
         }
@@ -218,15 +218,25 @@ test "parsePrecompileArgSlice rejects missing module manifest path" {
     try std.testing.expectError(error.MissingArgument, parsePrecompileArgSlice(&argv));
 }
 
+test "parsePrecompileArgSlice rejects unknown single-dash flags" {
+    const argv = [_][]const u8{ "-z", "handler.ts", "embedded_handler.zig" };
+    try std.testing.expectError(error.UnknownFlag, parsePrecompileArgSlice(&argv));
+}
+
 pub fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
     var args_iter = std.process.Args.Iterator.init(args_vector);
     defer args_iter.deinit();
 
     var args = std.ArrayList([]const u8).empty;
-    errdefer args.deinit(allocator);
+    errdefer {
+        for (args.items) |item| allocator.free(item);
+        args.deinit(allocator);
+    }
 
     while (args_iter.next()) |arg| {
-        try args.append(allocator, try allocator.dupe(u8, arg));
+        const owned = try allocator.dupe(u8, arg);
+        errdefer allocator.free(owned);
+        try args.append(allocator, owned);
     }
     return args.toOwnedSlice(allocator);
 }

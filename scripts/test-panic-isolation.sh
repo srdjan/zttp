@@ -32,7 +32,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-TMP_DIR=$(mktemp -d -t zttp-panic-XXXXXX)
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/zttp-panic.XXXXXX")
 APP_DIR="$TMP_DIR/panic-app"
 SERVER_LOG="$TMP_DIR/server.log"
 SRV_PID=""

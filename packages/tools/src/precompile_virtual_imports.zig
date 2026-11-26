@@ -73,32 +73,24 @@ pub fn validateVirtualModuleImports(
             continue;
         };
 
-        var name_buf: [32][]const u8 = undefined;
-        var name_count: usize = 0;
-        var j: u8 = 0;
-        while (j < import_decl.specifiers_count) : (j += 1) {
-            const spec_idx = view.getListIndex(import_decl.specifiers_start, j);
+        for (0..import_decl.specifiers_count) |j| {
+            const spec_idx = view.getListIndex(import_decl.specifiers_start, @intCast(j));
             const spec = view.getImportSpec(spec_idx) orelse continue;
             const imported_name = resolveImportedAtomName(spec.imported_atom, atoms) orelse continue;
-            if (name_count < name_buf.len) {
-                name_buf[name_count] = imported_name;
-                name_count += 1;
+            if (zts.modules.validateImports(binding, &.{imported_name})) |missing| {
+                if (diagnostic_out) |out| out.* = .{
+                    .kind = .missing_export,
+                    .module = module_str,
+                    .missing_export = missing,
+                    .line = line,
+                    .column = column,
+                };
+                if (!builtin.is_test) debugPrint(
+                    "import error: module '{s}' does not export '{s}'\n  --> {s}\n",
+                    .{ module_str, missing, filename },
+                );
+                return error.InvalidImportSpecifier;
             }
-        }
-
-        if (zts.modules.validateImports(binding, name_buf[0..name_count])) |missing| {
-            if (diagnostic_out) |out| out.* = .{
-                .kind = .missing_export,
-                .module = module_str,
-                .missing_export = missing,
-                .line = line,
-                .column = column,
-            };
-            if (!builtin.is_test) debugPrint(
-                "import error: module '{s}' does not export '{s}'\n  --> {s}\n",
-                .{ module_str, missing, filename },
-            );
-            return error.InvalidImportSpecifier;
         }
     }
 }
@@ -142,4 +134,40 @@ pub fn virtualImportJsonDiagnostic(
         .suggestion = suggestion,
         .message_owned = true,
     };
+}
+
+test "validateVirtualModuleImports checks specifiers past the 32nd" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import {
+        \\  match as m0, match as m1, match as m2, match as m3,
+        \\  match as m4, match as m5, match as m6, match as m7,
+        \\  match as m8, match as m9, match as m10, match as m11,
+        \\  match as m12, match as m13, match as m14, match as m15,
+        \\  match as m16, match as m17, match as m18, match as m19,
+        \\  match as m20, match as m21, match as m22, match as m23,
+        \\  match as m24, match as m25, match as m26, match as m27,
+        \\  match as m28, match as m29, match as m30, match as m31,
+        \\  nonexistentExport
+        \\} from "zttp:core";
+        \\function handler(req: Request): Response {
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var atoms = zts.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var p = try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer p.deinit();
+    p.setAtomTable(&atoms);
+    _ = try p.parse();
+    const view = zts.IrView.fromIRStore(&p.nodes, &p.constants);
+
+    var diag: ?VirtualImportDiagnostic = null;
+    try std.testing.expectError(
+        error.InvalidImportSpecifier,
+        validateVirtualModuleImports(view, &atoms, "handler.ts", &diag),
+    );
+    try std.testing.expect(diag != null);
+    try std.testing.expectEqual(diagnostic_catalog.VirtualImportKind.missing_export, diag.?.kind);
+    try std.testing.expectEqualStrings("nonexistentExport", diag.?.missing_export.?);
 }

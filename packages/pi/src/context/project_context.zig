@@ -212,8 +212,8 @@ test "reads a single AGENTS.md at cwd" {
     const result = (try loadFromDir(testing.allocator, tree.abs_path, .{})) orelse return error.TestExpected;
     defer testing.allocator.free(result);
 
-    try testing.expect(std.mem.indexOf(u8, result, "AGENTS.md") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "project rule X") != null);
+    try testing.expect(std.mem.find(u8, result, "AGENTS.md") != null);
+    try testing.expect(std.mem.find(u8, result, "project rule X") != null);
 }
 
 test "reads both AGENTS.md and CLAUDE.md at the same level" {
@@ -226,8 +226,8 @@ test "reads both AGENTS.md and CLAUDE.md at the same level" {
     const result = (try loadFromDir(testing.allocator, tree.abs_path, .{})) orelse return error.TestExpected;
     defer testing.allocator.free(result);
 
-    const a = std.mem.indexOf(u8, result, "AAA") orelse return error.TestExpected;
-    const b = std.mem.indexOf(u8, result, "BBB") orelse return error.TestExpected;
+    const a = std.mem.find(u8, result, "AAA") orelse return error.TestExpected;
+    const b = std.mem.find(u8, result, "BBB") orelse return error.TestExpected;
     try testing.expect(a < b); // AGENTS before CLAUDE
 }
 
@@ -246,8 +246,8 @@ test "walks upward and emits outer-first" {
     const result = (try loadFromDir(testing.allocator, sub_abs, .{})) orelse return error.TestExpected;
     defer testing.allocator.free(result);
 
-    const root_pos = std.mem.indexOf(u8, result, "ROOT") orelse return error.TestExpected;
-    const sub_pos = std.mem.indexOf(u8, result, "SUB") orelse return error.TestExpected;
+    const root_pos = std.mem.find(u8, result, "ROOT") orelse return error.TestExpected;
+    const sub_pos = std.mem.find(u8, result, "SUB") orelse return error.TestExpected;
     try testing.expect(root_pos < sub_pos);
 }
 
@@ -266,8 +266,8 @@ test "stops at .git directory inclusive" {
     const result = (try loadFromDir(testing.allocator, inner_abs, .{})) orelse return error.TestExpected;
     defer testing.allocator.free(result);
 
-    try testing.expect(std.mem.indexOf(u8, result, "REPO_ROOT") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "INNER") != null);
+    try testing.expect(std.mem.find(u8, result, "REPO_ROOT") != null);
+    try testing.expect(std.mem.find(u8, result, "INNER") != null);
 }
 
 test "oversized instruction file fails explicitly" {
@@ -319,6 +319,6 @@ test "a tree without .git does not read a parent AGENTS.md" {
     const result = (try loadFromDir(testing.allocator, sub_abs, .{})) orelse return error.TestExpected;
     defer testing.allocator.free(result);
 
-    try testing.expect(std.mem.indexOf(u8, result, "SUB") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "PARENT") == null);
+    try testing.expect(std.mem.find(u8, result, "SUB") != null);
+    try testing.expect(std.mem.find(u8, result, "PARENT") == null);
 }

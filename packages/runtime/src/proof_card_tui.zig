@@ -326,6 +326,11 @@ fn writeStatusBar(
 
 const LineList = std.ArrayList([]u8);
 
+fn appendOwnedLine(allocator: std.mem.Allocator, lines: *LineList, line: []u8) !void {
+    errdefer allocator.free(line);
+    try lines.append(allocator, line);
+}
+
 fn buildPropertiesPane(
     allocator: std.mem.Allocator,
     card: *const review.ProofCard,
@@ -337,22 +342,22 @@ fn buildPropertiesPane(
         const proven = @field(card.current.properties, meta.field);
         const glyph: []const u8 = if (proven) "[+]" else "[-]";
         const line = try allocator.print("{s} {s}", .{ glyph, meta.label });
-        try lines.append(allocator, line);
+        try appendOwnedLine(allocator, &lines, line);
     }
 
     const proof_line = try allocator.print("proof: {s}", .{card.current.proof_level.toString()});
-    try lines.append(allocator, proof_line);
+    try appendOwnedLine(allocator, &lines, proof_line);
 
     // Active specs render directly under the inferred properties. Failing
     // specs use [-]; passing specs use [*] to distinguish them from the
     // inferred property dots.
     if (card.current.declared_specs.len > 0) {
-        try lines.append(allocator, try allocator.dupe(u8, ""));
-        try lines.append(allocator, try allocator.dupe(u8, "Specs (active)"));
+        try appendOwnedLine(allocator, &lines, try allocator.dupe(u8, ""));
+        try appendOwnedLine(allocator, &lines, try allocator.dupe(u8, "Specs (active)"));
         for (card.current.declared_specs) |s| {
             const glyph: []const u8 = if (s.discharged) "[*]" else "[-]";
             const line = try allocator.print("{s} spec {s}", .{ glyph, s.name });
-            try lines.append(allocator, line);
+            try appendOwnedLine(allocator, &lines, line);
         }
     }
     return lines;
@@ -370,7 +375,7 @@ fn buildSurfacePane(
     for (card.current.routes) |r| {
         const suffix: []const u8 = if (r.is_prefix) " (prefix)" else "";
         const line = try allocator.print("  {s}{s}", .{ r.pattern, suffix });
-        try lines.append(allocator, line);
+        try appendOwnedLine(allocator, &lines, line);
     }
 
     try appendStringSection(allocator, &lines, "env", card.current.env_keys);
@@ -390,7 +395,7 @@ fn appendStringSection(
     try appendCountedHeading(allocator, lines, name, items.len);
     for (items) |item| {
         const line = try allocator.print("  {s}", .{item});
-        try lines.append(allocator, line);
+        try appendOwnedLine(allocator, lines, line);
     }
 }
 
@@ -401,7 +406,7 @@ fn appendCountedHeading(
     count: usize,
 ) !void {
     const line = try allocator.print("{s} ({d})", .{ name, count });
-    try lines.append(allocator, line);
+    try appendOwnedLine(allocator, lines, line);
 }
 
 fn freeLines(allocator: std.mem.Allocator, lines: *LineList) void {
@@ -490,7 +495,6 @@ test "writeProofCardFrame: structure and content" {
     const card = ProofCard{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "us-east",
         .current = &current,
         .baseline = null,
         .delta = &delta,
@@ -502,33 +506,33 @@ test "writeProofCardFrame: structure and content" {
     const out = aw.writer.buffered();
 
     // Frame headers and panes are present.
-    try std.testing.expect(std.mem.indexOf(u8, out, "Properties") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Surface") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Requests") == null);
+    try std.testing.expect(std.mem.find(u8, out, "Properties") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Surface") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Requests") == null);
 
     // Property glyphs reflect proven/not-proven flags.
-    try std.testing.expect(std.mem.indexOf(u8, out, "[+] read-only") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "[-] retry-safe") != null);
+    try std.testing.expect(std.mem.find(u8, out, "[+] read-only") != null);
+    try std.testing.expect(std.mem.find(u8, out, "[-] retry-safe") != null);
 
     // Surface tree heading + entries.
-    try std.testing.expect(std.mem.indexOf(u8, out, "routes (2)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "/healthz") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "/api (prefix)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "env (2)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "DATABASE_URL") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "egress (1)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "api.example.com") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "capabilities (1)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "clock") != null);
+    try std.testing.expect(std.mem.find(u8, out, "routes (2)") != null);
+    try std.testing.expect(std.mem.find(u8, out, "/healthz") != null);
+    try std.testing.expect(std.mem.find(u8, out, "/api (prefix)") != null);
+    try std.testing.expect(std.mem.find(u8, out, "env (2)") != null);
+    try std.testing.expect(std.mem.find(u8, out, "DATABASE_URL") != null);
+    try std.testing.expect(std.mem.find(u8, out, "egress (1)") != null);
+    try std.testing.expect(std.mem.find(u8, out, "api.example.com") != null);
+    try std.testing.expect(std.mem.find(u8, out, "capabilities (1)") != null);
+    try std.testing.expect(std.mem.find(u8, out, "clock") != null);
 
     // Status bar shows verdict, truncated contract sha, baseline note.
-    try std.testing.expect(std.mem.indexOf(u8, out, "Verdict: safe") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Contract: sha-frame-test-12345678") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Baseline: (first deploy)") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Verdict: safe") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Contract: sha-frame-test-12345678") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Baseline: (first deploy)") != null);
 
     // Border characters are present.
-    try std.testing.expect(std.mem.indexOf(u8, out, "+--") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "|") != null);
+    try std.testing.expect(std.mem.find(u8, out, "+--") != null);
+    try std.testing.expect(std.mem.find(u8, out, "|") != null);
 }
 
 test "writeProofCardFrame: every row has identical visible width" {
@@ -542,7 +546,6 @@ test "writeProofCardFrame: every row has identical visible width" {
     const card = ProofCard{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "us-east",
         .current = &current,
         .baseline = null,
         .delta = &delta,
@@ -574,7 +577,6 @@ test "writeProofCardFrame: proof trace block surfaces failing properties and kee
     const card = ProofCard{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "us-east",
         .current = &current,
         .baseline = null,
         .delta = &delta,
@@ -591,8 +593,8 @@ test "writeProofCardFrame: proof trace block surfaces failing properties and kee
     const out = aw.writer.buffered();
 
     // The failing property appears with its reasoning; the passing one does not.
-    try std.testing.expect(std.mem.indexOf(u8, out, "Proof trace: how each red proof broke") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Date.now() reads a clock.") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Proof trace: how each red proof broke") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Date.now() reads a clock.") != null);
 
     // Every rendered row still has identical visible width.
     var iter = std.mem.splitScalar(u8, out, '\n');
@@ -613,7 +615,6 @@ test "writeProofCardFrame: resisted block surfaces a held flow proof and keeps w
     const card = ProofCard{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "us-east",
         .current = &current,
         .baseline = null,
         .delta = &delta,
@@ -629,11 +630,11 @@ test "writeProofCardFrame: resisted block surfaces a held flow proof and keeps w
     try writeProofCardFrame(allocator, &card, &aw.writer, .{ .width = 100, .proof_trace_json = trace_json });
     const out = aw.writer.buffered();
 
-    try std.testing.expect(std.mem.indexOf(u8, out, "Resisted: the attack each proof defeats") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "+injection-safe") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "tried: 1; DROP TABLE users--") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "validated by schemaCompile() at L7") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "the validator clears the taint") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Resisted: the attack each proof defeats") != null);
+    try std.testing.expect(std.mem.find(u8, out, "+injection-safe") != null);
+    try std.testing.expect(std.mem.find(u8, out, "tried: 1; DROP TABLE users--") != null);
+    try std.testing.expect(std.mem.find(u8, out, "validated by schemaCompile() at L7") != null);
+    try std.testing.expect(std.mem.find(u8, out, "the validator clears the taint") != null);
 
     // Every rendered row still has identical visible width.
     var iter = std.mem.splitScalar(u8, out, '\n');
@@ -654,7 +655,6 @@ test "writeProofCardFrame: recompile_ms surfaces in properties header" {
     const card = ProofCard{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "us-east",
         .current = &current,
         .baseline = null,
         .delta = &delta,
@@ -665,7 +665,7 @@ test "writeProofCardFrame: recompile_ms surfaces in properties header" {
     try writeProofCardFrame(allocator, &card, &aw.writer, .{ .recompile_ms = 145 });
     const out = aw.writer.buffered();
 
-    try std.testing.expect(std.mem.indexOf(u8, out, "145ms recompile") != null);
+    try std.testing.expect(std.mem.find(u8, out, "145ms recompile") != null);
 }
 
 test "writeProofCardFrame: renders Why row when a demoted property has a cause" {
@@ -694,7 +694,6 @@ test "writeProofCardFrame: renders Why row when a demoted property has a cause" 
     const card = ProofCard{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "local",
         .current = &current,
         .baseline = &baseline,
         .delta = &delta,
@@ -706,7 +705,7 @@ test "writeProofCardFrame: renders Why row when a demoted property has a cause" 
     try writeProofCardFrame(allocator, &card, &aw.writer, .{});
     const out = aw.writer.buffered();
 
-    try std.testing.expect(std.mem.indexOf(u8, out, "Why: -deterministic at src/handler.ts:14: Date.now()") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Why: -deterministic at src/handler.ts:14: Date.now()") != null);
 }
 
 test "writeProofCardFrame: the Why row names the dependency file of a cause, not the handler" {
@@ -733,7 +732,6 @@ test "writeProofCardFrame: the Why row names the dependency file of a cause, not
     const card = ProofCard{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "local",
         .current = &current,
         .baseline = &baseline,
         .delta = &delta,
@@ -745,8 +743,8 @@ test "writeProofCardFrame: the Why row names the dependency file of a cause, not
     try writeProofCardFrame(allocator, &card, &aw.writer, .{});
     const out = aw.writer.buffered();
 
-    try std.testing.expect(std.mem.indexOf(u8, out, "Why: -deterministic at src/dep.ts:2: a branch") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "src/handler.ts:2") == null);
+    try std.testing.expect(std.mem.find(u8, out, "Why: -deterministic at src/dep.ts:2: a branch") != null);
+    try std.testing.expect(std.mem.find(u8, out, "src/handler.ts:2") == null);
 }
 
 test "writeProofCardFrame: no Why row when there are no demotions" {
@@ -768,7 +766,6 @@ test "writeProofCardFrame: no Why row when there are no demotions" {
     const card = ProofCard{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "local",
         .current = &current,
         .baseline = null,
         .delta = &delta,
@@ -780,7 +777,7 @@ test "writeProofCardFrame: no Why row when there are no demotions" {
     try writeProofCardFrame(allocator, &card, &aw.writer, .{});
     const out = aw.writer.buffered();
 
-    try std.testing.expect(std.mem.indexOf(u8, out, "Why:") == null);
+    try std.testing.expect(std.mem.find(u8, out, "Why:") == null);
 }
 
 test "writeProofCardFrame: demotion without a matching cause renders no Why row" {
@@ -799,7 +796,6 @@ test "writeProofCardFrame: demotion without a matching cause renders no Why row"
     const card = ProofCard{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "local",
         .current = &current,
         .baseline = &baseline,
         .delta = &delta,
@@ -811,7 +807,7 @@ test "writeProofCardFrame: demotion without a matching cause renders no Why row"
     try writeProofCardFrame(allocator, &card, &aw.writer, .{});
     const out = aw.writer.buffered();
 
-    try std.testing.expect(std.mem.indexOf(u8, out, "Why:") == null);
+    try std.testing.expect(std.mem.find(u8, out, "Why:") == null);
 }
 
 const TestDemote = enum { none, deterministic, input_validated };
@@ -851,7 +847,6 @@ fn renderForTest(
     const card = ProofCard{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "local",
         .current = &current,
         .baseline = baseline_ptr,
         .delta = &delta,
@@ -878,8 +873,8 @@ test "writeProofCardFrame: renders Counterexample block with suggestion" {
     try renderForTest(allocator, .deterministic, cx, &aw);
     const out = aw.writer.buffered();
 
-    try std.testing.expect(std.mem.indexOf(u8, out, "Counterexample: -deterministic at src/handler.ts:14: Date.now()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "why: remove Date.now()") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Counterexample: -deterministic at src/handler.ts:14: Date.now()") != null);
+    try std.testing.expect(std.mem.find(u8, out, "why: remove Date.now()") != null);
 }
 
 test "writeProofCardFrame: omits Counterexample block when card has none" {
@@ -887,7 +882,7 @@ test "writeProofCardFrame: omits Counterexample block when card has none" {
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     try renderForTest(allocator, .none, null, &aw);
-    try std.testing.expect(std.mem.indexOf(u8, aw.writer.buffered(), "Counterexample:") == null);
+    try std.testing.expect(std.mem.find(u8, aw.writer.buffered(), "Counterexample:") == null);
 }
 
 test "writeProofCardFrame: two panes at every width, status bar rows keep the width" {
@@ -904,7 +899,6 @@ test "writeProofCardFrame: two panes at every width, status bar rows keep the wi
     const card = ProofCard{
         .handler_path = "src/handler.ts",
         .service_name = "demo",
-        .region = "us-east",
         .current = &current,
         .baseline = &baseline,
         .delta = &delta,
@@ -929,6 +923,6 @@ test "writeProofCardFrame: two panes at every width, status bar rows keep the wi
             }
         }
         try std.testing.expect(!first_border);
-        try std.testing.expect(std.mem.indexOf(u8, out, "Baseline: sha-frame-test-12345678") != null);
+        try std.testing.expect(std.mem.find(u8, out, "Baseline: sha-frame-test-12345678") != null);
     }
 }

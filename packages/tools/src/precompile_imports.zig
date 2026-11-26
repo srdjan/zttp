@@ -113,9 +113,11 @@ pub fn scanSource(
     path: []const u8,
 ) error{ OutOfMemory, Unparseable }!SourceScan {
     const owned = try allocator.dupe(u8, source);
-    errdefer allocator.free(owned);
+    var file_owns_source = false;
+    errdefer if (!file_owns_source) allocator.free(owned);
     var file: ImportedFile = undefined;
     file.loadOwned(allocator, owned, path) catch return error.Unparseable;
+    file_owns_source = true;
     defer file.deinit();
 
     const base_dir = std.fs.path.dirname(path) orelse ".";
@@ -128,7 +130,6 @@ pub fn scanSource(
         if (rec.resolution != .unresolved) continue;
         if (!isRelativeSpecifier(rec.module_specifier)) continue;
         const target = try resolveCheckImportPath(allocator, base_dir, rec.module_specifier);
-        errdefer allocator.free(target);
         var seen = false;
         for (found.items) |item| {
             if (std.mem.eql(u8, item, target)) seen = true;
@@ -137,6 +138,7 @@ pub fn scanSource(
             allocator.free(target);
             continue;
         }
+        errdefer allocator.free(target);
         try found.append(allocator, target);
     }
     return .{
@@ -561,4 +563,23 @@ fn scanImportedFileTree(
         }
     }
     return .clean;
+}
+
+test "scanSource handles post-load OOM cleanly without double-freeing source" {
+    const source =
+        \\import { a } from "./a.ts";
+        \\import { b } from "./b.ts";
+        \\function handler(req: Request): Response {
+        \\  return Response.text(a() + b());
+        \\}
+    ;
+    var measure = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var baseline = try scanSource(measure.allocator(), source, "dir/handler.ts");
+    baseline.deinit(measure.allocator());
+    try std.testing.expect(measure.alloc_index > 2);
+
+    var fail_late = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = measure.alloc_index - 1,
+    });
+    try std.testing.expectError(error.OutOfMemory, scanSource(fail_late.allocator(), source, "dir/handler.ts"));
 }

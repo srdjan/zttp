@@ -107,7 +107,7 @@ pub fn collectFaultViolations(
     violations: *std.ArrayList(PropertyViolation),
     fc_diags: []const fault_cov.Diagnostic,
     tests: []const GeneratedTest,
-) void {
+) !void {
     for (fc_diags) |diag| {
         if (diag.severity != .warning) continue;
         // One arm for each kind, so a kind added later is a compile error here
@@ -128,7 +128,7 @@ pub fn collectFaultViolations(
             }
         }
 
-        violations.append(allocator, .{
+        try violations.append(allocator, .{
             .kind = .fault_uncovered,
             .message = diag.message,
             .help = help,
@@ -136,7 +136,7 @@ pub fn collectFaultViolations(
             .loc_col = 0,
             .counterexample_name = cx_name,
             .counterexample_index = cx_idx,
-        }) catch {};
+        });
     }
 }
 
@@ -149,7 +149,7 @@ pub fn collectFlowViolations(
     violations: *std.ArrayList(PropertyViolation),
     flow_diags: []const flow_checker_mod.Diagnostic,
     ir_view: IrView,
-) void {
+) !void {
     for (flow_diags) |diag| {
         const kind: ViolationKind = switch (diag.kind) {
             .unvalidated_input_in_egress => .injection_unsafe,
@@ -175,29 +175,33 @@ pub fn collectFlowViolations(
         // Dupe strings: flow messages may be allocated by messageWithReason and
         // freed when the FlowChecker deinits, which happens before JSONL/summary
         // generation. owns_strings = true signals the caller to free them.
-        const message = allocator.dupe(u8, diag.message) catch continue;
-        const help: ?[]const u8 = if (diag.help) |h|
-            allocator.dupe(u8, h) catch {
-                allocator.free(message);
-                continue;
-            }
-        else
-            null;
-
-        violations.append(allocator, .{
-            .kind = kind,
-            .message = message,
-            .help = help,
-            .loc_line = loc_line,
-            .loc_col = loc_col,
-            .counterexample_name = null,
-            .counterexample_index = null,
-            .owns_strings = true,
-        }) catch {
-            allocator.free(message);
-            if (help) |h| allocator.free(h);
-        };
+        try appendFlowViolation(allocator, violations, kind, diag, loc_line, loc_col);
     }
+}
+
+fn appendFlowViolation(
+    allocator: std.mem.Allocator,
+    violations: *std.ArrayList(PropertyViolation),
+    kind: ViolationKind,
+    diag: flow_checker_mod.Diagnostic,
+    loc_line: u32,
+    loc_col: u32,
+) !void {
+    const message = try allocator.dupe(u8, diag.message);
+    errdefer allocator.free(message);
+    const help: ?[]const u8 = if (diag.help) |h| try allocator.dupe(u8, h) else null;
+    errdefer if (help) |h| allocator.free(h);
+
+    try violations.append(allocator, .{
+        .kind = kind,
+        .message = message,
+        .help = help,
+        .loc_line = loc_line,
+        .loc_col = loc_col,
+        .counterexample_name = null,
+        .counterexample_index = null,
+        .owns_strings = true,
+    });
 }
 
 /// Append violations derived from HandlerVerifier diagnostics.
@@ -211,7 +215,7 @@ pub fn collectVerifierViolations(
     violations: *std.ArrayList(PropertyViolation),
     verifier_diags: []const handler_verifier_mod.Diagnostic,
     ir_view: IrView,
-) void {
+) !void {
     for (verifier_diags) |diag| {
         const kind: ViolationKind = switch (diag.kind) {
             .unchecked_result_value => .result_unsafe,
@@ -226,7 +230,7 @@ pub fn collectVerifierViolations(
             loc_col = loc.column;
         }
 
-        violations.append(allocator, .{
+        try violations.append(allocator, .{
             .kind = kind,
             .message = diag.message,
             .help = diag.help,
@@ -239,8 +243,21 @@ pub fn collectVerifierViolations(
             // handler path as a counterexample.
             .source_module = if (kind == .result_unsafe and !diag.route_root) diag.source_module else null,
             .source_func = if (kind == .result_unsafe and !diag.route_root) diag.source_func else null,
-        }) catch {};
+        });
     }
+}
+
+/// Match a PathGenerator stub module name (which may omit the `"zttp:"` prefix,
+/// e.g. `"auth"`) against a verifier source_module (e.g. `"zttp:auth"`).
+fn moduleMatches(stub_module: []const u8, source_module: []const u8) bool {
+    if (std.mem.eql(u8, stub_module, source_module)) return true;
+    if (std.mem.startsWith(u8, source_module, "zttp:")) {
+        return std.mem.eql(u8, source_module["zttp:".len..], stub_module);
+    }
+    if (std.mem.startsWith(u8, stub_module, "zttp:")) {
+        return std.mem.eql(u8, stub_module["zttp:".len..], source_module);
+    }
+    return false;
 }
 
 /// Second-pass counterexample fill for result_unsafe violations.
@@ -271,14 +288,13 @@ pub fn fillVerifierCounterexamples(
             for (t.io_stubs.items) |stub| {
                 // PathGenerator stubs use short module names (e.g. "auth"),
                 // while the verifier stores the full specifier ("zttp:auth").
-                const mod_match = std.mem.eql(u8, stub.module, src_mod) or
-                    std.mem.endsWith(u8, src_mod, stub.module);
+                const mod_match = moduleMatches(stub.module, src_mod);
                 // TODO(v0.1): Substring heuristic for matching failure results.
                 // Replace with structured JSON field comparison once stub result
                 // types are promoted to typed structs.
                 if (mod_match and
                     std.mem.eql(u8, stub.func, src_fn) and
-                    std.mem.indexOf(u8, stub.result_json, "\"ok\":false") != null)
+                    std.mem.find(u8, stub.result_json, "\"ok\":false") != null)
                 {
                     v.counterexample_name = t.name;
                     v.counterexample_index = i;
@@ -293,8 +309,7 @@ pub fn fillVerifierCounterexamples(
         // path. We synthesize the failure by overriding the stub in the output.
         outer2: for (tests, 0..) |t, i| {
             for (t.io_stubs.items) |stub| {
-                const mod_match = std.mem.eql(u8, stub.module, src_mod) or
-                    std.mem.endsWith(u8, src_mod, stub.module);
+                const mod_match = moduleMatches(stub.module, src_mod);
                 if (mod_match and std.mem.eql(u8, stub.func, src_fn)) {
                     v.counterexample_name = t.name;
                     v.counterexample_index = i;
@@ -349,9 +364,9 @@ pub fn writeViolationsJsonl(
         try writer.writeAll("\"}\n");
 
         // Request
-        try writer.writeAll("{\"type\":\"request\",\"method\":\"");
-        try writer.writeAll(test_case.method);
-        try writer.writeAll("\",\"url\":");
+        try writer.writeAll("{\"type\":\"request\",\"method\":");
+        try handler_contract.writeJsonString(writer, test_case.method);
+        try writer.writeAll(",\"url\":");
         try handler_contract.writeJsonString(writer, test_case.url);
         if (test_case.has_auth_header) {
             try writer.writeAll(",\"headers\":{\"authorization\":\"Bearer test-token\"},\"body\":null}\n");
@@ -362,13 +377,16 @@ pub fn writeViolationsJsonl(
         // IO stubs. For synthetic failure counterexamples, override the target
         // function's result to the failure value so the test demonstrates the bug.
         for (test_case.io_stubs.items) |stub| {
+            const mod_match = if (v.source_module) |sm| moduleMatches(stub.module, sm) else true;
             const is_override = v.counterexample_force_failure and
-                if (v.source_func) |sf| std.mem.eql(u8, stub.func, sf) else false;
+                mod_match and
+                (if (v.source_func) |sf| std.mem.eql(u8, stub.func, sf) else false);
             const result_json = if (is_override) "{\"ok\":false,\"error\":\"test-error\"}" else stub.result_json;
-            try writer.print(
-                "{{\"type\":\"io\",\"seq\":{d},\"module\":\"{s}\",\"fn\":\"{s}\",\"result\":{s}}}\n",
-                .{ stub.seq, stub.module, stub.func, result_json },
-            );
+            try writer.print("{{\"type\":\"io\",\"seq\":{d},\"module\":", .{stub.seq});
+            try handler_contract.writeJsonString(writer, stub.module);
+            try writer.writeAll(",\"fn\":");
+            try handler_contract.writeJsonString(writer, stub.func);
+            try writer.print(",\"result\":{s}}}\n", .{result_json});
         }
 
         // Expected response (the incorrect status the buggy handler returns)
@@ -495,10 +513,10 @@ test "formatViolationsSummary includes path when provided" {
     try formatViolationsSummary(&aw.writer, &violations, "handler.ts", "handler.violations.jsonl");
     buf = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "FAULT COVERAGE GAP") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "(see handler.violations.jsonl)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "1 counterexample test(s) written to handler.violations.jsonl") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "PASS on the buggy handler") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "FAULT COVERAGE GAP") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "(see handler.violations.jsonl)") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "1 counterexample test(s) written to handler.violations.jsonl") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "PASS on the buggy handler") != null);
 }
 
 test "collectFaultViolations keeps an unknown-status warning and drops upstream information" {
@@ -525,7 +543,7 @@ test "collectFaultViolations keeps an unknown-status warning and drops upstream 
     };
     var violations: std.ArrayList(PropertyViolation) = .empty;
     defer violations.deinit(allocator);
-    collectFaultViolations(allocator, &violations, &diags, &.{});
+    try collectFaultViolations(allocator, &violations, &diags, &.{});
     try std.testing.expectEqual(@as(usize, 1), violations.items.len);
     try std.testing.expectEqualStrings(
         "the failure path returns a status the analysis cannot read",
@@ -569,7 +587,7 @@ test "fault violation with counterexample emits JSONL" {
 
     var violations: std.ArrayList(PropertyViolation) = .empty;
     defer violations.deinit(allocator);
-    collectFaultViolations(allocator, &violations, &fc_diags, &tests);
+    try collectFaultViolations(allocator, &violations, &fc_diags, &tests);
 
     try std.testing.expectEqual(@as(usize, 1), violations.items.len);
     try std.testing.expectEqual(ViolationKind.fault_uncovered, violations.items[0].kind);
@@ -586,10 +604,10 @@ test "fault violation with counterexample emits JSONL" {
     buf = aw.toArrayList();
 
     try std.testing.expect(buf.items.len > 0);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "fault-uncovered-0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"POST\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "jwtVerify") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"status\":200") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "fault-uncovered-0") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\"POST\"") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "jwtVerify") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\"status\":200") != null);
 }
 
 test "fillVerifierCounterexamples synthetic fallback when no failure path exists" {
@@ -644,10 +662,10 @@ test "fillVerifierCounterexamples synthetic fallback when no failure path exists
     try writeViolationsJsonl(&aw.writer, allocator, violations.items, &tests);
     buf = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "result-unsafe-0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "result-unsafe-0") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\"ok\":false") != null);
     // Original success result must not appear
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"ok\":true") == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\"ok\":true") == null);
 }
 
 test "routed Result violation cannot borrow a handler counterexample" {
@@ -700,7 +718,7 @@ test "routed Result violation cannot borrow a handler counterexample" {
 
     var violations: std.ArrayList(PropertyViolation) = .empty;
     defer violations.deinit(allocator);
-    collectVerifierViolations(allocator, &violations, verifier.getDiagnostics(), ir_view);
+    try collectVerifierViolations(allocator, &violations, verifier.getDiagnostics(), ir_view);
 
     var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
     defer effect_facts.deinit(allocator);
@@ -735,4 +753,86 @@ test "writeJsonStringContent escapes C0 control bytes" {
     buf = aw.toArrayList();
 
     try std.testing.expectEqualStrings("a\\u0001b\\u001fc", buf.items);
+}
+
+test "fillVerifierCounterexamples matches module names strictly and override respects module" {
+    const allocator = std.testing.allocator;
+
+    var stubs: std.ArrayList(path_gen.IoStub) = .empty;
+    defer stubs.deinit(allocator);
+    try stubs.append(allocator, .{
+        .seq = 0,
+        .module = "cache",
+        .func = "get",
+        .result_json = "{\"ok\":true,\"value\":\"cached\"}",
+    });
+    try stubs.append(allocator, .{
+        .seq = 1,
+        .module = "kv",
+        .func = "get",
+        .result_json = "{\"ok\":true,\"value\":\"kv-val\"}",
+    });
+    const test_case = GeneratedTest{
+        .name = try allocator.dupe(u8, "path 1 GET /"),
+        .method = "GET\"X",
+        .url = "/",
+        .has_auth_header = false,
+        .expected_status = .{ .known = 200 },
+        .io_stubs = stubs,
+    };
+    defer allocator.free(test_case.name);
+    const tests = [_]GeneratedTest{test_case};
+
+    // Non-matching suffix ("zttp:oauth" vs "auth", or empty stub) must not match.
+    try std.testing.expect(!moduleMatches("auth", "zttp:oauth"));
+    try std.testing.expect(!moduleMatches("", "zttp:auth"));
+    try std.testing.expect(moduleMatches("auth", "zttp:auth"));
+    try std.testing.expect(moduleMatches("zttp:auth", "auth"));
+    try std.testing.expect(moduleMatches("zttp:auth", "zttp:auth"));
+
+    var violations = [_]PropertyViolation{.{
+        .kind = .result_unsafe,
+        .message = "unchecked kv.get",
+        .help = null,
+        .loc_line = 3,
+        .loc_col = 1,
+        .counterexample_name = null,
+        .counterexample_index = null,
+        .source_module = "zttp:kv",
+        .source_func = "get",
+    }};
+
+    fillVerifierCounterexamples(&violations, &tests);
+    try std.testing.expectEqual(@as(?usize, 0), violations[0].counterexample_index);
+    try std.testing.expect(violations[0].counterexample_force_failure);
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeViolationsJsonl(&aw.writer, allocator, &violations, &tests);
+    const out = aw.written();
+
+    // Method must be JSON-escaped.
+    try std.testing.expect(std.mem.find(u8, out, "\"method\":\"GET\\\"X\"") != null);
+    // cache.get must remain ok:true while kv.get is overridden to ok:false.
+    try std.testing.expect(std.mem.find(u8, out, "\"module\":\"cache\",\"fn\":\"get\",\"result\":{\"ok\":true,\"value\":\"cached\"}") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\"module\":\"kv\",\"fn\":\"get\",\"result\":{\"ok\":false,\"error\":\"test-error\"}") != null);
+}
+
+test "collectFaultViolations propagates OutOfMemory" {
+    const diags = [_]fault_cov.Diagnostic{.{
+        .severity = .warning,
+        .kind = .success_on_critical_failure,
+        .func_name = "jwtVerify",
+        .module_name = "zttp:auth",
+        .path_name = "p",
+        .status = .{ .known = 200 },
+        .message = "handler returns 2xx when auth fails",
+    }};
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var violations: std.ArrayList(PropertyViolation) = .empty;
+    defer violations.deinit(failing.allocator());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        collectFaultViolations(failing.allocator(), &violations, &diags, &.{}),
+    );
 }

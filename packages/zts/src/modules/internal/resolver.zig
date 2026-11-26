@@ -169,17 +169,15 @@ fn isFetchExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.F
 }
 
 fn wrappedExportFn(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) object.NativeFn {
-    // Both branches install the active module scope so `sdk.requireCapability`
-    // sees the binding's declared `required_capabilities`. Skipping the wrap on
-    // the `module_func` path would silently leave every sandbox SDK call with
-    // an empty active scope. That was the gap from Wave 1B/2D P0 #3 in the
-    // 2026-05-23 review.
+    // Every export gets exactly one wrapper that installs the active module
+    // scope with per-export (or inherited module-level) capabilities and bumps
+    // `ctx.cost_meter`, including capability-free modules.
+    const caps = func_binding.required_capabilities orelse binding.required_capabilities;
     if (func_binding.func) |native_fn| {
-        if (binding.required_capabilities.len == 0) return native_fn;
-        return comptime mb.wrapNativeFnWithCapabilities(native_fn, binding.specifier, binding.required_capabilities);
+        return comptime mb.wrapNativeFnWithCapabilities(native_fn, binding.specifier, caps);
     }
     if (func_binding.module_func) |module_fn| {
-        return comptime mb.wrapModuleFnWithCapabilities(module_fn, binding.specifier, binding.required_capabilities);
+        return comptime mb.wrapModuleFnWithCapabilities(module_fn, binding.specifier, caps);
     }
     @compileError("FunctionBinding must set either func or module_func: " ++ func_binding.name);
 }
@@ -277,9 +275,18 @@ test "wrappedExportFn propagates required_capabilities through module_func" {
     try std.testing.expectEqual(@as(u32, 1), ctx.cost_meter.count(.other));
 }
 
-test "a capability-free func export gets no capability scope wrapper" {
+test "a capability-free func export still meters cost and runs with empty capabilities" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
     const native = struct {
-        fn run(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+        fn run(ctx_ptr: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            const c: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            const scope = c.active_module_scope orelse return error.MissingScope;
+            if (scope.required_capabilities.len != 0) return error.UnexpectedCapability;
             return value.JSValue.true_val;
         }
     }.run;
@@ -295,7 +302,58 @@ test "a capability-free func export gets no capability scope wrapper" {
         .exports = &.{fb},
     };
 
-    // The capability layer adds nothing: the pointer is literally the original.
     const scoped = comptime wrappedExportFn(binding, fb);
-    try std.testing.expectEqual(@as(object.NativeFn, native), scoped);
+    const result = try scoped(ctx, value.JSValue.undefined_val, &.{});
+    try std.testing.expect(result.isTrue());
+    try std.testing.expect(ctx.active_module_scope == null);
+    try std.testing.expectEqual(@as(u32, 1), ctx.cost_meter.count(.other));
+}
+
+test "adapted SDK module through wrappedExportFn enforces per-export capabilities without double-wrapping" {
+    const sdk = @import("zttp-sdk");
+    const adapter = @import("../../module_binding_adapter.zig");
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const sdk_binding = sdk.ModuleBinding{
+        .specifier = "zttp-ext:resolver-adapter-probe",
+        .name = "resolver-adapter-probe",
+        .required_capabilities = &.{ .clock, .random },
+        .exports = &.{
+            .{
+                .name = "no_caps",
+                .module_func = struct {
+                    fn f(handle: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
+                        if (sdk.hasCapability(handle, .clock)) return error.UnexpectedClock;
+                        return sdk.JSValue.true_val;
+                    }
+                }.f,
+                .arg_count = 0,
+                .required_capabilities = &.{},
+            },
+            .{
+                .name = "only_clock",
+                .module_func = struct {
+                    fn f(handle: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
+                        if (!sdk.hasCapability(handle, .clock)) return error.MissingClock;
+                        if (sdk.hasCapability(handle, .random)) return error.UnexpectedRandom;
+                        return sdk.JSValue.true_val;
+                    }
+                }.f,
+                .arg_count = 0,
+                .required_capabilities = &.{.clock},
+            },
+        },
+    };
+    const adapted = comptime adapter.adaptModuleBinding(sdk_binding);
+    const fn0 = comptime wrappedExportFn(adapted, adapted.exports[0]);
+    const fn1 = comptime wrappedExportFn(adapted, adapted.exports[1]);
+
+    try std.testing.expect((try fn0(ctx, value.JSValue.undefined_val, &.{})).isTrue());
+    try std.testing.expect((try fn1(ctx, value.JSValue.undefined_val, &.{})).isTrue());
+    try std.testing.expect(ctx.active_module_scope == null);
+    try std.testing.expectEqual(@as(u32, 2), ctx.cost_meter.count(.other));
 }

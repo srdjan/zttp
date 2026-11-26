@@ -221,28 +221,28 @@ test "workspace_read_file: missing path arg returns structured error" {
     var result = try execute(testing.allocator, &.{});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "missing path") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "missing path") != null);
 }
 
 test "workspace_read_file: malformed JSON args returns structured error" {
     var result = try execute(testing.allocator, &.{"{not json"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "invalid JSON input") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "invalid JSON input") != null);
 }
 
 test "workspace_read_file: JSON args without path returns structured error" {
     var result = try execute(testing.allocator, &.{"{\"start_line\":1}"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "missing path") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "missing path") != null);
 }
 
 test "workspace_read_file: negative start_line returns structured error" {
     var result = try execute(testing.allocator, &.{"{\"path\":\"x\",\"start_line\":-1}"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "start_line must be a positive integer") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "start_line must be a positive integer") != null);
 }
 
 test "workspace_read_file: replayable pages reconstruct exact UTF-8 bytes" {
@@ -334,14 +334,14 @@ test "workspace_read_file: refuses a gitignored file without returning its conte
     var refused = try execute(allocator, &.{"scratch.txt"});
     defer refused.deinit(allocator);
     try testing.expect(!refused.ok);
-    try testing.expect(std.mem.indexOf(u8, refused.llm_text, "ignored by git") != null);
-    try testing.expect(std.mem.indexOf(u8, refused.llm_text, ".gitignore:1:scratch.txt") != null);
-    try testing.expect(std.mem.indexOf(u8, refused.llm_text, "hunter2") == null);
+    try testing.expect(std.mem.find(u8, refused.llm_text, "ignored by git") != null);
+    try testing.expect(std.mem.find(u8, refused.llm_text, ".gitignore:1:scratch.txt") != null);
+    try testing.expect(std.mem.find(u8, refused.llm_text, "hunter2") == null);
 
     var allowed = try execute(allocator, &.{"notes.txt"});
     defer allowed.deinit(allocator);
     try testing.expect(allowed.ok);
-    try testing.expect(std.mem.indexOf(u8, allowed.llm_text, "plain notes") != null);
+    try testing.expect(std.mem.find(u8, allowed.llm_text, "plain notes") != null);
 }
 
 test "workspace_read_file: a non-git workspace applies the secret deny list" {

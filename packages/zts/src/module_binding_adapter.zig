@@ -115,7 +115,7 @@ pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBi
     }
     comptime requireCoverage(sdk.ModuleBinding, internal.ModuleBinding, &module_source_exclusions, &module_target_exclusions);
 
-    const exports = comptime adaptFunctionBindings(binding.specifier, binding.required_capabilities, binding.exports);
+    const exports = comptime adaptFunctionBindings(binding.exports);
     var out: internal.ModuleBinding = undefined;
     out.exports = &exports;
     inline for (@typeInfo(sdk.ModuleBinding).@"struct".field_names) |field| {
@@ -126,25 +126,21 @@ pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBi
 }
 
 fn adaptFunctionBindings(
-    comptime specifier: []const u8,
-    comptime required_capabilities: []const sdk.ModuleCapability,
     comptime exports: []const sdk.FunctionBinding,
 ) [exports.len]internal.FunctionBinding {
     var out: [exports.len]internal.FunctionBinding = undefined;
     for (exports, 0..) |binding, i| {
-        out[i] = adaptFunctionBinding(specifier, required_capabilities, binding);
+        out[i] = adaptFunctionBinding(binding);
     }
     return out;
 }
 
 fn adaptFunctionBinding(
-    comptime specifier: []const u8,
-    comptime required_capabilities: []const sdk.ModuleCapability,
     comptime binding: sdk.FunctionBinding,
 ) internal.FunctionBinding {
     comptime requireCoverage(sdk.FunctionBinding, internal.FunctionBinding, &function_source_exclusions, &function_target_exclusions);
     var out: internal.FunctionBinding = undefined;
-    out.func = wrapToNativeFn(binding.module_func, specifier, binding.required_capabilities orelse required_capabilities);
+    out.func = wrapToNativeFn(binding.module_func);
     out.module_func = null;
     out.return_labels = adaptLabels(binding.return_labels);
     out.declassifies = adaptLabels(binding.declassifies);
@@ -171,20 +167,14 @@ pub inline fn internalArgs(args: []const sdk.JSValue) []const value.JSValue {
     return @ptrCast(args);
 }
 
-/// Produce a NativeFn directly from a sdk.ModuleFn, avoiding double-wrapping.
+/// Produce a NativeFn directly from a sdk.ModuleFn without installing an active
+/// module scope. `modules/internal/resolver.zig` installs the single capability
+/// scope and bumps `cost_meter` for every export, avoiding double-wrapping.
 /// Both JSValue types are bit-identical packed structs, so args are aliased
 /// via @ptrCast with zero per-element copy.
-fn wrapToNativeFn(
-    comptime module_fn: sdk.ModuleFn,
-    comptime specifier: []const u8,
-    comptime required_capabilities: []const internal.ModuleCapability,
-) object.NativeFn {
+fn wrapToNativeFn(comptime module_fn: sdk.ModuleFn) object.NativeFn {
     return struct {
         fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-            const prev = internal.pushActiveModuleContext(ctx, specifier, required_capabilities);
-            defer internal.popActiveModuleContext(prev);
-
             const sdk_args: []const sdk.JSValue = @ptrCast(args);
             const result = try module_fn(
                 @ptrCast(ctx_ptr),
@@ -252,10 +242,16 @@ test "adapted SDK module invocation reads authorization from its Context" {
     const ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
 
-    _ = try adapted.exports[0].func.?(ctx, value.JSValue.undefined_val, &.{});
+    const wrapped = comptime internal.wrapNativeFnWithCapabilities(
+        adapted.exports[0].func.?,
+        adapted.specifier,
+        adapted.exports[0].required_capabilities orelse adapted.required_capabilities,
+    );
+    _ = try wrapped(ctx, value.JSValue.undefined_val, &.{});
     try std.testing.expect(Observed.clock);
     try std.testing.expect(!Observed.random);
     try std.testing.expect(ctx.active_module_scope == null);
+    try std.testing.expectEqual(@as(u32, 1), ctx.cost_meter.count(.other));
 }
 
 test "adapted export enforces its declared capabilities at call time" {
@@ -318,14 +314,30 @@ test "adapted export enforces its declared capabilities at call time" {
     const ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
 
-    _ = try adapted.exports[0].func.?(ctx, value.JSValue.undefined_val, &.{});
-    _ = try adapted.exports[1].func.?(ctx, value.JSValue.undefined_val, &.{});
-    _ = try adapted.exports[2].func.?(ctx, value.JSValue.undefined_val, &.{});
+    const wrapped0 = comptime internal.wrapNativeFnWithCapabilities(
+        adapted.exports[0].func.?,
+        adapted.specifier,
+        adapted.exports[0].required_capabilities orelse adapted.required_capabilities,
+    );
+    const wrapped1 = comptime internal.wrapNativeFnWithCapabilities(
+        adapted.exports[1].func.?,
+        adapted.specifier,
+        adapted.exports[1].required_capabilities orelse adapted.required_capabilities,
+    );
+    const wrapped2 = comptime internal.wrapNativeFnWithCapabilities(
+        adapted.exports[2].func.?,
+        adapted.specifier,
+        adapted.exports[2].required_capabilities orelse adapted.required_capabilities,
+    );
+    _ = try wrapped0(ctx, value.JSValue.undefined_val, &.{});
+    _ = try wrapped1(ctx, value.JSValue.undefined_val, &.{});
+    _ = try wrapped2(ctx, value.JSValue.undefined_val, &.{});
     try std.testing.expectEqual(false, Observed.empty_clock);
     try std.testing.expectEqual(true, Observed.declared_clock);
     try std.testing.expectEqual(true, Observed.inherited_clock);
     try std.testing.expectEqual(true, Observed.inherited_random);
     try std.testing.expect(ctx.active_module_scope == null);
+    try std.testing.expectEqual(@as(u32, 3), ctx.cost_meter.count(.other));
 }
 
 test "binding metadata has one SDK type identity" {

@@ -266,8 +266,6 @@ fn destroyDeserializedConstant(allocator: std.mem.Allocator, constant: value.JSV
                 null,
             );
         }
-    } else if (constant.isFloat64()) {
-        allocator.destroy(constant.toPtr(value.JSValue.Float64Box));
     } else if (constant.isString()) {
         const js_str = constant.toPtr(string.JSString);
         if (!js_str.flags.is_unique) string.freeString(allocator, js_str);
@@ -328,14 +326,7 @@ fn deserializeConstant(
         .float => {
             const bits = try reader.readInt(u64, .little);
             const f: f64 = @bitCast(bits);
-            // Allocate Float64Box
-            const float_box = try allocator.create(value.JSValue.Float64Box);
-            float_box.* = .{
-                .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
-                ._pad = 0,
-                .value = f,
-            };
-            return value.JSValue.fromPtr(float_box);
+            return value.JSValue.fromFloat(f);
         },
         .string => {
             const len = try reader.readInt(u16, .little);
@@ -637,13 +628,16 @@ pub const BytecodeCache = struct {
         self.evictOverflowLocked();
     }
 
-    /// Get raw serialized bytes from cache (Phase 1b: for JSValue constant deserialization)
-    pub fn getRaw(self: *BytecodeCache, key: CacheKey) ?[]const u8 {
+    /// Copy raw serialized bytes out of the cache under the shared lock so the
+    /// returned slice stays valid after unlock even if another thread evicts or
+    /// replaces the entry. Caller owns the returned slice.
+    pub fn getRawAlloc(self: *BytecodeCache, allocator: std.mem.Allocator, key: CacheKey) !?[]u8 {
         self.lock.lockShared();
         defer self.lock.unlockShared();
         if (self.cache.get(key)) |bytes| {
+            const copy = try allocator.dupe(u8, bytes);
             _ = self.hits.fetchAdd(1, .monotonic);
-            return bytes;
+            return copy;
         }
         _ = self.misses.fetchAdd(1, .monotonic);
         return null;
@@ -758,17 +752,25 @@ test "BytecodeCache evicts oldest raw entry when bounded" {
     try cache.putRaw(key3, &three);
 
     try std.testing.expectEqual(@as(usize, 2), cache.count());
-    try std.testing.expect(cache.getRaw(key1) == null);
-    try std.testing.expectEqualSlices(u8, &two, cache.getRaw(key2).?);
-    try std.testing.expectEqualSlices(u8, &three, cache.getRaw(key3).?);
+    try std.testing.expect((try cache.getRawAlloc(allocator, key1)) == null);
+    const got2 = (try cache.getRawAlloc(allocator, key2)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(got2);
+    try std.testing.expectEqualSlices(u8, &two, got2);
+    const got3 = (try cache.getRawAlloc(allocator, key3)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(got3);
+    try std.testing.expectEqualSlices(u8, &three, got3);
 
     try cache.putRaw(key2, &nine);
     try cache.putRaw(key4, &four);
 
     try std.testing.expectEqual(@as(usize, 2), cache.count());
-    try std.testing.expect(cache.getRaw(key3) == null);
-    try std.testing.expectEqualSlices(u8, &nine, cache.getRaw(key2).?);
-    try std.testing.expectEqualSlices(u8, &four, cache.getRaw(key4).?);
+    try std.testing.expect((try cache.getRawAlloc(allocator, key3)) == null);
+    const got2_updated = (try cache.getRawAlloc(allocator, key2)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(got2_updated);
+    try std.testing.expectEqualSlices(u8, &nine, got2_updated);
+    const got4 = (try cache.getRawAlloc(allocator, key4)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(got4);
+    try std.testing.expectEqualSlices(u8, &four, got4);
 }
 
 test "BytecodeCache zero max entries disables storage" {
@@ -783,7 +785,28 @@ test "BytecodeCache zero max entries disables storage" {
     try cache.putRaw(key, &data);
 
     try std.testing.expectEqual(@as(usize, 0), cache.count());
-    try std.testing.expect(cache.getRaw(key) == null);
+    try std.testing.expect((try cache.getRawAlloc(allocator, key)) == null);
+}
+
+test "BytecodeCache getRawAlloc returns owned copy surviving eviction" {
+    const allocator = std.testing.allocator;
+
+    var cache = BytecodeCache.initWithMaxEntries(allocator, 1);
+    defer cache.deinit();
+
+    const key1 = testCacheKey("handler-a");
+    const key2 = testCacheKey("handler-b");
+    const data1 = [_]u8{ 1, 2, 3, 4 };
+    const data2 = [_]u8{ 9, 8, 7, 6 };
+
+    try cache.putRaw(key1, &data1);
+    const copy = (try cache.getRawAlloc(allocator, key1)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(copy);
+
+    // Evict key1 before reading `copy`
+    try cache.putRaw(key2, &data2);
+    try std.testing.expect((try cache.getRawAlloc(allocator, key1)) == null);
+    try std.testing.expectEqualSlices(u8, &data1, copy);
 }
 
 /// Simple slice writer for serialization
@@ -972,13 +995,6 @@ fn deserializeFullPatternDispatchForAllocationTest(
 }
 
 fn serializeOwnedConstantsFixture(allocator: std.mem.Allocator, buffer: []u8) ![]const u8 {
-    const float_box = try allocator.create(value.JSValue.Float64Box);
-    defer allocator.destroy(float_box);
-    float_box.* = .{
-        .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
-        ._pad = 0,
-        .value = 42.5,
-    };
     const js_string = try string.createString(allocator, "owned");
     defer string.freeString(allocator, js_string);
     const nested_code = [_]u8{@backingInt(bytecode.Opcode.ret_undefined)};
@@ -994,7 +1010,7 @@ fn serializeOwnedConstantsFixture(allocator: std.mem.Allocator, buffer: []u8) ![
         .source_map = null,
     };
     const constants = [_]value.JSValue{
-        value.JSValue.fromPtr(float_box),
+        value.JSValue.fromFloat(42.5),
         value.JSValue.fromPtr(js_string),
         value.JSValue.fromExternPtr(@constCast(&nested)),
     };
@@ -1121,26 +1137,9 @@ test "constant serialization - integers" {
 test "constant serialization - floats" {
     const allocator = std.testing.allocator;
 
-    // Create float box constants
-    const float_box1 = try allocator.create(value.JSValue.Float64Box);
-    defer allocator.destroy(float_box1);
-    float_box1.* = .{
-        .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
-        ._pad = 0,
-        .value = 3.14159,
-    };
-
-    const float_box2 = try allocator.create(value.JSValue.Float64Box);
-    defer allocator.destroy(float_box2);
-    float_box2.* = .{
-        .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
-        ._pad = 0,
-        .value = -2.71828,
-    };
-
     const constants = [_]value.JSValue{
-        value.JSValue.fromPtr(float_box1),
-        value.JSValue.fromPtr(float_box2),
+        value.JSValue.fromFloat(3.14159),
+        value.JSValue.fromFloat(-2.71828),
     };
 
     // Serialize
@@ -1151,15 +1150,7 @@ test "constant serialization - floats" {
     // Deserialize
     var reader = SliceReader{ .data = writer.getWritten() };
     const restored = try deserializeConstantsAtDepth(&reader, allocator, null, 0);
-    defer {
-        for (restored) |v| {
-            if (v.isPtr()) {
-                const box = v.toPtr(value.JSValue.Float64Box);
-                allocator.destroy(box);
-            }
-        }
-        allocator.free(restored);
-    }
+    defer allocator.free(restored);
 
     // Verify
     try std.testing.expectEqual(constants.len, restored.len);
@@ -1239,22 +1230,13 @@ test "constant serialization - special values" {
 test "constant serialization - mixed types" {
     const allocator = std.testing.allocator;
 
-    // Create mixed constants
-    const float_box = try allocator.create(value.JSValue.Float64Box);
-    defer allocator.destroy(float_box);
-    float_box.* = .{
-        .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
-        ._pad = 0,
-        .value = 99.9,
-    };
-
     const str = try string.createString(allocator, "test");
     defer string.freeString(allocator, str);
 
     const constants = [_]value.JSValue{
         value.JSValue.fromInt(42),
         value.JSValue.null_val,
-        value.JSValue.fromPtr(float_box),
+        value.JSValue.fromFloat(99.9),
         value.JSValue.fromPtr(str),
         value.JSValue.true_val,
     };
@@ -1269,9 +1251,7 @@ test "constant serialization - mixed types" {
     const restored = try deserializeConstantsAtDepth(&reader, allocator, null, 0);
     defer {
         for (restored) |v| {
-            if (v.isFloat64()) {
-                allocator.destroy(v.toPtr(value.JSValue.Float64Box));
-            } else if (v.isString()) {
+            if (v.isString()) {
                 string.freeString(allocator, v.toPtr(string.JSString));
             }
         }
@@ -2420,19 +2400,12 @@ fn serializeSweepFixture(allocator: std.mem.Allocator, buffer: []u8) ![]const u8
         .line_table = &nested_lines,
     };
 
-    const float_box = try allocator.create(value.JSValue.Float64Box);
-    defer allocator.destroy(float_box);
-    float_box.* = .{
-        .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
-        ._pad = 0,
-        .value = 42.5,
-    };
     const js_string = try string.createString(allocator, "sweep");
     defer string.freeString(allocator, js_string);
 
     const top_constants = [_]value.JSValue{
         value.JSValue.fromInt(-5),
-        value.JSValue.fromPtr(float_box),
+        value.JSValue.fromFloat(42.5),
         value.JSValue.fromPtr(js_string),
         value.JSValue.true_val,
         value.JSValue.fromExternPtr(@constCast(&nested)),

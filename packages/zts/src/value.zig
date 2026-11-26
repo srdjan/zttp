@@ -199,14 +199,6 @@ pub const JSValue = packed struct(u64) {
     // Float64 Support (FULLY INLINE - no heap allocation!)
     // ========================================================================
 
-    /// Heap-allocated float box used by the bytecode constant pool.
-    /// Runtime floats use inline encoding via fromFloat() instead.
-    pub const Float64Box = extern struct {
-        header: heap.MemBlockHeader,
-        _pad: u32,
-        value: f64,
-    };
-
     /// Create a float value (ALWAYS inline - no heap allocation!)
     pub inline fn fromFloat(v: f64) JSValue {
         const bits: u64 = @bitCast(v);
@@ -219,18 +211,9 @@ pub const JSValue = packed struct(u64) {
         return .{ .raw = bits };
     }
 
-    /// Check if value is a heap-allocated Float64Box (used in bytecode constant pool)
-    pub inline fn isBoxedFloat64(self: JSValue) bool {
-        if (!self.isPtr()) return false;
-        const addr = self.raw & PAYLOAD_MASK;
-        if (addr == 0) return false;
-        const box: *Float64Box = @ptrFromInt(addr);
-        return box.header.tag == .float64;
-    }
-
-    /// Check if value is any float (raw double or constant-pool boxed)
+    /// Check if value is a float (inline NaN-boxed double)
     pub inline fn isFloat64(self: JSValue) bool {
-        return self.isRawDouble() or self.isBoxedFloat64();
+        return self.isRawDouble();
     }
 
     /// Alias for isFloat64
@@ -240,19 +223,13 @@ pub const JSValue = packed struct(u64) {
 
     /// Check if value is any number (int or float)
     pub inline fn isNumber(self: JSValue) bool {
-        return self.isInt() or self.isRawDouble() or self.isBoxedFloat64();
+        return self.isInt() or self.isRawDouble();
     }
 
-    /// Get float64 value (works for raw double and boxed float)
+    /// Get float64 value
     pub inline fn getFloat64(self: JSValue) f64 {
         if (self.isRawDouble()) {
             return @bitCast(self.raw);
-        }
-        // Boxed float support (constant pool entries)
-        if (self.isBoxedFloat64()) {
-            const addr = self.raw & PAYLOAD_MASK;
-            const box: *Float64Box = @ptrFromInt(addr);
-            return box.value;
         }
         return 0.0;
     }
@@ -264,11 +241,6 @@ pub const JSValue = packed struct(u64) {
         }
         if (self.isRawDouble()) {
             return normalizeOptionalFloat(@bitCast(self.raw));
-        }
-        if (self.isBoxedFloat64()) {
-            const addr = self.raw & PAYLOAD_MASK;
-            const box: *Float64Box = @ptrFromInt(addr);
-            return normalizeOptionalFloat(box.value);
         }
         return null;
     }

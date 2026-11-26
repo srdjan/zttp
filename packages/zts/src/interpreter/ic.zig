@@ -9,7 +9,7 @@ const std = @import("std");
 const object = @import("../object.zig");
 const env_cache = @import("env_cache.zig");
 
-var pic_mega_recovery_window_cache: ?u16 = null;
+var pic_mega_recovery_window_cache: env_cache.UintCache(u16) = .{};
 
 /// Number of consecutive monomorphic observations after a PIC goes megamorphic
 /// before it is allowed to reset and re-specialize on the dominant shape.
@@ -19,31 +19,28 @@ pub fn getPicMegaRecoveryWindow() u16 {
 }
 
 /// Single entry in a polymorphic inline cache
-/// Stores hidden class index and slot offset for one observed shape
+/// Stores hidden class index, property atom, and slot offset for one observed shape
 pub const PICEntry = struct {
     hidden_class_idx: object.HiddenClassIndex,
+    atom: object.Atom = .null,
     slot_offset: u16,
 };
 
-/// Number of entries in a polymorphic inline cache
-/// 8 entries provides good coverage for common polymorphic patterns
-/// while keeping memory overhead reasonable per IC site
-pub const PIC_ENTRIES = 8;
+/// Number of entries in a polymorphic inline cache.
+/// Matches `effective_pic_cap` so no cache slots sit permanently unused.
+pub const PIC_ENTRIES = 4;
 
 /// Cap on distinct shapes the PIC caches before treating a site as megamorphic.
-/// The `entries` array stays at PIC_ENTRIES to preserve memory layout.
 ///
 /// The PIC is an interpreter feature, so the cap is a plain constant here.
-pub const effective_pic_cap: u8 = 4;
+pub const effective_pic_cap: u8 = PIC_ENTRIES;
 
 /// Polymorphic Inline Cache for property access optimization
-/// Caches up to `effective_pic_cap` (hidden_class, slot_offset) pairs per access site
+/// Caches up to `effective_pic_cap` (hidden_class, atom, slot_offset) tuples per access site
 /// Falls back to megamorphic mode when more shapes are observed
 pub const PolymorphicInlineCache = struct {
     /// Cached entries (only first `count` are valid)
-    /// Initialize all entries with invalid hidden class to prevent JIT false matches
-    /// on uninitialized memory (JIT checks first PIC_CHECK_COUNT entries inline)
-    entries: [PIC_ENTRIES]PICEntry = @as([PIC_ENTRIES]PICEntry, @splat(.{ .hidden_class_idx = .none, .slot_offset = 0 })),
+    entries: [PIC_ENTRIES]PICEntry = @as([PIC_ENTRIES]PICEntry, @splat(.{ .hidden_class_idx = .none, .atom = .null, .slot_offset = 0 })),
     /// Number of valid entries (0..effective_pic_cap)
     count: u8 = 0,
     /// Index of most recently hit entry
@@ -53,23 +50,25 @@ pub const PolymorphicInlineCache = struct {
     megamorphic: bool = false,
     /// Shape being watched for megamorphic recovery
     recovery_candidate: object.HiddenClassIndex = .none,
-    /// Consecutive observations of `recovery_candidate` while megamorphic
+    /// Atom being watched for megamorphic recovery
+    recovery_atom: object.Atom = .null,
+    /// Consecutive observations of `(recovery_candidate, recovery_atom)` while megamorphic
     consec_same_shape: u16 = 0,
     /// Latched when update() performed a megamorphic->monomorphic recovery
     /// Callers read and reset it to increment PerfStats.mega_recoveries.
     just_recovered: bool = false,
 
-    /// Lookup hidden class in cache, return slot offset if found
-    pub inline fn lookup(self: *PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex) ?u16 {
+    /// Lookup (hidden_class_idx, atom) in cache, return slot offset if found
+    pub inline fn lookup(self: *PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex, atom: object.Atom) ?u16 {
         if (self.count == 0) return null;
         if (self.last_hit < self.count) {
             const entry = self.entries[self.last_hit];
-            if (entry.hidden_class_idx == hidden_class_idx) {
+            if (entry.hidden_class_idx == hidden_class_idx and entry.atom == atom) {
                 return entry.slot_offset;
             }
         }
         for (self.entries[0..self.count], 0..) |entry, idx| {
-            if (entry.hidden_class_idx == hidden_class_idx) {
+            if (entry.hidden_class_idx == hidden_class_idx and entry.atom == atom) {
                 self.last_hit = @intCast(idx);
                 return entry.slot_offset;
             }
@@ -77,32 +76,34 @@ pub const PolymorphicInlineCache = struct {
         return null;
     }
 
-    /// Update cache with new (hidden_class_idx, slot_offset) pair
+    /// Update cache with new (hidden_class_idx, atom, slot_offset) tuple
     /// Returns true if the shape is now cached, false if still rejected as megamorphic.
     /// If recovery triggers, `just_recovered` is set so callers can observe it.
-    pub inline fn update(self: *PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex, slot_offset: u16) bool {
+    pub inline fn update(self: *PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex, atom: object.Atom, slot_offset: u16) bool {
         if (self.megamorphic) {
-            if (self.recovery_candidate == hidden_class_idx and hidden_class_idx != .none) {
+            if (self.recovery_candidate == hidden_class_idx and self.recovery_atom == atom and hidden_class_idx != .none) {
                 self.consec_same_shape +|= 1;
                 if (self.consec_same_shape >= getPicMegaRecoveryWindow()) {
-                    self.entries[0] = .{ .hidden_class_idx = hidden_class_idx, .slot_offset = slot_offset };
+                    self.entries[0] = .{ .hidden_class_idx = hidden_class_idx, .atom = atom, .slot_offset = slot_offset };
                     self.count = 1;
                     self.last_hit = 0;
                     self.megamorphic = false;
                     self.consec_same_shape = 0;
                     self.recovery_candidate = .none;
+                    self.recovery_atom = .null;
                     self.just_recovered = true;
                     return true;
                 }
             } else {
                 self.recovery_candidate = hidden_class_idx;
+                self.recovery_atom = atom;
                 self.consec_same_shape = 1;
             }
             return false;
         }
 
         for (self.entries[0..self.count], 0..) |*entry, idx| {
-            if (entry.hidden_class_idx == hidden_class_idx) {
+            if (entry.hidden_class_idx == hidden_class_idx and entry.atom == atom) {
                 entry.slot_offset = slot_offset;
                 self.last_hit = @intCast(idx);
                 return true;
@@ -112,6 +113,7 @@ pub const PolymorphicInlineCache = struct {
         if (self.count < effective_pic_cap) {
             self.entries[self.count] = .{
                 .hidden_class_idx = hidden_class_idx,
+                .atom = atom,
                 .slot_offset = slot_offset,
             };
             self.last_hit = self.count;
@@ -121,6 +123,7 @@ pub const PolymorphicInlineCache = struct {
 
         self.megamorphic = true;
         self.recovery_candidate = .none;
+        self.recovery_atom = .null;
         self.consec_same_shape = 0;
         return false;
     }
@@ -131,6 +134,7 @@ pub const PolymorphicInlineCache = struct {
         self.last_hit = 0;
         self.megamorphic = false;
         self.recovery_candidate = .none;
+        self.recovery_atom = .null;
         self.consec_same_shape = 0;
         self.just_recovered = false;
     }

@@ -228,11 +228,11 @@ fn validateClaims(claims: Claims) SignError!void {
 const JwsParts = struct { header: []const u8, payload: []const u8, signature: []const u8 };
 
 fn splitThree(s: []const u8) ?JwsParts {
-    const first = std.mem.indexOfScalar(u8, s, '.') orelse return null;
+    const first = std.mem.findScalar(u8, s, '.') orelse return null;
     const rest = s[first + 1 ..];
-    const second_rel = std.mem.indexOfScalar(u8, rest, '.') orelse return null;
+    const second_rel = std.mem.findScalar(u8, rest, '.') orelse return null;
     const second = first + 1 + second_rel;
-    if (std.mem.indexOfScalarPos(u8, s, second + 1, '.') != null) return null;
+    if (std.mem.findScalarPos(u8, s, second + 1, '.') != null) return null;
     return .{
         .header = s[0..first],
         .payload = s[first + 1 .. second],
@@ -250,6 +250,7 @@ fn encodeBase64Owned(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 fn decodeBase64(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     const exact_len = try b64.Decoder.calcSizeForSlice(src);
     const out = try allocator.alloc(u8, exact_len);
+    errdefer allocator.free(out);
     try b64.Decoder.decode(out, src);
     return out;
 }
@@ -317,10 +318,6 @@ fn buildPayloadJson(allocator: std.mem.Allocator, claims: Claims) ![]u8 {
         try json.objectField(field[0]);
         try json.write(field[1]);
     }
-    try json.objectField(wire_key.frontend_profile_id);
-    try json.write(@as(?[]const u8, null));
-    try json.objectField(wire_key.frontend_grammar_sha256);
-    try json.write(@as(?[]const u8, null));
     try json.objectField(wire_key.compiler_version);
     try json.write(claims.compiler_version);
     try json.objectField(wire_key.signed_at);
@@ -331,14 +328,6 @@ fn buildPayloadJson(allocator: std.mem.Allocator, claims: Claims) ![]u8 {
     try json.write(claims.guarded_categories);
     try json.objectField(wire_key.routes_count);
     try json.write(claims.routes_count);
-    try json.objectField(wire_key.durable_workflow_proof_level);
-    try json.write("none");
-    try json.objectField(wire_key.durable_workflow_retry_safe);
-    try json.write(false);
-    try json.objectField(wire_key.durable_workflow_idempotent);
-    try json.write(false);
-    try json.objectField(wire_key.durable_workflow_fault_covered);
-    try json.write(false);
     try json.endObject();
     return try allocator.dupe(u8, aw.writer.buffered());
 }
@@ -365,10 +354,15 @@ fn parsePublicKey(
 
     const jwk = obj.get("jwk") orelse return error.MissingPublicKey;
     if (jwk != .object) return error.MissingPublicKey;
+    const kty = jwk.object.get("kty") orelse return error.UnsupportedAlgorithm;
+    if (kty != .string or !std.mem.eql(u8, kty.string, "OKP")) return error.UnsupportedAlgorithm;
+    const crv = jwk.object.get("crv") orelse return error.UnsupportedAlgorithm;
+    if (crv != .string or !std.mem.eql(u8, crv.string, "Ed25519")) return error.UnsupportedAlgorithm;
     const x = jwk.object.get("x") orelse return error.MissingPublicKey;
     if (x != .string) return error.MissingPublicKey;
 
     const decoded = decodeBase64(allocator, x.string) catch return error.InvalidBase64;
+    defer allocator.free(decoded);
     if (decoded.len != Ed25519.PublicKey.encoded_length) return error.MissingPublicKey;
 
     var out: [Ed25519.PublicKey.encoded_length]u8 = undefined;
@@ -440,7 +434,7 @@ fn readStringDefault(obj: std.json.ObjectMap, key: []const u8, default: []const 
 }
 
 fn readOptionalString(obj: std.json.ObjectMap, key: []const u8) !?[]const u8 {
-    const val = obj.get(key) orelse return error.InvalidJson;
+    const val = obj.get(key) orelse return null;
     return switch (val) {
         .null => null,
         .string => |value| value,
@@ -600,12 +594,12 @@ test "verify refuses non-default retired authority claims" {
 
     const mutations = [_]struct { needle: []const u8, replacement: []const u8 }{
         .{
-            .needle = "\"frontendProfileId\":null",
-            .replacement = "\"frontendProfileId\":\"zts-tsx-1\"",
+            .needle = "\"v\":\"" ++ version_tag ++ "\",",
+            .replacement = "\"v\":\"" ++ version_tag ++ "\",\"frontendProfileId\":\"zts-tsx-1\",",
         },
         .{
-            .needle = "\"durableWorkflowIdempotent\":false",
-            .replacement = "\"durableWorkflowIdempotent\":true",
+            .needle = "\"v\":\"" ++ version_tag ++ "\",",
+            .replacement = "\"v\":\"" ++ version_tag ++ "\",\"durableWorkflowIdempotent\":true,",
         },
     };
     for (mutations) |mutation| {
@@ -889,4 +883,44 @@ test "splitThree returns null on wrong dot count" {
     try std.testing.expectEqualStrings("aa", ok.header);
     try std.testing.expectEqualStrings("bb", ok.payload);
     try std.testing.expectEqualStrings("cc", ok.signature);
+}
+
+test "parsePublicKey rejects missing or non-OKP/Ed25519 jwk kty and crv" {
+    const allocator = std.testing.allocator;
+    const kp = try keyPairFromSeed(test_seed);
+    const pub_b64 = try encodeBase64Owned(allocator, &kp.public_key.bytes);
+    defer allocator.free(pub_b64);
+
+    const wrong_kty = try std.fmt.allocPrint(
+        allocator,
+        "{{\"alg\":\"EdDSA\",\"jwk\":{{\"kty\":\"RSA\",\"crv\":\"Ed25519\",\"x\":\"{s}\"}}}}",
+        .{pub_b64},
+    );
+    defer allocator.free(wrong_kty);
+    try std.testing.expectError(error.UnsupportedAlgorithm, parsePublicKey(allocator, wrong_kty));
+
+    const wrong_crv = try std.fmt.allocPrint(
+        allocator,
+        "{{\"alg\":\"EdDSA\",\"jwk\":{{\"kty\":\"OKP\",\"crv\":\"Ed448\",\"x\":\"{s}\"}}}}",
+        .{pub_b64},
+    );
+    defer allocator.free(wrong_crv);
+    try std.testing.expectError(error.UnsupportedAlgorithm, parsePublicKey(allocator, wrong_crv));
+
+    const missing_kty = try std.fmt.allocPrint(
+        allocator,
+        "{{\"alg\":\"EdDSA\",\"jwk\":{{\"crv\":\"Ed25519\",\"x\":\"{s}\"}}}}",
+        .{pub_b64},
+    );
+    defer allocator.free(missing_kty);
+    try std.testing.expectError(error.UnsupportedAlgorithm, parsePublicKey(allocator, missing_kty));
+
+    const valid = try std.fmt.allocPrint(
+        allocator,
+        "{{\"alg\":\"EdDSA\",\"jwk\":{{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"{s}\"}}}}",
+        .{pub_b64},
+    );
+    defer allocator.free(valid);
+    const parsed = try parsePublicKey(allocator, valid);
+    try std.testing.expectEqualSlices(u8, &kp.public_key.bytes, &parsed);
 }

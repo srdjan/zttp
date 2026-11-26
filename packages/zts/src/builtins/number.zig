@@ -119,6 +119,7 @@ pub fn numberParseFloat(ctx: *context.Context, _: value.JSValue, args: []const v
 
     // Exponent part
     if (i < text.len and (text[i] == 'e' or text[i] == 'E')) {
+        const exp_start = i;
         i += 1;
         var exp_sign: i32 = 1;
         if (i < text.len and text[i] == '-') {
@@ -129,11 +130,22 @@ pub fn numberParseFloat(ctx: *context.Context, _: value.JSValue, args: []const v
         }
 
         var exp: i32 = 0;
+        var has_exp_digits = false;
         while (i < text.len and text[i] >= '0' and text[i] <= '9') {
-            exp = exp * 10 + @as(i32, @intCast(text[i] - '0'));
+            // Clamp before i32 overflow: 10^10000 already overflows f64 to Inf / underflows to 0.
+            if (exp < 10000) {
+                exp = exp * 10 + @as(i32, @intCast(text[i] - '0'));
+            }
+            has_exp_digits = true;
             i += 1;
         }
-        result *= std.math.pow(f64, 10.0, @as(f64, @floatFromInt(exp * exp_sign)));
+        if (has_exp_digits) {
+            if (result != 0.0) {
+                result *= std.math.pow(f64, 10.0, @as(f64, @floatFromInt(exp * exp_sign)));
+            }
+        } else {
+            i = exp_start;
+        }
     }
 
     result *= sign;
@@ -180,9 +192,14 @@ pub fn numberParseInt(ctx: *context.Context, _: value.JSValue, args: []const val
         i += 2;
     }
 
-    // Parse digits
-    var result: i64 = 0;
+    // Parse digits using checked u64 arithmetic, spilling to f64 on overflow so
+    // arbitrary request inputs never trigger integer overflow panics.
+    var int_acc: u64 = 0;
+    var float_acc: f64 = 0.0;
+    var overflowed = false;
     var has_digits = false;
+    const radix_u64: u64 = radix;
+    const radix_f64: f64 = @floatFromInt(radix);
 
     while (i < text.len) {
         const c = text[i];
@@ -198,22 +215,44 @@ pub fn numberParseInt(ctx: *context.Context, _: value.JSValue, args: []const val
 
         if (digit == null or digit.? >= radix) break;
 
-        result = result * radix + digit.?;
+        if (!overflowed) {
+            const mul_res = @mulWithOverflow(int_acc, radix_u64);
+            const add_res = @addWithOverflow(mul_res[0], @as(u64, digit.?));
+            if (mul_res[1] != 0 or add_res[1] != 0) {
+                overflowed = true;
+                float_acc = @as(f64, @floatFromInt(int_acc)) * radix_f64 + @as(f64, @floatFromInt(digit.?));
+            } else {
+                int_acc = add_res[0];
+            }
+        } else {
+            float_acc = float_acc * radix_f64 + @as(f64, @floatFromInt(digit.?));
+        }
+
         has_digits = true;
         i += 1;
     }
 
     if (!has_digits) return value.JSValue.nan_val;
 
-    if (negative) result = -result;
+    if (overflowed) {
+        return value.JSValue.fromFloat(if (negative) -float_acc else float_acc);
+    }
 
-    // Check if it fits in i32
-    if (result >= std.math.minInt(i32) and result <= std.math.maxInt(i32)) {
-        return value.JSValue.fromInt(@intCast(result));
+    if (negative) {
+        if (int_acc == 0) return value.JSValue.fromInt(0);
+        const min_i32_mag: u64 = @intCast(-@as(i64, std.math.minInt(i32)));
+        if (int_acc <= min_i32_mag) {
+            return value.JSValue.fromInt(@intCast(-@as(i64, @intCast(int_acc))));
+        }
+        return value.JSValue.fromFloat(-@as(f64, @floatFromInt(int_acc)));
+    }
+
+    if (int_acc <= std.math.maxInt(i32)) {
+        return value.JSValue.fromInt(@intCast(int_acc));
     }
 
     // Return as float for large values (NaN-boxing: no allocation)
-    return value.JSValue.fromFloat(@floatFromInt(result));
+    return value.JSValue.fromFloat(@floatFromInt(int_acc));
 }
 
 /// Coerce a JS value to a number following ToNumber, returning the f64 or NaN.
@@ -361,43 +400,6 @@ pub fn globalRange(ctx: *context.Context, _: value.JSValue, args: []const value.
     return result.toValue();
 }
 
-/// Native _processRequest(items, page, limit) - pagination with checksum, returns JSON string
-/// Eliminates all JS overhead for the /api/process benchmark endpoint
-pub fn globalProcessRequest(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
-    // Parse arguments with defaults
-    const total_items: i32 = if (args.len > 0 and args[0].isInt()) args[0].getInt() else if (args.len > 0 and args[0].isFloat()) std.math.lossyCast(i32, args[0].getFloat64()) else 100;
-    const page_arg: i32 = if (args.len > 1 and args[1].isInt()) args[1].getInt() else if (args.len > 1 and args[1].isFloat()) std.math.lossyCast(i32, args[1].getFloat64()) else 1;
-    const limit: i32 = if (args.len > 2 and args[2].isInt()) args[2].getInt() else if (args.len > 2 and args[2].isFloat()) std.math.lossyCast(i32, args[2].getFloat64()) else 10;
-
-    // Pagination math
-    const total_pages: i32 = if (limit > 0) @divTrunc(total_items + limit - 1, limit) else 1;
-    const current_page: i32 = @min(@max(1, page_arg), total_pages);
-    const start_idx: i32 = (current_page - 1) * limit;
-    const end_idx: i32 = @min(start_idx + limit, total_items);
-    const item_count: i32 = end_idx - start_idx;
-
-    // Compute checksum - same algorithm as JS version
-    var checksum: i32 = 0;
-    var i: i32 = 0;
-    while (i < item_count) : (i += 1) {
-        const item_idx = start_idx + i;
-        const val = @mod(((item_idx * 31) ^ (item_idx * 17)), 10000);
-        checksum = @mod((checksum + val), 1000000);
-    }
-
-    // Build JSON string directly
-    var buf: [128]u8 = undefined;
-    const json = std.fmt.bufPrint(&buf, "{{\"page\":{d},\"pages\":{d},\"count\":{d},\"checksum\":{d}}}", .{
-        current_page,
-        total_pages,
-        item_count,
-        checksum,
-    }) catch return value.JSValue.undefined_val;
-
-    // Create JS string from buffer
-    return ctx.createString(json) catch return value.JSValue.undefined_val;
-}
-
 test "globalIsNaN coerces ToNumber; Number.isNaN does not ENG12" {
     // ENG-12: global isNaN(x) coerces its argument to a number, so a numeric
     // string is not NaN while a non-numeric string is. Number.isNaN performs no
@@ -462,4 +464,35 @@ test "%matchShape tells a record from the other object classes" {
     // An unknown shape or a missing argument refuses rather than matches.
     try std.testing.expect(!globalMatchShape(ctx, undef, &.{ record, value.JSValue.fromInt(9) }).toBoolean());
     try std.testing.expect(!globalMatchShape(ctx, undef, &.{record}).toBoolean());
+}
+
+test "parseInt and parseFloat handle huge magnitudes without integer overflow panics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const undef = value.JSValue.undefined_val;
+    const big_pos = try ctx.createString("99999999999999999999");
+    const big_neg = try ctx.createString("-99999999999999999999");
+    const huge_exp = try ctx.createString("1e9999999999");
+    const tiny_exp = try ctx.createString("1e-9999999999");
+    const zero_huge_exp = try ctx.createString("0e9999999999");
+
+    const pi_pos = numberParseInt(ctx, undef, &.{big_pos});
+    try std.testing.expectEqual(@as(f64, 1e20), pi_pos.getFloat64());
+    const pi_neg = numberParseInt(ctx, undef, &.{big_neg});
+    try std.testing.expectEqual(@as(f64, -1e20), pi_neg.getFloat64());
+
+    const pf_huge = numberParseFloat(ctx, undef, &.{huge_exp});
+    try std.testing.expect(std.math.isPositiveInf(pf_huge.getFloat64()));
+    const pf_tiny = numberParseFloat(ctx, undef, &.{tiny_exp});
+    try std.testing.expectEqual(@as(f64, 0.0), pf_tiny.getFloat64());
+    const pf_zero = numberParseFloat(ctx, undef, &.{zero_huge_exp});
+    try std.testing.expectEqual(@as(f64, 0.0), pf_zero.getFloat64());
 }

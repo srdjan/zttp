@@ -120,14 +120,15 @@ fn scanGap(
 
         try flushBlankRun(allocator, out, outLine(line, pending_newlines), run_start, i, &pending_newlines);
 
-        const own_line = i == start or firstOnLine(source, i);
+        const own_line = firstOnLine(source, i);
         if (i + 1 < end and source[i + 1] == '/') {
             var j = i + 2;
             while (j < end and source[j] != '\n') j += 1;
+            const comment_end = if (j > i + 2 and source[j - 1] == '\r') j - 1 else j;
             try out.append(allocator, .{
                 .kind = .line_comment,
                 .start = i,
-                .end = j,
+                .end = comment_end,
                 .line = line,
                 .own_line = own_line,
             });
@@ -323,4 +324,15 @@ test "trivia offsets index the source they were collected from" {
         }
     }
     try testing.expectEqual(expected_blank_lines.len, blank_runs);
+}
+
+test "trailing comment without leading space is not own_line and CRLF strips carriage return" {
+    const source = "const a = 1;// tight\r\n// next\r\nconst b = 2;\r\n";
+    const t = try collectTest(source);
+    defer testing.allocator.free(t);
+    try testing.expectEqual(@as(usize, 2), t.len);
+    try testing.expect(!t[0].own_line);
+    try testing.expectEqualStrings("// tight", source[t[0].start..t[0].end]);
+    try testing.expect(t[1].own_line);
+    try testing.expectEqualStrings("// next", source[t[1].start..t[1].end]);
 }

@@ -2,14 +2,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const project_config_mod = @import("project_config");
-const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 const proofs_cli = @import("proofs_cli.zig");
 const shared = @import("cli_shared.zig");
 const runtime_cli = @import("runtime_cli.zig");
-const feature_options = @import("runtime_feature_options");
 const embedded_handler = @import("embedded_handler");
-const proof_ledger = @import("proof_ledger.zig");
 const pi_app = @import("pi_app");
 const verify_cli = @import("verify_cli.zig");
 const cli_args = @import("cli_args.zig");
@@ -719,7 +716,7 @@ test "every listed command appears in help --all, and every listing has a comman
         if (c.section == .unlisted) continue;
         var needle: [64]u8 = undefined;
         const line = try std.fmt.bufPrint(&needle, "  zttp {s}", .{c.name});
-        std.testing.expect(std.mem.indexOf(u8, help_all, line) != null) catch |err| {
+        std.testing.expect(std.mem.find(u8, help_all, line) != null) catch |err| {
             std.debug.print("help --all does not list `zttp {s}`\n", .{c.name});
             return err;
         };
@@ -732,7 +729,7 @@ test "every listed command appears in help --all, and every listing has a comman
     while (it.next()) |line| {
         if (!std.mem.startsWith(u8, line, "  zttp ")) continue;
         const rest = line["  zttp ".len..];
-        const verb_end = std.mem.indexOfAny(u8, rest, " \n") orelse rest.len;
+        const verb_end = std.mem.findAny(u8, rest, " \n") orelse rest.len;
         const verb = rest[0..verb_end];
         if (verb.len == 0) continue;
         var found = false;

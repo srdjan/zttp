@@ -10,7 +10,7 @@
 //! higher module that writes `@import("json_utils.zig")` compiles a second copy
 //! of it into that module, and the two copies' types are not interchangeable -
 //! that is the failure the split exists to prevent, and
-//! `scripts/check-zts-layering.sh` fails on it.
+//! `zig build test-zts-layering` fails on it.
 //!
 //! Tier membership is recorded in `scripts/zts-tiers.allow`. See
 //! pre-rebase:docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.

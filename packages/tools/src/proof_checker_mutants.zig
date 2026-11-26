@@ -5,6 +5,7 @@
 //! that does not compile cannot be mistaken for a killed mutant.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Mutant = struct {
     id: []const u8,
@@ -20,6 +21,7 @@ const Mutant = struct {
 var mutants: []const Mutant = &.{};
 
 const minimum_test_count: usize = 231;
+const minimum_mutant_count: usize = 202;
 const test_timeout_seconds: u64 = 10;
 const process_output_limit: std.Io.Limit = .limited(8 * 1024 * 1024);
 const baseline_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(120), .clock = .awake } };
@@ -229,6 +231,12 @@ fn runFloor(
 }
 
 fn parsePassingTestCount(output: []const u8) ?usize {
+    if (digitsBefore(output, " skipped;")) |skipped| {
+        if (skipped != 0) return null;
+    }
+    if (digitsBefore(output, " failed.") orelse digitsBefore(output, " failed;")) |failed| {
+        if (failed != 0) return null;
+    }
     if (digitsBefore(output, " tests passed.")) |count| return count;
     return digitsBefore(output, " passed;");
 }
@@ -266,34 +274,57 @@ fn loadProductionFiles(allocator: std.mem.Allocator, io: std.Io, kernel_path: []
     return files.toOwnedSlice(allocator);
 }
 
-fn validateList(production_files: []const []u8) bool {
+fn errPrint(comptime fmt: []const u8, args: anytype) void {
+    if (builtin.is_test) return;
+    std.debug.print(fmt, args);
+}
+
+fn validateList(production_files: []const []const u8) bool {
+    return validateListWithFloor(mutants, production_files, minimum_mutant_count);
+}
+
+fn validateListWithFloor(
+    list: []const Mutant,
+    production_files: []const []const u8,
+    min_mutants: usize,
+) bool {
     var valid = true;
-    if (mutants.len == 0) {
-        std.debug.print("proof-checker mutants: floor failed: mutant list is empty\n", .{});
+    if (list.len == 0) {
+        errPrint("proof-checker mutants: floor failed: mutant list is empty\n", .{});
+        valid = false;
+    } else if (list.len < min_mutants) {
+        errPrint("proof-checker mutants: floor failed: mutant list has {d} rows, below floor {d}\n", .{ list.len, min_mutants });
         valid = false;
     }
 
-    for (mutants, 0..) |mutant, index| {
+    for (list, 0..) |mutant, index| {
         if (mutant.id.len == 0 or mutant.old.len == 0) {
-            std.debug.print("proof-checker mutants: floor failed: row {d} has an empty id or old anchor\n", .{index});
+            errPrint("proof-checker mutants: floor failed: row {d} has an empty id or old anchor\n", .{index});
             valid = false;
         }
         if (std.mem.findScalar(u8, mutant.file, '/') != null or
             std.mem.findScalar(u8, mutant.file, '\\') != null or
             !std.mem.endsWith(u8, mutant.file, ".zig"))
         {
-            std.debug.print("proof-checker mutants: floor failed: row {s} has invalid file '{s}'\n", .{ mutant.id, mutant.file });
+            errPrint("proof-checker mutants: floor failed: row {s} has invalid file '{s}'\n", .{ mutant.id, mutant.file });
             valid = false;
         }
         if (mutant.equivalent) |reason| {
             if (reason.len == 0) {
-                std.debug.print("proof-checker mutants: floor failed: row {s} has an empty equivalent reason\n", .{mutant.id});
+                errPrint("proof-checker mutants: floor failed: row {s} has an empty equivalent reason\n", .{mutant.id});
                 valid = false;
             }
         }
-        for (mutants[0..index]) |previous| {
+        for (list[0..index]) |previous| {
             if (std.mem.eql(u8, previous.id, mutant.id)) {
-                std.debug.print("proof-checker mutants: floor failed: duplicate id {s}\n", .{mutant.id});
+                errPrint("proof-checker mutants: floor failed: duplicate id {s}\n", .{mutant.id});
+                valid = false;
+            }
+            if (std.mem.eql(u8, previous.file, mutant.file) and
+                std.mem.eql(u8, previous.old, mutant.old) and
+                std.mem.eql(u8, previous.new, mutant.new))
+            {
+                errPrint("proof-checker mutants: floor failed: row {s} duplicates mutation of {s}\n", .{ mutant.id, previous.id });
                 valid = false;
             }
         }
@@ -305,21 +336,21 @@ fn validateList(production_files: []const []u8) bool {
             }
         }
         if (!known_file) {
-            std.debug.print("proof-checker mutants: floor failed: row {s} names non-production file {s}\n", .{ mutant.id, mutant.file });
+            errPrint("proof-checker mutants: floor failed: row {s} names non-production file {s}\n", .{ mutant.id, mutant.file });
             valid = false;
         }
     }
 
     for (production_files) |file| {
         var found = false;
-        for (mutants) |mutant| {
+        for (list) |mutant| {
             if (std.mem.eql(u8, file, mutant.file)) {
                 found = true;
                 break;
             }
         }
         if (!found) {
-            std.debug.print("proof-checker mutants: floor failed: no row covers production source {s}\n", .{file});
+            errPrint("proof-checker mutants: floor failed: no row covers production source {s}\n", .{file});
             valid = false;
         }
     }
@@ -371,7 +402,10 @@ fn runMutant(work: *const Work, index: usize) !Result {
         .stderr_limit = process_output_limit,
         .timeout = compile_timeout,
     }) catch |err| switch (err) {
-        error.Timeout => return .{ .outcome = .timeout },
+        error.Timeout => return .{
+            .outcome = .harness_error,
+            .output = try work.allocator.dupe(u8, "compiler timed out"),
+        },
         else => return .{
             .outcome = .harness_error,
             .output = try work.allocator.print("compiler invocation: {s}", .{@errorName(err)}),
@@ -570,4 +604,34 @@ fn loadList(arena: std.mem.Allocator, io: std.Io, path: []const u8) ![]const Mut
         if (err == error.ParseZon) std.debug.print("proof-checker mutants: {s} is not a valid mutant list:\n{f}", .{ path, diag.fmt(path) });
         return err;
     };
+}
+
+test "parsePassingTestCount accepts clean summaries and rejects skipped or failed tests" {
+    try std.testing.expectEqual(@as(?usize, 231), parsePassingTestCount("All 231 tests passed.\n"));
+    try std.testing.expectEqual(@as(?usize, 231), parsePassingTestCount("231 passed; 0 skipped; 0 failed.\n"));
+    try std.testing.expectEqual(@as(?usize, null), parsePassingTestCount("230 passed; 1 skipped; 0 failed.\n"));
+    try std.testing.expectEqual(@as(?usize, null), parsePassingTestCount("230 passed; 0 skipped; 1 failed.\n"));
+    try std.testing.expectEqual(@as(?usize, null), parsePassingTestCount("no summary\n"));
+}
+
+test "validateListWithFloor enforces minimum count and rejects duplicate mutations" {
+    const prod = [_][]const u8{"checker.zig"};
+    const good = [_]Mutant{
+        .{ .id = "M1", .file = "checker.zig", .old = "a", .new = "b", .equivalent = null },
+        .{ .id = "M2", .file = "checker.zig", .old = "c", .new = "d", .equivalent = null },
+    };
+    try std.testing.expect(validateListWithFloor(&good, &prod, 2));
+    try std.testing.expect(!validateListWithFloor(&good, &prod, 3));
+
+    const dup_mutation = [_]Mutant{
+        .{ .id = "M1", .file = "checker.zig", .old = "a", .new = "b", .equivalent = null },
+        .{ .id = "M2", .file = "checker.zig", .old = "a", .new = "b", .equivalent = null },
+    };
+    try std.testing.expect(!validateListWithFloor(&dup_mutation, &prod, 2));
+
+    const dup_id = [_]Mutant{
+        .{ .id = "M1", .file = "checker.zig", .old = "a", .new = "b", .equivalent = null },
+        .{ .id = "M1", .file = "checker.zig", .old = "c", .new = "d", .equivalent = null },
+    };
+    try std.testing.expect(!validateListWithFloor(&dup_id, &prod, 2));
 }

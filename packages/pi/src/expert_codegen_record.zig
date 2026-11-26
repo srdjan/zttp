@@ -200,17 +200,17 @@ fn recordingCommand(
 test "recording remediation preserves the replay provider and requires the full corpus" {
     const local_full = try recordingCommand(testing.allocator, .local);
     defer testing.allocator.free(local_full);
-    try testing.expect(std.mem.indexOf(u8, local_full, "ZTTP_CODEGEN_PROVIDER=local") != null);
-    try testing.expect(std.mem.indexOf(u8, local_full, "ZTTP_CODEGEN_ONLY") == null);
+    try testing.expect(std.mem.find(u8, local_full, "ZTTP_CODEGEN_PROVIDER=local") != null);
+    try testing.expect(std.mem.find(u8, local_full, "ZTTP_CODEGEN_ONLY") == null);
 
     // The DeepSeek ceiling is named because the default truncates the heavier
     // cases into refused promotions. The local default is the stall guard, so
     // the remediation must not raise it there.
     const deepseek_command = try recordingCommand(testing.allocator, .deepseek);
     defer testing.allocator.free(deepseek_command);
-    try testing.expect(std.mem.indexOf(u8, deepseek_command, "ZTTP_CODEGEN_PROVIDER=deepseek") != null);
-    try testing.expect(std.mem.indexOf(u8, deepseek_command, "ZTTP_CODEGEN_TURN_TIMEOUT_MS=600000") != null);
-    try testing.expect(std.mem.indexOf(u8, local_full, "ZTTP_CODEGEN_TURN_TIMEOUT_MS") == null);
+    try testing.expect(std.mem.find(u8, deepseek_command, "ZTTP_CODEGEN_PROVIDER=deepseek") != null);
+    try testing.expect(std.mem.find(u8, deepseek_command, "ZTTP_CODEGEN_TURN_TIMEOUT_MS=600000") != null);
+    try testing.expect(std.mem.find(u8, local_full, "ZTTP_CODEGEN_TURN_TIMEOUT_MS") == null);
 }
 
 /// The declared local server stack, as `name@version`.
@@ -246,7 +246,7 @@ test "a declared runtime identity splits on the first at-sign" {
 fn declaredRuntimeFrom(provider: agent.Provider, raw_opt: ?[]const u8) !?RuntimeIdentity {
     const raw = raw_opt orelse return null;
     if (provider != .local) return error.RuntimeIdentityRequiresLocalProvider;
-    const split = std.mem.indexOfScalar(u8, raw, '@') orelse return error.MalformedRuntimeIdentity;
+    const split = std.mem.findScalar(u8, raw, '@') orelse return error.MalformedRuntimeIdentity;
     const name = std.mem.trim(u8, raw[0..split], " \t");
     const version = std.mem.trim(u8, raw[split + 1 ..], " \t");
     if (name.len == 0 or version.len == 0) return error.MalformedRuntimeIdentity;
@@ -591,21 +591,6 @@ test "empirical recording requires declared intent to pass" {
         requireRecordedIntent(testing.allocator, intent, "/workspace", "/zttp", Probe.notChecked),
     );
     try requireRecordedIntent(testing.allocator, intent, "/workspace", "/zttp", Probe.passed);
-}
-
-test "first attempt expectation is the recorded value or none" {
-    try testing.expectEqual(
-        @as(?bool, false),
-        firstAttemptExpectation(false),
-    );
-    try testing.expectEqual(
-        @as(?bool, null),
-        firstAttemptExpectation(null),
-    );
-}
-
-fn firstAttemptExpectation(recorded: ?bool) ?bool {
-    return recorded;
 }
 
 /// The headline model for the published convergence number.
@@ -1278,12 +1263,12 @@ test "jwt intent is independent of secret lookup order" {
     } else return error.TestExpectedEqual;
     const intent = jwt.intent;
 
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         intent.tests_jsonl,
         "\"authorization\":\"Bearer invalid-token\"",
     ) != null);
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         intent.tests_jsonl,
         "\"module\":\"env\",\"fn\":\"env\",\"args\":[\"JWT_SECRET\"]",
@@ -1812,7 +1797,6 @@ fn classifyRecordingFailure(err: anyerror) RecordingFailureKind {
         error.ModelNotFound,
         error.ProviderOverloaded,
         error.ProviderServerError,
-        error.ApiError,
         error.HttpNotOk,
         error.DeepSeekServerUnavailable,
         error.LocalServerUnavailable,
@@ -2035,7 +2019,6 @@ const LiveRecordContext = struct {
     diagnostics_run_id: []const u8,
     turn_timeout_ms: u64,
     require_green: bool,
-    enforce_headline_ratchet: bool,
 };
 
 const LiveRecordOutcome = struct {
@@ -2148,17 +2131,6 @@ fn recordLiveCase(
             result.tool_call_count,
         },
     );
-    if (context.enforce_headline_ratchet) {
-        if (firstAttemptExpectation(null)) |expected| {
-            if (result.firstAttemptGreen() != expected) {
-                std.debug.print(
-                    "[codegen-record] {s}: pinned first_attempt_green={} but fresh flow observed {}\n",
-                    .{ rc.name, expected, result.firstAttemptGreen() },
-                );
-                return error.PinnedExpectationMismatch;
-            }
-        }
-    }
 
     const zttp_bin = codegen.locateZttpBinary(allocator, context.repo_root) orelse {
         std.debug.print(
@@ -2369,8 +2341,6 @@ test "record codegen baseline corpus (live, gated)" {
         .diagnostics_run_id = diagnostics_run_id,
         .turn_timeout_ms = record_turn_timeout_ms,
         .require_green = require_green,
-        .enforce_headline_ratchet = corpus_provider == headline_provider and
-            std.mem.eql(u8, corpus_model, headline_model),
     };
     var raw_first_draft_passes: usize = 0;
     var first_attempt_greens: usize = 0;
@@ -2608,11 +2578,18 @@ const RuntimeConsensus = struct {
         candidate: ?evidence_identity.RuntimeRevision,
     ) !void {
         if (!self.observed) {
+            if (candidate) |runtime| {
+                const name_copy = try allocator.dupe(u8, runtime.name);
+                errdefer allocator.free(name_copy);
+                const revision_copy = try allocator.dupe(u8, runtime.revision);
+                self.value = .{
+                    .name = name_copy,
+                    .revision = revision_copy,
+                };
+            } else {
+                self.value = null;
+            }
             self.observed = true;
-            self.value = if (candidate) |runtime| .{
-                .name = try allocator.dupe(u8, runtime.name),
-                .revision = try allocator.dupe(u8, runtime.revision),
-            } else null;
             return;
         }
         if ((self.value == null) != (candidate == null)) return error.MixedCorpusIdentity;
@@ -2775,6 +2752,7 @@ fn compilerEvidenceIdentities(allocator: std.mem.Allocator) !evidence_identity.C
         semantics_hash,
         diagnostic_hash,
     });
+    defer allocator.free(meta_bytes);
     return .{
         .schema = evidence_identity.schema(&schema_hash),
         .meta = evidence_identity.meta(meta_bytes),
@@ -2889,6 +2867,7 @@ fn assertCoveragePageCurrent(
     tripped_count: usize,
 ) !void {
     const path = try a.print("{s}/docs/coverage.json", .{repo_root});
+    defer a.free(path);
     const bytes = zts.file_io.readFile(a, path, 64 * 1024) catch |err| {
         std.debug.print(
             "[proof-coverage] cannot read docs/coverage.json ({s}); regenerate with" ++
@@ -2897,6 +2876,7 @@ fn assertCoveragePageCurrent(
         );
         return error.CoveragePageUnreadable;
     };
+    defer a.free(bytes);
 
     const parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{}) catch |err| {
         std.debug.print(
@@ -3110,20 +3090,6 @@ test "codegen baseline replays at the committed first-attempt green rate" {
                     .{
                         rc.name,
                         @tagName(result.draft_quality),
-                        codegen.firstZtsCode(tr) orelse "-",
-                        if (on_headline) "" else " - off-headline provider or model, measured not ratcheted",
-                    },
-                );
-                if (on_headline) return error.CassetteRatchetMismatch;
-            }
-        } else if (firstAttemptExpectation(null)) |expected| {
-            if (result.firstAttemptGreen() != expected) {
-                std.debug.print(
-                    "[codegen-replay] {s}: expected first_attempt_green={} got {} (code {s}){s}\n",
-                    .{
-                        rc.name,
-                        expected,
-                        result.firstAttemptGreen(),
                         codegen.firstZtsCode(tr) orelse "-",
                         if (on_headline) "" else " - off-headline provider or model, measured not ratcheted",
                     },
@@ -3351,9 +3317,9 @@ test "codegen baseline replays at the committed first-attempt green rate" {
         std.debug.print(
             "[codegen-holes] median round-trips: whole_file={d} (n={d}), holes={d} (n={d})\n",
             .{
-                whole_rt.items[whole_rt.items.len / 2],
+                codegen.lowerMiddleMedianSorted(whole_rt.items),
                 whole_rt.items.len,
-                hole_rt.items[hole_rt.items.len / 2],
+                codegen.lowerMiddleMedianSorted(hole_rt.items),
                 hole_rt.items.len,
             },
         );

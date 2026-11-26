@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS016","severity":"error","message":"an assignment target must be a name, a member path, or an index; write `x = value`, `o.a = value`, or `xs[i] = value`, with no parentheses or `?.`","file":"parse/bad/invalid_assignment_target.ts","line":4,"column":9,"suggestion":"Assign to a declared name, member path, or index without parentheses, calls, or `?.`.","repair_intent":null}

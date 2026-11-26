@@ -235,8 +235,8 @@ pub const rows =
         // and an empty array throws.
         .{ .scope = "Array.prototype", .name = "reduce", .min_args = 1, .params = &.{ .function, .any }, .result = .reduce_value },
     } ++
-    // JSON. `parse` returns the parsed value, or `undefined` for text that is
-    // not valid JSON, for a value that is not a string, and for JSON `null`.
+    // JSON. `parse` returns the parsed value (`null` for JSON `null`), or `undefined`
+    // for text that is not valid JSON or for a value that is not a string.
     // `unknown` covers all of them. `tryParse` returns a Result object for any
     // argument. Its `ok`, `value`, and `error` are the core properties of the
     // Result object (`getResultCoreProperty` in object.zig), the same ones
@@ -297,7 +297,6 @@ pub const Skip = struct {
     reason: []const u8,
 };
 
-const u1b = "typed in U1b";
 const typed_elsewhere_array = "typed elsewhere: inferArrayMethodType gives the method a function type";
 const typed_elsewhere_response = "typed elsewhere: inferResponseConstructorType gives the Response type";
 const typed_elsewhere_signature = "typed elsewhere: a function signature registered by name in abi_types.zig";
@@ -330,8 +329,8 @@ pub const skips =
     skipsOf("global", "out of scope: h returns a vnode, a runtime object with no type", &.{"h"}) ++
     skipsOf("global", "out of scope: a call of the constructor returns a runtime object with no type", &.{"Request"}) ++
     skipsOf("global", refused_in_handler, &.{
-        "Error",           "Fragment",    "RangeError", "ReferenceError", "Result",      "SyntaxError", "TypeError",
-        "_processRequest", "httpRequest", "isFinite",   "isNaN",          "performance", "fetchSync",
+        "Error",       "Fragment", "RangeError", "ReferenceError", "Result",    "SyntaxError", "TypeError",
+        "httpRequest", "isFinite", "isNaN",      "performance",    "fetchSync",
     }) ++
     skipsOf("console", refused_in_handler, &.{"log"});
 
@@ -355,7 +354,6 @@ pub const Counts = struct {
     members: usize,
     rows: usize,
     skips: usize,
-    u1b_skips: usize,
 };
 
 fn findMember(members: []const Member, scope: []const u8, name: []const u8) bool {
@@ -444,13 +442,11 @@ fn census(
     try addMember(&members, allocator, "range", "length");
 
     var skipped: usize = 0;
-    var u1b_skipped: usize = 0;
     for (skip_table) |skip| {
         if (skip.reason.len == 0) return error.SkipWithoutReason;
         if (!findMember(members.items, skip.scope, skip.name)) return error.SkipNamesNoMember;
         if (rowFor(table, skip.scope, skip.name)) return error.SkipForTypedMember;
         skipped += 1;
-        if (std.mem.eql(u8, skip.reason, u1b)) u1b_skipped += 1;
     }
     for (table) |row| {
         if (!findMember(members.items, row.scope, row.name)) return error.RowNamesNoMember;
@@ -461,7 +457,7 @@ fn census(
         if (report) std.debug.print("builtin result census: {s}.{s} has no row and no skip\n", .{ m.scope, m.name });
         return error.MemberWithoutRow;
     }
-    return .{ .members = members.items.len, .rows = table.len, .skips = skipped, .u1b_skips = u1b_skipped };
+    return .{ .members = members.items.len, .rows = table.len, .skips = skipped };
 }
 
 test "census: every installed builtin has a result row or a stated reason" {
@@ -477,14 +473,14 @@ test "census: every installed builtin has a result row or a stated reason" {
 
     const counts = try census(allocator, ctx, &rows, &skips, true);
     std.debug.print(
-        "builtin result census: {d} members, {d} rows, {d} skips ({d} typed in U1b)\n",
-        .{ counts.members, counts.rows, counts.skips, counts.u1b_skips },
+        "builtin result census: {d} members, {d} rows, {d} skips\n",
+        .{ counts.members, counts.rows, counts.skips },
     );
     // The former ambient assertion was counted without an installed value.
     // The imported intrinsic is lowered before runtime builtin dispatch.
     try std.testing.expect(ctx.getGlobal(try ctx.atoms.intern("assert")) == null);
     // A floor on the input: a census that enumerated nothing would pass.
-    try std.testing.expect(counts.members >= 121);
+    try std.testing.expect(counts.members >= 120);
     // Each member has a row or a skip, never both.
     try std.testing.expectEqual(counts.members, counts.rows + counts.skips);
 

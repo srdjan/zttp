@@ -454,17 +454,16 @@ fn appendFlowWriteFindings(
         result.verify_warnings += 1;
         const diagnostic = flowWriteDiagnostic(site);
         if (json_mode) {
-            var projected = json_diag.fromCheckerDiagnostic(allocator, .verifier, diagnostic, ir_view, handler_path) orelse continue;
+            var projected = (try json_diag.fromCheckerDiagnostic(allocator, .verifier, diagnostic, ir_view, handler_path)) orelse continue;
             errdefer projected.deinit(allocator);
             try result.json_diagnostics.append(allocator, projected);
         } else if (!builtin.is_test) {
-            var output: std.ArrayList(u8) = .empty;
-            defer output.deinit(allocator);
-            var output_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+            var output_writer: std.Io.Writer.Allocating = .init(allocator);
+            defer output_writer.deinit();
             const single = [_]zts.VerifierDiagnostic{diagnostic};
             zts.DiagnosticProjection.writeAll(.verifier, diag_view, &single, ir_view, &output_writer.writer) catch {};
-            output = output_writer.toArrayList();
-            if (output.items.len > 0) debugPrint("{s}", .{output.items});
+            const written = output_writer.written();
+            if (written.len > 0) debugPrint("{s}", .{written});
         }
     }
 }
@@ -801,8 +800,9 @@ pub fn appendSourceRefusals(
             const errors = source_owner.parserErrors();
             if (json_mode) {
                 for (errors) |parse_error| {
-                    var diagnostic = json_diag.fromParseErrorOwned(allocator, parse_error, path);
-                    result.json_diagnostics.append(allocator, diagnostic) catch diagnostic.deinit(allocator);
+                    var diagnostic = try json_diag.fromParseErrorOwned(allocator, parse_error, path);
+                    errdefer diagnostic.deinit(allocator);
+                    try result.json_diagnostics.append(allocator, diagnostic);
                 }
             } else if (!builtin.is_test) {
                 printParseErrors(allocator, source_owner.sourceView(), errors);
@@ -857,14 +857,7 @@ fn runCheckOnParsedSource(
             return result;
         },
         .typescript => typed: {
-            source_owner.initInPlace(allocator, allocator, source, handler_path) catch |err| switch (err) {
-                error.OutOfMemory => {
-                    if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{err});
-                    result.parse_errors = 1;
-                    return result;
-                },
-                else => return err,
-            };
+            try source_owner.initInPlace(allocator, allocator, source, handler_path);
             source_owner_initialized = true;
             if (try appendSourceRefusals(allocator, &result, &source_owner, source, handler_path, json_mode)) return result;
             const capabilities = source_owner.acceptedCapabilities() orelse return error.DirectTypeSyntaxUnavailable;
@@ -1050,20 +1043,18 @@ fn runCheckOnParsedSource(
         if (bool_diags.len > 0) {
             if (json_mode) {
                 for (bool_diags) |diag| {
-                    if (json_diag.fromCheckerDiagnostic(allocator, .boolean, diag, ir_view, handler_path)) |jd| {
-                        result.json_diagnostics.append(allocator, jd) catch {
-                            var owned = jd;
-                            owned.deinit(allocator);
-                        };
+                    if (try json_diag.fromCheckerDiagnostic(allocator, .boolean, diag, ir_view, handler_path)) |jd| {
+                        var owned = jd;
+                        errdefer owned.deinit(allocator);
+                        try result.json_diagnostics.append(allocator, owned);
                     }
                 }
             } else {
-                var buf: std.ArrayList(u8) = .empty;
-                defer buf.deinit(allocator);
-                var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+                var aw: std.Io.Writer.Allocating = .init(allocator);
+                defer aw.deinit();
                 resolved.formatBoolDiagnostics(diag_view, &aw.writer) catch {};
-                buf = aw.toArrayList();
-                if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
+                const written = aw.written();
+                if (!builtin.is_test and written.len > 0) debugPrint("{s}", .{written});
             }
         }
         // No return on errors: the type and strict stages already ran inside
@@ -1079,20 +1070,18 @@ fn runCheckOnParsedSource(
     if (tc_diags.len > 0) {
         if (json_mode) {
             for (tc_diags) |diag| {
-                if (json_diag.fromCheckerDiagnostic(allocator, .type, diag, ir_view, handler_path)) |jd| {
-                    result.json_diagnostics.append(allocator, jd) catch {
-                        var owned = jd;
-                        owned.deinit(allocator);
-                    };
+                if (try json_diag.fromCheckerDiagnostic(allocator, .type, diag, ir_view, handler_path)) |jd| {
+                    var owned = jd;
+                    errdefer owned.deinit(allocator);
+                    try result.json_diagnostics.append(allocator, owned);
                 }
             }
         } else {
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(allocator);
-            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+            var aw: std.Io.Writer.Allocating = .init(allocator);
+            defer aw.deinit();
             resolved.formatTypeDiagnostics(diag_view, &aw.writer) catch {};
-            buf = aw.toArrayList();
-            if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
+            const written = aw.written();
+            if (!builtin.is_test and written.len > 0) debugPrint("{s}", .{written});
         }
     }
 
@@ -1119,20 +1108,18 @@ fn runCheckOnParsedSource(
         result.strict_advisories += strict_advisories;
         if (strict_diags.len > 0) {
             for (strict_diags) |diag| {
-                if (json_diag.fromCheckerDiagnostic(allocator, .strict, diag, ir_view, handler_path)) |jd| {
-                    result.json_diagnostics.append(allocator, jd) catch {
-                        var owned = jd;
-                        owned.deinit(allocator);
-                    };
+                if (try json_diag.fromCheckerDiagnostic(allocator, .strict, diag, ir_view, handler_path)) |jd| {
+                    var owned = jd;
+                    errdefer owned.deinit(allocator);
+                    try result.json_diagnostics.append(allocator, owned);
                 }
             }
             if (!json_mode) {
-                var buf: std.ArrayList(u8) = .empty;
-                defer buf.deinit(allocator);
-                var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+                var aw: std.Io.Writer.Allocating = .init(allocator);
+                defer aw.deinit();
                 resolved.formatStrictDiagnostics(diag_view, &aw.writer) catch {};
-                buf = aw.toArrayList();
-                if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
+                const written = aw.written();
+                if (!builtin.is_test and written.len > 0) debugPrint("{s}", .{written});
             }
         }
     }
@@ -1206,20 +1193,18 @@ fn runCheckOnParsedSource(
         if (verifier_diags.len > 0) {
             if (json_mode) {
                 for (verifier_diags) |diag| {
-                    if (json_diag.fromCheckerDiagnostic(allocator, .verifier, diag, ir_view, handler_path)) |jd| {
-                        result.json_diagnostics.append(allocator, jd) catch {
-                            var owned = jd;
-                            owned.deinit(allocator);
-                        };
+                    if (try json_diag.fromCheckerDiagnostic(allocator, .verifier, diag, ir_view, handler_path)) |jd| {
+                        var owned = jd;
+                        errdefer owned.deinit(allocator);
+                        try result.json_diagnostics.append(allocator, owned);
                     }
                 }
             } else {
-                var buf: std.ArrayList(u8) = .empty;
-                defer buf.deinit(allocator);
-                var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+                var aw: std.Io.Writer.Allocating = .init(allocator);
+                defer aw.deinit();
                 checked.verifier.formatDiagnostics(diag_view, &aw.writer) catch {};
-                buf = aw.toArrayList();
-                if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
+                const written = aw.written();
+                if (!builtin.is_test and written.len > 0) debugPrint("{s}", .{written});
             }
         }
 
@@ -1258,20 +1243,18 @@ fn runCheckOnParsedSource(
         result.flow_unresolved = checked.flow_checker.unresolvedCount();
         if (json_mode) {
             for (flow_diags) |diag| {
-                if (json_diag.fromCheckerDiagnostic(allocator, .flow, diag, ir_view, handler_path)) |jd| {
-                    result.json_diagnostics.append(allocator, jd) catch {
-                        var owned = jd;
-                        owned.deinit(allocator);
-                    };
+                if (try json_diag.fromCheckerDiagnostic(allocator, .flow, diag, ir_view, handler_path)) |jd| {
+                    var owned = jd;
+                    errdefer owned.deinit(allocator);
+                    try result.json_diagnostics.append(allocator, owned);
                 }
             }
         } else if (flow_diags.len > 0) {
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(allocator);
-            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+            var aw: std.Io.Writer.Allocating = .init(allocator);
+            defer aw.deinit();
             checked.flow_checker.formatDiagnostics(diag_view, &aw.writer) catch {};
-            buf = aw.toArrayList();
-            if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
+            const written = aw.written();
+            if (!builtin.is_test and written.len > 0) debugPrint("{s}", .{written});
         }
     }
 
@@ -1426,14 +1409,11 @@ fn runCheckOnParsedSource(
             result.paths_enumerated,
             result.paths_exhaustive,
         );
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-        const trace_written = zts.proof_trace.writeJson(&aw.writer, traces);
-        buf = aw.toArrayList();
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
         // An allocating writer fails only when it cannot allocate.
-        trace_written catch return error.OutOfMemory;
-        result.proof_trace_json = try allocator.dupe(u8, buf.items);
+        zts.proof_trace.writeJson(&aw.writer, traces) catch return error.OutOfMemory;
+        result.proof_trace_json = try aw.toOwnedSlice();
     }
 
     // Later analysis stages mutate contract.properties, so keep the flat

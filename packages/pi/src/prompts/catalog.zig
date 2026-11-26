@@ -70,7 +70,7 @@ test "catalog has exactly the expected entries, in order" {
 
 test "every template body mentions at least one placeholder" {
     for (&catalog) |*t| {
-        const has_placeholder = std.mem.indexOf(u8, t.body, "{{") != null;
+        const has_placeholder = std.mem.find(u8, t.body, "{{") != null;
         try testing.expect(has_placeholder);
     }
 }
@@ -138,17 +138,17 @@ test "findByName returns a pointer for a known template" {
 
 test "coding templates point at compiler-native Pi workflows" {
     const route = findByName("add-route") orelse return error.TestFailed;
-    try testing.expect(std.mem.indexOf(u8, route.body, "Author the COMPLETE file content yourself") != null);
-    try testing.expect(std.mem.indexOf(u8, route.body, "pi_apply_feature_plan") == null);
-    try testing.expect(std.mem.indexOf(u8, route.body, "one `propose_change_set` call") != null);
+    try testing.expect(std.mem.find(u8, route.body, "Author the COMPLETE file content yourself") != null);
+    try testing.expect(std.mem.find(u8, route.body, "pi_apply_feature_plan") == null);
+    try testing.expect(std.mem.find(u8, route.body, "one `propose_change_set` call") != null);
 
     const fix = findByName("fix") orelse return error.TestFailed;
-    try testing.expect(std.mem.indexOf(u8, fix.body, "zts_expert_verify_paths") != null);
-    try testing.expect(std.mem.indexOf(u8, fix.body, "pi_goal_candidate") != null);
-    try testing.expect(std.mem.indexOf(u8, fix.body, "/check") == null);
+    try testing.expect(std.mem.find(u8, fix.body, "zts_expert_verify_paths") != null);
+    try testing.expect(std.mem.find(u8, fix.body, "pi_goal_candidate") != null);
+    try testing.expect(std.mem.find(u8, fix.body, "/check") == null);
 
     const env = findByName("add-env") orelse return error.TestFailed;
-    try testing.expect(std.mem.indexOf(u8, env.body, "no_secret_leakage") != null);
+    try testing.expect(std.mem.find(u8, env.body, "no_secret_leakage") != null);
 }
 
 /// Expand `template_body` by substituting {{1}}, {{2}}, ..., {{args}}.
@@ -161,7 +161,7 @@ pub fn expand(allocator: std.mem.Allocator, template_body: []const u8, args: []c
 
     var pos: usize = 0;
     while (pos < template_body.len) {
-        const open = std.mem.indexOfScalarPos(u8, template_body, pos, '{') orelse {
+        const open = std.mem.findScalarPos(u8, template_body, pos, '{') orelse {
             try w.writeAll(template_body[pos..]);
             break;
         };
@@ -170,7 +170,7 @@ pub fn expand(allocator: std.mem.Allocator, template_body: []const u8, args: []c
             pos = open + 1;
             continue;
         }
-        const close = std.mem.indexOfPos(u8, template_body, open + 2, "}}") orelse {
+        const close = std.mem.findPos(u8, template_body, open + 2, "}}") orelse {
             try w.writeAll(template_body[pos..]);
             break;
         };

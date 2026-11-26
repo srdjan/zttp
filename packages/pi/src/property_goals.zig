@@ -138,8 +138,8 @@ test "supported goal list names every driveable goal" {
     // match the set `parseDriveableGoal` accepts or the message sends them at
     // a goal that will be refused.
     for (supported_goals) |goal| {
-        try testing.expect(std.mem.indexOf(u8, supported_goal_list, @tagName(goal)) != null);
+        try testing.expect(std.mem.find(u8, supported_goal_list, @tagName(goal)) != null);
     }
-    try testing.expect(std.mem.indexOf(u8, supported_goal_list, "input_validated") != null);
-    try testing.expect(std.mem.indexOf(u8, supported_goal_list, "pii_contained") != null);
+    try testing.expect(std.mem.find(u8, supported_goal_list, "input_validated") != null);
+    try testing.expect(std.mem.find(u8, supported_goal_list, "pii_contained") != null);
 }

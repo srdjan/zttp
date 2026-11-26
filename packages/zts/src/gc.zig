@@ -24,6 +24,9 @@ pub const GCConfig = struct {
     /// transient live-set spike cannot push the threshold arbitrarily high and
     /// starve future collections. 0 = no cap.
     max_major_gc_threshold: usize = 1 << 22,
+    /// When true, request-scoped arena allocation replaces the generational
+    /// nursery, so skip allocating the unused nursery buffer at init time.
+    hybrid_mode: bool = false,
 };
 
 /// Nursery heap with bump allocation
@@ -359,76 +362,6 @@ pub const GrayStack = struct {
     }
 };
 
-/// Float constant pool for common float values
-/// Pre-allocates Float64Box instances to avoid repeated allocations
-pub const FloatConstantPool = struct {
-    zero: value.JSValue.Float64Box,
-    one: value.JSValue.Float64Box,
-    neg_one: value.JSValue.Float64Box,
-    nan: value.JSValue.Float64Box,
-    pos_inf: value.JSValue.Float64Box,
-    neg_inf: value.JSValue.Float64Box,
-
-    const box_size = @sizeOf(value.JSValue.Float64Box);
-
-    pub fn init() FloatConstantPool {
-        return .{
-            .zero = .{
-                .header = heap.MemBlockHeader.init(.float64, box_size),
-                ._pad = 0,
-                .value = 0.0,
-            },
-            .one = .{
-                .header = heap.MemBlockHeader.init(.float64, box_size),
-                ._pad = 0,
-                .value = 1.0,
-            },
-            .neg_one = .{
-                .header = heap.MemBlockHeader.init(.float64, box_size),
-                ._pad = 0,
-                .value = -1.0,
-            },
-            .nan = .{
-                .header = heap.MemBlockHeader.init(.float64, box_size),
-                ._pad = 0,
-                .value = std.math.nan(f64),
-            },
-            .pos_inf = .{
-                .header = heap.MemBlockHeader.init(.float64, box_size),
-                ._pad = 0,
-                .value = std.math.inf(f64),
-            },
-            .neg_inf = .{
-                .header = heap.MemBlockHeader.init(.float64, box_size),
-                ._pad = 0,
-                .value = -std.math.inf(f64),
-            },
-        };
-    }
-
-    /// Try to get a cached Float64Box for a common value
-    /// Returns null if the value is not in the cache
-    pub fn get(self: *FloatConstantPool, v: f64) ?*value.JSValue.Float64Box {
-        // Check for exact matches of common values
-        if (v == 0.0) return &self.zero;
-        if (v == 1.0) return &self.one;
-        if (v == -1.0) return &self.neg_one;
-        if (std.math.isNan(v)) return &self.nan;
-        if (std.math.isPositiveInf(v)) return &self.pos_inf;
-        if (std.math.isNegativeInf(v)) return &self.neg_inf;
-        return null;
-    }
-
-    /// True if ptr points at one of the pre-allocated boxes inside this pool.
-    /// The six boxes are inline fields, so any cached float box pointer falls
-    /// within [base, base + @sizeOf(FloatConstantPool)).
-    pub fn contains(self: *FloatConstantPool, ptr: *anyopaque) bool {
-        const p = @intFromPtr(ptr);
-        const base = @intFromPtr(self);
-        return p >= base and p < base + @sizeOf(FloatConstantPool);
-    }
-};
-
 /// Pool of pre-allocated Upvalue objects for efficient closure creation
 /// Uses a free list for O(1) acquire/release operations
 pub const UpvaluePool = struct {
@@ -523,9 +456,6 @@ pub const GC = struct {
     /// Forwarding pointers for evacuation (maps old ptr address -> new ptr)
     forwarding_pointers: std.AutoHashMap(usize, *anyopaque),
 
-    /// Float constant pool for common values (0.0, 1.0, -1.0, NaN, Infinity)
-    float_pool: FloatConstantPool,
-
     /// Upvalue pool for efficient closure creation
     upvalue_pool: UpvaluePool,
 
@@ -537,9 +467,6 @@ pub const GC = struct {
 
     /// Memory limit in bytes (0 = no limit)
     memory_limit: usize = 0,
-
-    /// Number of float allocations saved by constant pool
-    float_pool_hits: u64 = 0,
 
     /// Hybrid allocation mode - when true, GC is disabled
     /// Arena handles ephemeral allocations, persistent allocations don't need GC
@@ -564,10 +491,13 @@ pub const GC = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, config: GCConfig) !GC {
-        const nursery_mem = try allocator.alloc(u8, config.nursery_size);
-        errdefer allocator.free(nursery_mem);
+        const nursery_mem: []u8 = if (config.hybrid_mode or config.nursery_size == 0)
+            &.{}
+        else
+            try allocator.alloc(u8, config.nursery_size);
+        errdefer if (nursery_mem.len > 0) allocator.free(nursery_mem);
 
-        var tenured = try TenuredHeap.init(allocator, config.tenured_initial_size);
+        var tenured = try TenuredHeap.init(allocator, if (config.hybrid_mode) 0 else config.tenured_initial_size);
         errdefer tenured.deinit();
 
         return .{
@@ -577,11 +507,11 @@ pub const GC = struct {
             .root_set = RootSet.init(allocator),
             .gray_stack = GrayStack.init(allocator),
             .forwarding_pointers = std.AutoHashMap(usize, *anyopaque).init(allocator),
-            .float_pool = FloatConstantPool.init(),
             .upvalue_pool = UpvaluePool.init(allocator),
             .config = config,
             .allocator = allocator,
             .heap_ptr = null,
+            .hybrid_mode = config.hybrid_mode,
         };
     }
 
@@ -627,27 +557,6 @@ pub const GC = struct {
     /// Add a GC root
     pub fn addRoot(self: *GC, val: value.JSValue) !void {
         try self.root_set.addRoot(val);
-    }
-
-    /// Allocate a Float64Box for boxed float values
-    /// Uses constant pool for common values (0.0, 1.0, -1.0, NaN, Infinity) to avoid allocation
-    pub fn allocFloat(self: *GC, v: f64) !*value.JSValue.Float64Box {
-        // Fast path: check constant pool for common values
-        if (self.float_pool.get(v)) |cached| {
-            self.float_pool_hits += 1;
-            return cached;
-        }
-
-        // Slow path: allocate new Float64Box
-        const size = @sizeOf(value.JSValue.Float64Box);
-        const ptr = self.allocNursery(size) orelse return error.OutOfMemory;
-        const box: *value.JSValue.Float64Box = @ptrCast(@alignCast(ptr));
-        box.* = .{
-            .header = heap.MemBlockHeader.init(.float64, size),
-            ._pad = 0,
-            .value = v,
-        };
-        return box;
     }
 
     /// Acquire an Upvalue from the pool (or allocate new)
@@ -821,9 +730,6 @@ pub const GC = struct {
 
     /// Evacuate a single object from nursery to tenured
     fn evacuateObject(self: *GC, ptr: *anyopaque) !*anyopaque {
-        // Pre-allocated float-pool boxes live outside the nursery and are never
-        // GC-managed; leave them in place rather than copying into tenured.
-        if (self.isFloatPoolBox(ptr)) return ptr;
         // Check if already evacuated (has forwarding pointer)
         if (self.getForwardingPointer(ptr)) |fwd| {
             return fwd;
@@ -1130,11 +1036,6 @@ pub const GC = struct {
 
     fn markPtr(self: *GC, ptr: *anyopaque) void {
         if (self.gc_oom) return;
-        // isInTenured(ptr) == !isInNursery(ptr), so any non-nursery pointer
-        // (including an unregistered float-pool box) is tenured-classified and
-        // would be pushed onto the gray stack. Drop float boxes early: they are
-        // not registered in tenured, hold no child pointers, and need no mark.
-        if (self.isFloatPoolBox(ptr)) return;
         if (self.isInTenured(ptr)) {
             if (self.markTenured(ptr)) {
                 self.gray_stack.push(ptr) catch {
@@ -1279,6 +1180,7 @@ pub const GC = struct {
     /// Write barrier for cross-generation pointers
     /// Call this when storing a pointer into an old-generation object
     pub fn writeBarrier(self: *GC, old_ptr: *anyopaque, new_val: value.JSValue) !void {
+        if (self.hybrid_mode) return;
         if (new_val.isPtr()) {
             const new_ptr: *anyopaque = @ptrCast(new_val.toPtr(u8));
             // Check if old is in tenured and new is in nursery
@@ -1308,13 +1210,6 @@ pub const GC = struct {
     /// Check if pointer is in tenured space
     pub fn isInTenured(self: *GC, ptr: *anyopaque) bool {
         return !self.isInNursery(ptr);
-    }
-
-    /// True if ptr is one of the pre-allocated float-pool boxes. Because
-    /// isInTenured(ptr) == !isInNursery(ptr), a float box (outside the nursery)
-    /// would otherwise be tenured-classified; this lets mark/evacuate skip it.
-    inline fn isFloatPoolBox(self: *GC, ptr: *anyopaque) bool {
-        return self.float_pool.contains(ptr);
     }
 
     /// Get GC statistics
@@ -1701,43 +1596,6 @@ test "TenuredHeap accounts slot size" {
     const size_class = heap.SizeClass.fromSize(obj.header.sizeBytes());
     const expected = if (size_class == .large) obj.header.sizeBytes() else size_class.slotSize();
     try std.testing.expectEqual(expected, tenured.allocated);
-}
-
-test "FloatConstantPool caching" {
-    const allocator = std.testing.allocator;
-    var gc_state = try GC.init(allocator, .{ .nursery_size = 4096 });
-    defer gc_state.deinit();
-
-    // Allocate common values - should use constant pool
-    const zero = try gc_state.allocFloat(0.0);
-    const one = try gc_state.allocFloat(1.0);
-    const neg_one = try gc_state.allocFloat(-1.0);
-    const nan = try gc_state.allocFloat(std.math.nan(f64));
-    const pos_inf = try gc_state.allocFloat(std.math.inf(f64));
-    const neg_inf = try gc_state.allocFloat(-std.math.inf(f64));
-
-    // Verify values are correct
-    try std.testing.expectEqual(@as(f64, 0.0), zero.value);
-    try std.testing.expectEqual(@as(f64, 1.0), one.value);
-    try std.testing.expectEqual(@as(f64, -1.0), neg_one.value);
-    try std.testing.expect(std.math.isNan(nan.value));
-    try std.testing.expect(std.math.isPositiveInf(pos_inf.value));
-    try std.testing.expect(std.math.isNegativeInf(neg_inf.value));
-
-    // Verify constant pool was used (6 hits)
-    try std.testing.expectEqual(@as(u64, 6), gc_state.float_pool_hits);
-
-    // Allocate same values again - should return same pointers from pool
-    const zero2 = try gc_state.allocFloat(0.0);
-    const one2 = try gc_state.allocFloat(1.0);
-    try std.testing.expectEqual(zero, zero2);
-    try std.testing.expectEqual(one, one2);
-    try std.testing.expectEqual(@as(u64, 8), gc_state.float_pool_hits);
-
-    // Allocate a non-cached value - should allocate new box
-    const pi = try gc_state.allocFloat(3.14159);
-    try std.testing.expectEqual(@as(f64, 3.14159), pi.value);
-    try std.testing.expectEqual(@as(u64, 8), gc_state.float_pool_hits); // No new hit
 }
 
 test "TenuredHeap registerObject is idempotent" {
@@ -2195,4 +2053,15 @@ test "GC allocNursery returns null when exhausted" {
     // Third allocation should fail (not enough space)
     const ptr3 = gc_state.allocNursery(32);
     try std.testing.expect(ptr3 == null);
+}
+
+test "GC skips nursery allocation when hybrid_mode is enabled" {
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 4 * 1024 * 1024, .hybrid_mode = true });
+    defer gc_state.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), gc_state.nursery.size);
+    try std.testing.expectEqual(@as(usize, 0), gc_state.nursery.used());
+    try std.testing.expectEqual(@as(usize, 0), gc_state.tenured.mark_bitvector.len);
+    try std.testing.expect(gc_state.hybrid_mode);
 }

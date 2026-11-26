@@ -38,10 +38,12 @@ pub fn writeJsonEnvelope(
 pub const OwnedDiagnostic = struct {
     diag: json_diag.JsonDiagnostic,
     owned_message: ?[]u8 = null,
+    owned_file: ?[]u8 = null,
     owned_suggestion: ?[]u8 = null,
 
     pub fn deinit(self: *OwnedDiagnostic, allocator: std.mem.Allocator) void {
         if (self.owned_message) |msg| allocator.free(msg);
+        if (self.owned_file) |file| allocator.free(file);
         if (self.owned_suggestion) |msg| allocator.free(msg);
     }
 
@@ -57,18 +59,21 @@ pub const OwnedDiagnostic = struct {
     ) !OwnedDiagnostic {
         const owned_message = try allocator.dupe(u8, message);
         errdefer allocator.free(owned_message);
+        const owned_file = try allocator.dupe(u8, file);
+        errdefer allocator.free(owned_file);
         const owned_suggestion = if (suggestion) |value| try allocator.dupe(u8, value) else null;
         return .{
             .diag = .{
                 .code = code,
                 .severity = severity,
                 .message = owned_message,
-                .file = file,
+                .file = owned_file,
                 .line = line,
                 .column = column,
                 .suggestion = owned_suggestion,
             },
             .owned_message = owned_message,
+            .owned_file = owned_file,
             .owned_suggestion = owned_suggestion,
         };
     }
@@ -537,7 +542,7 @@ fn checkForbiddenPatterns(
     diagnostics: *std.ArrayList(OwnedDiagnostic),
 ) !void {
     for (forbidden_patterns) |rule| {
-        if (std.mem.indexOf(u8, content, rule.pattern)) |offset| {
+        if (std.mem.find(u8, content, rule.pattern)) |offset| {
             try appendDiagnostic(
                 allocator,
                 diagnostics,
@@ -681,25 +686,32 @@ const ExportBindingIterator = struct {
 
     fn next(self: *ExportBindingIterator) ?Binding {
         const marker = ".name = \"";
-        while (std.mem.indexOfPos(u8, self.content, self.cursor, marker)) |idx| {
+        while (std.mem.findPos(u8, self.content, self.cursor, marker)) |idx| {
             const name_start = idx + marker.len;
-            const name_end = std.mem.indexOfScalarPos(u8, self.content, name_start, '"') orelse {
+            const name_end = std.mem.findScalarPos(u8, self.content, name_start, '"') orelse {
                 self.cursor = self.content.len;
                 return null;
             };
             const name = self.content[name_start..name_end];
 
-            // The block runs to the next export marker, or to end of file.
-            const body_end = if (std.mem.indexOfPos(u8, self.content, name_end, marker)) |n| n else self.content.len;
+            // Bound the body at this struct literal's closing `}` (tracking brace
+            // nesting and skipping strings/comments) or the next `.name = "` marker,
+            // whichever comes first. Stopping at `}` prevents comments or tests
+            // after the binding from disabling ZVM011 on the last export; stopping
+            // at the next marker prevents the enclosing `ModuleBinding.name` from
+            // capturing its first export's `.module_func`.
+            const next_marker = std.mem.findPos(u8, self.content, name_end + 1, marker) orelse self.content.len;
+            const brace_end = findClosingBrace(self.content, name_end + 1);
+            const body_end = @min(brace_end, next_marker);
             const body = self.content[name_end..body_end];
-            self.cursor = name_end;
+            self.cursor = name_end + 1;
 
-            if (std.mem.indexOf(u8, body, ".module_func") == null) continue;
+            if (std.mem.find(u8, body, ".module_func") == null) continue;
 
             return .{
                 .name = name,
                 .return_kind = parseReturnKind(body) orelse "unknown",
-                .derives_from_args = std.mem.indexOf(u8, body, "derives_from_args = true") != null,
+                .derives_from_args = std.mem.find(u8, body, "derives_from_args = true") != null,
                 .declares_validated = parseDeclaresValidated(body),
                 .offset = idx,
             };
@@ -708,9 +720,51 @@ const ExportBindingIterator = struct {
     }
 };
 
+fn findClosingBrace(content: []const u8, start: usize) usize {
+    var depth: usize = 1;
+    var i: usize = start;
+    while (i < content.len) {
+        const c = content[i];
+        if (c == '/' and i + 1 < content.len and content[i + 1] == '/') {
+            i += 2;
+            while (i < content.len and content[i] != '\n') : (i += 1) {}
+            continue;
+        }
+        if (c == '\\' and i + 1 < content.len and content[i + 1] == '\\') {
+            i += 2;
+            while (i < content.len and content[i] != '\n') : (i += 1) {}
+            continue;
+        }
+        if (c == '"' or c == '\'') {
+            const quote = c;
+            i += 1;
+            while (i < content.len and content[i] != '\n') {
+                if (content[i] == '\\' and i + 1 < content.len) {
+                    i += 2;
+                    continue;
+                }
+                if (content[i] == quote) {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if (c == '{') {
+            depth += 1;
+        } else if (c == '}') {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+        i += 1;
+    }
+    return content.len;
+}
+
 fn parseReturnKind(body: []const u8) ?[]const u8 {
     const marker = ".returns = .";
-    const idx = std.mem.indexOf(u8, body, marker) orelse return null;
+    const idx = std.mem.find(u8, body, marker) orelse return null;
     const start = idx + marker.len;
     var end = start;
     while (end < body.len and isIdentChar(body[end])) : (end += 1) {}
@@ -722,10 +776,10 @@ fn parseReturnKind(body: []const u8) ?[]const u8 {
 /// anywhere in the block: a neighbouring field must not be read as this one.
 fn parseDeclaresValidated(body: []const u8) bool {
     const marker = ".return_labels = .{";
-    const idx = std.mem.indexOf(u8, body, marker) orelse return false;
+    const idx = std.mem.find(u8, body, marker) orelse return false;
     const start = idx + marker.len;
-    const end = std.mem.indexOfScalarPos(u8, body, start, '}') orelse return false;
-    return std.mem.indexOf(u8, body[start..end], ".validated = true") != null;
+    const end = std.mem.findScalarPos(u8, body, start, '}') orelse return false;
+    return std.mem.find(u8, body[start..end], ".validated = true") != null;
 }
 
 fn checkCapabilityHelperDrift(
@@ -739,7 +793,7 @@ fn checkCapabilityHelperDrift(
         var used = false;
         var offset: usize = 0;
         for (rule.helpers) |helper| {
-            if (std.mem.indexOf(u8, content, helper)) |idx| {
+            if (std.mem.find(u8, content, helper)) |idx| {
                 used = true;
                 offset = idx;
                 break;
@@ -797,9 +851,9 @@ fn parseBindingCapabilities(allocator: std.mem.Allocator, content: []const u8) !
     errdefer caps.deinit(allocator);
 
     const marker = "required_capabilities = &.{";
-    const start = std.mem.indexOf(u8, content, marker) orelse return caps;
+    const start = std.mem.find(u8, content, marker) orelse return caps;
     const body_start = start + marker.len;
-    const body_end_rel = std.mem.indexOfScalarPos(u8, content, body_start, '}') orelse return caps;
+    const body_end_rel = std.mem.findScalarPos(u8, content, body_start, '}') orelse return caps;
     const body = content[body_start..body_end_rel];
 
     var i: usize = 0;
@@ -821,16 +875,16 @@ fn parseBindingCapabilities(allocator: std.mem.Allocator, content: []const u8) !
 }
 
 fn parseAssignedString(content: []const u8, marker: []const u8) ?[]const u8 {
-    const idx = std.mem.indexOf(u8, content, marker) orelse return null;
-    const first_quote = std.mem.indexOfScalarPos(u8, content, idx + marker.len, '"') orelse return null;
-    const end_quote = std.mem.indexOfScalarPos(u8, content, first_quote + 1, '"') orelse return null;
+    const idx = std.mem.find(u8, content, marker) orelse return null;
+    const first_quote = std.mem.findScalarPos(u8, content, idx + marker.len, '"') orelse return null;
+    const end_quote = std.mem.findScalarPos(u8, content, first_quote + 1, '"') orelse return null;
     return content[first_quote + 1 .. end_quote];
 }
 
 fn looksLikeBuiltinAdjacentPath(path: []const u8) bool {
-    const in_zts_modules_dir = std.mem.indexOf(u8, path, "packages/zts/src/modules/") != null and std.mem.endsWith(u8, path, ".zig");
-    const in_peer_modules_dir = std.mem.indexOf(u8, path, "packages/modules/src/") != null and std.mem.endsWith(u8, path, ".zig");
-    const in_specs_dir = std.mem.indexOf(u8, path, "packages/modules/module-specs/") != null and std.mem.endsWith(u8, path, ".json");
+    const in_zts_modules_dir = std.mem.find(u8, path, "packages/zts/src/modules/") != null and std.mem.endsWith(u8, path, ".zig");
+    const in_peer_modules_dir = std.mem.find(u8, path, "packages/modules/src/") != null and std.mem.endsWith(u8, path, ".zig");
+    const in_specs_dir = std.mem.find(u8, path, "packages/modules/module-specs/") != null and std.mem.endsWith(u8, path, ".json");
     return in_zts_modules_dir or in_peer_modules_dir or in_specs_dir;
 }
 
@@ -951,7 +1005,7 @@ test "ZVM011 fires on a data-carrying export that declares no derivation" {
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqualStrings("ZVM011", diags.items[0].diag.code);
     // Names the export, so the diagnostic points at the binding to edit.
-    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].diag.message, "slugify") != null);
+    try std.testing.expect(std.mem.find(u8, diags.items[0].diag.message, "slugify") != null);
 }
 
 test "ZVM011 is silent when the export says how its result is labelled" {
@@ -1020,7 +1074,7 @@ test "ZVM011 reads validated from this binding's own return_labels" {
 
     try checkLabelDerivation(allocator, "packages/modules/src/test.zig", source, "zttp:test", &diags);
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].diag.message, "passThrough") != null);
+    try std.testing.expect(std.mem.find(u8, diags.items[0].diag.message, "passThrough") != null);
 }
 
 test "every label_abstain_rows row names an export that still abstains" {
@@ -1228,20 +1282,18 @@ test "writeJsonEnvelope on empty VerifyResult emits the ok envelope" {
     var result: VerifyResult = .{};
     defer result.deinit(std.testing.allocator);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
     const hash = zts.policyHash();
     try writeJsonEnvelope(&aw.writer, &result, hash);
 
-    buf = aw.toArrayList();
-    const s = buf.items;
+    const s = aw.written();
 
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"checked_files\":[]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"violations\":[]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"policy_version\":\"2026.04.2\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"checked_files\":[]") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"violations\":[]") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"policy_version\":\"2026.04.2\"") != null);
     try std.testing.expectEqual(@as(u8, '\n'), s[s.len - 1]);
 }
 
@@ -1284,4 +1336,86 @@ test "pathMatchesCanonical requires a path-separator boundary" {
     try std.testing.expect(pathMatchesCanonical("packages/zts/src/modules/env.zig", "packages/zts/src/modules/env.zig"));
     try std.testing.expect(pathMatchesCanonical("/repo/packages/zts/src/modules/env.zig", "packages/zts/src/modules/env.zig"));
     try std.testing.expect(!pathMatchesCanonical("xpackages/zts/src/modules/env.zig", "packages/zts/src/modules/env.zig"));
+}
+
+test "auditPath owns companion file paths on failing companion specs and modules" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "packages/modules/src/platform");
+    try tmp.dir.createDirPath(io, "packages/modules/module-specs/platform");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/modules/src/platform/env.zig",
+        .data =
+        \\pub const binding = mb.ModuleBinding{
+        \\    .specifier = "zttp:env",
+        \\    .required_capabilities = &.{},
+        \\};
+        \\fn bad() void { _ = std.c.getenv("X"); }
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/modules/module-specs/platform/env.json",
+        .data = "{not valid json",
+    });
+
+    const module_path = try tmp.dir.realPathFileAlloc(io, "packages/modules/src/platform/env.zig", allocator);
+    defer allocator.free(module_path);
+    const spec_path = try tmp.dir.realPathFileAlloc(io, "packages/modules/module-specs/platform/env.json", allocator);
+    defer allocator.free(spec_path);
+
+    // Auditing the module path resolves a temporary spec_path that fails manifest parsing.
+    var by_module = try verifyPaths(allocator, &.{module_path}, .{});
+    defer by_module.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), by_module.diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZVM001", by_module.diagnostics.items[0].diag.code);
+    try std.testing.expectEqualStrings(module_path, by_module.diagnostics.items[0].diag.file);
+    try std.testing.expectEqualStrings("ZVM010", by_module.diagnostics.items[1].diag.code);
+    try std.testing.expectEqualStrings(spec_path, by_module.diagnostics.items[1].diag.file);
+
+    // Auditing the spec path resolves a temporary module_path that reports ZVM001.
+    var by_spec = try verifyPaths(allocator, &.{spec_path}, .{});
+    defer by_spec.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), by_spec.diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZVM001", by_spec.diagnostics.items[0].diag.code);
+    try std.testing.expectEqualStrings(module_path, by_spec.diagnostics.items[0].diag.file);
+    try std.testing.expectEqualStrings("ZVM010", by_spec.diagnostics.items[1].diag.code);
+    try std.testing.expectEqualStrings(spec_path, by_spec.diagnostics.items[1].diag.file);
+}
+
+test "ZVM011 still fires on last export when EOF tests mention derives_from_args or validated" {
+    const allocator = std.testing.allocator;
+    var diags: std.ArrayList(OwnedDiagnostic) = .empty;
+    defer {
+        for (diags.items) |*diag| diag.deinit(allocator);
+        diags.deinit(allocator);
+    }
+
+    const source =
+        \\pub const binding = mb.ModuleBinding{
+        \\    .name = "test",
+        \\    .specifier = "zttp:test",
+        \\    .exports = &.{
+        \\        .{
+        \\            .name = "lastExport",
+        \\            .module_func = lastExportImpl,
+        \\            .arg_count = 1,
+        \\            .returns = .string,
+        \\        },
+        \\    },
+        \\};
+        \\
+        \\test "mentioning flags after the binding cannot exempt lastExport" {
+        \\    // derives_from_args = true
+        \\    const s = ".return_labels = .{ .validated = true }";
+        \\    _ = s;
+        \\}
+    ;
+
+    try checkLabelDerivation(allocator, "packages/modules/src/test.zig", source, "zttp:test", &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqualStrings("ZVM011", diags.items[0].diag.code);
+    try std.testing.expect(std.mem.find(u8, diags.items[0].diag.message, "lastExport") != null);
 }

@@ -2612,13 +2612,13 @@ pub fn findByAsk(ask: []const u8) ?*const DefectSeed {
     // what every existing ask does.
     var best: ?*const DefectSeed = null;
     for (&seeds) |*seed| {
-        if (std.mem.indexOf(u8, ask, seed.id) == null) continue;
+        if (std.mem.find(u8, ask, seed.id) == null) continue;
         const longer = if (best) |current| seed.id.len > current.id.len else true;
         if (longer) best = seed;
     }
     if (best) |seed| return seed;
     for (&seeds) |*seed| {
-        if (std.mem.indexOf(u8, ask, seed.code)) |pos| {
+        if (std.mem.find(u8, ask, seed.code)) |pos| {
             const end = pos + seed.code.len;
             const closes = end >= ask.len or !std.ascii.isDigit(ask[end]);
             if (closes) return seed;

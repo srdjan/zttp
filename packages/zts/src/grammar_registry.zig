@@ -444,13 +444,13 @@ test "every noted row names a code the projection really emits" {
         if (p.note != null) noted += 1;
     }
     try testing.expectEqual(@as(usize, 3), noted);
-    try testing.expect(std.mem.indexOf(u8, findByName("RegistrationCall").?.note.?, parser_code) != null);
+    try testing.expect(std.mem.find(u8, findByName("RegistrationCall").?.note.?, parser_code) != null);
     const alias = findByName("TypeAliasDecl") orelse return error.TestExpectedEqual;
     const alias_note = alias.note orelse return error.TestExpectedEqual;
-    try testing.expect(std.mem.indexOf(u8, alias_note, type_code) != null);
+    try testing.expect(std.mem.find(u8, alias_note, type_code) != null);
     const query = findByName("BrandQuery") orelse return error.TestExpectedEqual;
     const query_note = query.note orelse return error.TestExpectedEqual;
-    try testing.expect(std.mem.indexOf(u8, query_note, query_code) != null);
+    try testing.expect(std.mem.find(u8, query_note, query_code) != null);
 }
 
 test "the production names are unique, so a client can key on them" {
@@ -475,9 +475,9 @@ test "every right-hand side is normalized the way the drift gate normalizes the 
         try testing.expect(p.rhs.len > 0);
         try testing.expect(!std.mem.startsWith(u8, p.rhs, " "));
         try testing.expect(!std.mem.endsWith(u8, p.rhs, " "));
-        try testing.expect(std.mem.indexOf(u8, p.rhs, "  ") == null);
-        try testing.expect(std.mem.indexOfScalar(u8, p.rhs, '\t') == null);
-        try testing.expect(std.mem.indexOfScalar(u8, p.rhs, '\n') == null);
+        try testing.expect(std.mem.find(u8, p.rhs, "  ") == null);
+        try testing.expect(std.mem.findScalar(u8, p.rhs, '\t') == null);
+        try testing.expect(std.mem.findScalar(u8, p.rhs, '\n') == null);
     }
 }
 
@@ -485,7 +485,7 @@ test "the grammar derives no form that the compiler refuses" {
     const has = struct {
         fn in(name: []const u8, needle: []const u8) bool {
             const p = findByName(name) orelse return false;
-            return std.mem.indexOf(u8, p.rhs, needle) != null;
+            return std.mem.find(u8, p.rhs, needle) != null;
         }
     }.in;
     // A function declaration is module level only (ZTS071).

@@ -207,22 +207,26 @@ pub fn add(ctx: Context) Result {
     const release_check_test_step = b.step("test-release-check", "Run release-passport tests");
     release_check_test_step.dependOn(&run_release_check_tests.step);
 
-    // Repository-only AST metric. The live command receives the tracked Zig
-    // source list from a NUL-safe script; its unit tests pin the AST definition
-    // and its input floors. It is never installed in user projects.
+    // Repository-only AST metric. Its unit tests pin the AST definition and its
+    // input floors. It is never installed in user projects.
     const production_branch_metric_tests = ctx.addTest(.{
         .filters = test_filters,
         .root_module = production_branch_metric_mod,
     });
     const run_production_branch_metric_tests = ctx.addRunTest(production_branch_metric_tests);
-    const production_branch_metric = ctx.addGate(&.{ "/bin/bash", "scripts/run-production-branch-metric.sh", "--tool" }, "production-branch-metric", "Measure production branch points in tracked Zig sources");
-    production_branch_metric.run.addArtifactArg(production_branch_metric_exe);
-    const metric_json = ctx.addGate(&.{ "/bin/bash", "scripts/run-production-branch-metric.sh", "--tool" }, "production-branch-metric-json", "Measure production branch points as JSON");
-    metric_json.run.addArtifactArg(production_branch_metric_exe);
-    metric_json.run.addArg("--json");
+    const production_branch_metric = b.addRunArtifact(production_branch_metric_exe);
+    production_branch_metric.addArgs(&.{ "--require-package-floor", "--tracked" });
+    production_branch_metric.setCwd(b.path("."));
+    production_branch_metric.has_side_effects = true;
+    b.step("production-branch-metric", "Measure production branch points in tracked Zig sources").dependOn(&production_branch_metric.step);
+    const metric_json = b.addRunArtifact(production_branch_metric_exe);
+    metric_json.addArgs(&.{ "--require-package-floor", "--tracked", "--json" });
+    metric_json.setCwd(b.path("."));
+    metric_json.has_side_effects = true;
+    b.step("production-branch-metric-json", "Measure production branch points as JSON").dependOn(&metric_json.step);
     const production_branch_metric_test_step = b.step("test-production-branch-metric", "Test and run the production branch metric");
     production_branch_metric_test_step.dependOn(&run_production_branch_metric_tests.step);
-    production_branch_metric_test_step.dependOn(&production_branch_metric.run.step);
+    production_branch_metric_test_step.dependOn(&production_branch_metric.step);
 
     // Evidence commands must retain output that already exists on stdout.
     const evidence_stream_probe = b.addSystemCommand(&.{

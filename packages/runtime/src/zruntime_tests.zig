@@ -5,7 +5,6 @@
 //! contains the loopback HTTP server that these tests use.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const compat = @import("zts").compat;
 const ascii = std.ascii;
 
@@ -18,10 +17,9 @@ fn egressEndpoint(url: []const u8, out: []u8) []const u8 {
 
 // Import zts module
 const zq = @import("zts");
-const fault_explain = @import("fault_explain.zig");
 const incident_log = @import("incident_log.zig");
 const http = @import("runtime_http.zig");
-const natives = @import("runtime_natives.zig");
+const trace_request_recorder = @import("trace_request_recorder.zig");
 
 // Force-reference so this root collects the attestation receipt's tests. A
 // container-level import that nothing else in the graph analyzes does not pull
@@ -33,24 +31,18 @@ comptime {
 
 // Helpers in runtime_http.zig that the tests below call unqualified.
 const buildFetchUrl = http.buildFetchUrl;
-const parseFetchArgs = http.parseFetchArgs;
 
 // Bytecode caching for faster cold starts
 const bytecode_cache = zq.bytecode_cache;
 
 // HTTP protocol types (shared with server layer)
 const http_types = @import("http_types.zig");
-const HttpRequestView = http_types.HttpRequestView;
 const HttpRequestOwned = http_types.HttpRequestOwned;
 
 const runtime_config_mod = @import("runtime_config.zig");
-const contract_runtime = @import("contract_runtime.zig");
-const cost_meter = zq.CostMeter;
 
 const RuntimeConfig = runtime_config_mod.RuntimeConfig;
 const RuntimePolicyGeneration = @import("runtime_policy_generation.zig").RuntimePolicyGeneration;
-
-const applyEmbeddedCapabilityPolicy = runtime_config_mod.applyEmbeddedCapabilityPolicy;
 
 // ============================================================================
 // File reading for module graph (POSIX, no async I/O dependency)
@@ -58,6 +50,7 @@ const applyEmbeddedCapabilityPolicy = runtime_config_mod.applyEmbeddedCapability
 
 const handler_instance = @import("handler_instance.zig");
 const HandlerInstance = handler_instance.HandlerInstance;
+const HandlerPool = handler_instance.HandlerPool;
 const OutboundIo = @import("outbound_io.zig").OutboundIo;
 // ============================================================================
 // Handler Pool (Lock-Free)
@@ -312,11 +305,11 @@ fn captureRequest(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, io: 
     const header_sep = findTestHeaderEnd(raw) orelse return error.InvalidTestRequest;
     const header_end = header_sep + 4;
     const request_head = raw[0..header_sep];
-    const line_end = std.mem.indexOf(u8, request_head, "\r\n") orelse return error.InvalidTestRequest;
+    const line_end = std.mem.find(u8, request_head, "\r\n") orelse return error.InvalidTestRequest;
     const request_line = request_head[0..line_end];
-    const first_space = std.mem.indexOfScalar(u8, request_line, ' ') orelse return error.InvalidTestRequest;
+    const first_space = std.mem.findScalar(u8, request_line, ' ') orelse return error.InvalidTestRequest;
     const rest = request_line[first_space + 1 ..];
-    const second_space_rel = std.mem.indexOfScalar(u8, rest, ' ') orelse return error.InvalidTestRequest;
+    const second_space_rel = std.mem.findScalar(u8, rest, ' ') orelse return error.InvalidTestRequest;
 
     const method = try allocator.dupe(u8, request_line[0..first_space]);
     errdefer allocator.free(method);
@@ -333,11 +326,11 @@ fn captureRequest(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, io: 
     }
     var line_start = line_end + 2;
     while (line_start < request_head.len) {
-        const next_line_end = std.mem.indexOfPos(u8, request_head, line_start, "\r\n") orelse request_head.len;
+        const next_line_end = std.mem.findPos(u8, request_head, line_start, "\r\n") orelse request_head.len;
         if (next_line_end == line_start) break;
         const line = request_head[line_start..next_line_end];
 
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const colon = std.mem.findScalar(u8, line, ':') orelse continue;
         const name = std.mem.trim(u8, line[0..colon], " \t");
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
         const name_copy = try allocator.dupe(u8, name);
@@ -389,7 +382,7 @@ fn readRawRequestBytes(allocator: std.mem.Allocator, stream: *std.Io.net.Stream,
 }
 
 fn findTestHeaderEnd(raw: []const u8) ?usize {
-    return std.mem.indexOf(u8, raw, "\r\n\r\n") orelse null;
+    return std.mem.find(u8, raw, "\r\n\r\n") orelse null;
 }
 
 fn requestMessageLength(raw: []const u8) ?usize {
@@ -401,12 +394,12 @@ fn requestMessageLength(raw: []const u8) ?usize {
     var chunked = false;
     var line_start: usize = 0;
     while (line_start < header_block.len) {
-        const line_end = std.mem.indexOfPos(u8, header_block, line_start, "\r\n") orelse header_block.len;
+        const line_end = std.mem.findPos(u8, header_block, line_start, "\r\n") orelse header_block.len;
         const line = header_block[line_start..line_end];
         line_start = line_end + 2;
         if (line.len == 0) continue;
 
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const colon = std.mem.findScalar(u8, line, ':') orelse continue;
         const name = std.mem.trim(u8, line[0..colon], " \t");
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
 
@@ -431,16 +424,16 @@ fn requestMessageLength(raw: []const u8) ?usize {
 fn chunkedBodyLength(body: []const u8) ?usize {
     var idx: usize = 0;
     while (true) {
-        const line_end = std.mem.indexOfPos(u8, body, idx, "\r\n") orelse return null;
+        const line_end = std.mem.findPos(u8, body, idx, "\r\n") orelse return null;
         const size_line = body[idx..line_end];
-        const semi = std.mem.indexOfScalar(u8, size_line, ';') orelse size_line.len;
+        const semi = std.mem.findScalar(u8, size_line, ';') orelse size_line.len;
         const size_text = std.mem.trim(u8, size_line[0..semi], " \t");
         const chunk_len = std.fmt.parseInt(usize, size_text, 16) catch return null;
         idx = line_end + 2;
 
         if (chunk_len == 0) {
             while (true) {
-                const trailer_end = std.mem.indexOfPos(u8, body, idx, "\r\n") orelse return null;
+                const trailer_end = std.mem.findPos(u8, body, idx, "\r\n") orelse return null;
                 if (trailer_end == idx) return trailer_end + 2;
                 idx = trailer_end + 2;
             }
@@ -524,7 +517,7 @@ test "every runtime global is reserved from a module top-level binding" {
         const name = (if (key.isPredefined()) key.toPredefinedName() else rt.ctx.atoms.getName(key)) orelse
             return error.TestUnexpectedResult;
         // A name such as `zttp:env#env` is no identifier, so no module can bind it.
-        if (std.mem.indexOfAny(u8, name, "%:#") != null) continue;
+        if (std.mem.findAny(u8, name, "%:#") != null) continue;
         if (!zq.modules.ModuleGraph.isReservedName(name)) {
             std.debug.print("runtime global has no reserved row: {s}\n", .{name});
             return error.TestUnexpectedResult;
@@ -679,6 +672,7 @@ test "failed pooled initialization clears its host and releases wrapper state" {
             } else |err| {
                 try std.testing.expectEqual(error.OutOfMemory, err);
                 try std.testing.expectEqual(@as(?*anyopaque, null), base.ctx.host);
+                try std.testing.expectEqual(@as(u64, 0), base.ctx.policy_generation);
                 try std.testing.expectEqual(@as(usize, 1), generation.refs.load(.monotonic));
                 return failing.alloc_index - before;
             }
@@ -908,8 +902,43 @@ test "non-Response return 500 is proof-explained against exhaustive_returns" {
     defer response.deinit();
 
     try std.testing.expectEqual(@as(u16, 500), response.status);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "exhaustive_returns") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "did not claim exhaustive_returns") != null);
+    try std.testing.expect(std.mem.find(u8, response.body, "exhaustive_returns") != null);
+    try std.testing.expect(std.mem.find(u8, response.body, "did not claim exhaustive_returns") != null);
+}
+
+test "non-Response return on path claiming exhaustive_returns reports and logs a soundness incident" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const log_path = try allocator.print(".zig-cache/tmp/{s}/non-response-incidents.jsonl", .{tmp.sub_path});
+
+    const fd = try incident_log.open(allocator, log_path);
+    defer std.Io.Threaded.closeFd(fd);
+
+    const rt = try HandlerInstance.init(allocator, .{
+        .handler_proof = .{ .exhaustive_returns = true },
+        .incident_log_fd = fd,
+    });
+    defer rt.deinit();
+
+    try rt.loadCode("function handler(req) { return 42; }", "<non-response-incident>");
+
+    var request = try makeTestRequest(allocator, "GET", "/non-resp", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 500), response.status);
+    try std.testing.expect(std.mem.find(u8, response.body, "Possible soundness incident") != null);
+    try std.testing.expect(std.mem.find(u8, response.body, "exhaustive_returns") != null);
+
+    const contents = try zq.file_io.readFile(allocator, log_path, 64 * 1024);
+    try std.testing.expect(std.mem.find(u8, contents, "soundness_incident") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "/non-resp") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "non_response_return") != null);
 }
 
 test "soundness incident on a proven path is written to the incident log" {
@@ -938,12 +967,12 @@ test "soundness incident on a proven path is written to the incident log" {
     try std.testing.expectError(error.HandlerTypeFault, rt.executeHandler(request.asView()));
 
     const contents = try zq.file_io.readFile(allocator, log_path, 64 * 1024);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "soundness_incident") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "/boom") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "optional_safe") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "soundness_incident") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "/boom") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "optional_safe") != null);
     // The single-line handler faults on line 1; the source map (feature A) must
     // surface that line into the incident detail.
-    try std.testing.expect(std.mem.indexOf(u8, contents, "NotCallable at 1:") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "NotCallable at 1:") != null);
 }
 
 test "exceeding a constant cost ceiling records a soundness incident" {
@@ -985,11 +1014,11 @@ test "exceeding a constant cost ceiling records a soundness incident" {
     try std.testing.expectEqualStrings("ok", response.body);
 
     const contents = try zq.file_io.readFile(allocator, log_path, 64 * 1024);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "soundness_incident") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "cost_bounded") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "cost envelope exceeded") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "total 2 > 1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "arena high-water") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "soundness_incident") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "cost_bounded") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "cost envelope exceeded") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "total 2 > 1") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "arena high-water") != null);
 }
 
 test "requests within the ceiling record no incident" {
@@ -1030,52 +1059,252 @@ test "requests within the ceiling record no incident" {
     try std.testing.expectEqualStrings("ok", response.body);
 
     const contents = try zq.file_io.readFile(allocator, log_path, 64 * 1024);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "soundness_incident") == null);
+    try std.testing.expect(std.mem.find(u8, contents, "soundness_incident") == null);
 }
 
 test "cost meter resets between pooled requests" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    const allocator = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const log_path = try allocator.print(".zig-cache/tmp/{s}/cost-reset.jsonl", .{tmp.sub_path});
+    const log_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cost-reset.jsonl", .{tmp.sub_path});
+    defer allocator.free(log_path);
 
     const fd = try incident_log.open(allocator, log_path);
     defer std.Io.Threaded.closeFd(fd);
 
-    const rt = try HandlerInstance.init(allocator, .{
-        .incident_log_fd = fd,
-        .cost_ceilings = .{
-            .total = 1,
-            .total_is_constant = true,
-        },
-    });
-    defer rt.deinit();
-
-    try rt.loadCode(
+    const handler_code =
         \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  env("ONE");
         \\  return Response.text("ok");
         \\}
-    , "<cost-reset>");
+    ;
+
+    var pool = try HandlerPool.init(
+        allocator,
+        .{
+            .incident_log_fd = fd,
+            .cost_ceilings = .{
+                .total = 1,
+                .total_is_constant = true,
+            },
+        },
+        handler_code,
+        "<cost-reset>",
+        1,
+        0,
+    );
+    defer pool.deinit();
 
     var first = try makeTestRequest(allocator, "GET", "/first", null);
     defer first.deinit(allocator);
-    var first_response = try rt.executeHandler(first.asView());
+    var first_response = try pool.executeHandler(first.asView());
     defer first_response.deinit();
-    try std.testing.expectEqual(@as(u32, 0), rt.ctx.cost_meter.total());
+    try std.testing.expectEqual(@as(u16, 200), first_response.status);
+    try std.testing.expectEqualStrings("ok", first_response.body);
 
     var second = try makeTestRequest(allocator, "GET", "/second", null);
     defer second.deinit(allocator);
-    var second_response = try rt.executeHandler(second.asView());
+    var second_response = try pool.executeHandler(second.asView());
     defer second_response.deinit();
-    try std.testing.expectEqual(@as(u32, 0), rt.ctx.cost_meter.total());
+    try std.testing.expectEqual(@as(u16, 200), second_response.status);
+    try std.testing.expectEqualStrings("ok", second_response.body);
 
     const contents = try zq.file_io.readFile(allocator, log_path, 64 * 1024);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "soundness_incident") == null);
+    defer allocator.free(contents);
+    try std.testing.expect(std.mem.find(u8, contents, "soundness_incident") == null);
+}
+
+test "TraceRecorder stays owned by HandlerInstance across panic teardown" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const trace_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/panic-trace.jsonl", .{tmp.sub_path});
+    defer allocator.free(trace_path);
+
+    // 1. Standalone HandlerInstance torn down while TRACE_STATE_SLOT is still active
+    //    (the state left behind when a handler panics before finishRequestRecorder runs).
+    {
+        const rt = try HandlerInstance.init(allocator, .{ .trace_file_path = trace_path });
+        defer rt.deinit();
+
+        var req = try makeTestRequest(allocator, "GET", "/panic-standalone", null);
+        defer req.deinit(allocator);
+
+        _ = trace_request_recorder.setupRequestRecorder(rt, req.asView());
+        try std.testing.expect(rt.ctx.module_state[zq.TRACE_STATE_SLOT] != null);
+    }
+
+    // 2. Pooled HandlerInstance torn down BEFORE its LockFreePool.Runtime ctx.deinit()
+    //    (the quarantine order on handler panic). Previously ctx.deinit() invoked
+    //    deinitOpaque on the already-destroyed TraceRecorder (UAF / double-free).
+    {
+        const fd = try runtime_config_mod.openTraceFile(allocator, trace_path);
+        defer std.Io.Threaded.closeFd(fd);
+        var trace_mutex: zq.trace.TraceMutex = .{};
+
+        var pool = try zq.LockFreePool.init(allocator, .{ .max_size = 1 });
+        defer pool.deinit();
+        const base = try pool.acquire();
+        defer pool.dropRuntime(base);
+
+        const generation = try RuntimePolicyGeneration.create(allocator, 1, .{}, false);
+        defer generation.release();
+
+        const rt = try HandlerInstance.initFromPool(base, .{ .trace_file_path = trace_path }, generation);
+        rt.trace_file = fd;
+        rt.trace_mutex = &trace_mutex;
+
+        var req = try makeTestRequest(allocator, "GET", "/panic-pooled", null);
+        defer req.deinit(allocator);
+
+        _ = trace_request_recorder.setupRequestRecorder(rt, req.asView());
+        try std.testing.expect(base.ctx.module_state[zq.TRACE_STATE_SLOT] != null);
+
+        rt.deinit();
+        try std.testing.expect(base.ctx.module_state[zq.TRACE_STATE_SLOT] == null);
+    }
+}
+
+test "handler dispatch matches req.path without query string and records trace response" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const trace_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/fast-path-trace.jsonl", .{tmp.sub_path});
+    defer allocator.free(trace_path);
+
+    const handler_code =
+        \\function handler(req) {
+        \\  if (req.path === "/health") {
+        \\    return Response.text("healthy");
+        \\  }
+        \\  return Response.text("other");
+        \\}
+    ;
+
+    {
+        const rt = try HandlerInstance.init(allocator, .{ .trace_file_path = trace_path });
+        defer rt.deinit();
+        try rt.loadCode(handler_code, "<fast-path-trace>");
+
+        var req = try makeTestRequest(allocator, "GET", "/health", null);
+        defer req.deinit(allocator);
+
+        var response = try rt.executeHandler(req.asView());
+        defer response.deinit();
+
+        try std.testing.expectEqual(@as(u16, 200), response.status);
+        try std.testing.expectEqualStrings("healthy", response.body);
+    }
+
+    const contents = try zq.file_io.readFile(allocator, trace_path, 64 * 1024);
+    defer allocator.free(contents);
+    try std.testing.expect(std.mem.find(u8, contents, "\"type\":\"request\"") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "\"type\":\"response\",\"status\":200") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "\"body\":\"healthy\"") != null);
+}
+
+test "auth guard before static route executes and denies unauthorized requests" {
+    const allocator = std.testing.allocator;
+
+    const handler_code =
+        \\function handler(req) {
+        \\  const token = req.headers.get("authorization");
+        \\  if (token !== "Bearer secret") {
+        \\    return Response.text("unauthorized", { status: 401 });
+        \\  }
+        \\  if (req.path === "/health") {
+        \\    return Response.text("healthy");
+        \\  }
+        \\  return Response.text("other");
+        \\}
+    ;
+
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+    try rt.loadCode(handler_code, "<auth-guard-static-route>");
+
+    {
+        var unauth_req = try makeTestRequest(allocator, "GET", "/health", null);
+        defer unauth_req.deinit(allocator);
+
+        var unauth_resp = try rt.executeHandler(unauth_req.asView());
+        defer unauth_resp.deinit();
+
+        try std.testing.expectEqual(@as(u16, 401), unauth_resp.status);
+        try std.testing.expectEqualStrings("unauthorized", unauth_resp.body);
+    }
+
+    {
+        var auth_req = try makeTestRequest(allocator, "GET", "/health", null);
+        defer auth_req.deinit(allocator);
+        const auth_key = try allocator.dupe(u8, "authorization");
+        errdefer allocator.free(auth_key);
+        const auth_val = try allocator.dupe(u8, "Bearer secret");
+        errdefer allocator.free(auth_val);
+        try auth_req.headers.append(allocator, .{ .key = auth_key, .value = auth_val });
+
+        var auth_resp = try rt.executeHandler(auth_req.asView());
+        defer auth_resp.deinit();
+
+        try std.testing.expectEqual(@as(u16, 200), auth_resp.status);
+        try std.testing.expectEqualStrings("healthy", auth_resp.body);
+    }
+}
+
+test "constant-envelope arena overflow fuse fires on pooled runtime" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const log_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/pooled-overflow.jsonl", .{tmp.sub_path});
+    defer allocator.free(log_path);
+
+    const fd = try incident_log.open(allocator, log_path);
+    defer std.Io.Threaded.closeFd(fd);
+
+    const handler_code =
+        \\function handler(req) {
+        \\  let s = "0123456789abcdef";
+        \\  for (const _ of range(10)) {
+        \\    s = [s, s].join("");
+        \\  }
+        \\  return Response.text(String(s.length));
+        \\}
+    ;
+
+    var pool = try HandlerPool.init(
+        allocator,
+        .{
+            .incident_log_fd = fd,
+            .use_hybrid_allocation = true,
+            .arena_size = 4096,
+            .cost_ceilings = .{
+                .total = 10,
+                .total_is_constant = true,
+            },
+        },
+        handler_code,
+        "<pooled-overflow>",
+        1,
+        0,
+    );
+    defer pool.deinit();
+
+    var req = try makeTestRequest(allocator, "GET", "/overflow", null);
+    defer req.deinit(allocator);
+    var response = try pool.executeHandler(req.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("16384", response.body);
+
+    const contents = try zq.file_io.readFile(allocator, log_path, 64 * 1024);
+    defer allocator.free(contents);
+    try std.testing.expect(std.mem.find(u8, contents, "cost arena overflow under constant envelope") != null);
 }
 
 test "httpRequest native binding reports disabled bridge by default" {
@@ -1509,7 +1738,7 @@ test "fetchSync returns response helpers and direct response objects" {
     defer direct_response.deinit();
 
     try std.testing.expectEqual(@as(u16, 599), direct_response.status);
-    try std.testing.expect(std.mem.indexOf(u8, direct_response.body, "\"error\":\"OutboundHttpDisabled\"") != null);
+    try std.testing.expect(std.mem.find(u8, direct_response.body, "\"error\":\"OutboundHttpDisabled\"") != null);
 }
 
 test "fetchSync returns structured errors for invalid init and allowlist failures" {
@@ -1789,9 +2018,9 @@ test "a denial names the guard, not the request's own bytes" {
         // Nothing the request chose reaches the stream: not the host, not the
         // port, not the path.
         for ([_][]const u8{ "127.0.0.1", "secret-looking-path" }) |chosen| {
-            try std.testing.expect(std.mem.indexOf(u8, event.resourceIdSlice(), chosen) == null);
-            try std.testing.expect(std.mem.indexOf(u8, event.detailSlice(), chosen) == null);
-            try std.testing.expect(std.mem.indexOf(u8, event.moduleSlice(), chosen) == null);
+            try std.testing.expect(std.mem.find(u8, event.resourceIdSlice(), chosen) == null);
+            try std.testing.expect(std.mem.find(u8, event.detailSlice(), chosen) == null);
+            try std.testing.expect(std.mem.find(u8, event.moduleSlice(), chosen) == null);
         }
     }
     try std.testing.expect(saw_denial);
@@ -2038,6 +2267,54 @@ test "a denied cache namespace never creates the store" {
     }
 }
 
+test "cacheStats scopes 0-arg aggregate to allowed namespaces and zeroes non-string args" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const both_policy = zq.RuntimePolicy{
+        .cache = .{ .enabled = true, .values = &[_][]const u8{ "allowed", "blocked" } },
+    };
+    const rt = try HandlerInstance.init(allocator, .{ .dev_capability_policy = both_policy });
+    defer rt.deinit();
+
+    try rt.loadCode(
+        \\import { cacheSet, cacheGet, cacheStats } from "zttp:cache";
+        \\function handler(req) {
+        \\  if (req.method === "POST") {
+        \\    cacheSet("allowed", "k", "ab");
+        \\    cacheGet("allowed", "k");
+        \\    cacheSet("blocked", "k", "12345");
+        \\    cacheGet("blocked", "k");
+        \\    return Response.json({ seeded: true });
+        \\  }
+        \\  return Response.json({
+        \\    all: cacheStats(),
+        \\    nonString: cacheStats(123),
+        \\  });
+        \\}
+    , "<cache-stats-scope>");
+
+    var post_req = try makeTestRequest(allocator, "POST", "/", null);
+    defer post_req.deinit(allocator);
+    var seed_resp = try rt.executeHandler(post_req.asView());
+    defer seed_resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), seed_resp.status);
+
+    // Restrict active policy to only "allowed" and reset per-request state cleanly.
+    rt.ctx.capability_policy.cache = .{ .enabled = true, .values = &[_][]const u8{"allowed"} };
+
+    var get_req = try makeTestRequest(allocator, "GET", "/", null);
+    defer get_req.deinit(allocator);
+    var stats_resp = try rt.executeHandler(get_req.asView());
+    defer stats_resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), stats_resp.status);
+    try std.testing.expectEqualStrings(
+        "{\"all\":{\"hits\":1,\"misses\":0,\"entries\":1,\"bytes\":10},\"nonString\":{\"hits\":0,\"misses\":0,\"entries\":0,\"bytes\":0}}",
+        stats_resp.body,
+    );
+}
+
 test "jwtSign, jwtVerify, and verifyWebhookSignature refuse an empty secret" {
     const allocator = std.testing.allocator;
     const rt = try HandlerInstance.init(allocator, .{});
@@ -2116,8 +2393,8 @@ test "rateCheck answers bad arguments with an error Result, not undefined" {
     defer response.deinit();
 
     try std.testing.expectEqual(@as(u16, 200), response.status);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"limitOk\":false,\"limitTag\":\"invalid_arguments\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"windowOk\":false,\"windowTag\":\"invalid_arguments\"") != null);
+    try std.testing.expect(std.mem.find(u8, response.body, "\"limitOk\":false,\"limitTag\":\"invalid_arguments\"") != null);
+    try std.testing.expect(std.mem.find(u8, response.body, "\"windowOk\":false,\"windowTag\":\"invalid_arguments\"") != null);
 }
 
 test "a denied sql write never reaches the database" {
@@ -2289,7 +2566,7 @@ test "fetchSync sends request data and exposes response helpers" {
     try std.testing.expectEqual(true, obj.get("ok").?.bool);
     try std.testing.expectEqualStrings("application/json", obj.get("contentType").?.string);
     try std.testing.expectEqualStrings("ok", obj.get("reply").?.string);
-    try std.testing.expect(std.mem.indexOf(u8, obj.get("rawBody").?.string, "\"method\":\"POST\"") != null);
+    try std.testing.expect(std.mem.find(u8, obj.get("rawBody").?.string, "\"method\":\"POST\"") != null);
     try std.testing.expectEqualStrings("POST", obj.get("method").?.string);
     try std.testing.expectEqualStrings("/inspect?mode=1", obj.get("path").?.string);
     try std.testing.expectEqualStrings("text/plain", obj.get("requestType").?.string);
@@ -2297,11 +2574,11 @@ test "fetchSync sends request data and exposes response helpers" {
     try std.testing.expectEqualStrings("ping", obj.get("requestBody").?.string);
     try std.testing.expectEqualStrings("4", obj.get("requestLength").?.string);
     try std.testing.expectEqualStrings("", obj.get("transferEncoding").?.string);
-    try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "POST /inspect?mode=1 HTTP/1.1\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "content-length: 4\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "Content-Type: text/plain\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "X-Test: alpha\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "\r\n\r\nping") != null);
+    try std.testing.expect(std.mem.find(u8, obj.get("requestRaw").?.string, "POST /inspect?mode=1 HTTP/1.1\r\n") != null);
+    try std.testing.expect(std.mem.find(u8, obj.get("requestRaw").?.string, "content-length: 4\r\n") != null);
+    try std.testing.expect(std.mem.find(u8, obj.get("requestRaw").?.string, "Content-Type: text/plain\r\n") != null);
+    try std.testing.expect(std.mem.find(u8, obj.get("requestRaw").?.string, "X-Test: alpha\r\n") != null);
+    try std.testing.expect(std.mem.find(u8, obj.get("requestRaw").?.string, "\r\n\r\nping") != null);
 }
 
 test "zttp fetch replay consumes traced inner and outer rows and preserves headers" {
@@ -2676,7 +2953,7 @@ test "weather handler returns 502 when upstream is not ok" {
     defer response.deinit();
 
     try std.testing.expectEqual(@as(u16, 502), response.status);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "weather_unavailable") != null);
+    try std.testing.expect(std.mem.find(u8, response.body, "weather_unavailable") != null);
     try std.testing.expectEqual(@as(u32, 1), replay_state.cursor);
     try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
 }
@@ -2712,7 +2989,7 @@ test "weather handler returns 404 for an unknown path without any egress" {
     defer response.deinit();
 
     try std.testing.expectEqual(@as(u16, 404), response.status);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "not_found") != null);
+    try std.testing.expect(std.mem.find(u8, response.body, "not_found") != null);
     // cursor stays at 0: fetch was never reached, so no egress happened.
     try std.testing.expectEqual(@as(u32, 0), replay_state.cursor);
     try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);

@@ -18,6 +18,7 @@ const local_client = @import("providers/local/client.zig");
 const tools_common = @import("tools/common.zig");
 const tool_registry = @import("tool_registry.zig");
 const gate_record = @import("gate_record.zig");
+const fd_io = @import("fd_io.zig");
 
 /// Re-exported so the runtime-side witness replay implementation can
 /// share the canonical `Verdict` type and function pointer signature.
@@ -239,7 +240,7 @@ fn runAutoloop(
     if (session.session_id) |sid| {
         var stdout_buf: [128]u8 = undefined;
         const line = std.fmt.bufPrint(&stdout_buf, "session: {s} (resume with `zttp expert --resume`)\n", .{sid}) catch "session persisted\n";
-        _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+        fd_io.writeAll(std.c.STDOUT_FILENO, line);
     }
     if (outcome.verdict != .achieved) std.process.exit(1);
 }
@@ -276,7 +277,7 @@ fn printAutoloopOutcome(
     }
 
     const bytes = buf.written();
-    _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
+    fd_io.writeAll(std.c.STDOUT_FILENO, bytes);
 }
 
 fn splitCsv(allocator: std.mem.Allocator, csv: []const u8) ![][]u8 {
@@ -303,7 +304,7 @@ fn parseToolsPreset(val: []const u8) !ToolsPreset {
 }
 
 fn exitWithMessage(msg: []const u8, code: u8) noreturn {
-    _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+    fd_io.writeAll(std.c.STDERR_FILENO, msg);
     std.process.exit(code);
 }
 
@@ -572,7 +573,7 @@ fn expectOkContains(outcome: *repl.DispatchOutcome, allocator: std.mem.Allocator
         .result => |*r| {
             defer r.deinit(allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, needle) != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, needle) != null);
         },
         else => return error.TestFailed,
     }
@@ -909,16 +910,16 @@ test "parseExpertFlags: --model refuses the retired Claude and OpenAI ids" {
 
 test "modeErrorMessage explains provider mismatch without provider payloads" {
     const message = modeErrorMessage(error.ProviderMismatch).?;
-    try testing.expect(std.mem.indexOf(u8, message, "model IDs do not switch providers") != null);
-    try testing.expect(std.mem.indexOf(u8, message, "key") == null);
+    try testing.expect(std.mem.find(u8, message, "model IDs do not switch providers") != null);
+    try testing.expect(std.mem.find(u8, message, "key") == null);
     try testing.expect(modeErrorMessage(error.OutOfMemory) == null);
 }
 
 test "modeErrorMessage gives actionable project instruction size guidance" {
     const message = modeErrorMessage(error.ProjectInstructionsTooLarge).?;
-    try testing.expect(std.mem.indexOf(u8, message, "AGENTS.md/CLAUDE.md") != null);
-    try testing.expect(std.mem.indexOf(u8, message, "48 KiB") != null);
-    try testing.expect(std.mem.indexOf(u8, message, "reduce") != null);
+    try testing.expect(std.mem.find(u8, message, "AGENTS.md/CLAUDE.md") != null);
+    try testing.expect(std.mem.find(u8, message, "48 KiB") != null);
+    try testing.expect(std.mem.find(u8, message, "reduce") != null);
 }
 
 test "parseExpertFlags: --goal without --handler is rejected" {
@@ -956,7 +957,7 @@ test "expert persona documents the protocol and approval-critical tools" {
         "propose_change_set",
     };
     for (required) |name| {
-        try std.testing.expect(std.mem.indexOf(u8, persona_text, name) != null);
+        try std.testing.expect(std.mem.find(u8, persona_text, name) != null);
     }
 }
 
@@ -984,7 +985,7 @@ test "an analyze tool may not take a workspace path" {
         for (bundleTools(bundle)) |tool| {
             if (tool.effect != .analyze) continue;
             for (path_keys) |key| {
-                if (std.mem.indexOf(u8, tool.input_schema, key) != null) {
+                if (std.mem.find(u8, tool.input_schema, key) != null) {
                     std.debug.print(
                         "tool `{s}` declares effect .analyze but takes {s} in its input schema\n",
                         .{ tool.name, key },

@@ -55,9 +55,9 @@ packages/proof-checker/src/checker.zig markDeclared catch-continue
 # function returns `?Rejection`, and a non-null value refuses the artifact.
 packages/proof-checker/src/checker.zig bindExecutableGraph catch-return
 
-# The graph-root loop above these searches has already read every member and
-# rejected a failed read. A failed read here cannot bypass that binding.
-packages/proof-checker/src/checker.zig checkGraphMemberDigest catch-break
+# The `catch return` rejects a failed graph read with `graph_member_missing`
+# rather than returning null. A failed read cannot bypass digest binding.
+packages/proof-checker/src/checker.zig checkGraphMemberDigest catch-return
 
 # Null means "no certificate-owned members", and this value only ever
 # populates the OBSERVED graph the kernel decides against. Omitting a member
@@ -452,16 +452,11 @@ packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@5
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@6
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@7
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@8
-packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@9
-packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@10
-packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@11
-packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@12
 
 # Type materialization retains a typed refusal before teardown. CHECK returns
 # one counted error and no contract. Storage propagates the original error;
 # graph validation reports the same refusal and returns TypeCheckFailed.
 # Allocation failures and errors without a retained refusal still propagate.
-packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@13
 packages/zts/src/pipeline.zig initWithImportsAndSource catch-block
 packages/zts/src/pipeline.zig validate catch-block
 packages/tools/src/precompile_contract.zig appendPolicyDiagnostics catch-block
@@ -482,17 +477,11 @@ packages/tools/src/precompile_check_run.zig runCheckOnlyWithOptions catch-block
 packages/tools/src/precompile_check_run.zig runCheckOnlyWithOptions catch-block@2
 packages/tools/src/precompile_check_run.zig runCheckOnlyWithOptions catch-block@3
 packages/tools/src/precompile_check_run.zig runCheckOnlyFromSourceWithPathAllocator catch-switch
-packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-switch
 packages/tools/src/precompile_contract.zig enforcePolicyForContract catch-block
 
-# Two sites of the module graph check. `appendSourceRefusals` holds the parser
-# diagnostic append that `runCheckOnParsedSource` held before, so its former
-# row moved here. It adds the count to `parse_errors` whether or not an append
-# fails, so a lost append drops presentation only.
 # `mergeDependencyContracts` formats the message of an API schema conflict into
 # a fixed buffer. A failed format leaves the message empty, and the function
 # returns `error.ApiSchemaConflict` on both paths, so the refusal stands.
-packages/tools/src/precompile_check_run.zig appendSourceRefusals catch-value
 packages/tools/src/precompile_contract.zig mergeDependencyContracts catch-value
 
 # Each of these is a failed allocation inside the type copier, and each returns

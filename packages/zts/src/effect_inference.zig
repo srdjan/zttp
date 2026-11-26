@@ -459,9 +459,26 @@ const ModuleBinding = struct {
 };
 
 const fetch_module_specifier: []const u8 = "zttp:fetch";
+const fetch_export: []const u8 = "fetch";
+const fetch_with_retry_export: []const u8 = "fetchWithRetry";
 const fetch_sync_export: []const u8 = "fetchSync";
 const cache_module_specifier: []const u8 = "zttp:cache";
 const cache_get_export: []const u8 = "cacheGet";
+
+fn isFetchExport(module: []const u8, name: []const u8) bool {
+    if (!std.mem.eql(u8, module, fetch_module_specifier)) return false;
+    return std.mem.eql(u8, name, fetch_export) or
+        std.mem.eql(u8, name, fetch_with_retry_export) or
+        std.mem.eql(u8, name, fetch_sync_export);
+}
+
+fn exportRequiresNetwork(binding: *const module_binding.ModuleBinding, exported: module_binding.FunctionBinding) bool {
+    const caps = exported.required_capabilities orelse binding.required_capabilities;
+    for (caps) |cap| {
+        if (cap == .network) return true;
+    }
+    return false;
+}
 
 /// Maximum fixed-point iterations. A single iteration propagates each user
 /// call's current row into its caller. Convergence is bounded by the
@@ -1366,7 +1383,25 @@ pub const Analyzer = struct {
 
         try self.markCallThroughHolder(call.callee, row);
 
-        if (self.ir_view.getTag(call.callee) != .identifier) return;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse {
+            row.lower_bound = true;
+            return;
+        };
+        if (callee_tag != .identifier) {
+            // Direct method calls (`s.toUpperCase()`, `items.map(...)`,
+            // `[a, b].join("")`, `Response.text(...)`) use `.member_access` or
+            // `.optional_chain`; `markCallThroughHolder` already flags those
+            // whose receiver holds a function value. Inline IIFEs have their
+            // body walked directly in `walkBaseExpr`. Every other
+            // non-identifier callee — computed/indexed dispatch (`fns[0]()`,
+            // `obj[k]()`), calling a call result (`getFn()()`), or conditional
+            // callees (`(c ? f : g)()`) — invokes an unresolved function value.
+            switch (callee_tag) {
+                .member_access, .optional_chain, .function_expr, .arrow_function => {},
+                else => row.lower_bound = true,
+            }
+            return;
+        }
         const binding = self.ir_view.getBinding(call.callee) orelse return;
 
         if (self.importOf(binding)) |imported| {
@@ -1416,8 +1451,8 @@ pub const Analyzer = struct {
             // A `.write`-classified export modifies external state; that
             // demotes the enclosing function's `read_only` capsule property.
             if (effect == .write) row.writes = true;
-            if (std.mem.eql(u8, imported.module, fetch_module_specifier) and
-                std.mem.eql(u8, imported.name, fetch_sync_export))
+            if ((!isRelativeModule(imported.module) and reached.capabilities.contains(.network)) or
+                isFetchExport(imported.module, imported.name))
             {
                 row.has_egress = true;
             }
@@ -1486,11 +1521,15 @@ pub const Analyzer = struct {
                     node = (self.ir_view.getMember(node) orelse return).object;
                 },
                 .identifier => break,
+                .object_literal => {
+                    if (steps > 0) row.lower_bound = true;
+                    return;
+                },
                 // exhaustive: only an access chain rooted at an identifier
-                // names a binding. A chain rooted at a call or a literal
-                // (`f().g()`, `[w][0]()`) has no receiver binding to test;
-                // its function values are charged where they are referenced
-                // by the callee walk, and the call-result case is left to R6.
+                // names a binding. A chain rooted at a call or array literal
+                // (`items.filter(a).map(b)`, `[a, b].join("")`) may invoke a
+                // standard method; its function values are charged where they
+                // are referenced by the callee walk.
                 else => return,
             }
         }
@@ -1619,8 +1658,27 @@ pub const Analyzer = struct {
         }
         row.capabilities.setUnion(declared);
         // Same demotions a direct module call makes: reaching a capability is
-        // not pure, and reaching the clock or the RNG is not deterministic.
+        // not pure, reaching a varying source is not deterministic, and
+        // capabilities that permit writes, egress, or cache reads must demote
+        // those effect flags conservatively so a callback cannot launder them.
         if (reachesVaryingSource(declared)) row.deterministic = false;
+        var cap_it = declared.iterator();
+        while (cap_it.next()) |cap| {
+            switch (cap) {
+                .network => {
+                    row.has_egress = true;
+                    row.writes = true;
+                },
+                .sqlite, .filesystem, .stderr, .runtime_callback, .clock => {
+                    row.writes = true;
+                },
+                .policy_check => {
+                    row.writes = true;
+                    row.cache_reads = true;
+                },
+                .env, .random, .crypto => {},
+            }
+        }
         row.pure = false;
         return true;
     }
@@ -1651,7 +1709,7 @@ pub const Analyzer = struct {
             if (i >= sig.param_count) return null;
             const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
             const pb = self.ir_view.paramBinding(param_idx) orelse continue;
-            if (pb.slot == binding.slot) return sig.param_types[i];
+            if (pb.scope_id == binding.scope_id and pb.slot == binding.slot) return sig.param_types[i];
         }
         return null;
     }
@@ -1730,8 +1788,8 @@ pub const Analyzer = struct {
         }
         row.pure = false;
         if (self.importEffect(imported.module, imported.name) == .write) row.writes = true;
-        if (std.mem.eql(u8, imported.module, fetch_module_specifier) and
-            std.mem.eql(u8, imported.name, fetch_sync_export))
+        if ((!isRelativeModule(imported.module) and reached.capabilities.contains(.network)) or
+            isFetchExport(imported.module, imported.name))
         {
             row.has_egress = true;
         }
@@ -2621,10 +2679,16 @@ const ContractProjectionBuilder = struct {
                 const is_cache = std.mem.eql(u8, binding.specifier, cache_module_specifier);
                 for (entry.names.items) |function_name| {
                     summary.has_any_call = true;
+                    var matched = false;
                     for (binding.exports) |exported| {
                         if (!std.mem.eql(u8, exported.name, function_name)) continue;
+                        matched = true;
                         summary.includeCall(exported.effect);
+                        if (exportRequiresNetwork(binding, exported)) summary.includeEgress();
                         break;
+                    }
+                    if (!matched and isFetchExport(binding.specifier, function_name)) {
+                        summary.includeEgress();
                     }
                     if (is_cache and std.mem.eql(u8, function_name, cache_get_export)) {
                         summary.has_cache_read = true;
@@ -2634,11 +2698,19 @@ const ContractProjectionBuilder = struct {
             }
             const registry = self.registry orelse continue;
             const manifest = registry.fromSpecifier(entry.module) orelse continue;
+            var manifest_has_network = false;
+            for (manifest.required_capabilities.items) |decl| {
+                if (decl.effective == .network) {
+                    manifest_has_network = true;
+                    break;
+                }
+            }
             for (entry.names.items) |function_name| {
                 summary.has_any_call = true;
                 for (manifest.exports.items) |exported| {
                     if (!std.mem.eql(u8, exported.name, function_name)) continue;
                     summary.includeCall(exported.effect);
+                    if (manifest_has_network) summary.includeEgress();
                     break;
                 }
             }
@@ -2852,10 +2924,16 @@ const ContractProjectionBuilder = struct {
         if (self.facts.genericBindingForReference(binding, .module_reference)) |generic| {
             summary.has_any_call = true;
             if (builtin_modules.fromSpecifier(generic.module_specifier)) |module| {
+                var matched = false;
                 for (module.exports) |exported| {
                     if (!std.mem.eql(u8, exported.name, generic.binding_name)) continue;
+                    matched = true;
                     summary.includeCall(exported.effect);
+                    if (exportRequiresNetwork(module, exported)) summary.includeEgress();
                     break;
+                }
+                if (!matched and isFetchExport(generic.module_specifier, generic.binding_name)) {
+                    summary.includeEgress();
                 }
             }
             if (std.mem.eql(u8, generic.module_specifier, cache_module_specifier) and
@@ -2870,27 +2948,40 @@ const ContractProjectionBuilder = struct {
             if (self.facts.extensionBindingForReference(binding, .module_reference)) |extension| {
                 summary.has_any_call = true;
                 const manifest = registry.fromSpecifier(extension.module_specifier) orelse return;
+                var has_network = false;
+                for (manifest.required_capabilities.items) |decl| {
+                    if (decl.effective == .network) {
+                        has_network = true;
+                        break;
+                    }
+                }
                 for (manifest.exports.items) |exported| {
                     if (!std.mem.eql(u8, exported.name, extension.binding_name)) continue;
                     summary.includeCall(exported.effect);
+                    if (has_network) summary.includeEgress();
                     break;
                 }
                 return;
             }
         }
 
-        if (self.findFunctionNodeByBinding(binding.slot)) |function| {
+        if (self.findFunctionNodeByBinding(binding)) |function| {
             try self.pushReachableFunction(function, seen_functions, stack);
         }
     }
 
-    fn findFunctionNodeByBinding(self: *const ContractProjectionBuilder, slot: u16) ?NodeIndex {
+    fn findFunctionNodeByBinding(self: *const ContractProjectionBuilder, binding: ir.BindingRef) ?NodeIndex {
+        const is_global = slotIsAtom(binding);
+        if (!is_global and binding.kind != .local) return null;
         for (0..self.ir_view.nodeCount()) |index| {
             const node: NodeIndex = @intCast(index);
             const tag = self.ir_view.getTag(node) orelse continue;
             if (tag != .function_decl and tag != .var_decl) continue;
             const declaration = self.ir_view.getVarDecl(node) orelse continue;
-            if (declaration.binding.slot != slot or declaration.init == null_node) continue;
+            if (declaration.init == null_node) continue;
+            const decl_is_global = slotIsAtom(declaration.binding);
+            if (is_global != decl_is_global) continue;
+            if (declaration.binding.scope_id != binding.scope_id or declaration.binding.slot != binding.slot) continue;
             const init_tag = self.ir_view.getTag(declaration.init) orelse continue;
             if (init_tag == .function_expr or init_tag == .arrow_function) return declaration.init;
         }
@@ -2907,7 +2998,7 @@ const ContractProjectionBuilder = struct {
             .function_expr, .arrow_function => node,
             .identifier => blk: {
                 const binding = self.ir_view.getBinding(node) orelse break :blk null;
-                break :blk self.findFunctionNodeByBinding(binding.slot);
+                break :blk self.findFunctionNodeByBinding(binding);
             },
             // exhaustive: function targets are declarations, function
             // expressions, arrows, or identifiers. Other forms resolve no target.
@@ -5604,4 +5695,178 @@ test "reachable effects of deeply nested call sites do not recurse natively" {
     try testing.expect(shallow.has_egress);
     const deep = try nestedChainSummary(testing.allocator, 60, 400);
     try testing.expectEqual(shallow, deep);
+}
+
+test "real zttp:fetch exports fetch and fetchWithRetry set has_egress and demote readOnly" {
+    const fetch_row = try analyzeHandlerRow(
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) { return fetch("https://example.com"); }
+    );
+    try testing.expect(fetch_row.has_egress);
+    try testing.expect(fetch_row.writes);
+    try testing.expect(!fetch_row.readOnly());
+
+    const retry_row = try analyzeHandlerRow(
+        \\import { fetchWithRetry } from "zttp:fetch";
+        \\function handler(req) { return fetchWithRetry("https://example.com"); }
+    );
+    try testing.expect(retry_row.has_egress);
+    try testing.expect(retry_row.writes);
+    try testing.expect(!retry_row.readOnly());
+}
+
+test "declared callback capabilities derive writes, has_egress, and cache_reads conservatively" {
+    const allocator = testing.allocator;
+    const Case = struct {
+        source: []const u8,
+        cap: Capability,
+        writes: bool,
+        has_egress: bool,
+        cache_reads: bool,
+        read_only: bool,
+    };
+    const cases = [_]Case{
+        .{
+            .source =
+            \\type NetVal = Effects<string, "network">;
+            \\function run(cb: () => NetVal): Effects<string, "network"> {
+            \\  return cb();
+            \\}
+            ,
+            .cap = .network,
+            .writes = true,
+            .has_egress = true,
+            .cache_reads = false,
+            .read_only = false,
+        },
+        .{
+            .source =
+            \\type SqlVal = Effects<string, "sqlite">;
+            \\function run(cb: () => SqlVal): Effects<string, "sqlite"> {
+            \\  return cb();
+            \\}
+            ,
+            .cap = .sqlite,
+            .writes = true,
+            .has_egress = false,
+            .cache_reads = false,
+            .read_only = false,
+        },
+        .{
+            .source =
+            \\type PolicyVal = Effects<string, "policy_check">;
+            \\function run(cb: () => PolicyVal): Effects<string, "policy_check"> {
+            \\  return cb();
+            \\}
+            ,
+            .cap = .policy_check,
+            .writes = true,
+            .has_egress = false,
+            .cache_reads = true,
+            .read_only = false,
+        },
+        .{
+            .source =
+            \\type CryptoVal = Effects<string, "crypto">;
+            \\function run(cb: () => CryptoVal): Effects<string, "crypto"> {
+            \\  return cb();
+            \\}
+            ,
+            .cap = .crypto,
+            .writes = false,
+            .has_egress = false,
+            .cache_reads = false,
+            .read_only = true,
+        },
+    };
+    for (cases) |c| {
+        var atoms = atom_table.AtomTable.init(allocator);
+        defer atoms.deinit();
+        var parser = try JsParser.initAdmission(allocator, allocator, c.source, .compile);
+        parser.setAtomTable(&atoms);
+        defer parser.deinit();
+        const root = try parser.parse();
+        var pool = type_pool_mod.TypePool.init(allocator);
+        defer pool.deinit(allocator);
+        var env = type_env_mod.TypeEnv.init(allocator, &pool);
+        defer env.deinit();
+        const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+        try env.populateSourceTypes(.{ .direct = .{
+            .module_path = "/app/callback-effects-test.ts",
+            .store = &parser.type_store,
+            .ir_view = view,
+            .atoms = &atoms,
+        } });
+        var analyzer = Analyzer.init(allocator, view, &atoms);
+        defer analyzer.deinit();
+        analyzer.type_source = .{ .direct = &env };
+        try analyzer.analyze(root);
+        const row = analyzer.lookup("run") orelse return error.FunctionNotFound;
+        try testing.expect(!row.lower_bound);
+        try testing.expect(row.capabilities.contains(c.cap));
+        try testing.expectEqual(c.writes, row.writes);
+        try testing.expectEqual(c.has_egress, row.has_egress);
+        try testing.expectEqual(c.cache_reads, row.cache_reads);
+        try testing.expectEqual(c.read_only, row.readOnly());
+    }
+}
+
+test "declaredParamType checks scope_id so nested untyped closure param does not inherit outer pure param" {
+    const allocator = testing.allocator;
+    const source =
+        \\function outer(cb: () => string, items: unknown[]) {
+        \\  return items.map((g) => g());
+        \\}
+    ;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    var pool = type_pool_mod.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = type_env_mod.TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    try env.populateSourceTypes(.{ .direct = .{
+        .module_path = "/app/scope-param-test.ts",
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } });
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    analyzer.type_source = .{ .direct = &env };
+    try analyzer.analyze(root);
+    const row = analyzer.lookup("outer") orelse return error.FunctionNotFound;
+    try testing.expect(row.lower_bound);
+}
+
+test "non-identifier indirect callees mark the row as a lower bound" {
+    const call_result = try analyzeHandlerRow(
+        \\function id(x) { return x; }
+        \\function makeFn() { return id; }
+        \\function handler(x) { return makeFn()(x); }
+    );
+    try testing.expect(call_result.lower_bound);
+
+    const indexed = try analyzeHandlerRow(
+        \\function f(x) { return x; }
+        \\function handler(x) { return [f][0](x); }
+    );
+    try testing.expect(indexed.lower_bound);
+
+    const conditional = try analyzeHandlerRow(
+        \\function a(x) { return x; }
+        \\function b(x) { return x; }
+        \\function handler(cond, x) { return (cond ? a : b)(x); }
+    );
+    try testing.expect(conditional.lower_bound);
+
+    const obj_literal_call = try analyzeHandlerRow(
+        \\function f(x) { return x; }
+        \\function handler(x) { return ({ run: f }).run(x); }
+    );
+    try testing.expect(obj_literal_call.lower_bound);
 }

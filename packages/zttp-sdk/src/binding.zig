@@ -160,8 +160,6 @@ pub const ModuleBinding = struct {
     typescript_helpers: []const u8 = "",
     required_capabilities: []const ModuleCapability = &.{},
     stateful: bool = false,
-    state_init: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!void = null,
-    state_deinit: ?*const fn (*anyopaque, std.mem.Allocator) void = null,
     contract_section: ?[]const u8 = null,
     sandboxable: bool = false,
 };
@@ -201,12 +199,6 @@ pub fn validateBindingMetadata(comptime bindings: anytype) void {
             }
         }
 
-        if (binding.state_init != null and binding.state_deinit == null) {
-            @compileError("module has state_init but missing state_deinit: " ++ binding.specifier);
-        }
-        if (binding.state_init == null and binding.state_deinit != null) {
-            @compileError("module has state_deinit but missing state_init: " ++ binding.specifier);
-        }
         if (findDuplicateRequiredCapability(binding.required_capabilities)) |capability| {
             @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' in " ++ binding.specifier);
         }

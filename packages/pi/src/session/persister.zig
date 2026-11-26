@@ -30,46 +30,6 @@ pub const AppendOptions = struct {
 
 pub const redacted_tool_output = "[tool output not persisted]";
 
-/// Pure mapping from a transcript variant to the corresponding event
-/// variant. Borrows slices from `entry`; do not persist the returned
-/// record past `entry`'s lifetime unless `events.appendEvent` has already
-/// been called with it.
-///
-/// NOTE: `.assistant_tool_use` is handled separately by `appendEntry` so a
-/// partial write can never durably commit only part of a logical call batch.
-fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
-    return switch (entry.*) {
-        .user_text => |body| .{ .user_text = body },
-        .model_text => |body| .{ .model_text = body },
-        .proof_card => |message| .{ .proof_card = .{
-            .llm_text = message.llm_text,
-            .ui_payload = message.ui_payload,
-        } },
-        .diagnostic_box => |message| .{ .diagnostic_box = .{
-            .llm_text = message.llm_text,
-            .ui_payload = message.ui_payload,
-        } },
-        .verified_change_set => |message| .{ .verified_change_set = .{
-            .llm_text = message.llm_text,
-            .ui_payload = message.ui_payload,
-        } },
-        .system_note => |body| .{ .system_note = body },
-        .assistant_tool_use => |calls| .{ .tool_use = .{
-            .id = calls[0].id,
-            .name = calls[0].name,
-            .args_json = calls[0].args_json,
-            .reasoning_content = calls[0].reasoning_content,
-        } },
-        .tool_result => |tr| .{ .tool_result = .{
-            .tool_use_id = tr.tool_use_id,
-            .tool_name = tr.tool_name,
-            .ok = tr.ok,
-            .llm_text = tr.llm_text,
-            .ui_payload = tr.ui_payload,
-        } },
-    };
-}
-
 /// Append one or more `events.jsonl` lines for `entry`, honoring `opts`.
 ///
 /// `.assistant_tool_use` with N calls emits one atomic `tool_use_batch` frame.
@@ -98,6 +58,21 @@ pub fn appendEntryToWriter(
     opts: AppendOptions,
 ) !void {
     switch (entry.*) {
+        .user_text => |body| try writer.appendEntryEvent(allocator, entry_id, .{ .user_text = body }),
+        .model_text => |body| try writer.appendEntryEvent(allocator, entry_id, .{ .model_text = body }),
+        .proof_card => |message| try writer.appendEntryEvent(allocator, entry_id, .{ .proof_card = .{
+            .llm_text = message.llm_text,
+            .ui_payload = message.ui_payload,
+        } }),
+        .diagnostic_box => |message| try writer.appendEntryEvent(allocator, entry_id, .{ .diagnostic_box = .{
+            .llm_text = message.llm_text,
+            .ui_payload = message.ui_payload,
+        } }),
+        .verified_change_set => |message| try writer.appendEntryEvent(allocator, entry_id, .{ .verified_change_set = .{
+            .llm_text = message.llm_text,
+            .ui_payload = message.ui_payload,
+        } }),
+        .system_note => |body| try writer.appendEntryEvent(allocator, entry_id, .{ .system_note = body }),
         .tool_result => |tr| {
             try writer.appendEntryEvent(allocator, entry_id, .{ .tool_result = .{
                 .tool_use_id = tr.tool_use_id,
@@ -121,7 +96,6 @@ pub fn appendEntryToWriter(
             }
             try writer.appendEntryEvent(allocator, entry_id, .{ .tool_use_batch = batch });
         },
-        else => try writer.appendEntryEvent(allocator, entry_id, entryToEvent(entry)),
     }
 }
 
@@ -326,7 +300,7 @@ test "appendEntry with no_persist_tool_output writes a structural placeholder" {
     defer parsed.deinit();
     const body = parsed.value.object.get("d").?.object.get("llm_text").?.string;
     try testing.expectEqualStrings(redacted_tool_output, body);
-    try testing.expect(std.mem.indexOf(u8, raw, "secret output") == null);
+    try testing.expect(std.mem.find(u8, raw, "secret output") == null);
 }
 
 test "appendEntry with no_persist_tool_output still persists user_text" {

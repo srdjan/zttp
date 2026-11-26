@@ -36,22 +36,12 @@ const self_extract = @import("self_extract.zig");
 const security_logger_mod = @import("security_logger.zig");
 const SecurityLogger = security_logger_mod.SecurityLogger;
 const response_mod = @import("server_response.zig");
-const static_mod = @import("server_static.zig");
-const resolveStaticFile = static_mod.resolveStaticFile;
 const io_mod = @import("posix_util.zig");
-const unixMillisNow = io_mod.unixMillisNow;
 const writeAllFd = io_mod.writeAllFd;
 const createUnixSocketPair = io_mod.createUnixSocketPair;
-const writevAllFd = io_mod.writevAllFd;
 const defaultPoolSize = io_mod.defaultPoolSize;
 const initIoBackend = io_mod.initIoBackend;
-const etagMatchesIfNoneMatch = http_types.etagMatchesIfNoneMatch;
-const findHeaderValue = http_types.findHeaderValue;
-const formatHttpError = response_mod.formatHttpError;
-const formatStaticNotModified = response_mod.formatStaticNotModified;
-const formatStaticOkHeader = response_mod.formatStaticOkHeader;
 const buildDynamicResponseHeader = response_mod.buildDynamicResponseHeader;
-const formatWellKnownHeaders = response_mod.formatWellKnownHeaders;
 
 const FastHeaderSlots = http_parser.FastHeaderSlots;
 const findHeaderEnd = http_parser.findHeaderEnd;
@@ -59,7 +49,6 @@ const parseRequestLineBorrowed = http_parser.parseRequestLineBorrowed;
 const parseHeadersFromLinesBorrowed = http_parser.parseHeadersFromLinesBorrowed;
 const parseQueryString = http_parser.parseQueryString;
 const splitHeaderLine = http_parser.splitHeaderLine;
-const parseContentLength = http_parser.parseContentLength;
 
 const readFilePosix = engine.readFile;
 
@@ -539,7 +528,7 @@ pub const Server = struct {
         };
         if (checked) |proof| {
             const properties = proof.properties;
-            if ((properties.pure or (properties.deterministic and properties.read_only)) and !proof.reads_request_state) {
+            if (properties.deterministic and properties.read_only and !proof.reads_request_state) {
                 settings.cache_properties = properties;
             }
         }
@@ -551,8 +540,25 @@ pub const Server = struct {
     /// claimed-safe path is a soundness incident on both sides. The checker
     /// accepts no `optional_safe`, so accepted facts would hide every incident.
     pub fn claimedFaultFacts(contract: ?*const ValidatedRuntimeContract) fault_explain.Proof {
-        const claimed = (contract orelse return .{}).properties();
-        return .{ .optional_safe = claimed.optional_safe, .result_safe = claimed.result_safe };
+        const vc = contract orelse return .{};
+        const claimed = vc.properties();
+        return .{
+            .optional_safe = claimed.optional_safe,
+            .result_safe = claimed.result_safe,
+            .exhaustive_returns = vc.view().exhaustive_returns,
+        };
+    }
+
+    pub fn validateLifecycleOverride(self: *const Self) !void {
+        const override = self.config.lifecycle_override orelse return;
+        if (override != .reuse_unbounded) return;
+        const isolated = if (self.contract) |*c| c.properties().state_isolated else false;
+        if (!isolated) {
+            if (!builtin.is_test) {
+                std.log.err("Refusing --lifecycle reuse: handler does not prove state_isolated", .{});
+            }
+            return error.UnsafeLifecycleOverride;
+        }
     }
 
     fn sourceServingSettings(self: *const Self, contract: ?*const ValidatedRuntimeContract) @import("runtime_pool.zig").ServingSettings {
@@ -627,6 +633,7 @@ pub const Server = struct {
         }
 
         try activation.activate(self);
+        try self.validateLifecycleOverride();
 
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
         // Wire the server-level request timeout into the runtime config so the
@@ -678,7 +685,9 @@ pub const Server = struct {
             );
         if (comptime runtime_config_mod.debug_hooks_enabled) {
             if (pool_rt_config.debug_panic_path) |path| {
-                self.pool.?.debug_panic_path = path;
+                if (self.pool) |*pool| {
+                    pool.debug_panic_path = path;
+                }
             }
         }
         if (pool_timer) |*t| {
@@ -710,7 +719,7 @@ pub const Server = struct {
             std.log.info("   Proof cache: enabled (handler proven deterministic + read_only + input-independent)", .{});
         } else if (self.proof_checked) |proof| {
             const properties = proof.properties;
-            if ((properties.pure or (properties.deterministic and properties.read_only)) and proof.reads_request_state) {
+            if (properties.deterministic and properties.read_only and proof.reads_request_state) {
                 std.log.info("   Proof cache: disabled (handler reads request headers/body; method+URL key would be unsound)", .{});
             }
         }
@@ -846,6 +855,7 @@ pub const Server = struct {
 
     const AcceptWakeContext = struct {
         server: *Self,
+        bound_port: u16,
         done: std.atomic.Value(bool) = .init(false),
     };
 
@@ -859,7 +869,7 @@ pub const Server = struct {
             "127.0.0.1"
         else
             context.server.config.host;
-        const address = net.IpAddress.parseIp4(host, context.server.config.port) catch return;
+        const address = net.IpAddress.parseIp4(host, context.bound_port) catch return;
         const io = context.server.io_backend.io();
         var stream = address.connect(io, .{ .mode = .stream }) catch return;
         stream.close(io);
@@ -868,7 +878,10 @@ pub const Server = struct {
     fn acceptLoop(self: *Self) !void {
         const io = self.io_backend.io();
         var listener = self.listener orelse return error.NotStarted;
-        var wake_context = AcceptWakeContext{ .server = self };
+        var wake_context = AcceptWakeContext{
+            .server = self,
+            .bound_port = listener.socket.address.getPort(),
+        };
         var wake_thread: ?std.Thread = null;
         if (comptime builtin.target.os.tag != .windows) {
             wake_thread = try std.Thread.spawn(.{}, wakeAcceptOnShutdown, .{&wake_context});
@@ -998,8 +1011,9 @@ pub const Server = struct {
                 if (body_start > data.len or len > data.len - body_start) {
                     return error.IncompleteBody;
                 }
-                body = try allocator.alloc(u8, len);
-                @memcpy(body.?, data[body_start..][0..len]);
+                const body_buf = try allocator.alloc(u8, len);
+                @memcpy(body_buf, data[body_start..][0..len]);
+                body = body_buf;
             }
         }
 
@@ -1010,8 +1024,6 @@ pub const Server = struct {
             .query_params = qr.params,
             .headers = headers,
             .body = body,
-            .string_storage = &.{},
-            .owns_string_storage = false,
             .query_params_storage = qr.storage,
             .query_decoded_storage = qr.decoded_storage,
             .connection = fast_slots.connection,
@@ -1039,13 +1051,10 @@ const ParsedRequest = struct {
     url: []const u8,
     /// URL path without query string (e.g., "/api/process" from "/api/process?items=100")
     path: []const u8 = "",
-    /// Parsed query parameters (references into string_storage)
+    /// Parsed query parameters (references into request buffer / decoded storage)
     query_params: []const QueryParam = &.{},
     headers: std.ArrayListUnmanaged(HttpHeader),
     body: ?[]u8,
-    /// Batch buffer holding method, url, and header strings (single allocation)
-    string_storage: []u8,
-    owns_string_storage: bool = true,
     /// Backing storage for query_params array
     query_params_storage: ?[]QueryParam = null,
     /// Backing buffer for percent-decoded query param strings
@@ -1059,14 +1068,9 @@ const ParsedRequest = struct {
 
     pub fn deinit(self: *ParsedRequest, allocator: std.mem.Allocator) void {
         if (self.body) |b| allocator.free(b);
-        if (self.owns_string_storage) {
-            // Free single batch allocation instead of individual strings.
-            allocator.free(self.string_storage);
-        }
         // Free query params storage if allocated
         if (self.query_params_storage) |qps| allocator.free(qps);
         if (self.query_decoded_storage) |ds| allocator.free(ds);
-        // Headers list only - strings are in string_storage
         self.headers.deinit(allocator);
     }
 
@@ -1378,7 +1382,7 @@ test "threaded readRequestData preserves pipelined bytes for the next request" {
     try std.testing.expectEqualStrings("/first", first_request.path);
     first_request.deinit(allocator);
 
-    _ = arena.reset(.retain_capacity);
+    _ = arena.reset(.{ .retain_with_limit = 64 * 1024 });
     allocator = arena.allocator();
     const second_data = try pool.readRequestData(fds[0], allocator, &pending, null);
     try std.testing.expectEqualStrings(second, second_data);
@@ -1429,7 +1433,7 @@ test "connection queue drain closes queued file descriptors" {
     const fds = try createUnixSocketPair();
     defer std.Io.Threaded.closeFd(fds[1]);
 
-    try std.testing.expect(queue.push(.{ .stream_fd = fds[0] }));
+    try std.testing.expect(queue.push(std.testing.io, .{ .stream_fd = fds[0] }));
     try std.testing.expectEqual(@as(usize, 1), queue.drainAndClose());
     try std.testing.expectEqual(@as(usize, 0), queue.count.load(.acquire));
 
@@ -1472,6 +1476,91 @@ test "threaded handleSingleRequestSync returns 413 for oversized body" {
     var buf: [256]u8 = undefined;
     const n = try std.posix.read(fds[1], &buf);
     try std.testing.expect(std.mem.startsWith(u8, buf[0..n], "HTTP/1.1 413 Payload Too Large\r\n"));
+}
+
+test "threaded handleSingleRequestSync responds with 431 and 400 on framing and header-cap errors" {
+    const allocator = std.testing.allocator;
+
+    const Case = struct {
+        raw: []const u8,
+        expected_prefix: []const u8,
+    };
+
+    // Build an oversized header payload (> 32 KiB) without terminating CRLFCRLF.
+    var big_header = try allocator.alloc(u8, 33 * 1024);
+    defer allocator.free(big_header);
+    @memset(big_header, 'A');
+    const prefix = "GET / HTTP/1.1\r\nX-Big: ";
+    @memcpy(big_header[0..prefix.len], prefix);
+
+    const cases = [_]Case{
+        .{
+            .raw = big_header,
+            .expected_prefix = "HTTP/1.1 431 Request Header Fields Too Large\r\n",
+        },
+        .{
+            .raw = "POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n",
+            .expected_prefix = "HTTP/1.1 400 Bad Request\r\n",
+        },
+        .{
+            .raw = "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n",
+            .expected_prefix = "HTTP/1.1 400 Bad Request\r\n",
+        },
+        .{
+            .raw = "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: bogus\r\n\r\n",
+            .expected_prefix = "HTTP/1.1 400 Bad Request\r\n",
+        },
+        .{
+            .raw = "POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\nZZZ\r\n",
+            .expected_prefix = "HTTP/1.1 400 Bad Request\r\n",
+        },
+    };
+
+    for (cases) |c| {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const req_alloc = arena.allocator();
+
+        var server: Server = undefined;
+        server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+        server.reload_active = false;
+
+        var pool = ConnectionPool{
+            .workers = &[_]std.Thread{},
+            .queue = ConnectionPool.BoundedQueue.init(),
+            .running = std.atomic.Value(bool).init(true),
+            .server = &server,
+            .allocator = req_alloc,
+        };
+
+        const fds = try createUnixSocketPair();
+        defer std.Io.Threaded.closeFd(fds[0]);
+        defer std.Io.Threaded.closeFd(fds[1]);
+
+        // Write from a background thread so payloads larger than the OS
+        // AF_UNIX socket buffer (~8 KiB on macOS) cannot deadlock while
+        // handleSingleRequestSync reads from fds[0].
+        const Writer = struct {
+            fn run(fd: std.posix.fd_t, payload: []const u8) void {
+                writeAllFd(fd, payload) catch {};
+            }
+        };
+        const writer_thread = try std.Thread.spawn(.{}, Writer.run, .{ fds[1], c.raw });
+        defer writer_thread.join();
+
+        var pending: ConnectionPool.PendingRequestBytes = .{};
+        defer pending.deinit(pool.allocator);
+
+        const outcome = try pool.handleSingleRequestSync(fds[0], 0, req_alloc, &pending);
+        try std.testing.expectEqual(ConnectionPool.RequestOutcome.close, outcome);
+        // Unblock writer_thread immediately if it still has unread bytes queued
+        // (e.g. after 431 short-circuits reading an oversized header).
+        _ = std.c.shutdown(fds[0], std.c.SHUT.RD);
+
+        var buf: [256]u8 = undefined;
+        const n = try std.posix.read(fds[1], &buf);
+        try std.testing.expect(std.mem.startsWith(u8, buf[0..n], c.expected_prefix));
+    }
 }
 
 test "threaded waitForNextRequest closes idle keep-alive connection early" {
@@ -1542,7 +1631,7 @@ test "threaded keep-alive connection serves two sequential requests" {
         try writeAllFd(fds[1], request);
         var buf: [512]u8 = undefined;
         var len: usize = 0;
-        while (std.mem.indexOf(u8, buf[0..len], "{\"v\":1}") == null) {
+        while (std.mem.find(u8, buf[0..len], "{\"v\":1}") == null) {
             const n = try std.posix.read(fds[1], buf[len..]);
             try std.testing.expect(n > 0);
             len += n;
@@ -1600,7 +1689,7 @@ test "threaded health and readiness probes return over socket accept path" {
             var status_buf: [32]u8 = undefined;
             const status_prefix = try std.fmt.bufPrint(&status_buf, "HTTP/1.1 {d} ", .{status});
             try std.testing.expect(std.mem.startsWith(u8, response_buf[0..n], status_prefix));
-            const body_start = (std.mem.indexOf(u8, response_buf[0..n], "\r\n\r\n") orelse return error.TestUnexpectedResult) + 4;
+            const body_start = (std.mem.find(u8, response_buf[0..n], "\r\n\r\n") orelse return error.TestUnexpectedResult) + 4;
             const body = switch (status) {
                 200 => "OK",
                 501 => "Not Implemented",
@@ -1609,7 +1698,7 @@ test "threaded health and readiness probes return over socket accept path" {
             };
             var length_buf: [32]u8 = undefined;
             const length = try std.fmt.bufPrint(&length_buf, "Content-Length: {d}\r\n", .{body.len});
-            try std.testing.expect(std.mem.indexOf(u8, response_buf[0..body_start], length) != null);
+            try std.testing.expect(std.mem.find(u8, response_buf[0..body_start], length) != null);
             try std.testing.expectEqualStrings(if (std.mem.eql(u8, method, "HEAD")) "" else body, response_buf[body_start..n]);
         }
     };
@@ -1699,7 +1788,7 @@ fn runShutdownGraceScenario(scenario: ShutdownGraceScenario) !void {
             var request: std.ArrayList(u8) = .empty;
             defer request.deinit(self.allocator);
             var chunk: [512]u8 = undefined;
-            while (std.mem.indexOf(u8, request.items, "\r\n\r\n") == null) {
+            while (std.mem.find(u8, request.items, "\r\n\r\n") == null) {
                 const n = try std.posix.read(stream.socket.handle, &chunk);
                 if (n == 0) return error.EndOfStream;
                 if (request.items.len + n > 16 * 1024) return error.StreamTooLong;
@@ -1944,7 +2033,7 @@ fn runShutdownGraceScenario(scenario: ShutdownGraceScenario) !void {
     var response: std.ArrayList(u8) = .empty;
     defer response.deinit(allocator);
     var response_chunk: [512]u8 = undefined;
-    while (std.mem.indexOf(u8, response.items, "\r\n\r\ndrained") == null) {
+    while (std.mem.find(u8, response.items, "\r\n\r\ndrained") == null) {
         try Wait.forReadable(original.socket.handle, 2_000);
         const n = try std.posix.read(original.socket.handle, &response_chunk);
         if (n == 0) break;
@@ -1952,7 +2041,7 @@ fn runShutdownGraceScenario(scenario: ShutdownGraceScenario) !void {
         try response.appendSlice(allocator, response_chunk[0..n]);
     }
     try std.testing.expect(std.mem.startsWith(u8, response.items, "HTTP/1.1 200 OK\r\n"));
-    const body_start = std.mem.indexOf(u8, response.items, "\r\n\r\n") orelse return error.InvalidResponse;
+    const body_start = std.mem.find(u8, response.items, "\r\n\r\n") orelse return error.InvalidResponse;
     try std.testing.expectEqualStrings("drained", response.items[body_start + 4 ..]);
     try Wait.forPoolOccupancy(&server.pool.?, 0, expiry_timeout_ms);
     try upstream.join();
@@ -2064,9 +2153,9 @@ test "buildDynamicResponseHeader filters handler supplied framing headers" {
     const sync_len = try buildDynamicResponseHeader(&sync_buf, &response, true, attestation);
     const sync = sync_buf[0..sync_len];
     try std.testing.expect(std.mem.startsWith(u8, sync, "HTTP/1.1 201 Created\r\nX-Test: one\r\nZttp-Proofs: pure\r\nZttp-Attest: jws\r\nContent-Length: 7\r\nConnection: keep-alive\r\n\r\n"));
-    try std.testing.expect(std.mem.indexOf(u8, sync, "Content-Length: 999") == null);
-    try std.testing.expect(std.mem.indexOf(u8, sync, "Connection: close") == null);
-    try std.testing.expect(std.mem.indexOf(u8, sync, "Transfer-Encoding: chunked") == null);
+    try std.testing.expect(std.mem.find(u8, sync, "Content-Length: 999") == null);
+    try std.testing.expect(std.mem.find(u8, sync, "Connection: close") == null);
+    try std.testing.expect(std.mem.find(u8, sync, "Transfer-Encoding: chunked") == null);
 }
 
 test "parseRequestFromBuffer rejects invalid content length" {
@@ -2727,7 +2816,7 @@ test "source replacement keeps failed state and retires successful generations t
         try std.testing.expect(server.well_known_doc == null);
         // Fault facts follow the claims of the incoming contract.
         try std.testing.expectEqual(fault_explain.Proof{ .result_safe = true }, pool.config.handler_proof);
-        try std.testing.expectEqual(contract_runtime.PoolingPolicy.reuse_bounded_by_count, pool.pooling_policy);
+        try std.testing.expectEqual(contract_runtime.PoolingPolicy.reuse_bounded_by_count, pool.getPoolingPolicy());
         try std.testing.expect(pool.policy_generation.policy.allowsEnv("NEW_KEY"));
         try std.testing.expect(!pool.policy_generation.policy.allowsEnv("OLD_KEY"));
         var response = try pool.executeHandler(request);
@@ -2781,4 +2870,62 @@ test "source preparation failure no-pool and guard refusal preserve ownership" {
     try std.testing.expect(candidate.source != null);
     try std.testing.expectEqualStrings("<inline>", server.handler_filename);
     try std.testing.expectEqualStrings("function handler(req) { return Response.text('old'); }", server.pool.?.handler_code);
+}
+
+test "claimedFaultFacts forwards verification.exhaustiveReturns from validated contract" {
+    const allocator = std.testing.allocator;
+    const contract_json = try stampedContractJsonForTest(
+        allocator,
+        ",\"verification\":{\"exhaustiveReturns\":true,\"resultsSafe\":false,\"unreachableCode\":true,\"bytecodeVerified\":true}",
+    );
+    defer allocator.free(contract_json);
+    var raw = try contract_runtime.parseContractJson(allocator, contract_json);
+    contract_runtime.stampLiveForTest(&raw.inner);
+    var validated = try contract_runtime.validate(raw, .{});
+    defer validated.deinit();
+
+    const proof = Server.claimedFaultFacts(&validated);
+    try std.testing.expect(proof.exhaustive_returns);
+    try std.testing.expect(!proof.optional_safe);
+    try std.testing.expect(!proof.result_safe);
+}
+
+test "validateLifecycleOverride refuses reuse_unbounded unless contract proves state_isolated" {
+    const allocator = std.testing.allocator;
+
+    var no_contract = try Server.init(allocator, .{
+        .handler = .{ .inline_code = "" },
+        .pool_size = 1,
+        .lifecycle_override = .reuse_unbounded,
+        .log_requests = false,
+    });
+    defer no_contract.deinit();
+    try std.testing.expectError(error.UnsafeLifecycleOverride, no_contract.validateLifecycleOverride());
+
+    const not_isolated_json = try stampedContractJsonForTest(
+        allocator,
+        ",\"properties\":{\"readOnly\":true,\"deterministic\":true,\"stateIsolated\":false}",
+    );
+    defer allocator.free(not_isolated_json);
+    var raw_not = try contract_runtime.parseContractJson(allocator, not_isolated_json);
+    contract_runtime.stampLiveForTest(&raw_not.inner);
+    no_contract.contract = try contract_runtime.validate(raw_not, .{});
+    try std.testing.expectError(error.UnsafeLifecycleOverride, no_contract.validateLifecycleOverride());
+
+    const isolated_json = try stampedContractJsonForTest(
+        allocator,
+        ",\"properties\":{\"readOnly\":true,\"deterministic\":true,\"stateIsolated\":true}",
+    );
+    defer allocator.free(isolated_json);
+    var raw_iso = try contract_runtime.parseContractJson(allocator, isolated_json);
+    contract_runtime.stampLiveForTest(&raw_iso.inner);
+    var isolated_server = try Server.init(allocator, .{
+        .handler = .{ .inline_code = "" },
+        .pool_size = 1,
+        .lifecycle_override = .reuse_unbounded,
+        .log_requests = false,
+    });
+    defer isolated_server.deinit();
+    isolated_server.contract = try contract_runtime.validate(raw_iso, .{});
+    try isolated_server.validateLifecycleOverride();
 }

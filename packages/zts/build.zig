@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
     // higher tier reaches it by name. A relative import across this line would
     // compile a second copy of the file into the importing module, and the two
     // copies' types would not be interchangeable.
-    // `scripts/check-zts-layering.sh` fails on that; see
+    // `zig build test-zts-layering` fails on that; see
     // pre-rebase:docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
     const base_mod = b.addModule("zts-base", .{
         .root_source_file = b.path("src/base_root.zig"),

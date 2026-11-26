@@ -381,7 +381,7 @@ fn applyEdits(allocator: std.mem.Allocator, source: []const u8, edits: []Edit, p
     try out.appendSlice(allocator, prefix);
     var cursor: usize = 0;
     for (edits) |edit| {
-        if (edit.start < cursor or edit.end > source.len) return error.InvalidMigration;
+        if (edit.start < cursor or edit.end < edit.start or edit.end > source.len) return error.InvalidMigration;
         try out.appendSlice(allocator, source[cursor..edit.start]);
         try out.appendSlice(allocator, edit.replacement);
         cursor = edit.end;
@@ -749,4 +749,10 @@ pub fn validateAll(
         }
     }
     return .equivalent;
+}
+
+test "applyEdits rejects inverted edit span" {
+    var rep = [_]u8{'x'};
+    var edits = [_]Edit{.{ .start = 5, .end = 3, .replacement = &rep }};
+    try std.testing.expectError(error.InvalidMigration, applyEdits(std.testing.allocator, "0123456789", &edits, ""));
 }

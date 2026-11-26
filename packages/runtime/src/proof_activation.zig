@@ -92,7 +92,7 @@ fn refusal(
 pub fn observedRoot(allocator: std.mem.Allocator, inputs: Inputs) Error!?[32]u8 {
     const members = try allocator.alloc(artifact_graph.Member, artifact_graph.max_members);
     defer allocator.free(members);
-    const observed = artifact_graph.build(allocator, graphInputs(inputs), members) catch |err| switch (err) {
+    const observed = artifact_graph.build(allocator, graphInputs(inputs, .{}), members) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // exhaustive: any other build error means the graph could not be
         // reconstructed, so a caller comparing two rebuilds has nothing to
@@ -103,9 +103,9 @@ pub fn observedRoot(allocator: std.mem.Allocator, inputs: Inputs) Error!?[32]u8 
     return graph.computeRoot(observed) catch null;
 }
 
-fn graphInputs(inputs: Inputs) artifact_graph.Inputs {
+fn graphInputs(inputs: Inputs, limits: pcc.limits.Limits) artifact_graph.Inputs {
     const commitments = if (inputs.certificate) |certificate|
-        certificateCommitments(certificate)
+        certificateCommitments(certificate, limits)
     else
         null;
     return artifact_graph.fromArtifact(.{
@@ -137,7 +137,7 @@ pub fn accept(
     const members = try allocator.alloc(artifact_graph.Member, artifact_graph.max_members);
     defer allocator.free(members);
 
-    const observed = artifact_graph.build(allocator, graphInputs(inputs), members) catch |err| switch (err) {
+    const observed = artifact_graph.build(allocator, graphInputs(inputs, policy.limits), members) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // exhaustive: any other build error is answered by the refusal on this
         // line. The arm is not silent - it IS the rejection, so no ignored case
@@ -182,9 +182,9 @@ const CertificateCommitments = struct {
 /// stated root is returned beside a fold over every certificate byte. The
 /// checker independently refolds the IR section and compares it with the first
 /// value before accepting any evidence.
-fn certificateCommitments(certificate: []const u8) ?CertificateCommitments {
-    var budget = pcc.limits.Budget.init(.{});
-    const decoded = pcc.certificate.decode(certificate, .{}, &budget) catch return null;
+fn certificateCommitments(certificate: []const u8, limits: pcc.limits.Limits) ?CertificateCommitments {
+    var budget = pcc.limits.Budget.init(limits);
+    const decoded = pcc.certificate.decode(certificate, limits, &budget) catch return null;
     return .{
         .ir = decoded.identity.ir_root,
         .certificate = pcc.certificate.commitmentDigest(certificate, decoded) catch return null,
@@ -421,7 +421,7 @@ test "the compiler's guard catalog and the kernel's are the same table" {
 /// The producer names a policy file key (`cache.allow_namespaces`); the kernel
 /// names the section (`cache`). Compare the part they both claim.
 fn sectionKeyRoot(key: []const u8) []const u8 {
-    const dot = std.mem.indexOfScalar(u8, key, '.') orelse return key;
+    const dot = std.mem.findScalar(u8, key, '.') orelse return key;
     return key[0..dot];
 }
 

@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS022","severity":"error","message":"'break' outside of loop","file":"parse/bad/invalid_break.ts","line":3,"column":5,"suggestion":"Remove `break`, or move it inside a `for...of` loop.","repair_intent":null}

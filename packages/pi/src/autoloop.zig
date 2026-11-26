@@ -28,6 +28,7 @@ const session_state = @import("session_state.zig");
 const session_events = @import("session/events.zig");
 const tools_common = @import("tools/common.zig");
 const pi_apply_repair_plan = @import("tools/pi_apply_repair_plan.zig");
+const fd_io = @import("fd_io.zig");
 const pi_goal_check = @import("tools/pi_goal_check.zig");
 const turn = @import("turn.zig");
 const change_set = @import("change_set.zig");
@@ -93,13 +94,15 @@ pub fn drive(
     transcript: *transcript_mod.Transcript,
     options: DriveOptions,
 ) !Outcome {
-    const start_ms = tools_common.nowUnixMs();
+    const start_ns = try zts.monotonicNowNs();
     var iter: u32 = 0;
     var patches_without_progress: u32 = 0;
     var last_goals_met_count: u32 = countMetGoals(transcript, options.file, options.goals);
 
     while (iter < options.budget.max_iterations) : (iter += 1) {
-        if (tools_common.nowUnixMs() - start_ms > options.budget.max_wall_time_ms) {
+        const now_ns = try zts.monotonicNowNs();
+        const elapsed_ms: i64 = @intCast((now_ns -| start_ns) / std.time.ns_per_ms);
+        if (elapsed_ms > options.budget.max_wall_time_ms) {
             return finalizeExhausted(allocator, registry, transcript, options, .exhausted_time, iter);
         }
 
@@ -130,6 +133,10 @@ pub fn drive(
 
         if (apply_outcome.regression) {
             return finalize(allocator, transcript, options, .regression_blocked, iter + 1);
+        }
+
+        if (apply_outcome.applied == 0) {
+            return finalize(allocator, transcript, options, .stalled, iter + 1);
         }
 
         const current_met = countMetGoals(transcript, options.file, options.goals);
@@ -206,24 +213,24 @@ fn writeStallProgress(
         "autoloop: patch applied but no property goals changed. Attempt "
     else
         "autoloop: two patches without progress. If this continues, the loop will stop. Attempt ";
-    _ = std.c.write(std.c.STDERR_FILENO, prefix.ptr, prefix.len);
+    fd_io.writeAll(std.c.STDERR_FILENO, prefix);
 
     var nums_buf: [64]u8 = undefined;
     const nums = std.fmt.bufPrint(&nums_buf, "{d}/{d}. Goals still unmet:", .{ count, max }) catch return;
-    _ = std.c.write(std.c.STDERR_FILENO, nums.ptr, nums.len);
+    fd_io.writeAll(std.c.STDERR_FILENO, nums);
 
     const props = session_state.currentProperties(transcript, file);
     var any_unmet = false;
     for (goals) |goal| {
         const met = if (props) |p| session_state.propertyByName(p, goal) else false;
         if (!met) {
-            _ = std.c.write(std.c.STDERR_FILENO, " ", 1);
-            _ = std.c.write(std.c.STDERR_FILENO, goal.ptr, goal.len);
+            fd_io.writeAll(std.c.STDERR_FILENO, " ");
+            fd_io.writeAll(std.c.STDERR_FILENO, goal);
             any_unmet = true;
         }
     }
-    if (!any_unmet) _ = std.c.write(std.c.STDERR_FILENO, " (none)", 7);
-    _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
+    if (!any_unmet) fd_io.writeAll(std.c.STDERR_FILENO, " (none)");
+    fd_io.writeAll(std.c.STDERR_FILENO, "\n");
 }
 
 fn finalize(
@@ -348,8 +355,9 @@ fn parseGoalCheckResult(allocator: std.mem.Allocator, json_text: []const u8) !Go
     }
 
     for (witnesses_value.array.items) |item| {
+        try bodies.ensureUnusedCapacity(allocator, 1);
         const body = try parseSingleGoalCheckWitness(allocator, item);
-        try bodies.append(allocator, body);
+        bodies.appendAssumeCapacity(body);
     }
 
     return .{ .ok = ok_val.bool, .witnesses = try bodies.toOwnedSlice(allocator) };
@@ -756,7 +764,7 @@ fn applyPlans(
         var summary_owned = true;
         defer if (summary_owned) allocator.free(summary);
 
-        try transcript.entries.append(allocator, .{ .verified_change_set = .{
+        try transcript.appendOwned(allocator, .{ .verified_change_set = .{
             .llm_text = summary,
             .ui_payload = receipt_payload,
         } });
@@ -896,7 +904,7 @@ fn emitWitnessReplaySummary(
     var note_owned_by_transcript = false;
     errdefer if (!note_owned_by_transcript) allocator.free(note);
 
-    try transcript.entries.append(allocator, .{ .system_note = note });
+    try transcript.appendOwned(allocator, .{ .system_note = note });
     note_owned_by_transcript = true;
 
     if (options.journal_writer != null or options.events_path != null) {
@@ -1049,7 +1057,7 @@ test "drive returns .stalled when no plans are available but goals are unmet" {
     try testing.expectEqual(@as(u32, 1), outcome.goals_unmet_count);
 }
 
-test "drive returns .exhausted_iters when budget runs out" {
+test "drive returns .stalled when no automatic repair plan applies" {
     const allocator = testing.allocator;
 
     const never_ok = struct {
@@ -1073,31 +1081,11 @@ test "drive returns .exhausted_iters when budget runs out" {
             ) };
         }
     };
-    const apply_fails = struct {
-        fn run(
-            alloc: std.mem.Allocator,
-            args: []const []const u8,
-        ) anyerror!registry_mod.ToolResult {
-            _ = args;
-            return .{ .ok = true, .llm_text = try alloc.dupe(u8, "{\"ok\":false,\"applied\":false}") };
-        }
-    };
 
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(allocator);
     try registry.register(allocator, goalCheckTool(never_ok.run));
     try registry.register(allocator, repairPlanTool(plans_exist.run));
-    try registry.register(allocator, .{
-        .name = "pi_apply_repair_plan",
-        .label = "apply",
-        .description = "stub",
-        .effect = .analyze,
-        .context_policy = .exact,
-        .model_exposure = .visible,
-        .input_schema = "{}",
-        .decode_json = StubTool.decodePassthrough,
-        .execute = apply_fails.run,
-    });
 
     var transcript: transcript_mod.Transcript = .{};
     defer transcript.deinit(allocator);
@@ -1108,8 +1096,52 @@ test "drive returns .exhausted_iters when budget runs out" {
         .goals = &.{"retry_safe"},
         .budget = .{ .max_iterations = 3, .max_wall_time_ms = 60_000 },
     });
+    try testing.expectEqual(AutoloopVerdict.stalled, outcome.verdict);
+    try testing.expectEqual(@as(u32, 1), outcome.iterations);
+}
+
+test "drive returns .exhausted_iters when budget runs out" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "autoloop-exhausted-iters");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "handler.ts",
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  let total = 1;
+        \\  return Response.json({ total: total });
+        \\}
+        \\
+    );
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+    try std.Io.Threaded.chdir(tmp.abs_path);
+
+    const never_ok = struct {
+        fn run(
+            alloc: std.mem.Allocator,
+            args: []const []const u8,
+        ) anyerror!registry_mod.ToolResult {
+            _ = args;
+            return .{ .ok = true, .llm_text = try alloc.dupe(u8, "{\"ok\":false,\"goals\":[\"retry_safe\"],\"witnesses\":[]}") };
+        }
+    };
+
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(allocator);
+    try registry.register(allocator, goalCheckTool(never_ok.run));
+    try registry.register(allocator, repairPlanTool(letToConstRepairPlan));
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+
+    const outcome = try drive(allocator, &registry, &transcript, .{
+        .workspace_root = tmp.abs_path,
+        .file = "handler.ts",
+        .goals = &.{"no_secret_leakage"},
+        .budget = .{ .max_iterations = 1, .max_wall_time_ms = 60_000 },
+    });
     try testing.expectEqual(AutoloopVerdict.exhausted_iters, outcome.verdict);
-    try testing.expectEqual(@as(u32, 3), outcome.iterations);
+    try testing.expectEqual(@as(u32, 1), outcome.iterations);
 }
 
 test "applyPlans commits a compiler-planned repair through one receipted change set" {
@@ -1147,7 +1179,7 @@ test "applyPlans commits a compiler-planned repair through one receipted change 
     var preview = try invokeApply(allocator, "handler.ts", plans[0].raw_json);
     defer preview.deinit(allocator);
     try testing.expect(preview.ok);
-    try testing.expect(std.mem.indexOf(u8, preview.proposed_content, "const total = 1;") != null);
+    try testing.expect(std.mem.find(u8, preview.proposed_content, "const total = 1;") != null);
     const apply_outcome = try applyPlans(allocator, &transcript, .{
         .workspace_root = tmp.abs_path,
         .file = "handler.ts",
@@ -1162,7 +1194,7 @@ test "applyPlans commits a compiler-planned repair through one receipted change 
     const repaired = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
     defer allocator.free(repaired);
     try testing.expect(!std.mem.eql(u8, repaired, source));
-    try testing.expect(std.mem.indexOf(u8, repaired, "const total = 1;") != null);
+    try testing.expect(std.mem.find(u8, repaired, "const total = 1;") != null);
 
     var receipts: usize = 0;
     for (transcript.entries.items) |*entry| {
@@ -1298,8 +1330,8 @@ test "parseRepairPlans extracts ids and re-serializes plan bodies" {
     try testing.expectEqualStrings("p2", plans.items[1].id);
     try testing.expect(!plans.items[0].behavioral_change);
     try testing.expect(plans.items[1].behavioral_change);
-    try testing.expect(std.mem.indexOf(u8, plans.items[0].raw_json, "insert_guard_before_line") != null);
-    try testing.expect(std.mem.indexOf(u8, plans.items[1].raw_json, "add_trailing_return") != null);
+    try testing.expect(std.mem.find(u8, plans.items[0].raw_json, "insert_guard_before_line") != null);
+    try testing.expect(std.mem.find(u8, plans.items[1].raw_json, "add_trailing_return") != null);
     try testing.expectEqual(@as(u32, 3), plans.items[0].line_target);
     try testing.expectEqual(@as(u32, 10), plans.items[1].line_target);
 }
@@ -1359,8 +1391,8 @@ test "buildPathGoalsJson escapes special characters in the path" {
     const allocator = testing.allocator;
     const out = try buildPathGoalsJson(allocator, "a\"b.ts", &.{"retry_safe"});
     defer allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "\"path\":\"a\\\"b.ts\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"retry_safe\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"path\":\"a\\\"b.ts\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"retry_safe\"") != null);
 }
 
 test "parseGoalCheckResult returns ok=true with empty witnesses when absent" {
@@ -1568,7 +1600,7 @@ test "drive reports achieved when the patch of the last iteration meets every go
     try testing.expectEqual(@as(u32, 2), final_patch_goal_check_calls);
     const events = try zts.file_io.readFile(allocator, events_path, 4 * 1024 * 1024);
     defer allocator.free(events);
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         events,
         "\"autoloop_outcome\",\"d\":{\"verdict\":\"achieved\",\"iterations\":1,\"goals_met\":[\"no_secret_leakage\"],\"goals_unmet\":[],\"final_change_set_hash\":\"",
@@ -1601,7 +1633,7 @@ test "autoloop outcome frame lists every goal as met when the goals were met wit
     try testing.expectEqual(@as(u32, 0), outcome.goals_unmet_count);
     const events = try zts.file_io.readFile(allocator, events_path, 4 * 1024 * 1024);
     defer allocator.free(events);
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         events,
         "\"autoloop_outcome\",\"d\":{\"verdict\":\"achieved\",\"iterations\":0,\"goals_met\":[\"retry_safe\",\"pure\"],\"goals_unmet\":[]}}",

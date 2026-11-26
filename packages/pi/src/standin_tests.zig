@@ -89,8 +89,8 @@ test "stand-in add-route playbook applies an edit through the real agent loop an
 
     const handler_path = try tmp.childPath(allocator, "handler.ts");
     const content = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
-    try testing.expect(std.mem.indexOf(u8, content, "\"GET /health\": handleGetHealth") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "function handleGetHealth") != null);
+    try testing.expect(std.mem.find(u8, content, "\"GET /health\": handleGetHealth") != null);
+    try testing.expect(std.mem.find(u8, content, "function handleGetHealth") != null);
 }
 
 /// Drive one defect seed through the real server, the real loop, and the real
@@ -421,7 +421,7 @@ test "stand-in hole arm: two one-fill turns compose through publisher and apply"
     const handler_path = try tmp.childPath(allocator, "handler.ts");
     const after_first = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
     try testing.expectEqual(@as(usize, 1), hole_seeds.countHoles(after_first));
-    try testing.expect(std.mem.indexOf(u8, after_first, seed.expressions[0]) != null);
+    try testing.expect(std.mem.find(u8, after_first, seed.expressions[0]) != null);
 
     const second = try loop.runTurnWith(
         allocator,
@@ -438,7 +438,7 @@ test "stand-in hole arm: two one-fill turns compose through publisher and apply"
     const after_second = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
     try testing.expectEqual(@as(usize, 0), hole_seeds.countHoles(after_second));
     for (seed.expressions) |expression| {
-        try testing.expect(std.mem.indexOf(u8, after_second, expression) != null);
+        try testing.expect(std.mem.find(u8, after_second, expression) != null);
     }
     try testing.expectEqual(@as(usize, 2), transcriptToolResultCount(&session.transcript, "zts_expert_query"));
 
@@ -653,7 +653,7 @@ test "stand-in gate: every source edit draft passes the real parser and compiler
         switch (reply.response) {
             .change_set => |edit| {
                 try testing.expectEqualStrings(case.file, edit.file);
-                try testing.expect(std.mem.indexOf(u8, edit.content, case.must_contain) != null);
+                try testing.expect(std.mem.find(u8, edit.content, case.must_contain) != null);
                 var proof = try prove_probe.observe(allocator, .{
                     .baseline = case.source,
                     .candidate = edit.content,
@@ -688,8 +688,8 @@ test "stand-in review reports source observations without a compiler verdict" {
     const outcome = try local_client.decodeResponse(allocator, "", body);
     switch (outcome.reply.response) {
         .final_text => |text| {
-            try testing.expect(std.mem.indexOf(u8, text, "missing visible `result.ok` guard") != null);
-            try testing.expect(std.mem.indexOf(u8, text, "did not run the compiler") != null);
+            try testing.expect(std.mem.find(u8, text, "missing visible `result.ok` guard") != null);
+            try testing.expect(std.mem.find(u8, text, "did not run the compiler") != null);
         },
         else => return error.ExpectedFinalText,
     }
@@ -716,11 +716,11 @@ test "stand-in environment edit preserves existing handler source and passes the
     const reply = try propose_change_set.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
     switch (reply.response) {
         .change_set => |edit| {
-            try testing.expect(std.mem.indexOf(u8, edit.content, "// KEEP: application-specific response marker") != null);
-            try testing.expect(std.mem.indexOf(u8, edit.content, "const marker = \"preserve-me\";") != null);
-            try testing.expect(std.mem.indexOf(u8, edit.content, "import { env } from \"zttp:env\";") != null);
-            const env_read = std.mem.indexOf(u8, edit.content, "env(\"APP_NAME\");") orelse return error.MissingEnvironmentRead;
-            const marker = std.mem.indexOf(u8, edit.content, "const marker = \"preserve-me\";") orelse return error.MissingMarker;
+            try testing.expect(std.mem.find(u8, edit.content, "// KEEP: application-specific response marker") != null);
+            try testing.expect(std.mem.find(u8, edit.content, "const marker = \"preserve-me\";") != null);
+            try testing.expect(std.mem.find(u8, edit.content, "import { env } from \"zttp:env\";") != null);
+            const env_read = std.mem.find(u8, edit.content, "env(\"APP_NAME\");") orelse return error.MissingEnvironmentRead;
+            const marker = std.mem.find(u8, edit.content, "const marker = \"preserve-me\";") orelse return error.MissingMarker;
             try testing.expect(env_read < marker);
             var proof = try prove_probe.observe(allocator, .{
                 .baseline = source,
@@ -769,8 +769,8 @@ test "stand-in environment edit returns a miss for unsupported handler sources" 
         const outcome = try local_client.decodeResponse(allocator, "", body);
         switch (outcome.reply.response) {
             .final_text => |text| {
-                try testing.expect(std.mem.indexOf(u8, text, "[standin-miss]") != null);
-                try testing.expect(std.mem.indexOf(u8, text, case.reason) != null);
+                try testing.expect(std.mem.find(u8, text, "[standin-miss]") != null);
+                try testing.expect(std.mem.find(u8, text, case.reason) != null);
             },
             else => return error.ExpectedFinalText,
         }
@@ -852,8 +852,8 @@ test "stand-in violation fix returns a miss for an already guarded source" {
     const outcome = try local_client.decodeResponse(allocator, "", body);
     switch (outcome.reply.response) {
         .final_text => |text| {
-            try testing.expect(std.mem.indexOf(u8, text, "[standin-miss]") != null);
-            try testing.expect(std.mem.indexOf(u8, text, "already has a visible `result.ok` guard") != null);
+            try testing.expect(std.mem.find(u8, text, "[standin-miss]") != null);
+            try testing.expect(std.mem.find(u8, text, "already has a visible `result.ok` guard") != null);
         },
         else => return error.ExpectedFinalText,
     }
@@ -950,16 +950,16 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
             }
             try testing.expect(result.firstAttemptGreen());
             if (std.mem.eql(u8, entry.id, "add-route")) {
-                try testing.expect(std.mem.indexOf(u8, handler, "\"GET /health\": handleGetHealth") != null);
+                try testing.expect(std.mem.find(u8, handler, "\"GET /health\": handleGetHealth") != null);
             } else if (std.mem.eql(u8, entry.id, "add-env")) {
-                try testing.expect(std.mem.indexOf(u8, handler, "from \"zttp:env\"") != null);
-                try testing.expect(std.mem.indexOf(u8, handler, "env(\"APP_NAME\")") != null);
+                try testing.expect(std.mem.find(u8, handler, "from \"zttp:env\"") != null);
+                try testing.expect(std.mem.find(u8, handler, "env(\"APP_NAME\")") != null);
             } else if (std.mem.eql(u8, entry.id, "fix")) {
-                try testing.expect(std.mem.indexOf(u8, handler, "if (!result.ok)") != null);
-                try testing.expect(std.mem.indexOf(u8, handler, "result.error") != null);
+                try testing.expect(std.mem.find(u8, handler, "if (!result.ok)") != null);
+                try testing.expect(std.mem.find(u8, handler, "result.error") != null);
             } else if (std.mem.eql(u8, entry.id, "fill-hole")) {
                 const seed = hole_seeds.findById("single-hole") orelse return error.MissingHoleSeed;
-                try testing.expect(std.mem.indexOf(u8, handler, seed.expressions[0]) != null);
+                try testing.expect(std.mem.find(u8, handler, seed.expressions[0]) != null);
                 try testing.expectEqual(@as(usize, 0), hole_seeds.countHoles(handler));
             } else {
                 return error.UncheckedRangeEntry;
@@ -1006,7 +1006,7 @@ fn transcriptContains(transcript: *const transcript_mod.Transcript, needle: []co
             else => null,
         };
         if (text) |value| {
-            if (std.mem.indexOf(u8, value, needle) != null) return true;
+            if (std.mem.find(u8, value, needle) != null) return true;
         }
     }
     return false;

@@ -471,7 +471,8 @@ fn appendRelativeRoot(
 
 fn appendUniqueOwned(allocator: std.mem.Allocator, roots: *std.ArrayList([]u8), value: []const u8) !void {
     for (roots.items) |root| if (std.mem.eql(u8, root, value)) return;
-    try roots.append(allocator, try allocator.dupe(u8, value));
+    try roots.ensureUnusedCapacity(allocator, 1);
+    roots.appendAssumeCapacity(try allocator.dupe(u8, value));
 }
 
 const Collected = struct {
@@ -496,6 +497,7 @@ fn collectCheckDiagnostics(
         .json_mode = true,
         .policy_source = policy_source,
     }) catch |full_error| {
+        if (full_error == error.OutOfMemory) return error.OutOfMemory;
         const source = try zts.file_io.readFile(allocator, handler_path, change_set.max_file_bytes);
         defer allocator.free(source);
         var fallback = zts_cli.precompile.runCheckOnlyFromSourceWithOptions(
@@ -508,7 +510,10 @@ fn collectCheckDiagnostics(
                 .skip_contract = true,
                 .policy_source = policy_source,
             },
-        ) catch return full_error;
+        ) catch |fallback_error| {
+            if (fallback_error == error.OutOfMemory) return error.OutOfMemory;
+            return full_error;
+        };
         defer fallback.deinit(allocator);
         if (fallback.json_diagnostics.items.len == 0) return full_error;
         // The fallback skips contract and flow analysis, so its diagnostics
@@ -668,16 +673,20 @@ fn contractChanges(
         defer allocator.free(text);
         try appendChange(allocator, &out, .route, route.status == .added, text);
     }
-    if (before.capabilities) |before_caps| if (after.capabilities) |after_caps| {
-        for (after_caps.slice()) |capability| {
-            if (before_caps.has(capability)) continue;
+    const before_caps = before.capabilities;
+    const after_caps = after.capabilities;
+    if (after_caps) |caps| {
+        for (caps.slice()) |capability| {
+            if (before_caps != null and before_caps.?.has(capability)) continue;
             try appendChange(allocator, &out, .capability, true, @tagName(capability));
         }
-        for (before_caps.slice()) |capability| {
-            if (after_caps.has(capability)) continue;
+    }
+    if (before_caps) |caps| {
+        for (caps.slice()) |capability| {
+            if (after_caps != null and after_caps.?.has(capability)) continue;
             try appendChange(allocator, &out, .capability, false, @tagName(capability));
         }
-    };
+    }
     return try out.toOwnedSlice(allocator);
 }
 
@@ -1041,7 +1050,7 @@ test "aggregate proof rejects a configured policy it cannot load" {
         .accepted => return error.TestUnexpectedResult,
         .rejected => |rejection| {
             try testing.expectEqualStrings("policy_context_failed", rejection.code);
-            try testing.expect(std.mem.indexOf(u8, rejection.message, "baseline") != null);
+            try testing.expect(std.mem.find(u8, rejection.message, "baseline") != null);
         },
     }
 }

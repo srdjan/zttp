@@ -221,10 +221,7 @@ fn buildResult(allocator: std.mem.Allocator, args: BuildArgs) !registry_mod.Tool
     try edit_simulate.writeResultJson(w, args.verdict);
     try w.writeAll("}\n");
 
-    const llm_text = try text_buf.toOwnedSlice();
-    errdefer allocator.free(llm_text);
-    if (llm_text.len > common.max_hole_tool_result_bytes) {
-        allocator.free(llm_text);
+    if (text_buf.written().len > common.max_hole_tool_result_bytes) {
         return refusal(
             allocator,
             args.path,
@@ -234,6 +231,9 @@ fn buildResult(allocator: std.mem.Allocator, args: BuildArgs) !registry_mod.Tool
             "the complete verified proposal exceeds the tool-result limit; use a smaller expression or handler",
         );
     }
+
+    const llm_text = try text_buf.toOwnedSlice();
+    errdefer allocator.free(llm_text);
 
     const summary = try allocator.print("{d} total, {d} new, {d} preexisting", .{ args.verdict.total, args.verdict.new_count, args.verdict.preexisting_count });
     defer allocator.free(summary);
@@ -346,12 +346,12 @@ test "execute fills the named hole and leaves the rest of the file alone" {
     var result = try execute(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
 
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "return s;") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "hole()") == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "return s;") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "hole()") == null);
     // The other function is untouched: the edit is the hole's bytes and no
     // others, which is the whole claim this tool makes.
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "Response.json({ slug: slug(\\\"x\\\") })") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "Response.json({ slug: slug(\\\"x\\\") })") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"applied\":false") != null);
 }
 
 test "execute refuses a coordinate that no longer names a hole" {
@@ -374,7 +374,7 @@ test "execute refuses a coordinate that no longer names a hole" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "no_hole_at_site") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "no_hole_at_site") != null);
 }
 
 test "execute refuses an empty expression" {
@@ -389,7 +389,7 @@ test "execute refuses an empty expression" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "empty_expression") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "empty_expression") != null);
 }
 
 fn writeFixture(tmp_sub_path: anytype, source: []const u8) ![]u8 {
@@ -402,6 +402,33 @@ fn writeFixture(tmp_sub_path: anytype, source: []const u8) ![]u8 {
 }
 
 test "the description tells the agent not to rewrite the file" {
-    try testing.expect(std.mem.indexOf(u8, tool.description, "nothing else in the file moves") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "never writes") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "nothing else in the file moves") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "never writes") != null);
+}
+
+test "buildResult handles OOM on oversized refusal without double-free" {
+    const oversized = try testing.allocator.alloc(u8, common.max_hole_tool_result_bytes + 64);
+    defer testing.allocator.free(oversized);
+    @memset(oversized, 'a');
+
+    const verdict: edit_simulate.SimulateResult = .{};
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator, proposed: []const u8, v: *const edit_simulate.SimulateResult) !void {
+            var res = buildResult(allocator, .{
+                .path = "handler.ts",
+                .line = 1,
+                .column = 1,
+                .expression = "x",
+                .proposed = proposed,
+                .verdict = v,
+            }) catch |err| switch (err) {
+                error.WriteFailed => return error.OutOfMemory,
+                else => return err,
+            };
+            defer res.deinit(allocator);
+            try testing.expect(!res.ok);
+            try testing.expect(std.mem.find(u8, res.llm_text, "proposed_content_too_large") != null);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Case.run, .{ oversized, &verdict });
 }

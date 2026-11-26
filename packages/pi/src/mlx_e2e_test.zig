@@ -181,8 +181,8 @@ test "local MLX expert flow" {
 
     const applied = try zts.file_io.readFile(allocator, "handler.ts", 1024 * 1024);
     defer allocator.free(applied);
-    try std.testing.expect(std.mem.indexOf(u8, applied, "/health") != null);
-    try std.testing.expect(std.mem.indexOf(u8, applied, "req.body") == null);
+    try std.testing.expect(std.mem.find(u8, applied, "/health") != null);
+    try std.testing.expect(std.mem.find(u8, applied, "req.body") == null);
 
     const meta_path = try allocator.dupe(
         u8,

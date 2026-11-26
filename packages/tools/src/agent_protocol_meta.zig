@@ -1030,8 +1030,8 @@ test "a stale policy_hash fails with both values named" {
     try testing.expectEqualStrings("expected.policy_hash", err.get("field").?.string);
     // Both values, so a client re-binds without a second round trip.
     const message = err.get("message").?.string;
-    try testing.expect(std.mem.indexOf(u8, message, "0000000000") != null);
-    try testing.expect(std.mem.indexOf(u8, message, &zts.policyHash()) != null);
+    try testing.expect(std.mem.find(u8, message, "0000000000") != null);
+    try testing.expect(std.mem.find(u8, message, &zts.policyHash()) != null);
 }
 
 test "a stale profile_id fails the same way" {
@@ -1341,8 +1341,8 @@ test "module discovery names each parameter and the module use protocol" {
 
         // The protocol between the exports, which no single signature holds.
         const summary = module_obj.get("summary").?.string;
-        try testing.expect(std.mem.indexOf(u8, summary, "sql(name, statement)") != null);
-        try testing.expect(std.mem.indexOf(u8, summary, "never SQL text") != null);
+        try testing.expect(std.mem.find(u8, summary, "sql(name, statement)") != null);
+        try testing.expect(std.mem.find(u8, summary, "never SQL text") != null);
 
         for (module_obj.get("exports").?.array.items) |exp| {
             const exp_obj = exp.object;
@@ -1426,7 +1426,7 @@ test "modules describes imports in full and keeps every other module choosable" 
             // statement by name and that sqlMany takes that name, not SQL.
             // (Return types are asserted separately, below.)
             const summary = m.get("summary").?.string;
-            try testing.expect(std.mem.indexOf(u8, summary, "never SQL text") != null);
+            try testing.expect(std.mem.find(u8, summary, "never SQL text") != null);
             for (m.get("exports").?.array.items) |exp_value| {
                 const exp = exp_value.object;
                 try testing.expect(exp.get("effect") != null);
@@ -1836,7 +1836,7 @@ test "meta publishes the closed severity set and the rule that decides success" 
         if (std.mem.eql(u8, item.string, "advisory")) found_advisory = true;
     }
     try testing.expect(found_advisory);
-    try testing.expect(std.mem.indexOf(u8, severities.get("success_rule").?.string, "no error diagnostic") != null);
+    try testing.expect(std.mem.find(u8, severities.get("success_rule").?.string, "no error diagnostic") != null);
 }
 
 test "meta publishes an advisory-only idiom table" {
@@ -1931,7 +1931,7 @@ test "meta publishes the built-in module catalog from the bindings" {
         try testing.expectEqual(@as(usize, 1), module.type_exports.len);
         try testing.expectEqualStrings("Nominal", module.type_exports[0].name);
         const type_text = module.type_exports[0].typescript orelse return error.TestExpectedEqual;
-        try testing.expect(std.mem.indexOf(u8, type_text, "type Nominal") != null);
+        try testing.expect(std.mem.find(u8, type_text, "type Nominal") != null);
         const intrinsics = module.intrinsic_exports;
         try testing.expectEqual(@as(usize, 4), intrinsics.len);
         try testing.expectEqualStrings("nominal", intrinsics[0].name);
@@ -1943,7 +1943,7 @@ test "meta publishes the built-in module catalog from the bindings" {
         try testing.expectEqualStrings("P", intrinsics[3].name);
         try testing.expectEqualStrings("pattern_namespace", intrinsics[3].kind);
         const pattern_text = intrinsics[3].typescript orelse return error.TestExpectedEqual;
-        try testing.expect(std.mem.indexOf(u8, pattern_text, "const P") != null);
+        try testing.expect(std.mem.find(u8, pattern_text, "const P") != null);
     }
     try testing.expect(saw_core);
     try testing.expectEqual(@as(usize, 21), runtime_modules);

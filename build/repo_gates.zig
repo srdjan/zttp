@@ -62,7 +62,7 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
         .target = b.graph.host,
         .optimize = .fast,
     });
-    kernel_safety_probe_mod.addImport("zttp_proof_checker", ctx.proofCheckerMod());
+    kernel_safety_probe_mod.addImport("zttp_proof_checker", ctx.proofCheckerHostFastMod());
     kernel_safety_probe_mod.addImport("kernel_safety_probe_dep", b.createModule(.{
         .root_source_file = b.path("build/kernel_safety_probe_dep.zig"),
         .target = b.graph.host,
@@ -92,11 +92,17 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     module_boundary.has_side_effects = true;
     const module_boundary_step = ctx.b.step("test-module-boundary", "Check consumer reach into zts internals against the allowlist");
     module_boundary_step.dependOn(&module_boundary.step);
-    const release_workflow = ctx.addGate(&.{ "/bin/bash", "scripts/test-release-workflow.sh" }, "test-release-workflow", "Check release script invariants");
-    release_workflow.run.addArtifactArg(tools.repo_gate_exe);
+    const release_workflow = ctx.b.addRunArtifact(tools.repo_gate_exe);
+    release_workflow.addArgs(&.{ "release-workflow", "scripts/release.sh" });
+    release_workflow.setCwd(ctx.b.path("."));
+    release_workflow.has_side_effects = true;
+    ctx.b.step("test-release-workflow", "Check release script invariants").dependOn(&release_workflow.step);
     const proof_swallow = ctx.addGate(&.{ "/bin/bash", "scripts/check-proof-swallow.sh" }, "test-proof-swallow", "Check the proof pipeline for unreviewed swallowed errors");
-    const zts_layering = ctx.addGate(&.{ "/bin/bash", "scripts/check-zts-layering.sh" }, "test-zts-layering", "Check zts tier assignments import only downward");
-    zts_layering.run.addArtifactArg(tools.zts_graph_gate_exe);
+    const zts_layering = ctx.b.addRunArtifact(tools.zts_graph_gate_exe);
+    zts_layering.addArg("layering");
+    zts_layering.setCwd(ctx.b.path("."));
+    zts_layering.has_side_effects = true;
+    ctx.b.step("test-zts-layering", "Check zts tier assignments import only downward").dependOn(&zts_layering.step);
     const convergence_emitter = ctx.addGate(&.{ "/bin/bash", "scripts/check-convergence-emitter.sh" }, "test-convergence-emitter", "Check the convergence marker has one producer and one consumer");
 
     const evidence_marker = ctx.addGate(&.{ "/bin/bash", "scripts/test-evidence-marker.sh" }, "test-evidence-marker", "Check release evidence marker and publisher boundaries");
@@ -122,9 +128,9 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
         .kernel_safety_step = kernel_safety.step,
         .kernel_safety_gate = kernel_safety_gate,
         .module_boundary = module_boundary,
-        .release_workflow = release_workflow.run,
+        .release_workflow = release_workflow,
         .proof_swallow = proof_swallow.run,
-        .zts_layering = zts_layering.run,
+        .zts_layering = zts_layering,
         .convergence_emitter = convergence_emitter.run,
         .evidence_marker = evidence_marker.run,
         .docs_drift_step = docs_drift.step,

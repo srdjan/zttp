@@ -1,9 +1,9 @@
 //! Reduce a handler file to its unique Canonical Normal Form.
 //!
 //! Read-only: returns the canonical source, the `fullyCanonical` fixed-point
-//! flag, any residual diagnostics, and the rewrite trace. The agent applies the
-//! canonical source through its normal `propose_change_set` path; this tool never writes
-//! the file. Distinct from `zts_expert_canonicalize`, which previews single
+//! flag, any residual diagnostics, and the rewrite trace. This tool never writes
+//! the file; the model submits edits through `propose_change_set`.
+//! Distinct from `zts_expert_canonicalize`, which previews single
 //! per-node refactor intents - this returns the fixed point.
 
 const std = @import("std");
@@ -130,7 +130,7 @@ test "normalize registry returns a non-writing version-2 fixed point" {
     try testing.expectEqual(@as(usize, 1), trace.items.len);
     try testing.expectEqualStrings("replace_let_with_const", trace.items[0].object.get("intent").?.string);
     const canonical_source = payload.get("canonical_source").?.string;
-    try testing.expect(std.mem.indexOf(u8, canonical_source, "const msg") != null);
+    try testing.expect(std.mem.find(u8, canonical_source, "const msg") != null);
 
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "handler.ts", testing.allocator, .limited(1024 * 1024));
     defer testing.allocator.free(on_disk);

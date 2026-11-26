@@ -65,22 +65,19 @@ fn execute(
     const relative = common.relativeToRoot(root, absolute);
 
     const has_explicit_output = args.len > 1 and args[1].len > 0;
-    var output_abs_owned: ?[]u8 = null;
-    defer if (output_abs_owned) |p| allocator.free(p);
-    var output_path_owned: ?[]u8 = null;
-    defer if (output_path_owned) |p| allocator.free(p);
+    var derived_output_owned: ?[]u8 = null;
+    defer if (derived_output_owned) |p| allocator.free(p);
 
-    const output_path: []const u8 = if (has_explicit_output) blk: {
-        const output_abs = try common.resolveInsideWorkspace(allocator, root, args[1]);
-        output_abs_owned = output_abs;
-        break :blk common.relativeToRoot(root, output_abs);
-    } else blk: {
+    const raw_output: []const u8 = if (has_explicit_output) args[1] else blk: {
         const ext = std.fs.path.extension(relative);
         const stem = relative[0 .. relative.len - ext.len];
         const owned = try allocator.print("{s}.test.jsonl", .{stem});
-        output_path_owned = owned;
+        derived_output_owned = owned;
         break :blk owned;
     };
+    const output_abs = try common.resolveInsideWorkspace(allocator, root, raw_output);
+    defer allocator.free(output_abs);
+    const output_path = common.relativeToRoot(root, output_abs);
 
     const argv = [_][]const u8{ "zts", "gen-tests", relative, "-o", output_path };
     var buf: std.Io.Writer.Allocating = .init(allocator);
@@ -95,7 +92,7 @@ fn execute(
             return try common.commandOutcomeToToolResult(allocator, &argv, &outcome);
         },
     };
-    try zts.file_io.writeFile(allocator, output_path, buf.written());
+    try zts.file_io.writeFile(allocator, output_abs, buf.written());
     const message = try allocator.print("Wrote {d} test{s} to {s}\n", .{
         count,
         if (count == 1) @as([]const u8, "") else "s",
@@ -114,14 +111,14 @@ fn execute(
 const testing = std.testing;
 
 test "tool description mentions behavioral paths" {
-    try testing.expect(std.mem.indexOf(u8, tool.description, "behavioral") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "behavioral") != null);
 }
 
 test "missing args returns not-ok" {
     var result = try execute(testing.allocator, &.{});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "requires handler_path") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "requires handler_path") != null);
 }
 
 test "out-of-workspace output_path is rejected" {

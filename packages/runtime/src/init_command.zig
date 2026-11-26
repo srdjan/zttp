@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const writeAllFd = @import("posix_util.zig").writeAllFd;
-const builtin = @import("builtin");
 
 const zts = @import("zts");
 const shared = @import("cli_shared.zig");
@@ -827,7 +826,7 @@ test "init --extension scaffolds a manifest the parser accepts" {
 
     const readme = try zts.file_io.readFile(testing.allocator, "demoext/README.md", 256 * 1024);
     defer testing.allocator.free(readme);
-    try testing.expect(std.mem.indexOf(u8, readme, "SDK and runtime bridge are revision-locked") != null);
+    try testing.expect(std.mem.find(u8, readme, "SDK and runtime bridge are revision-locked") != null);
 }
 
 test "init --extension sanitizes build zon package name for hyphenated names" {
@@ -843,8 +842,8 @@ test "init --extension sanitizes build zon package name for hyphenated names" {
 
     const build_zon = try zts.file_io.readFile(testing.allocator, "demo-ext/build.zig.zon", 256 * 1024);
     defer testing.allocator.free(build_zon);
-    try testing.expect(std.mem.indexOf(u8, build_zon, ".name = .zttp_ext_demo_ext") != null);
-    try testing.expect(std.mem.indexOf(u8, build_zon, ".fingerprint = 0x") != null);
+    try testing.expect(std.mem.find(u8, build_zon, ".name = .zttp_ext_demo_ext") != null);
+    try testing.expect(std.mem.find(u8, build_zon, ".fingerprint = 0x") != null);
 }
 
 test "init --extension package fingerprint uses package name checksum" {
@@ -872,7 +871,7 @@ test "init --extension package name stays within Zig manifest limit" {
 
     try testing.expect(package_name.len <= 32);
     try testing.expect(std.mem.startsWith(u8, package_name, "zttp_ext_very"));
-    try testing.expect(std.mem.indexOfScalar(u8, package_name, '-') == null);
+    try testing.expect(std.mem.findScalar(u8, package_name, '-') == null);
 }
 
 test "init --extension preserves a pre-existing build.zig" {
@@ -1013,7 +1012,7 @@ test "initCommand scaffolds the v1 project layout" {
 
     const handler = try zts.file_io.readFile(testing.allocator, "demo/src/handler.ts", 64 * 1024);
     defer testing.allocator.free(handler);
-    try testing.expect(std.mem.indexOf(u8, handler, "function handler(req: Request): Guardrails<Response>") != null);
+    try testing.expect(std.mem.find(u8, handler, "function handler(req: Request): Guardrails<Response>") != null);
 }
 
 test "initCommand --expert scaffolds and asks the dispatcher to enter expert mode" {
@@ -1056,8 +1055,8 @@ test "initCommand writes template-specific starter README files" {
 
     const api_readme = try zts.file_io.readFile(testing.allocator, "api-demo/README.md", 64 * 1024);
     defer testing.allocator.free(api_readme);
-    try testing.expect(std.mem.indexOf(u8, api_readme, "# zttp API app") != null);
-    try testing.expect(std.mem.indexOf(u8, api_readme, "curl http://127.0.0.1:3000/health") != null);
+    try testing.expect(std.mem.find(u8, api_readme, "# zttp API app") != null);
+    try testing.expect(std.mem.find(u8, api_readme, "curl http://127.0.0.1:3000/health") != null);
 }
 
 /// Census of the TypeScript that `zttp init` writes: each source runs through

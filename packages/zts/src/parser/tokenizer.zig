@@ -563,7 +563,9 @@ pub const Tokenizer = struct {
 
         saw_separator = self.scanDigitRun(isDigit);
 
-        if (self.pos < self.source.len and self.source[self.pos] == '.') {
+        if (start < self.source.len and self.source[start] != '.' and
+            self.pos < self.source.len and self.source[self.pos] == '.')
+        {
             if (self.pos + 1 < self.source.len and isDigit(self.source[self.pos + 1])) {
                 self.pos += 1;
                 saw_separator = self.scanDigitRun(isDigit) or saw_separator;
@@ -573,7 +575,7 @@ pub const Tokenizer = struct {
         if (self.pos < self.source.len and (self.source[self.pos] == 'e' or self.source[self.pos] == 'E')) {
             self.pos += 1;
             if (self.pos < self.source.len and (self.source[self.pos] == '+' or self.source[self.pos] == '-')) self.pos += 1;
-            while (self.pos < self.source.len and isDigit(self.source[self.pos])) self.pos += 1;
+            saw_separator = self.scanDigitRun(isDigit) or saw_separator;
         }
 
         return self.numberToken(start, col, line, saw_separator);
@@ -673,6 +675,15 @@ pub const Tokenizer = struct {
                                         .@"resume" = self.pos,
                                     } };
                                     return true;
+                                }
+                                // Without an observer, consume the final byte
+                                // too so it never leaks out as a token.
+                                if (self.pos < self.source.len) {
+                                    if (self.source[self.pos] == '\n') {
+                                        self.line += 1;
+                                        self.line_start = self.pos + 1;
+                                    }
+                                    self.pos = @intCast(self.source.len);
                                 }
                             }
                         } else return false;
@@ -1026,7 +1037,7 @@ test "raw erasure resumes inside a comment at the exact surviving token" {
     const keyword = tokenizer.next();
     try std.testing.expectEqual(TokenType.kw_import, keyword.type);
 
-    const raw_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').? + 1);
+    const raw_end: u32 = @intCast(std.mem.findScalar(u8, source, ';').? + 1);
     const initial = Token.synthetic(.eof, .{
         .line = 1,
         .column = 1,
@@ -1053,7 +1064,7 @@ test "raw erasure preserves opaque lexical and cached state" {
     const subst_brace_depths = tokenizer.subst_brace_depths;
     const cached = tokenizer.current;
     const has_cached = tokenizer.has_current;
-    const raw_end: u32 = @intCast(std.mem.lastIndexOfScalar(u8, source, ';').? + 1);
+    const raw_end: u32 = @intCast(std.mem.findScalarLast(u8, source, ';').? + 1);
 
     tokenizer.resumeAfterRawErasure(raw_end, keyword);
 
@@ -1069,7 +1080,7 @@ test "raw erasure advances LF positions without parsing opaque bytes" {
     const keyword = tokenizer.next();
     try std.testing.expectEqual(TokenType.kw_import, keyword.type);
 
-    const raw_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').? + 1);
+    const raw_end: u32 = @intCast(std.mem.findScalar(u8, source, ';').? + 1);
     var previous_tokenizer = Tokenizer.init(";");
     const previous = previous_tokenizer.next();
     tokenizer.resumeAfterRawErasure(raw_end, previous);
@@ -1083,7 +1094,7 @@ test "raw erasure advances LF positions without parsing opaque bytes" {
 
 test "raw erasure restores regex eligibility from the runtime predecessor" {
     const source = "import type opaque;/abc/;";
-    const raw_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').? + 1);
+    const raw_end: u32 = @intCast(std.mem.findScalar(u8, source, ';').? + 1);
 
     var previous_semicolon_tokenizer = Tokenizer.init(";");
     const previous_semicolon = previous_semicolon_tokenizer.next();
@@ -1117,7 +1128,7 @@ test "raw template resume drops its frame and uses template tail regex state" {
     try std.testing.expectEqual(TokenType.template_head, head.type);
     try std.testing.expectEqual(@as(u8, 1), tokenizer.template_depth);
 
-    const raw_end: u32 = @intCast(std.mem.indexOfScalarPos(u8, source, head.start + head.len, '`').? + 1);
+    const raw_end: u32 = @intCast(std.mem.findScalarPos(u8, source, head.start + head.len, '`').? + 1);
     tokenizer.resumeAfterRawTemplate(head, raw_end);
     try std.testing.expectEqual(@as(u8, 0), tokenizer.template_depth);
     try std.testing.expectEqual(TokenType.slash, tokenizer.next().type);
@@ -1131,7 +1142,7 @@ test "malformed string resume restores the LF raw boundary" {
     _ = tokenizer.next();
     const string = tokenizer.next();
     try std.testing.expectEqual(TokenType.string_literal, string.type);
-    const lf: u32 = @intCast(std.mem.indexOfScalar(u8, string.text(source), '\n').? + string.start);
+    const lf: u32 = @intCast(std.mem.findScalar(u8, string.text(source), '\n').? + string.start);
 
     tokenizer.resumeMalformedStringAt(string, lf, keyword);
     try std.testing.expectEqual(lf, tokenizer.pos);
@@ -1178,8 +1189,8 @@ test "plain lookahead does not consume a committed trivia observation" {
     var lookahead = committed;
 
     const speculative = lookahead.next();
-    try std.testing.expectEqual(TokenType.identifier, speculative.type);
-    try std.testing.expectEqual(@as(u32, @intCast(source.len - 1)), speculative.start);
+    try std.testing.expectEqual(TokenType.eof, speculative.type);
+    try std.testing.expectEqual(@as(u32, @intCast(source.len)), speculative.start);
 
     var observation: ?TriviaObservation = null;
     const terminal = committed.nextObserved(&observation);
@@ -1194,7 +1205,7 @@ test "recovery string rescan ignores erased type quotes and preserves LF" {
     try std.testing.expectEqual(TokenType.regex_literal, tokenizer.next().type);
     const original = tokenizer.next();
     try std.testing.expectEqual(TokenType.string_literal, original.type);
-    const type_start: u32 = @intCast(std.mem.indexOf(u8, source, "\"const\"").?);
+    const type_start: u32 = @intCast(std.mem.find(u8, source, "\"const\"").?);
     try std.testing.expectEqual(type_start + 1, original.start + original.len);
     const rescanned = try tokenizer.rescanRecoveryString(original, &.{.{
         .start = type_start,
@@ -1209,14 +1220,14 @@ test "recovery string rescan ignores erased type quotes and preserves LF" {
 
 test "recovery string rescan uses logical erasures for escapes and quotes" {
     const source = "/ from \"./a\";\nconst live: \"escaped\\\n\\\"quote\" = 1;\nconst end = \"ok\";\n";
-    const start: u32 = @intCast(std.mem.indexOf(u8, source, "\"escaped").?);
-    const end: u32 = @intCast(std.mem.indexOf(u8, source, " = 1;").?);
+    const start: u32 = @intCast(std.mem.find(u8, source, "\"escaped").?);
+    const end: u32 = @intCast(std.mem.find(u8, source, " = 1;").?);
     const erasures = [_]RecoveryErasure{.{ .start = start, .end = end }};
     var tokenizer = Tokenizer.init(source);
     try std.testing.expectEqual(TokenType.regex_literal, tokenizer.next().type);
     const original = tokenizer.next();
     const rescanned = try tokenizer.rescanRecoveryString(original, &erasures);
-    const real_quote: u32 = @intCast(std.mem.indexOf(u8, source, "\"ok\"").?);
+    const real_quote: u32 = @intCast(std.mem.find(u8, source, "\"ok\"").?);
     try std.testing.expectEqual(real_quote + 1, rescanned.start + rescanned.len);
 
     const masked = try std.testing.allocator.dupe(u8, source);
@@ -1267,4 +1278,31 @@ test "recovery string rescan validates every interval before changing state" {
     invalid.type = .identifier;
     try std.testing.expectError(error.InvalidRecoveryErasure, tokenizer.rescanRecoveryString(invalid, &.{}));
     try std.testing.expectEqualDeep(before, tokenizer.saveState());
+}
+
+test "unterminated block comment consumes final byte, exponent handles separators, and double dot splits" {
+    // Unterminated `/* x` must not leak `x` as an identifier token.
+    var comment_tz = Tokenizer.init("/* x");
+    const comment_eof = comment_tz.next();
+    try std.testing.expectEqual(TokenType.eof, comment_eof.type);
+
+    // Exponent separator `1e1_0` stays one number token with has_separator = true.
+    const exp_src = "1e1_0";
+    var exp_tz = Tokenizer.init(exp_src);
+    const exp_tok = exp_tz.next();
+    try std.testing.expectEqual(TokenType.number, exp_tok.type);
+    try std.testing.expectEqualStrings("1e1_0", exp_tok.text(exp_src));
+    try std.testing.expect(exp_tok.has_separator);
+    try std.testing.expectEqual(TokenType.eof, exp_tz.next().type);
+
+    // `.1.2` splits into `.1` and `.2`, never one `.1.2` token.
+    const dot_src = ".1.2";
+    var dot_tz = Tokenizer.init(dot_src);
+    const first = dot_tz.next();
+    const second = dot_tz.next();
+    try std.testing.expectEqual(TokenType.number, first.type);
+    try std.testing.expectEqualStrings(".1", first.text(dot_src));
+    try std.testing.expectEqual(TokenType.number, second.type);
+    try std.testing.expectEqualStrings(".2", second.text(dot_src));
+    try std.testing.expectEqual(TokenType.eof, dot_tz.next().type);
 }

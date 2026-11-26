@@ -337,7 +337,7 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         // Function calls (n_pop is dynamic based on argc)
         .call => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "call" },
         .call_method => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "call_method" },
-        .tail_call => .{ .size = 2, .n_pop = 0, .n_push = 0, .name = "tail_call" },
+        .tail_call => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "tail_call" },
 
         // Property access
         .get_field => .{ .size = 3, .n_pop = 1, .n_push = 1, .name = "get_field" },

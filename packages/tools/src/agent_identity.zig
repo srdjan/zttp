@@ -54,8 +54,9 @@ pub fn canonicalRoot(allocator: std.mem.Allocator, io: std.Io, root: []const u8)
 /// root-relative form. Rejects anything that escapes the root.
 ///
 /// An existing file goes through `realPathFile`, so a symlink pointing out of
-/// the tree is caught. A path that does not exist yet resolves lexically, which
-/// is enough: a lexical resolve cannot re-enter the root after leaving it.
+/// the tree is caught. When the target does not exist yet, the deepest
+/// existing ancestor is canonicalized and combined with the remaining tail,
+/// closing symlink escapes through an existing parent directory.
 pub fn canonicalRelPath(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -68,15 +69,14 @@ pub fn canonicalRelPath(
         try std.fs.path.resolve(allocator, &.{ canonical_root, path });
     defer allocator.free(joined);
 
-    const resolved = blk: {
-        const real = std.Io.Dir.realPathFileAlloc(.cwd(), io, joined, allocator) catch
-            break :blk try std.fs.path.resolve(allocator, &.{joined});
-        defer allocator.free(real);
-        break :blk try allocator.dupe(u8, real);
-    };
+    const resolved = try canonicalizeExistingOrAncestor(allocator, io, joined);
     defer allocator.free(resolved);
 
     if (std.mem.eql(u8, resolved, canonical_root)) return allocator.dupe(u8, "");
+    if (std.mem.eql(u8, canonical_root, "/")) {
+        if (resolved.len <= 1 or resolved[0] != std.fs.path.sep) return error.PathOutsideProjectRoot;
+        return allocator.dupe(u8, resolved[1..]);
+    }
     if (!std.mem.startsWith(u8, resolved, canonical_root)) return error.PathOutsideProjectRoot;
     // Guard the separator too: `/project-other` starts with `/project` and is a
     // different tree.
@@ -84,6 +84,34 @@ pub fn canonicalRelPath(
         return error.PathOutsideProjectRoot;
     }
     return allocator.dupe(u8, resolved[canonical_root.len + 1 ..]);
+}
+
+fn canonicalizeExistingOrAncestor(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+) ![]u8 {
+    const lexical = try std.fs.path.resolve(allocator, &.{path});
+    defer allocator.free(lexical);
+
+    if (std.Io.Dir.realPathFileAlloc(.cwd(), io, lexical, allocator)) |real| {
+        defer allocator.free(real);
+        return allocator.dupe(u8, real);
+    } else |_| {}
+
+    var ancestor: []const u8 = lexical;
+    while (std.fs.path.dirname(ancestor)) |parent| {
+        if (std.mem.eql(u8, parent, ancestor)) break;
+        ancestor = parent;
+        if (std.Io.Dir.realPathFileAlloc(.cwd(), io, ancestor, allocator)) |real_ancestor| {
+            defer allocator.free(real_ancestor);
+            const suffix = std.mem.trimStart(u8, lexical[ancestor.len..], "/\\");
+            if (suffix.len == 0) return allocator.dupe(u8, real_ancestor);
+            return std.fs.path.resolve(allocator, &.{ real_ancestor, suffix });
+        } else |_| {}
+    }
+
+    return allocator.dupe(u8, lexical);
 }
 
 // ---------------------------------------------------------------------------
@@ -194,4 +222,37 @@ test "canonicalRoot rejects a root that does not exist" {
         error.ProjectRootUnresolvable,
         canonicalRoot(a, std.testing.io, "/no/such/project/root/here"),
     );
+}
+
+test "canonicalRelPath rejects a nonexistent file under an escaping symlinked directory" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "root");
+    try tmp.dir.createDirPath(io, "outside");
+
+    const outside_abs = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, "outside", a);
+    defer a.free(outside_abs);
+    tmp.dir.symLink(io, outside_abs, "root/escape_dir", .{}) catch |err| switch (err) {
+        error.AccessDenied => return,
+        else => return err,
+    };
+
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, "root", a);
+    defer a.free(root);
+
+    try std.testing.expectError(
+        error.PathOutsideProjectRoot,
+        canonicalRelPath(a, io, root, "escape_dir/new_file.ts"),
+    );
+}
+
+test "canonicalRelPath handles filesystem root" {
+    const a = std.testing.allocator;
+    const rel = try canonicalRelPath(a, std.testing.io, "/", "/nonexistent_zttp_root_test/src/handler.ts");
+    defer a.free(rel);
+    try std.testing.expectEqualStrings("nonexistent_zttp_root_test/src/handler.ts", rel);
 }

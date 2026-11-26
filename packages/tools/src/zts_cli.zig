@@ -294,10 +294,21 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         try defaultProjectEntry(allocator);
     defer if (handler_path == null) allocator.free(target);
 
-    const policy_source = edit_simulate.discoverProjectPolicySource(
+    var analysis_ctx = project_config_mod.discoverAnalysisContext(
         allocator,
         if (handler_path) |path| path else null,
+        null,
     ) catch {
+        if (json_mode) {
+            try writePolicyLoadFailureJson(allocator, target);
+        } else {
+            try writePolicyLoadFailureText(allocator, target);
+        }
+        std.process.exit(1);
+    };
+    defer analysis_ctx.deinit(allocator);
+
+    const policy_source = analysis_ctx.readPolicySource(allocator) catch {
         if (json_mode) {
             try writePolicyLoadFailureJson(allocator, target);
         } else {
@@ -308,7 +319,7 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     defer if (policy_source) |src| allocator.free(src);
 
     var result = precompile.runCheckOnlyWithOptions(allocator, target, .{
-        .sql_schema_path = sql_schema_path,
+        .sql_schema_path = sql_schema_path orelse analysis_ctx.sqlite,
         .json_mode = json_mode,
         .policy_source = policy_source,
     }) catch |err| switch (err) {
@@ -365,7 +376,7 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         precompile.formatProofCard(&card_aw.writer, &result, target);
         card_buf = card_aw.toArrayList();
         if (card_buf.items.len > 0) {
-            _ = std.c.write(std.c.STDERR_FILENO, card_buf.items.ptr, card_buf.items.len);
+            writeAllFd(std.c.STDERR_FILENO, card_buf.items) catch {};
         }
     }
 
@@ -463,7 +474,7 @@ fn writePolicyLoadFailureText(allocator: std.mem.Allocator, target: []const u8) 
 
     buf = aw.toArrayList();
     if (buf.items.len > 0) {
-        _ = std.c.write(std.c.STDERR_FILENO, buf.items.ptr, buf.items.len);
+        writeAllFd(std.c.STDERR_FILENO, buf.items) catch {};
     }
 }
 
@@ -489,7 +500,7 @@ fn writeUnmappedAnalyzerErrorToWriter(allocator: std.mem.Allocator, writer: anyt
     if (json_mode) {
         try json_diag.writeErrorJson(writer, null, &.{diagnostic}, null);
     } else {
-        try writeDriverFailureText(writer, target, "Analyzer diagnostics", diagnostic.message, diagnostic.suggestion.?);
+        try writeDriverFailureText(writer, target, "Analyzer diagnostics", diagnostic.message, diagnostic.suggestion orelse "");
     }
 }
 
@@ -502,7 +513,7 @@ fn writeUnmappedAnalyzerError(allocator: std.mem.Allocator, json_mode: bool, tar
     if (json_mode) {
         try writeAllFd(std.c.STDOUT_FILENO, buf.items);
     } else {
-        _ = std.c.write(std.c.STDERR_FILENO, buf.items.ptr, buf.items.len);
+        try writeAllFd(std.c.STDERR_FILENO, buf.items);
     }
 }
 
@@ -791,7 +802,7 @@ fn runGenTestsCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
             out_path,
         });
         defer allocator.free(msg);
-        _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+        writeAllFd(std.c.STDERR_FILENO, msg) catch {};
     } else {
         if (buf.items.len > 0) {
             try writeAllFd(std.c.STDOUT_FILENO, buf.items);
@@ -852,7 +863,7 @@ test "module writers classify core authoring exports without runtime functions" 
         try std.testing.expectEqual(@as(usize, 1), module.type_exports.len);
         try std.testing.expectEqualStrings("Nominal", module.type_exports[0].name);
         const type_text = module.type_exports[0].typescript orelse return error.TestExpectedEqual;
-        try std.testing.expect(std.mem.indexOf(u8, type_text, "type Nominal") != null);
+        try std.testing.expect(std.mem.find(u8, type_text, "type Nominal") != null);
         const intrinsics = module.intrinsic_exports;
         try std.testing.expectEqual(@as(usize, 4), intrinsics.len);
         try std.testing.expectEqualStrings("nominal", intrinsics[0].name);
@@ -871,8 +882,8 @@ test "module writers classify core authoring exports without runtime functions" 
     var text_writer: std.Io.Writer.Allocating = .fromArrayList(a, &text_buf);
     try json_diag.writeModulesText(&text_writer.writer);
     text_buf = text_writer.toArrayList();
-    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "zttp:core\n  type Nominal\n  intrinsic nominal (nominal)\n  intrinsic match (match)\n  intrinsic assert (assert)\n  intrinsic P (pattern_namespace)\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "zttp:env\n  env\n") != null);
+    try std.testing.expect(std.mem.find(u8, text_buf.items, "zttp:core\n  type Nominal\n  intrinsic nominal (nominal)\n  intrinsic match (match)\n  intrinsic assert (assert)\n  intrinsic P (pattern_namespace)\n") != null);
+    try std.testing.expect(std.mem.find(u8, text_buf.items, "zttp:env\n  env\n") != null);
 }
 
 test "writeAllFd fails on a closed descriptor and writes a full buffer" {
@@ -888,9 +899,9 @@ test "missing sql schema json uses diagnostic envelope" {
     try writeMissingSqlSchemaJsonToWriter(&aw.writer, "handler.ts");
 
     buf = aw.toArrayList();
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"success\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"code\":\"ZTS700\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "--sql-schema") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\"success\":false") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\"code\":\"ZTS700\"") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "--sql-schema") != null);
 }
 
 test "policy load failures are actionable in json and text modes" {
@@ -899,18 +910,18 @@ test "policy load failures are actionable in json and text modes" {
     var json_aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &json_buf);
     try writePolicyLoadFailureJsonToWriter(&json_aw.writer, "handler.ts");
     json_buf = json_aw.toArrayList();
-    try std.testing.expect(std.mem.indexOf(u8, json_buf.items, "\"success\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json_buf.items, "\"code\":\"ZTS000\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json_buf.items, "policy entry in zttp.json") != null);
+    try std.testing.expect(std.mem.find(u8, json_buf.items, "\"success\":false") != null);
+    try std.testing.expect(std.mem.find(u8, json_buf.items, "\"code\":\"ZTS000\"") != null);
+    try std.testing.expect(std.mem.find(u8, json_buf.items, "policy entry in zttp.json") != null);
 
     var text_buf: std.ArrayList(u8) = .empty;
     defer text_buf.deinit(std.testing.allocator);
     var text_aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &text_buf);
     try writePolicyLoadFailureTextToWriter(&text_aw.writer, "handler.ts");
     text_buf = text_aw.toArrayList();
-    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "Capability policy diagnostics") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "ZTS000") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "handler.ts") != null);
+    try std.testing.expect(std.mem.find(u8, text_buf.items, "Capability policy diagnostics") != null);
+    try std.testing.expect(std.mem.find(u8, text_buf.items, "ZTS000") != null);
+    try std.testing.expect(std.mem.find(u8, text_buf.items, "handler.ts") != null);
 }
 
 test "an unmapped analyzer error is one ZTS000 diagnostic" {
@@ -927,7 +938,7 @@ test "an unmapped analyzer error is one ZTS000 diagnostic" {
     const diagnostics = parsed.value.object.get("diagnostics").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
     try std.testing.expectEqualStrings("ZTS000", diagnostics[0].object.get("code").?.string);
-    try std.testing.expect(std.mem.indexOf(u8, diagnostics[0].object.get("message").?.string, "JumpTooFar") != null);
+    try std.testing.expect(std.mem.find(u8, diagnostics[0].object.get("message").?.string, "JumpTooFar") != null);
 
     var text_buf: std.ArrayList(u8) = .empty;
     defer text_buf.deinit(allocator);
@@ -935,8 +946,8 @@ test "an unmapped analyzer error is one ZTS000 diagnostic" {
     try writeUnmappedAnalyzerErrorToWriter(allocator, &text_aw.writer, false, "handler.ts", error.JumpTooFar);
     text_buf = text_aw.toArrayList();
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text_buf.items, "ZTS000"));
-    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "JumpTooFar") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "1 errors, 0 warnings") != null);
+    try std.testing.expect(std.mem.find(u8, text_buf.items, "JumpTooFar") != null);
+    try std.testing.expect(std.mem.find(u8, text_buf.items, "1 errors, 0 warnings") != null);
 
     // Out of memory is not an analyzer verdict: it propagates and writes nothing.
     var none_buf: std.ArrayList(u8) = .empty;
@@ -955,4 +966,5 @@ test {
     _ = describe_rule;
     _ = search_rules;
     _ = semantics_cli;
+    _ = upgrade_verifier;
 }

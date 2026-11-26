@@ -61,7 +61,7 @@ pub fn resolve(
 /// Returns everything up to and including the last '/'.
 /// If no '/' found, returns "./"
 pub fn dirName(path: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
+    if (std.mem.findScalarLast(u8, path, '/')) |idx| {
         return path[0 .. idx + 1];
     }
     return "./";
@@ -117,7 +117,7 @@ fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 
     while (remaining.len > 0) {
         // Find next segment
-        const sep_idx = std.mem.indexOfScalar(u8, remaining, '/');
+        const sep_idx = std.mem.findScalar(u8, remaining, '/');
         const segment = if (sep_idx) |idx| remaining[0..idx] else remaining;
         remaining = if (sep_idx) |idx| remaining[idx + 1 ..] else "";
 

@@ -594,7 +594,7 @@ test "no form is published twice, and every example is a whole handler" {
         }
         // A snippet would not check, and the legality gate would then be
         // measuring the snippet's incompleteness rather than the form.
-        try testing.expect(std.mem.indexOf(u8, entry.source, "export function handler(") != null);
+        try testing.expect(std.mem.find(u8, entry.source, "export function handler(") != null);
     }
     try testing.expect(findByFeature("match expression") != null);
     try testing.expect(findByFeature("classes") == null);
@@ -606,14 +606,14 @@ test "module examples have unique names and explicit whole-handler evidence" {
         try testing.expect(entry.name.len > 0);
         try testing.expect(entry.purpose.len > 0);
         try testing.expect(entry.modules.len > 0);
-        try testing.expect(std.mem.indexOf(u8, entry.source, "export function handler(") != null);
+        try testing.expect(std.mem.find(u8, entry.source, "export function handler(") != null);
         for (module_examples[index + 1 ..]) |other| {
             try testing.expect(!std.mem.eql(u8, entry.name, other.name));
         }
         for (entry.modules) |specifier| {
             const quoted = try testing.allocator.print("\"{s}\"", .{specifier});
             defer testing.allocator.free(quoted);
-            try testing.expect(std.mem.indexOf(u8, entry.source, quoted) != null);
+            try testing.expect(std.mem.find(u8, entry.source, quoted) != null);
         }
     }
 }

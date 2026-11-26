@@ -23,8 +23,8 @@ pub fn add(ctx: Context) Result {
         .link_libc = true,
     });
     gate_mod.addImport("zts", ctx.zts_host_mod);
-    gate_mod.addImport("zttp_proof_checker", ctx.proofCheckerMod());
-    gate_mod.addImport("project_config", ctx.project_config_mod);
+    gate_mod.addImport("zttp_proof_checker", ctx.proofCheckerHostMod());
+    gate_mod.addImport("project_config", ctx.project_config_host_mod);
     const gate_exe = b.addExecutable(.{
         .name = "bytecode-identity-gate",
         .root_module = gate_mod,

@@ -685,7 +685,6 @@ const all_labels = [_]Label{ .secret, .credential, .user_input, .clean };
 /// unit F1b chooses on purpose.
 const leaking_labels = [_]Label{ .secret, .credential, .user_input };
 const all_sinks = [_]Sink{ .log, .egress_url, .egress_body, .egress_headers, .egress_opaque, .response, .response_html };
-const effect_sinks = [_]Sink{ .log, .egress_url, .egress_body, .egress_headers, .egress_opaque };
 /// A call through a closure bound by name with an `unknown` result is ZTS600,
 /// so the effect sinks reach the flow stage through `.map` (`concise_arrow_hof`).
 const concise_sinks = [_]Sink{ .response, .response_html };
@@ -1185,14 +1184,14 @@ const hand_written = [_]Hand{
         ,
     },
     .{
-        .name = "x26_mask_secret_literal_bound_holds",
+        .name = "x26_mask_bound_zero_holds",
         .property = .no_secret_leakage,
         .expect = .hold,
-        .reason = "mask with an integer literal bound within the ceiling on an unmodified source value declassifies it; the control for x27 to x31",
+        .reason = "mask with an integer literal bound of 0 at the lower boundary of 0..4 on an unmodified source value declassifies it",
         .body =
         \\function handler(req: Request): Claim<Response> {
         \\  const t = env("API_TOKEN") ?? "";
-        \\  logInfo(mask(t, 4), { n: 1 });
+        \\  logInfo(mask(t, 0), { n: 1 });
         \\  return Response.json({ ok: 1 });
         \\}
         ,

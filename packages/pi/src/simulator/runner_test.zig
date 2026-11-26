@@ -21,7 +21,7 @@ fn bindLocalCassette(
     allocator: std.mem.Allocator,
     request_sha256: model_request.Sha256Hex,
 ) ![]u8 {
-    const newline = std.mem.indexOfScalar(u8, local_cassette, '\n') orelse
+    const newline = std.mem.findScalar(u8, local_cassette, '\n') orelse
         return error.MalformedTestCassette;
     if (newline == 0 or local_cassette[newline - 1] != '}') {
         return error.MalformedTestCassette;

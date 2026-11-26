@@ -11,7 +11,9 @@ const NodeIndex = ir.NodeIndex;
 
 pub const AtomResolver = *const fn (atom_idx: u16, ctx: *const anyopaque) ?[]const u8;
 
-pub const Error = std.Io.Writer.Error || std.mem.Allocator.Error;
+pub const Error = std.mem.Allocator.Error;
+
+const max_serialize_depth: usize = 512;
 
 /// Serialize one static literal from `ir_view`.
 ///
@@ -29,7 +31,10 @@ pub fn serialize(
     var output: std.Io.Writer.Allocating = .init(allocator);
     defer output.deinit();
 
-    if (!try writeNode(ir_view, node_idx, resolve_atom, resolver_ctx, &output.writer)) {
+    const ok = writeNode(ir_view, node_idx, resolve_atom, resolver_ctx, &output.writer, 0) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
+    if (!ok) {
         return null;
     }
     return try output.toOwnedSlice();
@@ -41,7 +46,9 @@ fn writeNode(
     resolve_atom: AtomResolver,
     resolver_ctx: *const anyopaque,
     writer: *std.Io.Writer,
+    depth: usize,
 ) std.Io.Writer.Error!bool {
+    if (depth >= max_serialize_depth) return false;
     const tag = ir_view.getTag(node_idx) orelse return false;
     switch (tag) {
         .lit_int => {
@@ -75,10 +82,12 @@ fn writeNode(
         .unary_op => {
             const unary = ir_view.getUnary(node_idx) orelse return false;
             switch (unary.op) {
-                .transparent => return writeNode(ir_view, unary.operand, resolve_atom, resolver_ctx, writer),
+                .transparent => return writeNode(ir_view, unary.operand, resolve_atom, resolver_ctx, writer, depth + 1),
                 .neg => {
+                    const operand_tag = ir_view.getTag(unary.operand) orelse return false;
+                    if (operand_tag != .lit_int and operand_tag != .lit_float) return false;
                     try writer.writeByte('-');
-                    return writeNode(ir_view, unary.operand, resolve_atom, resolver_ctx, writer);
+                    return writeNode(ir_view, unary.operand, resolve_atom, resolver_ctx, writer, depth + 1);
                 },
                 else => return false,
             }
@@ -89,7 +98,7 @@ fn writeNode(
             for (0..array.elements_count) |i| {
                 if (i > 0) try writer.writeAll(", ");
                 const element = ir_view.getListIndex(array.elements_start, @intCast(i));
-                if (!try writeNode(ir_view, element, resolve_atom, resolver_ctx, writer)) return false;
+                if (!try writeNode(ir_view, element, resolve_atom, resolver_ctx, writer, depth + 1)) return false;
             }
             try writer.writeByte(']');
             return true;
@@ -109,7 +118,7 @@ fn writeNode(
                 if (i > 0) try writer.writeAll(", ");
                 try json_utils.writeJsonString(writer, key);
                 try writer.writeAll(": ");
-                if (!try writeNode(ir_view, property.value, resolve_atom, resolver_ctx, writer)) return false;
+                if (!try writeNode(ir_view, property.value, resolve_atom, resolver_ctx, writer, depth + 1)) return false;
             }
             try writer.writeByte('}');
             return true;
@@ -421,15 +430,13 @@ test "serialize releases every allocation when serialization fails" {
             node_idx: NodeIndex,
             resolver_ctx: *const u8,
         ) !void {
-            const json = serialize(
+            const json = (try serialize(
                 failing_allocator,
                 ir_view,
                 node_idx,
                 resolve,
                 resolver_ctx,
-            ) catch |err| switch (err) {
-                error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
-            } orelse return error.ExpectedLiteral;
+            )) orelse return error.ExpectedLiteral;
             defer failing_allocator.free(json);
         }
     };
@@ -439,4 +446,41 @@ test "serialize releases every allocation when serialization fails" {
         Fixture.run,
         .{ view, try Fixture.initializer(view), &context },
     );
+}
+
+test "serialize refuses negated non-numeric literals and deep nesting" {
+    const allocator = std.testing.allocator;
+    const Fixture = struct {
+        fn resolve(_: u16, _: *const anyopaque) ?[]const u8 {
+            return null;
+        }
+    };
+    const context: u8 = 0;
+
+    var store = ir.IRStore.init(allocator);
+    defer store.deinit();
+    var constants = ir.ConstantPool.init(allocator);
+    defer constants.deinit();
+    const loc: ir.SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+
+    const str_idx = try constants.addString("abc");
+    const str_node = try store.addString(loc, str_idx);
+    const neg_str = try store.addUnary(loc, .{ .op = .neg, .operand = str_node });
+    const bool_node = try store.addBool(loc, true);
+    const neg_bool = try store.addUnary(loc, .{ .op = .neg, .operand = bool_node });
+    const int_node = try store.addInt(loc, 5);
+    const neg_int = try store.addUnary(loc, .{ .op = .neg, .operand = int_node });
+    const double_neg = try store.addUnary(loc, .{ .op = .neg, .operand = neg_int });
+
+    // Build a deeply nested chain of transparent wrappers exceeding max_serialize_depth.
+    var deep_node = int_node;
+    for (0..max_serialize_depth + 1) |_| {
+        deep_node = try store.addUnary(loc, .{ .op = .transparent, .operand = deep_node });
+    }
+
+    const view = IrView.fromIRStore(&store, &constants);
+    try std.testing.expect((try serialize(allocator, view, neg_str, Fixture.resolve, &context)) == null);
+    try std.testing.expect((try serialize(allocator, view, neg_bool, Fixture.resolve, &context)) == null);
+    try std.testing.expect((try serialize(allocator, view, double_neg, Fixture.resolve, &context)) == null);
+    try std.testing.expect((try serialize(allocator, view, deep_node, Fixture.resolve, &context)) == null);
 }

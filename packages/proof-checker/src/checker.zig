@@ -283,9 +283,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
             .stage = .limits,
             .code = switch (err) {
                 error.WorkBudgetExhausted => .work_budget_exhausted,
-                error.Truncated => .truncated_input,
-                // exhaustive: every other decode error still reaches rejectAt.
-                else => .unknown_enum_member,
+                else => |decode_err| cert_mod.reasonFor(decode_err),
             },
             .recertifiable = true,
         });
@@ -711,6 +709,7 @@ const Session = struct {
         @setRuntimeSafety(true);
         var i: u32 = 0;
         while (i < node.child_count) : (i += 1) {
+            try self.budget.spend(1);
             const child = try self.certificate.ir.get(node.first_child + i);
             // A function's body returns only when called, not when declared.
             if (child.tag != .function and self.total.get(child.id)) return true;
@@ -723,6 +722,7 @@ const Session = struct {
         if (node.child_count == 0) return false;
         var i: u32 = 0;
         while (i < node.child_count) : (i += 1) {
+            try self.budget.spend(1);
             const child = try self.certificate.ir.get(node.first_child + i);
             if (child.tag == .function or !self.total.get(child.id)) return false;
         }
@@ -806,6 +806,7 @@ const Session = struct {
         @setRuntimeSafety(true);
         var i: u32 = 0;
         while (i < node.child_count) : (i += 1) {
+            try self.budget.spend(1);
             const member = try self.certificate.ir.get(node.first_child + i);
             if (member.tag != .function and self.derived.get(member.id)) return true;
         }
@@ -817,6 +818,7 @@ const Session = struct {
         if (node.child_count == 0) return false;
         var i: u32 = 0;
         while (i < node.child_count) : (i += 1) {
+            try self.budget.spend(1);
             const member = try self.certificate.ir.get(node.first_child + i);
             if (member.tag == .function or !self.derived.get(member.id)) return false;
         }
@@ -1011,7 +1013,7 @@ const Session = struct {
     fn checkTranslation(self: *Session) SessionError!?Outcome {
         @setRuntimeSafety(true);
         const witnesses = self.certificate.translation;
-        if (witnesses.len() == 0) return null;
+        if (witnesses.len() == 0) return self.checkRewrites();
 
         var previous: ?cert_mod.Witness = null;
         var active_scope: ?u32 = null;
@@ -1266,10 +1268,9 @@ const Session = struct {
                 return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = edge.member_id });
             }
             if (edge.family == .opcode) has_opcode_dependency = true;
-            grades[totality_slot] = if (grades[totality_slot]) |existing|
-                verdict.AssuranceGrade.weakest(existing, edge.grade)
-            else
-                edge.grade;
+            if (grades[totality_slot]) |existing| {
+                grades[totality_slot] = verdict.AssuranceGrade.weakest(existing, edge.grade);
+            }
             // The IR-to-bytecode gap lies under every results claim, checked or
             // not: the bytecode must run what was analyzed. So every results
             // grade is capped as totality is (v0.26.0 Decision 15(a)).
@@ -1338,7 +1339,9 @@ const Session = struct {
         inline for (@typeInfo(ps.Property).@"enum".field_names) |field| {
             const property: ps.Property = @fromBackingInt(@intCast(@backingInt(@field(ps.Property, field))));
             const slot = @backingInt(property) - 1;
-            if (grades[slot]) |grade| property_verdicts.recordGrade(property, grade);
+            if (!refused[slot]) {
+                if (grades[slot]) |grade| property_verdicts.recordGrade(property, grade);
+            }
         }
         var weakest: ?verdict.AssuranceGrade = null;
         for (self.policy.required) |requirement| {
@@ -1572,6 +1575,8 @@ fn bindExecutableGraph(
 
     if (checkGraphMemberDigest(certificate, .proof_ir, certificate.identity.ir_root, .proof_ir_digest_mismatch)) |rejection| return rejection;
     if (checkGraphMemberDigest(certificate, .proof_certificate, certificate_digest, .proof_certificate_digest_mismatch)) |rejection| return rejection;
+    if (checkGraphMemberDigest(certificate, .contract_bytes, certificate.identity.contract_digest, .graph_member_digest_mismatch)) |rejection| return rejection;
+    if (checkGraphMemberDigest(certificate, .runtime_policy_bytes, certificate.identity.runtime_policy_digest, .graph_member_digest_mismatch)) |rejection| return rejection;
 
     return null;
 }
@@ -1583,10 +1588,15 @@ fn checkGraphMemberDigest(
     code: verdict.ReasonCode,
 ) ?Rejection {
     @setRuntimeSafety(true);
+    var found = false;
     var index: u32 = 0;
     while (index < certificate.graph.len()) : (index += 1) {
-        const member = certificate.graph.get(index) catch break;
+        const member = certificate.graph.get(index) catch return bindingRejection(
+            .graph_member_missing,
+            .{ .section = @backingInt(cert_mod.SectionTag.graph) },
+        );
         if (member.kind != kind) continue;
+        found = true;
         if (!std.mem.eql(u8, &member.digest, &digest)) {
             return .{
                 .stage = .artifact_binding,
@@ -1597,8 +1607,11 @@ fn checkGraphMemberDigest(
                 .recertifiable = true,
             };
         }
-        break;
     }
+    if (!found) return bindingRejection(
+        .graph_member_missing,
+        .{ .section = @backingInt(cert_mod.SectionTag.graph) },
+    );
     return null;
 }
 
@@ -1683,6 +1696,7 @@ pub const test_support = struct {
                     .executable_root = graph.computeRoot(&self.members) catch unreachable,
                     .ir_root = cert_mod.irRootFromNodes(&self.ir),
                     .contract_digest = digest(2),
+                    .runtime_policy_digest = digest(3),
                     .development = false,
                 },
                 .graph = &self.members,
@@ -2197,15 +2211,35 @@ test "current behavior accepts two residual-plan graph members with a nonzero or
     try testing.expectEqual(ordinary_result.work_spent, result.work_spent);
 }
 
-test "current behavior skips rewrite checks when translation is empty" {
+test "rewrite checks still run when translation witnesses are empty" {
     var fixture = try test_support.buildGuarded();
     const invalid = [_]cert_mod.Rewrite{.{ .rule = .rewrite_peephole_fusion, .before_offset = 0, .before_len = 4, .after_offset = 0, .after_len = 9, .delta = 0 }};
     var parts = fixture.parts();
     parts.rewrites = &invalid;
     try encodeGuardedParts(&fixture, parts);
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
-    try testing.expect(result.rejection() == null);
+    try expectAt(result, .translation_check, .rewrite_span_mismatch);
+}
+
+test "mismatched contract_bytes or runtime_policy_bytes graph digest rejects" {
+    {
+        var fixture = try test_support.build();
+        for (&fixture.members) |*member| {
+            if (member.kind == .contract_bytes) member.digest = test_support.digest(0xaa);
+        }
+        try fixture.encode();
+        const result = check(fixture.inputs(), policy_mod.production);
+        try expectAt(result, .artifact_binding, .graph_member_digest_mismatch);
+    }
+    {
+        var fixture = try test_support.build();
+        for (&fixture.members) |*member| {
+            if (member.kind == .runtime_policy_bytes) member.digest = test_support.digest(0xbb);
+        }
+        try fixture.encode();
+        const result = check(fixture.inputs(), policy_mod.production);
+        try expectAt(result, .artifact_binding, .graph_member_digest_mismatch);
+    }
 }
 
 test "a guard that disagrees with the consumer's catalog rejects on every field" {
@@ -4179,6 +4213,7 @@ test "results: a proved results edge with its opcode edge is accepted at trusted
     });
     try testing.expect(result.rejection() == null);
     try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.properties.gradeFor(.results_checked));
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, null), result.properties.gradeFor(.response_total));
 }
 
 test "results: a tested claim the kernel re-derives is accepted at trusted" {
@@ -4319,4 +4354,33 @@ test "consumer marker: no other property is ever marked" {
             try testing.expect(!result.properties.consumerChecked(property));
         }
     }
+}
+
+test "work budget: wide sequence child scans are metered and exhaust tight budgets" {
+    const wide_rows = [_]ResultRow{
+        .{ .tag = .function, .parent = 0 },
+        .{ .tag = .sequence, .parent = 0 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .return_node, .parent = 1 },
+    };
+    const accepted = try checkResultsCertificate(&wide_rows, proved_results_edge, null, .{});
+    try expectResultsAccepted(accepted);
+    try testing.expectEqual(@as(u64, 328), accepted.work_spent);
+
+    var tight = policy_mod.production;
+    tight.limits.max_work = 327;
+    const exhausted = try checkResultsCertificate(&wide_rows, proved_results_edge, null, .{
+        .policy = tight,
+    });
+    try expectAt(exhausted, .limits, .work_budget_exhausted);
 }

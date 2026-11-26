@@ -972,37 +972,19 @@ fn runBuild(
 }
 
 fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return;
-    defer allocator.free(path_z);
-
-    const pid = std.c.fork();
-    if (pid == 0) {
-        // The appended bytecode makes the signed binary fail codesign's strict
-        // validation, so codesign prints scary-but-expected diagnostics to
-        // stdout/stderr. Silence them: the signature is still applied and the
-        // binary still runs. Redirect both streams to /dev/null before exec.
-        const devnull_fd = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
-        if (devnull_fd >= 0) {
-            _ = std.c.dup2(devnull_fd, std.c.STDOUT_FILENO);
-            _ = std.c.dup2(devnull_fd, std.c.STDERR_FILENO);
-        }
-        const codesign: [*:0]const u8 = "/usr/bin/codesign";
-        const argv = [_:null]?[*:0]const u8{
-            codesign,
-            "--force",
-            "--sign",
-            "-",
-            path_z,
-            null,
-        };
-        _ = std.c.execve(codesign, &argv, std.c.environ);
-        std.c._exit(1);
-    } else if (pid > 0) {
-        var status: i32 = 0;
-        _ = std.c.waitpid(pid, &status, 0);
-        // A non-zero status is expected (strict validation fails on the appended
-        // bytecode) and unactionable, so it is deliberately not surfaced.
-    }
+    // The appended bytecode makes the signed binary fail codesign's strict
+    // validation, so codesign prints expected diagnostics and returns non-zero
+    // even though the ad-hoc signature is applied and the binary runs. Capture
+    // and discard stdout/stderr via std.process.run rather than raw fork/execve.
+    var io_backend = shared.threadedIo(allocator);
+    defer io_backend.deinit();
+    const result = std.process.run(allocator, io_backend.io(), .{
+        .argv = &.{ "/usr/bin/codesign", "--force", "--sign", "-", path },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    }) catch return;
+    allocator.free(result.stdout);
+    allocator.free(result.stderr);
 }
 
 fn printBuildHelp() !void {
@@ -1432,6 +1414,7 @@ test "a real compile produces a certificate that binds its own IR and artifact" 
             .identity = artifact_graph.identityFromContract(&contract),
         },
         .contract_digest = artifact_graph.digestOf(contract_json),
+        .runtime_policy_digest = artifact_graph.digestOf(policy_section),
     });
     defer built.deinit();
 
@@ -1986,6 +1969,7 @@ test "a real compile reaches policy acceptance, and one changed byte does not" {
         .properties = dischargedProperties(&contract),
         .artifact = sections,
         .contract_digest = artifact_graph.digestOf(contract_json),
+        .runtime_policy_digest = sections.policy_section_digest,
     });
     defer built.deinit();
 
@@ -2258,8 +2242,8 @@ test "proofs verify accepts a bundled guarded artifact by handing acceptance its
         return e;
     };
     const text = out.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, text, "REJECTED") == null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "Guards:    1 of 1 covered (env_key)") != null);
+    try std.testing.expect(std.mem.find(u8, text, "REJECTED") == null);
+    try std.testing.expect(std.mem.find(u8, text, "Guards:    1 of 1 covered (env_key)") != null);
 }
 
 test "the signed root and the startup rebuild are the same fold" {
@@ -2297,6 +2281,7 @@ test "the signed root and the startup rebuild are the same fold" {
             .identity = artifact_graph.identityFromContract(&contract),
         },
         .contract_digest = artifact_graph.digestOf(contract_json),
+        .runtime_policy_digest = policy_digest,
     });
     defer built.deinit();
 
@@ -2607,6 +2592,7 @@ fn certificateForSource(allocator: std.mem.Allocator, source: []const u8) ![]u8 
             .identity = artifact_graph.identityFromContract(&contract),
         },
         .contract_digest = artifact_graph.digestOf(contract_json),
+        .runtime_policy_digest = artifact_graph.digestOf(policy_section),
     });
     defer built.deinit();
     return allocator.dupe(u8, built.bytes);
@@ -2639,7 +2625,7 @@ test "prepareProjectArtifact default path: <root>/.zttp/<subdir>/<basename>" {
     defer artifact.deinit(testing.allocator);
 
     // Output path ends in `.zttp/build/<basename(root)>`.
-    try testing.expect(std.mem.indexOf(u8, artifact.output_path, ".zttp/build/") != null);
+    try testing.expect(std.mem.find(u8, artifact.output_path, ".zttp/build/") != null);
     try testing.expectEqualStrings(artifact.project_name, std.fs.path.basename(artifact.output_path));
 
     // Parent dir exists (createDirPath ran).
@@ -2708,9 +2694,9 @@ test "deploy ledger payload includes worst-case cost summary" {
 
     const raw = try zts.file_io.readFile(allocator, proof_ledger.ledgerPath(), 64 * 1024);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"kind\":\"deploy\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"costWorstCase\":1048579") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"costBodyLimit\":1048576") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"kind\":\"deploy\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"costWorstCase\":1048579") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"costBodyLimit\":1048576") != null);
 }
 
 test "prepareProjectArtifact returns NoProjectConfig when no zttp.json on or above CWD" {
@@ -3296,7 +3282,7 @@ test "direct source contracts preserve certificate bytes and proof IR" {
     try std.testing.expectEqual(@as(usize, 2), fixtures.len);
     const expected_certificates = [_]struct { len: usize, sha256: []const u8, proof_nodes: usize }{
         .{ .len = 1349, .sha256 = "3e8814418ac8d56de80b28417bba5ea9a8bae7dbe3fdaf2856166201d11b9200", .proof_nodes = 5 },
-        .{ .len = 1729, .sha256 = "c5654609e1f23426038892020059935c1bcf499ba11c580d49102c0daa41225d", .proof_nodes = 9 },
+        .{ .len = 1729, .sha256 = "10e1525d60b100e12e2086c32f465c7cd50092a2a082adc5000ec4ea42338cc1", .proof_nodes = 9 },
     };
     for (fixtures, expected_certificates) |source, expected| {
         var direct: zts.DirectCheckSource = undefined;
@@ -3716,8 +3702,8 @@ test "proofs verify refuses a bundle whose certificate file is not the certifica
         "zttp proofs verify: bundle certificate does not match the certificate in the binary\n",
         err.writer.buffered(),
     );
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "Proof:     REJECTED - bundle certificate does not match the binary") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "policy_accepted") == null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "Proof:     REJECTED - bundle certificate does not match the binary") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "policy_accepted") == null);
 }
 
 test "proofs verify refuses a bundle whose contract file is not the contract in the binary" {
@@ -3743,8 +3729,8 @@ test "proofs verify refuses a bundle whose contract file is not the contract in 
         "zttp proofs verify: bundle contract does not match the contract in the binary\n",
         err.writer.buffered(),
     );
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "Proof:     REJECTED - bundle contract does not match the binary") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "policy_accepted") == null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "Proof:     REJECTED - bundle contract does not match the binary") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "policy_accepted") == null);
 }
 
 test "proofs verify names the properties the kernel re-derived for a guarded Result" {
@@ -3772,7 +3758,7 @@ test "proofs verify names the properties the kernel re-derived for a guarded Res
     var err = std.Io.Writer.Allocating.init(allocator);
     defer err.deinit();
     try proofs_bundle.verify(allocator, "bundle", false, &out.writer, &err.writer);
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "\nChecked:   response_total, results_checked\n") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\nChecked:   response_total, results_checked\n") != null);
 }
 
 test "proofs verify reports a handler without a Result as re-deriving results_checked too, with no Result read to check" {
@@ -3790,5 +3776,5 @@ test "proofs verify reports a handler without a Result as re-deriving results_ch
     var err = std.Io.Writer.Allocating.init(allocator);
     defer err.deinit();
     try proofs_bundle.verify(allocator, "bundle", false, &out.writer, &err.writer);
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "\nChecked:   response_total, results_checked\n") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\nChecked:   response_total, results_checked\n") != null);
 }

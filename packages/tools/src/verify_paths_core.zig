@@ -7,6 +7,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const writeJsonString = zts.writeJsonString;
+const project_config_mod = @import("project_config");
 const precompile = @import("precompile.zig");
 const json_diag = precompile.json_diag;
 const expert_meta = @import("expert_meta.zig");
@@ -30,7 +31,42 @@ pub fn collect(
 ) !VerifyPathsOutcome {
     var has_errors = false;
     for (paths) |path| {
+        var analysis_ctx = project_config_mod.discoverAnalysisContext(scratch, path, null) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            const fake: Diagnostic = .{
+                .code = zts.DiagnosticCatalog.driverCode(.compiler_io_failure),
+                .severity = "error",
+                .message = @errorName(err),
+                .file = path,
+                .line = 0,
+                .column = 0,
+                .suggestion = null,
+            };
+            try ctx.emit(&fake);
+            has_errors = true;
+            continue;
+        };
+        defer analysis_ctx.deinit(scratch);
+        const policy_source = analysis_ctx.readPolicySource(scratch) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            const fake: Diagnostic = .{
+                .code = zts.DiagnosticCatalog.driverCode(.compiler_io_failure),
+                .severity = "error",
+                .message = @errorName(err),
+                .file = path,
+                .line = 0,
+                .column = 0,
+                .suggestion = null,
+            };
+            try ctx.emit(&fake);
+            has_errors = true;
+            continue;
+        };
+        defer if (policy_source) |src| scratch.free(src);
+
         var result = precompile.runCheckOnlyWithOptions(scratch, path, .{
+            .sql_schema_path = analysis_ctx.sqlite,
+            .policy_source = policy_source,
             .json_mode = true,
         }) catch |err| {
             const fake: Diagnostic = .{
@@ -52,7 +88,7 @@ pub fn collect(
 
         for (result.json_diagnostics.items) |diag| {
             var with_file = diag;
-            with_file.file = path;
+            if (with_file.file.len == 0) with_file.file = path;
             try ctx.emit(&with_file);
         }
     }
@@ -68,14 +104,11 @@ pub fn writeJsonEnvelope(
     writer: anytype,
     paths: []const []const u8,
 ) !VerifyPathsOutcome {
-    var violations_buf: std.ArrayList(u8) = .empty;
-    defer violations_buf.deinit(scratch);
-    var vio_aw: std.Io.Writer.Allocating = .fromArrayList(scratch, &violations_buf);
+    var vio_aw: std.Io.Writer.Allocating = .init(scratch);
+    defer vio_aw.deinit();
 
     var emitter = JsonEmitter{ .writer = &vio_aw.writer, .first = true };
     const outcome = try collect(scratch, paths, &emitter);
-
-    violations_buf = vio_aw.toArrayList();
 
     try writer.print(
         "{{\"ok\":{s},\"policy_version\":\"{s}\",\"policy_hash\":\"{s}\",\"checked_files\":[",
@@ -90,7 +123,7 @@ pub fn writeJsonEnvelope(
         try writeJsonString(writer, path);
     }
     try writer.writeAll("],\"violations\":[");
-    try writer.writeAll(violations_buf.items);
+    try writer.writeAll(vio_aw.written());
     try writer.writeAll("]}\n");
 
     return outcome;
@@ -112,38 +145,32 @@ const JsonEmitter = struct {
 // ---------------------------------------------------------------------------
 
 test "writeJsonEnvelope with empty paths emits an ok v1 envelope" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
     const outcome = try writeJsonEnvelope(std.testing.allocator, &aw.writer, &.{});
-
-    buf = aw.toArrayList();
-    const s = buf.items;
+    const s = aw.written();
 
     try std.testing.expect(outcome.ok);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"checked_files\":[]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"violations\":[]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"policy_version\":\"2026.04.2\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"checked_files\":[]") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"violations\":[]") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"policy_version\":\"2026.04.2\"") != null);
     try std.testing.expectEqual(@as(u8, '\n'), s[s.len - 1]);
 }
 
 test "writeJsonEnvelope on a non-existent path emits a ZTS000 envelope" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
     const paths = [_][]const u8{"/tmp/zts-verify-paths-core-not-real.ts"};
     const outcome = try writeJsonEnvelope(std.testing.allocator, &aw.writer, &paths);
-
-    buf = aw.toArrayList();
-    const s = buf.items;
+    const s = aw.written();
 
     try std.testing.expect(!outcome.ok);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"ZTS000\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "/tmp/zts-verify-paths-core-not-real.ts") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"ZTS000\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "/tmp/zts-verify-paths-core-not-real.ts") != null);
 }
 
 test "writeJsonEnvelope surfaces ZTS400 for a flow violation" {
@@ -175,17 +202,15 @@ test "writeJsonEnvelope surfaces ZTS400 for a flow violation" {
     const abs_path = path_buf[0..abs_len];
     const paths = [_][]const u8{abs_path};
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     const outcome = try writeJsonEnvelope(allocator, &aw.writer, &paths);
-    buf = aw.toArrayList();
-    const s = buf.items;
+    const s = aw.written();
 
     try std.testing.expect(!outcome.ok);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"ZTS400\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "secret data flows into response body") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"ZTS400\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "secret data flows into response body") != null);
 }
 
 test "writeJsonEnvelope canonical diagnostics make ok false" {
@@ -206,17 +231,15 @@ test "writeJsonEnvelope canonical diagnostics make ok false" {
     const abs_path = path_buf[0..abs_len];
     const paths = [_][]const u8{abs_path};
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     const outcome = try writeJsonEnvelope(allocator, &aw.writer, &paths);
-    buf = aw.toArrayList();
-    const s = buf.items;
+    const s = aw.written();
 
     try std.testing.expect(!outcome.ok);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"ZTS604\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"severity\":\"error\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"ZTS604\"") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"severity\":\"error\"") != null);
 }
 
 test "writeJsonEnvelope canonical clean file keeps ok true" {
@@ -239,14 +262,57 @@ test "writeJsonEnvelope canonical clean file keeps ok true" {
     const abs_path = path_buf[0..abs_len];
     const paths = [_][]const u8{abs_path};
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     const outcome = try writeJsonEnvelope(allocator, &aw.writer, &paths);
-    buf = aw.toArrayList();
-    const s = buf.items;
+    const s = aw.written();
 
     try std.testing.expect(outcome.ok);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"ZTS608\"") == null);
+    try std.testing.expect(std.mem.find(u8, s, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.find(u8, s, "\"ZTS608\"") == null);
+}
+
+test "writeJsonEnvelope preserves imported module file attribution" {
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try tmp_dir.dir.writeFile(std.testing.io, .{
+        .sub_path = "entry.ts",
+        .data =
+        \\import { greet } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(greet());
+        \\}
+        ,
+    });
+    try tmp_dir.dir.writeFile(std.testing.io, .{
+        .sub_path = "dep.ts",
+        .data =
+        \\export function greet(): string {
+        \\  let msg = "hi";
+        \\  return msg;
+        \\}
+        ,
+    });
+
+    const entry_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, "entry.ts", allocator);
+    defer allocator.free(entry_path);
+    const dep_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, "dep.ts", allocator);
+    defer allocator.free(dep_path);
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const outcome = try writeJsonEnvelope(allocator, &aw.writer, &.{entry_path});
+    try std.testing.expect(!outcome.ok);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, aw.written(), .{});
+    defer parsed.deinit();
+    const violations = parsed.value.object.get("violations").?.array.items;
+    try std.testing.expect(violations.len >= 1);
+    var saw_dep = false;
+    for (violations) |v| {
+        if (std.mem.eql(u8, v.object.get("file").?.string, dep_path)) saw_dep = true;
+    }
+    try std.testing.expect(saw_dep);
 }

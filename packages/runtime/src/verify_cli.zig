@@ -107,14 +107,17 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
 
     const uri = parseHttpUri(opts.url) catch |err| return reportFetchError(err);
 
-    const header_value = fetchAttestHeader(allocator, io_backend.io(), uri) catch |err| return reportFetchError(err);
+    var client = std.http.Client{ .allocator = allocator, .io = io_backend.io() };
+    defer client.deinit();
+
+    const header_value = fetchAttestHeader(allocator, &client, uri) catch |err| return reportFetchError(err);
     defer allocator.free(header_value);
     // The old header form holds a JWS; refuse it before the document fetch.
     if (!std.mem.startsWith(u8, header_value, attest_header_strings.attest_digest_prefix)) {
         writeStderr(verificationFailureMessage(error.UnsupportedAttestationVersion) orelse "verify: attestation format is not supported\n");
         return exit_signature_invalid;
     }
-    const document_body = fetchAttestDocument(allocator, io_backend.io(), uri) catch |err| return reportFetchError(err);
+    const document_body = fetchAttestDocument(allocator, &client, uri) catch |err| return reportFetchError(err);
     defer allocator.free(document_body);
 
     const attest_jws = attestationFromDocument(allocator, header_value, document_body) catch |err| {
@@ -188,15 +191,12 @@ fn parseHttpUri(url: []const u8) error{UnsupportedScheme}!std.Uri {
 }
 
 /// Fetch the URL, extract the Zttp-Attest header value (`sha256=<hex>`), return
-/// an owned copy. The response body is discarded.
+/// an owned copy. The response body is never read (connection closes via req.deinit).
 fn fetchAttestHeader(
     allocator: std.mem.Allocator,
-    io: std.Io,
+    client: *std.http.Client,
     uri: std.Uri,
 ) ![]u8 {
-    var client = std.http.Client{ .allocator = allocator, .io = io };
-    defer client.deinit();
-
     var req = try client.request(.GET, uri, .{
         .redirect_behavior = .unhandled,
         .keep_alive = false,
@@ -212,11 +212,7 @@ fn fetchAttestHeader(
     var it = response.head.iterateHeaders();
     while (it.next()) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, attest_header_strings.header_name_attest)) {
-            const owned = try allocator.dupe(u8, header.value);
-            // Drain body so the connection is left clean; we ignore the bytes.
-            const reader = response.reader(&.{});
-            _ = reader.discardRemaining() catch {};
-            return owned;
+            return try allocator.dupe(u8, header.value);
         }
     }
     return error.NotAttested;
@@ -229,16 +225,13 @@ const max_document_bytes: usize = 8 * 1024 * 1024;
 /// without redirects. Return the owned body.
 fn fetchAttestDocument(
     allocator: std.mem.Allocator,
-    io: std.Io,
+    client: *std.http.Client,
     uri: std.Uri,
 ) ![]u8 {
     var document_uri = uri;
     document_uri.path = .{ .raw = "/.well-known/zttp-attest" };
     document_uri.query = null;
     document_uri.fragment = null;
-
-    var client = std.http.Client{ .allocator = allocator, .io = io };
-    defer client.deinit();
 
     // A cached document from an earlier deployment would not match the digest.
     var req = try client.request(.GET, document_uri, .{
@@ -390,24 +383,12 @@ fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *cons
     try json.write(result.claims.core_grammar_sha256);
     try json.objectField("semanticsSha256");
     try json.write(result.claims.semantics_sha256);
-    try json.objectField("frontendProfileId");
-    try json.write(@as(?[]const u8, null));
-    try json.objectField("frontendGrammarSha256");
-    try json.write(@as(?[]const u8, null));
     try json.objectField("routesCount");
     try json.write(result.claims.routes_count);
     try json.objectField("propertySummary");
     try json.write(result.claims.property_summary);
     try json.objectField("guardedCategories");
     try json.write(result.claims.guarded_categories);
-    try json.objectField("durableWorkflowProofLevel");
-    try json.write("none");
-    try json.objectField("durableWorkflowRetrySafe");
-    try json.write(false);
-    try json.objectField("durableWorkflowIdempotent");
-    try json.write(false);
-    try json.objectField("durableWorkflowFaultCovered");
-    try json.write(false);
     try json.endObject();
     try aw.writer.writeByte('\n');
 
@@ -474,7 +455,7 @@ test "parseArgs: rejects multiple positional args" {
 test "the predecessor attestation error tells the caller to rebuild" {
     const message = verificationFailureMessage(error.UnsupportedAttestationVersion) orelse
         return error.TestExpectedEqual;
-    try std.testing.expect(std.mem.indexOf(u8, message, "rebuild") != null);
+    try std.testing.expect(std.mem.find(u8, message, "rebuild") != null);
 }
 
 test "retired attestation claims have an exact verification message" {
@@ -520,20 +501,20 @@ test "renderClaimsJson uses JSON string escaping" {
     try testing.expectEqualStrings("https://example.test/a?x=\"y\"", root.get("url").?.string);
     try testing.expectEqualStrings("zttp\"dev\\test", root.get("compilerVersion").?.string);
     try testing.expectEqualStrings("zts-model-1", root.get("coreProfileId").?.string);
-    try testing.expect(root.get("frontendProfileId").? == .null);
-    try testing.expect(root.get("frontendGrammarSha256").? == .null);
+    try testing.expect(root.get("frontendProfileId") == null);
+    try testing.expect(root.get("frontendGrammarSha256") == null);
     try testing.expectEqualStrings("quote\" slash\\ newline\n", root.get("propertySummary").?.string);
     try testing.expectEqualStrings("env,cache", root.get("guardedCategories").?.string);
     try testing.expectEqualStrings("provenance_only", root.get("assurance").?.string);
     try testing.expect(!root.get("keyPinned").?.bool);
     try testing.expect(root.get("propertySummary").? == .string);
-    try testing.expectEqualStrings("none", root.get("durableWorkflowProofLevel").?.string);
-    try testing.expect(!root.get("durableWorkflowRetrySafe").?.bool);
-    try testing.expect(!root.get("durableWorkflowIdempotent").?.bool);
-    try testing.expect(!root.get("durableWorkflowFaultCovered").?.bool);
+    try testing.expect(root.get("durableWorkflowProofLevel") == null);
+    try testing.expect(root.get("durableWorkflowRetrySafe") == null);
+    try testing.expect(root.get("durableWorkflowIdempotent") == null);
+    try testing.expect(root.get("durableWorkflowFaultCovered") == null);
     try testing.expectEqual(@as(i64, 1_700_000_000), root.get("signedAt").?.integer);
     try testing.expectEqual(@as(i64, 2), root.get("routesCount").?.integer);
-    try testing.expect(std.mem.indexOf(u8, out, "\\\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\\\"") != null);
     try testing.expect(std.mem.endsWith(u8, out, "\n"));
 }
 
@@ -645,7 +626,7 @@ test "renderClaimsHuman renders in full past 4096 bytes" {
     const out = try renderClaimsHuman(testing.allocator, "https://example.test", &result, false);
     defer testing.allocator.free(out);
     try testing.expect(out.len > 4096);
-    try testing.expect(std.mem.indexOf(u8, out, long) != null);
+    try testing.expect(std.mem.find(u8, out, long) != null);
     try testing.expect(std.mem.endsWith(u8, out, "faultCovered=false\n"));
 }
 
@@ -680,7 +661,7 @@ test "a pinned key is reported as pinned in human and JSON output" {
         "Signature verified: https://example.test\n" ++
             "  signed_at is the signer's own claim; no host is bound to this claim.\n",
     ));
-    try testing.expect(std.mem.indexOf(u8, human, "not pinned") == null);
+    try testing.expect(std.mem.find(u8, human, "not pinned") == null);
 
     const json = try renderClaimsJson(testing.allocator, "https://example.test", &result, true);
     defer testing.allocator.free(json);

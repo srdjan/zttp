@@ -159,6 +159,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Create Error prototype with toString method
     const error_proto = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodDynamic(ctx, error_proto, "toString", wrap(err.errorToString), 0);
+    ctx.error_prototype = error_proto;
 
     // Error constructors
     const error_ctor_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(err.errorConstructor), .Error, 1);
@@ -252,11 +253,6 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const hole_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalHole), hole_atom, 0);
     try ctx.setGlobal(hole_atom, hole_func.toValue());
 
-    // Global _processRequest
-    const process_req_atom = try ctx.atoms.intern("_processRequest");
-    const process_req_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalProcessRequest), process_req_atom, 3);
-    try ctx.setGlobal(process_req_atom, process_req_func.toValue());
-
     // Map/Set are intentionally NOT registered as globals: their constructors
     // produce prototype-less instances, so any method call (e.g. m.set(...))
     // throws NotCallable -> HTTP 500. Leaving them unregistered makes `Map` a
@@ -296,7 +292,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const render_fn = try createBuiltinNativeFunction(ctx, pool, root_class_idx, http.renderToString, render_atom, 1);
     try ctx.setGlobal(render_atom, render_fn.toValue());
     const fragment_atom: object.Atom = .Fragment;
-    try ctx.setGlobal(fragment_atom, value.JSValue.undefined_val);
+    try ctx.setGlobal(fragment_atom, value.JSValue.null_val);
 
     // Date and performance
     const date_obj = try createBuiltinObject(ctx, pool, root_class_idx);

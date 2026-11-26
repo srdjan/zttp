@@ -1264,15 +1264,17 @@ pub const HiddenClassPool = struct {
         return self.property_names.items[start..][0..prop_count];
     }
 
-    /// Get or create a hidden class for functions with 2 reserved slots
+    /// Get or create a hidden class for functions with 3 reserved slots
     /// This prevents property additions from overwriting internal function data
-    /// stored in inline_slots[0] and inline_slots[1]
+    /// stored in inline_slots[0..3] (FUNC_DATA, FUNC_IS_BYTECODE, FUNC_IS_CLOSURE).
     pub fn getOrCreateFunctionClass(self: *HiddenClassPool, from_idx: HiddenClassIndex) !HiddenClassIndex {
         const from = from_idx.toInt();
 
-        // Use special atoms for function class transition
+        // Use special atoms >= 0xFFFE for function class transition (atom_table
+        // refuses dynamic atoms >= 0xFFFE, and serializers skip them).
         const reserved0: Atom = @fromBackingInt(@intCast(0xFFFE));
         const reserved1: Atom = @fromBackingInt(@intCast(0xFFFF));
+        const reserved2: Atom = @fromBackingInt(@intCast(0x10000));
 
         const key: u64 = (@as(u64, from) << 32) | @backingInt(reserved0);
         if (self.transition_map.get(key)) |to_idx| {
@@ -1280,19 +1282,22 @@ pub const HiddenClassPool = struct {
         }
 
         try self.reserveClass();
-        try self.property_names.ensureUnusedCapacity(self.allocator, 2);
-        try self.property_offsets.ensureUnusedCapacity(self.allocator, 2);
-        try self.property_flags.ensureUnusedCapacity(self.allocator, 2);
+        try self.property_names.ensureUnusedCapacity(self.allocator, 3);
+        try self.property_offsets.ensureUnusedCapacity(self.allocator, 3);
+        try self.property_flags.ensureUnusedCapacity(self.allocator, 3);
         try self.transition_map.ensureUnusedCapacity(self.allocator, 1);
 
         const prototype = self.getPrototype(from_idx);
-        const new_idx = try self.allocClass(2, prototype);
+        const new_idx = try self.allocClass(3, prototype);
 
         self.property_names.appendAssumeCapacity(reserved0);
         self.property_offsets.appendAssumeCapacity(0);
         self.property_flags.appendAssumeCapacity(.{});
         self.property_names.appendAssumeCapacity(reserved1);
         self.property_offsets.appendAssumeCapacity(1);
+        self.property_flags.appendAssumeCapacity(.{});
+        self.property_names.appendAssumeCapacity(reserved2);
+        self.property_offsets.appendAssumeCapacity(2);
         self.property_flags.appendAssumeCapacity(.{});
         self.transition_map.putAssumeCapacity(key, new_idx);
 
@@ -1338,8 +1343,8 @@ pub const JSObject = extern struct {
         pub const FUNC_DATA: usize = 0;
         /// Function objects: true_val for bytecode function, undefined for native
         pub const FUNC_IS_BYTECODE: usize = 1;
-        /// Closure objects: true_val marker to identify closures
-        pub const FUNC_IS_CLOSURE: usize = 4;
+        /// Closure objects: true_val marker to identify closures (contiguous with slots 0..1)
+        pub const FUNC_IS_CLOSURE: usize = 2;
 
         /// Array objects: length as integer
         pub const ARRAY_LENGTH: usize = 0;
@@ -1541,11 +1546,6 @@ pub const JSObject = extern struct {
                 const nested = constant.toExternPtr(bytecode.FunctionBytecode);
                 destroyFunctionBytecode(allocator, nested, seen);
             }
-            return;
-        }
-        if (constant.isBoxedFloat64()) {
-            const box = constant.toPtr(value.JSValue.Float64Box);
-            allocator.destroy(box);
             return;
         }
         if (constant.isString()) {
@@ -1802,6 +1802,10 @@ pub const JSObject = extern struct {
             std.log.debug("getBytecodeFunc fail: FUNC_IS_BYTECODE is undefined", .{});
             return null;
         }
+        // Closures store *ClosureData, not *BytecodeFunctionData.
+        if (self.inline_slots[Slots.FUNC_IS_CLOSURE].isTrue()) {
+            return null;
+        }
         return slot.toExternPtr(BytecodeFunctionData);
     }
 
@@ -1899,8 +1903,11 @@ pub const JSObject = extern struct {
         if (slot < INLINE_SLOT_COUNT) {
             return self.inline_slots[slot];
         }
-        if (self.overflow_slots) |slots| {
-            return slots[slot - INLINE_SLOT_COUNT];
+        const overflow_idx = slot - INLINE_SLOT_COUNT;
+        if (overflow_idx < self.overflow_capacity) {
+            if (self.overflow_slots) |slots| {
+                return slots[overflow_idx];
+            }
         }
         return value.JSValue.undefined_val;
     }
@@ -1909,8 +1916,13 @@ pub const JSObject = extern struct {
     pub inline fn setSlot(self: *JSObject, slot: u16, val: value.JSValue) void {
         if (slot < INLINE_SLOT_COUNT) {
             self.inline_slots[slot] = val;
-        } else if (self.overflow_slots) |slots| {
-            slots[slot - INLINE_SLOT_COUNT] = val;
+        } else {
+            const overflow_idx = slot - INLINE_SLOT_COUNT;
+            if (overflow_idx < self.overflow_capacity) {
+                if (self.overflow_slots) |slots| {
+                    slots[overflow_idx] = val;
+                }
+            }
         }
     }
 
@@ -2006,8 +2018,16 @@ pub const JSObject = extern struct {
             return; // Silently fail in non-strict mode
         }
 
+        // Reserve slots 0..3 for function metadata before adding user properties
+        // so setting properties on bytecode functions/closures never clobbers
+        // FUNC_DATA, FUNC_IS_BYTECODE, or FUNC_IS_CLOSURE.
+        const base_class_idx = if (self.class_id == .function and pool.getPropertyCount(self.hidden_class_idx) < 3)
+            try pool.getOrCreateFunctionClass(self.hidden_class_idx)
+        else
+            self.hidden_class_idx;
+
         // Transition to new hidden class
-        const new_class_idx = try pool.addProperty(self.hidden_class_idx, name);
+        const new_class_idx = try pool.addProperty(base_class_idx, name);
         const new_slot = pool.getPropertyCount(new_class_idx) - 1;
 
         // Ensure we have space
@@ -2432,23 +2452,23 @@ pub const JSObject = extern struct {
         // error set) so it cleanly becomes a JS exception via setIndexChecked.
         if (index >= MAX_DENSE_ARRAY_LEN) return error.OutOfMemory;
 
-        // Update length if needed
-        const current_len = self.getArrayLength();
-        if (index >= current_len) {
-            self.setArrayLength(index + 1);
-        }
-
         // Element storage starts at slot 1
         const slot = index + 1;
         if (slot < INLINE_SLOT_COUNT) {
             self.inline_slots[slot] = val;
-            return;
+        } else {
+            // Allocate overflow slots BEFORE advancing ARRAY_LENGTH so an OOM
+            // never leaves recorded length greater than the allocated backing.
+            const overflow_idx: u16 = @intCast(slot - INLINE_SLOT_COUNT);
+            try self.ensureOverflowCapacity(allocator, overflow_idx + 1);
+            self.overflow_slots.?[overflow_idx] = val;
         }
 
-        // Need overflow slots
-        const overflow_idx: u16 = @intCast(slot - INLINE_SLOT_COUNT);
-        try self.ensureOverflowCapacity(allocator, overflow_idx + 1);
-        self.overflow_slots.?[overflow_idx] = val;
+        // Update length only after the write has succeeded
+        const current_len = self.getArrayLength();
+        if (index >= current_len) {
+            self.setArrayLength(index + 1);
+        }
     }
 
     /// Push element to end of array
@@ -3087,4 +3107,60 @@ test "JSObject create cleans up object when overflow allocation fails" {
         error.OutOfMemory,
         JSObject.create(failing.allocator(), class_idx, null, pool),
     );
+}
+
+test "closure getBytecodeFunctionData returns null and property writes preserve function metadata" {
+    const allocator = std.testing.allocator;
+    const bytecode_mod = @import("bytecode.zig");
+
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
+
+    const code = [_]u8{@backingInt(bytecode_mod.Opcode.ret_undefined)};
+    const func_bc = bytecode_mod.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+
+    const bc_fn = try JSObject.createBytecodeFunction(allocator, pool.getEmptyClass(), &func_bc, .name);
+    defer {
+        allocator.destroy(bc_fn.inline_slots[JSObject.Slots.FUNC_DATA].toExternPtr(BytecodeFunctionData));
+        bc_fn.destroy(allocator);
+    }
+    try bc_fn.setProperty(allocator, pool, .status, value.JSValue.fromInt(200));
+    try std.testing.expect(bc_fn.getBytecodeFunctionData() != null);
+    try std.testing.expectEqual(&func_bc, bc_fn.getBytecodeFunctionData().?.bytecode);
+    try std.testing.expectEqual(@as(i32, 200), bc_fn.getProperty(pool, .status).?.getInt());
+
+    const upvalues = try allocator.alloc(*Upvalue, 0);
+    const closure = try JSObject.createClosure(allocator, pool.getEmptyClass(), &func_bc, .name, upvalues);
+    defer {
+        const cd = closure.inline_slots[JSObject.Slots.FUNC_DATA].toExternPtr(ClosureData);
+        allocator.free(cd.upvalues);
+        allocator.destroy(cd);
+        closure.destroy(allocator);
+    }
+    try std.testing.expect(closure.getBytecodeFunctionData() == null);
+    try std.testing.expect(closure.getClosureData() != null);
+    try closure.setProperty(allocator, pool, .status, value.JSValue.fromInt(201));
+    try std.testing.expect(closure.getClosureData() != null);
+    try std.testing.expectEqual(@as(i32, 201), closure.getProperty(pool, .status).?.getInt());
+}
+
+test "setIndex does not advance array length when overflow allocation fails" {
+    const allocator = std.testing.allocator;
+    const arr = try JSObject.createArray(allocator, .empty);
+    defer arr.destroy(allocator);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, arr.setIndex(failing.allocator(), 10, value.JSValue.fromInt(1)));
+    try std.testing.expectEqual(@as(u32, 0), arr.getArrayLength());
 }

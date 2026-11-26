@@ -14,7 +14,7 @@
 //! higher module that writes `@import("handler_contract.zig")` compiles a
 //! second copy of it into that module, and a `HandlerContract` from one copy is
 //! not a `HandlerContract` from the other.
-//! `scripts/check-zts-layering.sh` fails on it, and so does zig.
+//! `zig build test-zts-layering` fails on it, and so does zig.
 //!
 //! Tier membership is recorded in `scripts/zts-tiers.allow`. See
 //! pre-rebase:docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.

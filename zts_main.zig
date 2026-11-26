@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         allocator.free(argv);
     }
 
-    const user_args = argv[1..];
+    const user_args = if (argv.len > 1) argv[1..] else &.{};
     if (user_args.len > 0) {
         const command = user_args[0];
         if (std.mem.eql(u8, command, "expert") or std.mem.eql(u8, command, "ledger")) {

@@ -182,16 +182,16 @@ test "diagnose: unmapped fault class is never an incident" {
 test "formatMessage: predicted names the unproven chip and the cause" {
     var buf: [256]u8 = undefined;
     const msg = formatMessage(&buf, diagnose(.{ .optional_safe = true }, .type_fault));
-    try std.testing.expect(std.mem.indexOf(u8, msg, "did not claim result_safe") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "optional_safe") == null); // proven, not named
-    try std.testing.expect(std.mem.indexOf(u8, msg, "narrowing its type") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "did not claim result_safe") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "optional_safe") == null); // proven, not named
+    try std.testing.expect(std.mem.find(u8, msg, "narrowing its type") != null);
 }
 
 test "formatMessage: soundness incident is loud and lists the proven chips" {
     var buf: [256]u8 = undefined;
     const msg = formatMessage(&buf, diagnose(.{ .optional_safe = true, .result_safe = true }, .type_fault));
-    try std.testing.expect(std.mem.indexOf(u8, msg, "Possible soundness incident") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "optional_safe/result_safe") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "Possible soundness incident") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "optional_safe/result_safe") != null);
 }
 
 test "formatMessage: unmapped falls back to a generic 500 message" {

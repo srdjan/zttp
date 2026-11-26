@@ -2222,10 +2222,6 @@ pub const TypeEnv = struct {
             return self.isAssignableTo(source, target_inner);
         }
 
-        if (target_tag == .t_ref and std.mem.eql(u8, self.pool.getRefName(target), "object")) {
-            return self.isObjectLike(source, 0);
-        }
-
         return self.pool.isAssignableToWith(source, target, self.refResolver());
     }
 
@@ -2239,35 +2235,6 @@ pub const TypeEnv = struct {
     fn resolveRefErased(ctx: *const anyopaque, idx: TypeIndex) TypeIndex {
         const self: *const TypeEnv = @ptrCast(@alignCast(ctx));
         return self.resolveRef(idx);
-    }
-
-    fn isObjectLike(self: *const TypeEnv, source: TypeIndex, depth: u8) bool {
-        const source_tag = self.pool.getTag(source) orelse return false;
-        return switch (source_tag) {
-            .t_never => true,
-            .t_record, .t_array, .t_tuple, .t_function => true,
-            .t_ref => blk: {
-                const resolved = self.resolveRef(source);
-                if (resolved != source and depth < 8) {
-                    break :blk self.isObjectLike(resolved, depth + 1);
-                }
-                // Request/WebSocket-style nominal refs have no definition in
-                // TypeEnv, so unresolved named refs are pragmatically object-like.
-                // This over-accepts an unresolved primitive alias such as
-                // `type Foo = string`; aliases present in TypeEnv resolve above.
-                break :blk true;
-            },
-            .t_union => blk: {
-                const members = self.pool.getUnionMembers(source);
-                if (members.len == 0) break :blk false;
-                for (members) |member| {
-                    if (!self.isObjectLike(member, depth)) break :blk false;
-                }
-                break :blk true;
-            },
-            // exhaustive: other type tags do not meet this object-like check.
-            else => false,
-        };
     }
 
     /// Resolve a type to a record: a record passes through, a named ref resolves

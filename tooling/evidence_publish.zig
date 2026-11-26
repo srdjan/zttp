@@ -551,7 +551,7 @@ fn renderRemainder(
         } else return error.InvalidSeedEvidence;
         try output.writer.print("One advertised rule of {d} is not verified by a seed: ", .{total});
         try writeCodes(&output.writer, group.codes.items);
-        try output.writer.print(", because it is\n`{s}`. {s}.\n\n", .{ group.reason, reasonMeaning(group.reason).? });
+        try output.writer.print(", because it is\n`{s}`. {s}.\n\n", .{ group.reason, reasonMeaning(group.reason) orelse "" });
     } else {
         try output.writer.print(
             "The {d} advertised rules the section above leaves out, and why each is out.\n" ++
@@ -563,7 +563,7 @@ fn renderRemainder(
             if (group.codes.items.len == 0) continue;
             try output.writer.print("| `{s}` | ", .{group.reason});
             try writeCodes(&output.writer, group.codes.items);
-            try output.writer.print(" | {s} |\n", .{reasonMeaning(group.reason).?});
+            try output.writer.print(" | {s} |\n", .{reasonMeaning(group.reason) orelse ""});
         }
         try output.writer.writeByte('\n');
     }
@@ -642,9 +642,12 @@ fn renderCoverageMarkdown(
     union_payload: UnionPayload,
 ) ![]u8 {
     const total: usize = @intCast(try integerField(object, "rulesTotal"));
-    const tripped = try valueStrings(object.get("tripped").?);
-    const untripped = try valueStrings(object.get("untripped").?);
-    const off_registry = try valueStrings(object.get("offRegistry").?);
+    const tripped_value = object.get("tripped") orelse return error.InvalidCoverageEvidence;
+    const tripped = try valueStrings(tripped_value);
+    const untripped_value = object.get("untripped") orelse return error.InvalidCoverageEvidence;
+    const untripped = try valueStrings(untripped_value);
+    const off_registry_value = object.get("offRegistry") orelse return error.InvalidCoverageEvidence;
+    const off_registry = try valueStrings(off_registry_value);
     var seed_only: usize = 0;
     for (seed.verified) |code| {
         if (valueArrayContains(untripped, code)) seed_only += 1;
@@ -849,7 +852,8 @@ fn renderCoverage(
     var union_parsed = try parseUnion(allocator, union_log);
     defer union_parsed.deinit();
     const union_payload = union_parsed.value;
-    const current_tripped = try valueStrings(object.get("tripped").?);
+    const tripped_val = object.get("tripped") orelse return error.InvalidCoverageEvidence;
+    const current_tripped = try valueStrings(tripped_val);
     try validateUnionEvidence(
         union_payload,
         try stringField(object, "corpusVersion"),
@@ -876,7 +880,8 @@ fn printCoverageInputs(
     var evidence = try evidence_marker.extract(allocator, replay_log, coverage_marker, .coverage);
     defer evidence.deinit();
     const object = try objectOf(evidence.value);
-    const tripped = try valueStrings(object.get("tripped").?);
+    const tripped_val = object.get("tripped") orelse return error.InvalidCoverageEvidence;
+    const tripped = try valueStrings(tripped_val);
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     try stdout_writer.interface.print("{s}\n", .{try stringField(object, "corpusVersion")});
@@ -893,30 +898,12 @@ fn writeUnionPending(writer: *std.Io.Writer, tripped: []const std.json.Value) !v
     }
 }
 
-fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
-    var args_iter = std.process.Args.Iterator.init(args_vector);
-    defer args_iter.deinit();
-    var list: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (list.items) |arg| allocator.free(arg);
-        list.deinit(allocator);
-    }
-    while (args_iter.next()) |arg| try list.append(allocator, try allocator.dupe(u8, arg));
-    return list.toOwnedSlice(allocator);
-}
-
-pub fn main(init: std.process.Init.Minimal) !void {
+pub fn main(init: std.process.Init) !void {
     var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = init.environ });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-    const args = try collectArgs(allocator, init.args);
-    defer {
-        for (args) |arg| allocator.free(arg);
-        allocator.free(args);
-    }
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 2) return error.Usage;
     if (std.mem.eql(u8, args[1], "convergence")) return renderConvergence(allocator, io, args[1..]);
     if (std.mem.eql(u8, args[1], "coverage")) return renderCoverage(allocator, io, args[1..]);
@@ -965,9 +952,9 @@ test "zero coverage renders truthfully and hands off an explicit observation" {
     try validateUnionEvidence(union_payload, version, &.{});
     const rendered = try renderCoverageMarkdown(a, parsed.value.object, "2026-10-20", .{ .seedsTotal = 2, .rulesTotal = 3, .verifiedRules = 2, .verified = &.{ "ZTS001", "ZTS002" }, .unseeded = &.{.{ .code = "ZTS003", .reason = "non-default" }} }, union_payload);
     defer a.free(rendered);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "no advertised registry-rule rejection is observed") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "corpus is load-bearing") == null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "| 3 | 0 | 3 |") != null);
+    try std.testing.expect(std.mem.find(u8, rendered, "no advertised registry-rule rejection is observed") != null);
+    try std.testing.expect(std.mem.find(u8, rendered, "corpus is load-bearing") == null);
+    try std.testing.expect(std.mem.find(u8, rendered, "| 3 | 0 | 3 |") != null);
     var pending: std.Io.Writer.Allocating = .init(a);
     defer pending.deinit();
     try writeUnionPending(&pending.writer, &.{});
@@ -1020,8 +1007,8 @@ test "convergence renderer appends only inside the results table" {
     const row = "| new | row | here | 19 | deepseek | model | hash | 2 | 2 | 2 | 2 |";
     const rendered = try renderConvergenceMarkdown(std.testing.allocator, source, row);
     defer std.testing.allocator.free(rendered);
-    const new_at = std.mem.indexOf(u8, rendered, row).?;
-    const other_at = std.mem.indexOf(u8, rendered, "| Other | Table |").?;
+    const new_at = std.mem.find(u8, rendered, row).?;
+    const other_at = std.mem.find(u8, rendered, "| Other | Table |").?;
     try std.testing.expect(new_at < other_at);
     const rendered_twice = try renderConvergenceMarkdown(std.testing.allocator, rendered, row);
     defer std.testing.allocator.free(rendered_twice);

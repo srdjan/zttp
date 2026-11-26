@@ -148,7 +148,6 @@ pub const HandlerInstance = struct {
     owned_strings: ?zq.StringTable,
     handler_atom: ?zq.Atom,
     cached_handler_obj: ?*zq.JSObject,
-    cached_dispatch: ?*const zq.PatternDispatchTable,
     config: RuntimeConfig,
     /// Policy tuple retained for this runtime's full lifetime.
     policy_generation: ?*RuntimePolicyGeneration = null,
@@ -232,6 +231,7 @@ pub const HandlerInstance = struct {
         errdefer if (!initialized) allocator.destroy(gc_state);
         gc_state.* = try zq.GC.init(allocator, .{
             .nursery_size = config.nursery_size,
+            .hybrid_mode = config.use_hybrid_allocation,
         });
         errdefer if (!initialized) gc_state.deinit();
 
@@ -252,20 +252,22 @@ pub const HandlerInstance = struct {
         var hybrid_state: ?*zq.arena.HybridAllocator = null;
 
         if (config.use_hybrid_allocation) {
-            arena_state = try allocator.create(zq.arena.Arena);
-            errdefer allocator.destroy(arena_state.?);
-            arena_state.?.* = try zq.arena.Arena.init(allocator, .{ .size = config.arena_size });
-            errdefer arena_state.?.deinit();
+            const arena = try allocator.create(zq.arena.Arena);
+            errdefer allocator.destroy(arena);
+            arena.* = try zq.arena.Arena.init(allocator, .{ .size = config.arena_size });
+            errdefer arena.deinit();
+            arena_state = arena;
 
-            hybrid_state = try allocator.create(zq.arena.HybridAllocator);
-            errdefer allocator.destroy(hybrid_state.?);
-            hybrid_state.?.* = .{
+            const hybrid = try allocator.create(zq.arena.HybridAllocator);
+            errdefer allocator.destroy(hybrid);
+            hybrid.* = .{
                 .persistent = allocator,
-                .arena = arena_state.?,
+                .arena = arena,
             };
-            ctx.setHybridAllocator(hybrid_state.?);
+            hybrid_state = hybrid;
+            ctx.setHybridAllocator(hybrid);
             if (config.memory_limit > 0) {
-                hybrid_state.?.setMemoryLimit(config.memory_limit);
+                hybrid.setMemoryLimit(config.memory_limit);
             }
         }
 
@@ -283,7 +285,6 @@ pub const HandlerInstance = struct {
             .owned_strings = zq.StringTable.init(allocator),
             .handler_atom = null,
             .cached_handler_obj = null,
-            .cached_dispatch = null,
             .config = config,
             .policy_generation = null,
             .outbound_io_backend = if (config.outbound_http_enabled)
@@ -302,7 +303,9 @@ pub const HandlerInstance = struct {
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
         };
-        self.strings = &self.owned_strings.?;
+        if (self.owned_strings) |*owned| {
+            self.strings = owned;
+        }
         // All core resources have moved into the wrapper. Later failures use
         // normal teardown, including trace descriptors and the outbound backend.
         initialized = true;
@@ -356,7 +359,6 @@ pub const HandlerInstance = struct {
             .owned_strings = null,
             .handler_atom = null,
             .cached_handler_obj = null,
-            .cached_dispatch = null,
             .config = config,
             .policy_generation = retained_policy,
             // The backend allocates and frees a task record per name lookup and
@@ -402,10 +404,16 @@ pub const HandlerInstance = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        // Drop the host pointer before anything is torn down. On the pooled
-        // path the Context survives this wrapper, so leaving it set would hand
-        // the next callback a freed pointer.
+        // Drop the host pointer, trace slot, and borrowed policy pointers before
+        // anything is torn down. On the pooled path the Context survives this
+        // wrapper, so leaving them set would hand the next callback or Context
+        // teardown a freed pointer.
         if (self.ctx.host == @as(?*anyopaque, @ptrCast(self))) self.ctx.host = null;
+        self.ctx.module_state[zq.TRACE_STATE_SLOT] = null;
+        if (!self.owns_resources) {
+            self.ctx.capability_policy = .{};
+            self.ctx.policy_generation = 0;
+        }
         if (self.owns_resources) {
             // Context teardown walks builtin objects and bytecode constants that may
             // still reference interned unique strings from this runtime.
@@ -432,7 +440,8 @@ pub const HandlerInstance = struct {
         }
         if (self.trace_recorder) |rec| {
             rec.deinit();
-            self.allocator.destroy(rec);
+            self.response_allocator.destroy(rec);
+            self.trace_recorder = null;
         }
         if (self.owned_strings) |*owned_strings| {
             owned_strings.deinit();
@@ -447,7 +456,6 @@ pub const HandlerInstance = struct {
         // Use predefined handler atom
         self.handler_atom = zq.Atom.handler;
         self.cached_handler_obj = null;
-        self.cached_dispatch = null;
 
         try self.installHttpConstructors();
         // Install console object
@@ -832,25 +840,61 @@ pub const HandlerInstance = struct {
         self.last_opt_stats = if (parser.code_gen) |cg| cg.getOptStats() else .{};
     }
 
+    const DynamicBytecodeWriter = struct {
+        allocator: std.mem.Allocator,
+        list: std.ArrayList(u8) = .empty,
+
+        fn deinit(self: *DynamicBytecodeWriter) void {
+            self.list.deinit(self.allocator);
+        }
+
+        pub fn writeAll(self: *DynamicBytecodeWriter, data: []const u8) !void {
+            try self.list.appendSlice(self.allocator, data);
+        }
+
+        pub fn writeByte(self: *DynamicBytecodeWriter, byte: u8) !void {
+            try self.list.append(self.allocator, byte);
+        }
+
+        pub fn writeInt(self: *DynamicBytecodeWriter, comptime T: type, val: T, _: std.lang.Endian) !void {
+            const bytes = std.mem.asBytes(&val);
+            try self.writeAll(bytes);
+        }
+    };
+
+    const CacheTarget = union(enum) {
+        none,
+        slice: []u8,
+        alloc: std.mem.Allocator,
+    };
+
     /// Load and compile JavaScript code
     pub fn loadCode(self: *Self, code: []const u8, filename: []const u8) !void {
-        _ = try self.loadCodeWithCachingInternal(code, filename, null, true, false);
+        _ = try self.loadCodeWithCachingInternal(code, filename, .none, true, false);
     }
 
     /// Load and compile JavaScript code without requiring a `handler` export.
     /// Used by benchmark and script-style tooling that call other globals directly.
     pub fn loadCodeNoHandler(self: *Self, code: []const u8, filename: []const u8) !void {
-        _ = try self.loadCodeWithCachingInternal(code, filename, null, false, false);
+        _ = try self.loadCodeWithCachingInternal(code, filename, .none, false, false);
     }
 
     /// Load and compile JavaScript code, optionally returning serialized bytecode for caching
     /// If cache_buffer is provided, serializes the bytecode and returns the serialized slice
     pub fn loadCodeWithCaching(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8) !?[]const u8 {
-        return self.loadCodeWithCachingInternal(code, filename, cache_buffer, true, false);
+        const target: CacheTarget = if (cache_buffer) |b| .{ .slice = b } else .none;
+        return self.loadCodeWithCachingInternal(code, filename, target, true, false);
+    }
+
+    /// Load and compile JavaScript code, dynamically allocating the serialized
+    /// bytecode for caching with `out_allocator`. Caller owns the returned slice.
+    pub fn loadCodeWithCachingAlloc(self: *Self, code: []const u8, filename: []const u8, out_allocator: std.mem.Allocator) !?[]u8 {
+        const slice = try self.loadCodeWithCachingInternal(code, filename, .{ .alloc = out_allocator }, true, false);
+        return if (slice) |s| @constCast(s) else null;
     }
 
     pub fn loadPreparedEval(self: *Self, source: execution_spec.PreparedEvalSource, filename: []const u8) !void {
-        _ = try self.loadCodeWithCachingInternal(source.code, filename, null, true, true);
+        _ = try self.loadCodeWithCachingInternal(source.code, filename, .none, true, true);
     }
 
     pub fn loadPreparedEvalWithCaching(
@@ -859,10 +903,21 @@ pub const HandlerInstance = struct {
         filename: []const u8,
         cache_buffer: ?[]u8,
     ) !?[]const u8 {
-        return self.loadCodeWithCachingInternal(source.code, filename, cache_buffer, true, true);
+        const target: CacheTarget = if (cache_buffer) |b| .{ .slice = b } else .none;
+        return self.loadCodeWithCachingInternal(source.code, filename, target, true, true);
     }
 
-    fn loadCodeWithCachingInternal(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8, refresh_handler: bool, prepared_eval: bool) !?[]const u8 {
+    pub fn loadPreparedEvalWithCachingAlloc(
+        self: *Self,
+        source: execution_spec.PreparedEvalSource,
+        filename: []const u8,
+        out_allocator: std.mem.Allocator,
+    ) !?[]u8 {
+        const slice = try self.loadCodeWithCachingInternal(source.code, filename, .{ .alloc = out_allocator }, true, true);
+        return if (slice) |s| @constCast(s) else null;
+    }
+
+    fn loadCodeWithCachingInternal(self: *Self, code: []const u8, filename: []const u8, cache_target: CacheTarget, refresh_handler: bool, prepared_eval: bool) !?[]const u8 {
         self.last_opt_stats = .{};
         self.interpreter.resetProfilingCounters();
         const source_kind = zq.classifySourcePath(filename);
@@ -990,22 +1045,50 @@ pub const HandlerInstance = struct {
         // Bytecode verification: reject malformed bytecode before execution.
         try verifyBytecodeRecursive(&func);
 
-        // Serialize for caching if buffer provided (includes atoms for true cache hit)
+        // Serialize for caching if requested (includes atoms for true cache hit)
         var serialized: ?[]const u8 = null;
-        if (cache_buffer) |buffer| {
-            var writer = bytecode_cache.SliceWriter{ .buffer = buffer };
-            bytecode_cache.serializeBytecodeWithAtomsAndShapes(
-                &func,
-                &self.ctx.atoms,
-                shapes,
-                &writer,
-                self.allocator,
-            ) catch {
-                // Serialization failed (buffer too small), continue without caching
-            };
-            if (writer.pos > 0) {
-                serialized = writer.getWritten();
-            }
+        var owned_serialized: ?[]u8 = null;
+        errdefer if (owned_serialized) |owned| switch (cache_target) {
+            .alloc => |out_alloc| out_alloc.free(owned),
+            else => {},
+        };
+        switch (cache_target) {
+            .none => {},
+            .slice => |buffer| {
+                var writer = bytecode_cache.SliceWriter{ .buffer = buffer };
+                bytecode_cache.serializeBytecodeWithAtomsAndShapes(
+                    &func,
+                    &self.ctx.atoms,
+                    shapes,
+                    &writer,
+                    self.allocator,
+                ) catch {
+                    // Serialization failed (buffer too small), continue without caching
+                };
+                if (writer.pos > 0) {
+                    serialized = writer.getWritten();
+                }
+            },
+            .alloc => |out_alloc| {
+                var writer = DynamicBytecodeWriter{ .allocator = out_alloc };
+                errdefer writer.deinit();
+                if (bytecode_cache.serializeBytecodeWithAtomsAndShapes(
+                    &func,
+                    &self.ctx.atoms,
+                    shapes,
+                    &writer,
+                    self.allocator,
+                )) |_| {
+                    if (writer.list.items.len > 0) {
+                        owned_serialized = try writer.list.toOwnedSlice(out_alloc);
+                        serialized = owned_serialized;
+                    } else {
+                        writer.deinit();
+                    }
+                } else |_| {
+                    writer.deinit();
+                }
+            },
         }
 
         // Execute the compiled code to define functions
@@ -1035,12 +1118,6 @@ pub const HandlerInstance = struct {
 
         const handler_obj = handler_val.toPtr(zq.JSObject);
         self.cached_handler_obj = handler_obj;
-
-        if (handler_obj.getBytecodeFunctionData()) |bc_data| {
-            self.cached_dispatch = bc_data.bytecode.pattern_dispatch;
-        } else {
-            self.cached_dispatch = null;
-        }
     }
 
     /// Load from cached serialized bytecode (Phase 1d: true cache hit with atoms and shapes)
@@ -1169,8 +1246,13 @@ pub const HandlerInstance = struct {
         }
     }
 
+    fn activeArena(self: *Self) ?*zq.arena.Arena {
+        if (self.ctx.hybrid) |h| return h.arena;
+        return self.arena_state;
+    }
+
     fn arenaHighWatermark(self: *Self) usize {
-        const arena = self.arena_state orelse return 0;
+        const arena = self.activeArena() orelse return 0;
         return arena.getStats().high_watermark;
     }
 
@@ -1213,7 +1295,7 @@ pub const HandlerInstance = struct {
         }
 
         if (ceilings.total_is_constant) {
-            const arena = self.arena_state orelse return;
+            const arena = self.activeArena() orelse return;
             const stats = arena.getStats();
             if (stats.overflow_count > 0) {
                 var detail_buf: [192]u8 = undefined;
@@ -1268,21 +1350,6 @@ pub const HandlerInstance = struct {
         const trace_timer = trace_request_recorder.setupRequestRecorder(self, request);
         defer trace_request_recorder.finishRequestRecorder(self, trace_timer);
 
-        // === FAST PATH: Native dispatch for static routes ===
-        if (self.cached_dispatch) |dispatch| {
-            if (self.tryFastPathDispatch(
-                dispatch,
-                request.url,
-                request.path,
-                borrow_body,
-            )) |response| {
-                // Native fast-path dispatch does not execute JS bytecode or allocate
-                // request JS objects, so runtime reset is unnecessary on this path.
-                reset_after = false;
-                return response;
-            }
-        }
-
         // Create Request object from HttpRequest
         const request_obj = try self.createRequestObject(request);
 
@@ -1332,10 +1399,9 @@ pub const HandlerInstance = struct {
             const exc = self.ctx.exception;
             self.ctx.clearException();
             var err_response = HttpResponse.init(self.response_allocator);
+            errdefer err_response.deinit();
             err_response.status = 500;
-            const exc_msg: []const u8 = if (exc.isString())
-                exc.toPtr(zq.JSString).data()
-            else
+            const exc_msg: []const u8 = getStringDataCtx(exc, self.ctx) orelse
                 "handler aborted without returning a Response";
             // Proof-explain the exception: a pending exception that is not a
             // Response is an engine-raised type fault (throw is not in the subset).
@@ -1364,93 +1430,6 @@ pub const HandlerInstance = struct {
         }
 
         trace_request_recorder.recordResponse(self, &response);
-        return response;
-    }
-
-    /// Try to dispatch request via native fast path.
-    /// Returns response if a static pattern matches, null otherwise.
-    fn tryFastPathDispatch(
-        self: *Self,
-        dispatch: *const zq.PatternDispatchTable,
-        url: []const u8,
-        path: []const u8,
-        borrow_body: bool,
-    ) ?HttpResponse {
-        const effective_path = if (path.len > 0) path else url;
-
-        // O(1) exact match via hash lookup
-        if (self.tryFastExactMatch(dispatch, .url, url, borrow_body)) |response| {
-            return response;
-        }
-        if (!std.mem.eql(u8, effective_path, url)) {
-            if (self.tryFastExactMatch(dispatch, .path, effective_path, borrow_body)) |response| {
-                return response;
-            }
-        }
-
-        return null; // Fall back to bytecode execution
-    }
-
-    fn tryFastExactMatch(
-        self: *Self,
-        dispatch: *const zq.PatternDispatchTable,
-        route_atom: zq.Atom,
-        target: []const u8,
-        borrow_body: bool,
-    ) ?HttpResponse {
-        const target_hash = std.hash.Wyhash.hash(0, target);
-        const idx = dispatch.exact_match_map.get(target_hash) orelse return null;
-        const pattern = &dispatch.patterns[idx];
-
-        // Verify atom + bytes (handle hash collision)
-        if (pattern.pattern_type != .exact) return null;
-        if (pattern.url_atom != route_atom) return null;
-        if (!std.mem.eql(u8, target, pattern.url_bytes)) return null;
-
-        return self.buildFastResponse(pattern, borrow_body) catch null;
-    }
-
-    /// Build a response from a pre-serialized static pattern.
-    fn buildFastResponse(
-        self: *Self,
-        pattern: *const zq.HandlerPattern,
-        borrow_body: bool,
-    ) !HttpResponse {
-        var response = HttpResponse.init(self.response_allocator);
-        response.status = pattern.status;
-
-        const content_type = switch (pattern.content_type_idx) {
-            0 => "application/json",
-            1 => "text/plain; charset=utf-8",
-            else => "text/html; charset=utf-8",
-        };
-
-        // OPTIMIZATION: Use pre-built raw response if available (single write, no header construction)
-        if (pattern.prebuilt_response) |prebuilt| {
-            response.prebuilt_raw = prebuilt;
-            // Still set body for logging/debugging purposes
-            response.body = pattern.static_body;
-            response.body_owned = false;
-            // Also populate the structured Content-Type header. The slow path
-            // (Connection: close, or attestation active) rebuilds headers from
-            // response.headers and ignores prebuilt_raw's baked-in Content-Type,
-            // so without this such responses would ship with no Content-Type.
-            try response.putHeaderBorrowed("Content-Type", content_type);
-            return response;
-        }
-
-        // Fallback: construct response normally
-        if (borrow_body) {
-            response.body = pattern.static_body;
-            response.body_owned = false;
-        } else {
-            const body_copy = try response.allocator.dupe(u8, pattern.static_body);
-            response.body = body_copy;
-            response.body_owned = true;
-        }
-
-        try response.putHeaderBorrowed("Content-Type", content_type);
-
         return response;
     }
 
@@ -1635,6 +1614,7 @@ pub const HandlerInstance = struct {
 
     pub fn extractResponseInternal(self: *Self, result: zq.JSValue, borrow_body: bool) !HttpResponse {
         var response = HttpResponse.init(self.response_allocator);
+        errdefer response.deinit();
 
         if (!result.isObject()) {
             // If result is any string (flat or slice), use it as
@@ -1653,6 +1633,9 @@ pub const HandlerInstance = struct {
             const body_owned = try response.allocator.dupe(u8, fault_explain.formatMessage(&fault_buf, diag));
             response.setBodyOwned(body_owned);
             try response.putHeader("Content-Type", "text/plain; charset=utf-8");
+            if (diag.verdict == .soundness_incident) {
+                self.recordSoundnessIncident(diag.namedChips(), "non_response_return");
+            }
             return response;
         }
 
@@ -1762,6 +1745,8 @@ pub const HandlerInstance = struct {
         // Clear zruntime-layer request state that pool.zig's HandlerInstance.reset()
         // does not know about. The engine-level sp/call_depth/exception clear
         // happens inside pool.release() -> HandlerInstance.reset().
+        self.ctx.cost_meter.reset();
+        self.ctx.module_state[zq.TRACE_STATE_SLOT] = null;
         self.http_state.reset();
         self.last_request_body_len = 0;
     }
@@ -1812,9 +1797,9 @@ test "a load parse failure renders its code, file, source line, and underline" {
 
     const text = try renderParseErrors(allocator, frontend.sourceView(), frontend.parserErrors());
     defer allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "error[ZTS") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "  --> bad.ts:2:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "  2 | const b = while;\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "^") != null);
+    try std.testing.expect(std.mem.find(u8, text, "error[ZTS") != null);
+    try std.testing.expect(std.mem.find(u8, text, "  --> bad.ts:2:") != null);
+    try std.testing.expect(std.mem.find(u8, text, "  2 | const b = while;\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "   | ") != null);
+    try std.testing.expect(std.mem.find(u8, text, "^") != null);
 }

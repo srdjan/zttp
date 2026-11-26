@@ -113,18 +113,15 @@ pub fn build(b: *std.Build) void {
     const examples_step = b.top_level_steps.get("test-examples") orelse @panic("runtime_tests.addIntegration registers test-examples");
     examples_step.step.dependOn(&gate_floor_probe.step);
 
-    // Release build step (with handler precompilation if provided)
-    const release_step = b.step("release", "Build optimized release binaries (zttp, zttp-runtime, zts)");
-    release_step.dependOn(b.getInstallStep());
-    const bench_exe = bench.addRuntimeBench(ctx, test_step);
+    _ = bench.addRuntimeBench(ctx, test_step);
     smoke.add(ctx);
-    bench.addCompileBench(ctx, test_step, bench_exe);
+    bench.addCompileBench(ctx, test_step);
 
     const spine = agent_spine.add(ctx);
     test_step.dependOn(spine.check_step);
     test_step.dependOn(spine.test_step);
     const coverage_step = step_coverage.register(b);
-    step_coverage.attachScriptCensus(b, test_step, proofs.script_reachability, tools.repo_gate_exe);
+    step_coverage.attachScriptCensus(b, test_step, proofs.script_reachability);
     const reach = step_coverage.classify(b, test_step);
     agent_spine.attachTaskCensus(b, spine, reach);
     step_coverage.add(b, test_step, coverage_step, reach);

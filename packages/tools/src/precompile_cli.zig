@@ -16,8 +16,7 @@ const collectModuleManifestPaths = args_mod.collectModuleManifestPaths;
 const buildManifestRegistryFromPaths = args_mod.buildManifestRegistryFromPaths;
 const collectArgs = args_mod.collectArgs;
 const readFilePosix = zts.file_io.readFile;
-/// Write a file synchronously using posix operations
-const writeFilePosix = util.writeFilePosix;
+const writeFilePosix = zts.file_io.writeFile;
 /// Derive contract.json path from the output .zig path.
 const deriveSiblingPath = util.deriveSiblingPath;
 const stderr_mod = @import("precompile_stderr.zig");
@@ -44,22 +43,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
         allocator.free(argv);
     }
 
-    try runCompileWithArgs(allocator, argv[1..]);
+    try runCompileWithArgs(allocator, if (argv.len > 1) argv[1..] else &.{});
 }
 
 pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    const opts = parsePrecompileArgSlice(argv) catch |err| {
-        if (err == error.MissingArgument) return;
-        return err;
-    };
+    const opts = try parsePrecompileArgSlice(argv);
 
     // Partner virtual-module manifests (--module-manifest <path>, repeatable).
     // Read, parse, validate, and register before compilation. Failures here
     // fail loud: a malformed manifest must not silently compile to nothing.
-    const manifest_paths = collectModuleManifestPaths(allocator, argv) catch |err| {
-        if (err == error.MissingArgument) return;
-        return err;
-    };
+    const manifest_paths = try collectModuleManifestPaths(allocator, argv);
     defer allocator.free(manifest_paths);
 
     var manifest_registry = if (manifest_paths.len > 0)
@@ -135,7 +128,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
             };
             defer allocator.free(viol_path);
             var violations_written = true;
-            writeFilePosix(viol_path, viol_jsonl, allocator) catch |err| {
+            writeFilePosix(allocator, viol_path, viol_jsonl) catch |err| {
                 debugPrint("Error writing violations file '{s}': {}\n", .{ viol_path, err });
                 violations_written = false;
             };
@@ -185,17 +178,15 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
             };
             defer allocator.free(contract_path);
 
-            var json_output: std.ArrayList(u8) = .empty;
-            defer json_output.deinit(allocator);
-            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &json_output);
+            var aw: std.Io.Writer.Allocating = .init(allocator);
+            defer aw.deinit();
 
             writeContractJson(contract, &aw.writer) catch |err| {
                 debugPrint("Error serializing contract: {}\n", .{err});
                 return err;
             };
-            json_output = aw.toArrayList();
 
-            writeFilePosix(contract_path, json_output.items, allocator) catch |err| {
+            writeFilePosix(allocator, contract_path, aw.written()) catch |err| {
                 debugPrint("Error writing contract file '{s}': {}\n", .{ contract_path, err });
                 return err;
             };
@@ -212,7 +203,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
             };
             defer allocator.free(tests_path);
 
-            writeFilePosix(tests_path, tests_jsonl, allocator) catch |err| {
+            writeFilePosix(allocator, tests_path, tests_jsonl) catch |err| {
                 debugPrint("Error writing generated tests '{s}': {}\n", .{ tests_path, err });
                 return err;
             };
@@ -230,7 +221,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
             };
             defer allocator.free(viol_path);
 
-            writeFilePosix(viol_path, viol_jsonl, allocator) catch |err| {
+            writeFilePosix(allocator, viol_path, viol_jsonl) catch |err| {
                 debugPrint("Error writing violations file '{s}': {}\n", .{ viol_path, err });
                 return err;
             };
@@ -253,9 +244,8 @@ fn writeZigFile(
     policy: ?HandlerPolicy,
     allocator: std.mem.Allocator,
 ) !void {
-    var output = std.ArrayList(u8).empty;
-    defer output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     const writer = &aw.writer;
 
     try writer.writeAll("//! Auto-generated embedded handler bytecode\n");
@@ -290,8 +280,7 @@ fn writeZigFile(
     const contract_ptr = if (compiled.contract) |*c| c else null;
     try writeCapabilityPolicy(writer, policy, contract_ptr);
 
-    output = aw.toArrayList();
-    try writeFilePosix(path, output.items, allocator);
+    try writeFilePosix(allocator, path, aw.written());
 }
 
 fn writeCapabilityPolicy(writer: anytype, policy: ?HandlerPolicy, contract: ?*const HandlerContract) !void {
@@ -453,26 +442,23 @@ fn hexChar(n: u4) u8 {
 test "writeBytecodeArray emits zig-fmt stable rows" {
     const allocator = std.testing.allocator;
 
-    var output = std.ArrayList(u8).empty;
-    defer output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
 
     const bytes = [_]u8{ 0x01, 0xab, 0xff };
     try writeBytecodeArray(&aw.writer, &bytes);
-    output = aw.toArrayList();
 
     try std.testing.expectEqualStrings(
         "    0x01, 0xab, 0xff,\n",
-        output.items,
+        aw.written(),
     );
 }
 
 test "writeCapabilityPolicy emits zig-fmt stable empty allowlists" {
     const allocator = std.testing.allocator;
 
-    var output = std.ArrayList(u8).empty;
-    defer output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
 
     const policy = HandlerPolicy{
         .env = .{},
@@ -482,20 +468,22 @@ test "writeCapabilityPolicy emits zig-fmt stable empty allowlists" {
         .sql = .{},
     };
     try writeCapabilityPolicy(&aw.writer, policy, null);
-    output = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, output.items, ".values = &[_][]const u8{},") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, ".values = &[_][]const u8{\n        },") == null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, ".egress_scopes = .{ .bits = 5 },") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "runtime_policy_index_required = false;") != null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), ".values = &[_][]const u8{},") != null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), ".values = &[_][]const u8{\n        },") == null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), ".egress_scopes = .{ .bits = 5 },") != null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), "runtime_policy_index_required = false;") != null);
 
-    output.clearRetainingCapacity();
-    aw = .fromArrayList(allocator, &output);
+    aw.clearRetainingCapacity();
     var guarded = handler_contract.emptyContract("borrowed-test-path.ts");
     guarded.env.dynamic = true;
     try writeCapabilityPolicy(&aw.writer, null, &guarded);
-    output = aw.toArrayList();
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "runtime_policy_index_required = true;") != null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), "runtime_policy_index_required = true;") != null);
+}
+
+test "runCompileWithArgs propagates MissingArgument instead of succeeding" {
+    try std.testing.expectError(error.MissingArgument, runCompileWithArgs(std.testing.allocator, &.{}));
+    try std.testing.expectError(error.MissingArgument, runCompileWithArgs(std.testing.allocator, &.{"only-handler.ts"}));
 }
 
 test "precompile refuses every retired module before replacing generated output" {

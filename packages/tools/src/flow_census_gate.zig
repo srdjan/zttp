@@ -876,13 +876,13 @@ test "the real check refuses a secret in a handler-body log and holds a clean co
     try testing.expectEqual(Observed.held, try realVerdict(&env, try findProbe(probes, "clean__log__handler")));
 }
 
-test "the real check reaches a verdict on an import probe" {
+test "the real check refuses a secret leak through an imported helper" {
     var env = try TinyRun.init();
     defer env.deinit();
     const probes = try probes_mod.generate(env.arena.allocator());
     const p = try findProbe(probes, "secret__log__import_fn");
-    try testing.expect(p.files.len == 2);
-    try testing.expect((try realVerdict(&env, p)) != Observed.no_verdict);
+    try testing.expectEqual(@as(usize, 2), p.files.len);
+    try testing.expectEqual(Observed.refused, try realVerdict(&env, p));
 }
 
 test "the committed census clears its floors and every expectation states a reason" {

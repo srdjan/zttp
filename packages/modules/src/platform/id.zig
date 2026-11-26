@@ -178,7 +178,7 @@ test "formatUlidFromInputs: 26 chars, Crockford base32 only, timestamp encoded b
     // visual ambiguity with 1/0).
     formatUlidFromInputs(0xDEADBEEF, .{ 0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE }, &buf);
     for (buf) |c| {
-        try testing.expect(std.mem.indexOfScalar(u8, CROCKFORD_BASE32, c) != null);
+        try testing.expect(std.mem.findScalar(u8, CROCKFORD_BASE32, c) != null);
         try testing.expect(c != 'I' and c != 'L' and c != 'O' and c != 'U');
     }
 }

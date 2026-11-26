@@ -2,19 +2,11 @@
 const std = @import("std");
 const engine = @import("zts-engine");
 const SourceView = @import("zts-base").source_diagnostics.SourceView;
-const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const diagnostic_projection = @import("diagnostic_projection.zig");
 const evaluator = @import("flow_interp.zig");
 const report_types = @import("flow_report.zig");
 const type_checker = @import("type_checker.zig");
 const ir = engine.parser.ir;
-const atom_table = engine.atom_table;
-const counterexample = @import("counterexample.zig");
-const handler_function_mod = @import("handler_function.zig");
-const NodeIndex = ir.NodeIndex;
-const IrView = ir.IrView;
-const mb = engine.module_binding;
-const LabelSet = mb.LabelSet;
 
 /// Version of the flow verdict semantics, included in the policy identity. It
 /// also covers the `deterministic` verdict of `effect_inference.zig`, which has

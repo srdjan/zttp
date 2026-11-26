@@ -229,9 +229,9 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
 
 fn originalRequestFromSummary(summary: []const u8) ?[]const u8 {
     const heading = "## Original Request";
-    const start = std.mem.lastIndexOf(u8, summary, heading) orelse return null;
+    const start = std.mem.findLast(u8, summary, heading) orelse return null;
     const content_start = start + heading.len;
-    const end = std.mem.indexOfPos(u8, summary, content_start, "\n## Early Progress") orelse
+    const end = std.mem.findPos(u8, summary, content_start, "\n## Early Progress") orelse
         summary.len;
     const request = std.mem.trim(u8, summary[content_start..end], " \t\r\n");
     return if (request.len == 0) null else request;

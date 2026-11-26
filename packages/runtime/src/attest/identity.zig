@@ -70,6 +70,7 @@ fn loadExisting(file_path: []const u8) !SignerIdentity {
     if (stat.mode & permission_group_bits != 0) return error.KeyFilePermissionsTooOpen;
 
     var bytes: [file_size_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &bytes);
     var filled: usize = 0;
     while (filled < bytes.len) {
         const n = try std.posix.read(fd, bytes[filled..]);
@@ -77,16 +78,20 @@ fn loadExisting(file_path: []const u8) !SignerIdentity {
         filled += n;
     }
 
-    return buildIdentity(bytes[0..Ed25519.KeyPair.seed_length].*, .loaded);
+    var seed: [Ed25519.KeyPair.seed_length]u8 = bytes[0..Ed25519.KeyPair.seed_length].*;
+    defer std.crypto.secureZero(u8, &seed);
+    return buildIdentity(seed, .loaded);
 }
 
 fn generate(file_path: []const u8) !SignerIdentity {
     var seed: [Ed25519.KeyPair.seed_length]u8 = undefined;
-    try fillCsprng(&seed);
+    defer std.crypto.secureZero(u8, &seed);
+    try fillRandomBytes(&seed);
 
     const identity = try buildIdentity(seed, .generated);
 
     var bytes: [file_size_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &bytes);
     @memcpy(bytes[0..Ed25519.KeyPair.seed_length], &seed);
     @memcpy(bytes[Ed25519.KeyPair.seed_length..], &identity.key_pair.public_key.bytes);
 
@@ -128,19 +133,36 @@ fn ensureDirectory(path: []const u8) !void {
 }
 
 fn writeFileStrict(file_path: []const u8, bytes: []const u8) !void {
-    if (file_path.len + 4 >= std.fs.max_path_bytes) return error.NameTooLong;
+    // Suffix is ".tmp." + 16 hex chars = 21 bytes.
+    if (file_path.len + 22 >= std.fs.max_path_bytes) return error.NameTooLong;
 
-    // Write-then-rename for atomicity: a crash mid-write leaves the old file
-    // intact rather than a half-written credential.
+    // Write-then-rename for atomicity using a unique exclusive temp file so
+    // concurrent writers cannot collide and pre-existing symlinks are refused.
     var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = try std.mem.printSentinel(&tmp_buf, "{s}.tmp", .{file_path}, 0);
+    var tmp_path: [:0]u8 = undefined;
+    var fd: std.posix.fd_t = undefined;
 
-    const fd = try std.posix.openatZ(
-        std.posix.AT.FDCWD,
-        tmp_path,
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
-        file_mode,
-    );
+    var attempt: usize = 0;
+    while (true) : (attempt += 1) {
+        var rand_bytes: [8]u8 = undefined;
+        try fillRandomBytes(&rand_bytes);
+        const suffix = std.fmt.bytesToHex(rand_bytes, .lower);
+        tmp_path = try std.mem.printSentinel(&tmp_buf, "{s}.tmp.{s}", .{ file_path, suffix }, 0);
+
+        fd = std.posix.openatZ(
+            std.posix.AT.FDCWD,
+            tmp_path,
+            .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true },
+            file_mode,
+        ) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                if (attempt >= 8) return error.WriteFailed;
+                continue;
+            },
+            else => return err,
+        };
+        break;
+    }
 
     var write_ok = false;
     defer {
@@ -151,7 +173,11 @@ fn writeFileStrict(file_path: []const u8, bytes: []const u8) !void {
     var total: usize = 0;
     while (total < bytes.len) {
         const n = std.c.write(fd, bytes[total..].ptr, bytes.len - total);
-        if (n <= 0) return error.WriteFailed;
+        if (n < 0) {
+            if (std.posix.errno(n) == .INTR) continue;
+            return error.WriteFailed;
+        }
+        if (n == 0) return error.WriteFailed;
         total += @intCast(n);
     }
 
@@ -172,14 +198,18 @@ fn toCStr(buf: *[std.fs.max_path_bytes]u8, path: []const u8) ![:0]const u8 {
     return buf[0..path.len :0];
 }
 
-fn fillCsprng(buf: *[Ed25519.KeyPair.seed_length]u8) !void {
+fn fillRandomBytes(buf: []u8) !void {
     const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
     if (fd < 0) return error.UrandomOpenFailed;
     defer _ = std.c.close(fd);
     var filled: usize = 0;
     while (filled < buf.len) {
         const n = std.c.read(fd, buf[filled..].ptr, buf.len - filled);
-        if (n <= 0) return error.UrandomReadFailed;
+        if (n < 0) {
+            if (std.posix.errno(n) == .INTR) continue;
+            return error.UrandomReadFailed;
+        }
+        if (n == 0) return error.UrandomReadFailed;
         filled += @intCast(n);
     }
 }

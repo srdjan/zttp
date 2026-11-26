@@ -183,8 +183,7 @@ fn renderSearchOutput(
         fn lessThan(_: void, a: SearchRecord, b: SearchRecord) bool {
             const path_order = std.mem.order(u8, a.path, b.path);
             if (path_order != .eq) return path_order == .lt;
-            const line_order = std.mem.order(u8, a.line_text, b.line_text);
-            if (line_order != .eq) return line_order == .lt;
+            if (a.line != b.line) return a.line < b.line;
             return std.mem.lessThan(u8, a.text, b.text);
         }
     }.lessThan);
@@ -264,7 +263,6 @@ fn renderSearchOutput(
 
 const SearchRecord = struct {
     path: []const u8,
-    line_text: []const u8,
     line: usize,
     text: []const u8,
 };
@@ -297,7 +295,6 @@ fn parseSearchRecords(
 
         try records.append(allocator, .{
             .path = path,
-            .line_text = line_text,
             .line = line,
             .text = payload[colon + 1 ..],
         });
@@ -425,7 +422,7 @@ fn grepFile(
     // Bound each file read. A failed read must not report a complete search.
     const contents = try zts.file_io.readFile(allocator, file_abs, 16 * 1024 * 1024);
     defer allocator.free(contents);
-    if (std.mem.indexOfScalar(u8, contents, 0) != null) return; // skip binary files
+    if (std.mem.findScalar(u8, contents, 0) != null) return; // skip binary files
     // A stray non-UTF-8 byte does not make a text file unsearchable: the match
     // preview is cut on a codepoint boundary and `json_writer.writeString`
     // replaces any invalid sequence, so the envelope stays well-formed. Skipping
@@ -440,7 +437,7 @@ fn grepFile(
         else
             contents.len;
         const line = contents[line_start..line_end];
-        if (std.mem.indexOf(u8, line, query) != null) {
+        if (std.mem.find(u8, line, query) != null) {
             if (count.* >= limit) return;
             try out.print(allocator, "{s}\x00{d}:{s}\n", .{ rel, line_no, line });
             count.* += 1;
@@ -461,35 +458,35 @@ test "workspace_search_text: missing query arg returns structured error" {
     var result = try execute(testing.allocator, &.{});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "missing query") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "missing query") != null);
 }
 
 test "workspace_search_text: JSON args without query returns structured error" {
     var result = try execute(testing.allocator, &.{"{\"path\":\".\"}"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "missing query") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "missing query") != null);
 }
 
 test "workspace_search_text: non-string query returns structured error" {
     var result = try execute(testing.allocator, &.{"{\"query\":42}"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "query must be a string") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "query must be a string") != null);
 }
 
 test "workspace_search_text: malformed JSON returns structured error" {
     var result = try execute(testing.allocator, &.{"{not"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "invalid JSON input") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "invalid JSON input") != null);
 }
 
 test "workspace_search_text: multiline query returns structured error" {
     var result = try tool.execute(testing.allocator, &.{"{\"query\":\"a\\nb\"}"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "newline") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "newline") != null);
 }
 
 test "workspace_search_text: paged previews retain exact match locators" {
@@ -650,7 +647,7 @@ test "workspace_search_text: public tool API bounds an explicit file and refuses
     var parsed_directory = try std.json.parseFromSlice(std.json.Value, allocator, directory_result.llm_text, .{});
     defer parsed_directory.deinit();
     try testing.expect(!parsed_directory.value.object.get("inventory_complete").?.bool);
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         parsed_directory.value.object.get("stderr").?.string,
         "ignore policy",
@@ -671,7 +668,7 @@ test "workspace_search_text: in-process fallback searches one explicit file" {
 
     try testing.expect(output.ok);
     try testing.expect(output.complete);
-    try testing.expect(std.mem.indexOf(u8, output.stdout, "src/handler.ts\x002:find-me here") != null);
+    try testing.expect(std.mem.find(u8, output.stdout, "src/handler.ts\x002:find-me here") != null);
 }
 
 test "workspace_search_text: in-process recursive fallback refuses without ignore policy" {
@@ -687,7 +684,7 @@ test "workspace_search_text: in-process recursive fallback refuses without ignor
     try testing.expect(!output.ok);
     try testing.expect(!output.complete);
     try testing.expectEqual(@as(usize, 0), output.stdout.len);
-    try testing.expect(std.mem.indexOf(u8, output.stderr, "ignore policy") != null);
+    try testing.expect(std.mem.find(u8, output.stderr, "ignore policy") != null);
 }
 
 test "workspace_search_text: in-process fallback propagates a missing named file" {
@@ -775,9 +772,9 @@ test "workspace_search_text: records under a secret basename never reach the pag
     };
     var result = try renderSearchOutput(testing.allocator, "API_KEY", 0, 50, true, &output);
     defer result.deinit(testing.allocator);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "hunter2") == null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "PEM-BODY") == null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "src/a.ts") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "hunter2") == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "PEM-BODY") == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "src/a.ts") != null);
 }
 
 test "workspace_search_text: a recursive search in a non-git workspace omits .env lines" {
@@ -794,8 +791,8 @@ test "workspace_search_text: a recursive search in a non-git workspace omits .en
 
     var result = try tool.execute(allocator, &.{"{\"query\":\"API_KEY\"}"});
     defer result.deinit(allocator);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "hunter2") == null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"path\":\".env\"") == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "hunter2") == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"path\":\".env\"") == null);
 }
 
 test "workspace_search_text: an explicit secret path is refused" {
@@ -810,4 +807,26 @@ test "workspace_search_text: an explicit secret path is refused" {
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
     try testing.expectError(error.SecretPath, tool.execute(allocator, &.{"{\"query\":\"API_KEY\",\"path\":\".env\"}"}));
+}
+
+test "workspace_search_text: sorts line numbers numerically so line 2 precedes line 10" {
+    const stdout =
+        "src/a.ts\x0010:line ten\n" ++
+        "src/a.ts\x002:line two\n" ++
+        "src/a.ts\x001:line one\n";
+    const output: SearchOutput = .{
+        .stdout = @constCast(stdout),
+        .stderr = @constCast(""),
+        .ok = true,
+    };
+    var result = try renderSearchOutput(testing.allocator, "line", 0, 50, true, &output);
+    defer result.deinit(testing.allocator);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, result.llm_text, .{});
+    defer parsed.deinit();
+    const matches = parsed.value.object.get("matches").?.array.items;
+    try testing.expectEqual(@as(usize, 3), matches.len);
+    try testing.expectEqual(@as(i64, 1), matches[0].object.get("line").?.integer);
+    try testing.expectEqual(@as(i64, 2), matches[1].object.get("line").?.integer);
+    try testing.expectEqual(@as(i64, 10), matches[2].object.get("line").?.integer);
 }

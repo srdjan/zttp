@@ -34,6 +34,8 @@ pub const EditSimulateInput = struct {
     /// exists only as a string. When null, no policy is enforced and the POL
     /// rules cannot fire - the same shape as a project that declares none.
     policy_source: ?[]const u8 = null,
+    /// Optional ancestor boundary for project discovery (`zttp.json`).
+    stop_at_dir: ?[]const u8 = null,
     // When either is null, simulation discovers it the way `zts check` does,
     // walking up from `file`. That walk is not purely file-rooted:
     // `project_config.findStartDir` reverts to process cwd for a path with no
@@ -101,7 +103,7 @@ pub fn simulate(
     // passes both and skips discovery.
     var discovered: ProjectPaths = if (input.sql_schema_path == null or
         input.policy_source == null)
-        try discoverProjectPaths(allocator, input.file)
+        try discoverProjectPathsBounded(allocator, input.file, input.stop_at_dir)
     else
         .{};
     defer discovered.deinit(allocator);
@@ -296,15 +298,14 @@ pub fn writeResultJson(writer: anytype, result: *const SimulateResult) !void {
 
 /// CLI entry point for `zts edit-simulate`.
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
 
     const verdict_available = try runWithArgsWriter(allocator, argv, &aw.writer);
 
-    buf = aw.toArrayList();
-    if (buf.items.len > 0) {
-        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
+    const written = aw.written();
+    if (written.len > 0) {
+        try writeAllFd(std.c.STDOUT_FILENO, written);
     }
     if (!verdict_available) std.process.exit(1);
 }
@@ -384,7 +385,7 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
         try writeProjectContextFailure(writer, input.file);
         return false;
     };
-    if (paths.sqlite == null and paths.policy == null) {
+    if (!paths.found) {
         paths.deinit(allocator);
         paths = discoverProjectPaths(allocator, null) catch {
             try writeProjectContextFailure(writer, input.file);
@@ -424,86 +425,29 @@ fn writeProjectContextFailure(writer: anytype, file: []const u8) !void {
     try writeJsonString(writer, "repair zttp.json and restore its referenced analysis files");
     try writer.writeAll(",\"file\":");
     try writeJsonString(writer, file);
-    try writer.writeAll("}],\"total\":1,\"new\":1,\"preexisting\":0}\n");
+    try writer.writeAll("}],\"summary\":{\"total\":1,\"new\":1,\"preexisting\":0}}\n");
 }
 
 /// The `zttp.json` entries the analyzer reads. Caller frees via `deinit`.
-pub const ProjectPaths = struct {
-    sqlite: ?[]u8 = null,
-    policy: ?[]u8 = null,
-    /// The `requiredProperties` names, unchecked, in file order.
-    required_properties: []const []const u8 = &.{},
+pub const ProjectPaths = project_config_mod.AnalysisContext;
 
-    pub fn deinit(self: *ProjectPaths, allocator: std.mem.Allocator) void {
-        if (self.sqlite) |p| allocator.free(p);
-        if (self.policy) |p| allocator.free(p);
-        for (self.required_properties) |name| allocator.free(name);
-        allocator.free(self.required_properties);
-        self.* = .{};
-    }
-};
-
-/// Resolve the project's SQL schema and capability policy for analysis. Read
-/// the entries in the nearest `zttp.json` walking up from
-/// `start_path` (or cwd when null), resolved against the project root. This is
-/// the same source `zttp dev`, `zttp test`, and `zttp doctor` pass to the
-/// analyzer, and the same boundary `zts check` uses. A field is null when the
-/// project exists but names no such entry.
-///
-/// Both paths come from one walk. Resolving them separately walked the ancestor
-/// directories and parsed the same manifest twice for every simulated edit.
-///
-/// A manifest that cannot be read or does not parse is an ERROR, not a null
-/// path. Callers that would rather analyze without project context say so at
-/// their own call site with `catch`; a caller that publishes a verdict must
-/// not be handed a silently weakened one. This is the fail-open class
-/// AGENTS.md documents.
+/// Resolve the project's SQL schema and capability policy for analysis.
 pub fn discoverProjectPaths(allocator: std.mem.Allocator, start_path: ?[]const u8) !ProjectPaths {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var project = try project_config_mod.discover(allocator, io, start_path);
-    defer if (project) |*p| p.deinit(allocator);
-    const cfg = if (project) |*p| p else return .{};
-    var paths: ProjectPaths = .{ .sqlite = try cfg.resolvedSqlitePath(allocator) };
-    errdefer paths.deinit(allocator);
-    paths.policy = try cfg.resolvedPolicyPath(allocator);
-    paths.required_properties = try dupeNames(allocator, cfg.required_properties);
-    return paths;
+    return discoverProjectPathsBounded(allocator, start_path, null);
 }
 
-/// Owned copy of `names`. A failure frees the copies made so far.
-fn dupeNames(allocator: std.mem.Allocator, names: []const []const u8) ![]const []const u8 {
-    const copy = try allocator.alloc([]const u8, names.len);
-    var done: usize = 0;
-    errdefer {
-        for (copy[0..done]) |name| allocator.free(name);
-        allocator.free(copy);
-    }
-    for (names, 0..) |name, index| {
-        copy[index] = try allocator.dupe(u8, name);
-        done = index + 1;
-    }
-    return copy;
+pub fn discoverProjectPathsBounded(
+    allocator: std.mem.Allocator,
+    start_path: ?[]const u8,
+    stop_at_dir: ?[]const u8,
+) !ProjectPaths {
+    return project_config_mod.discoverAnalysisContext(allocator, start_path, stop_at_dir);
 }
 
-/// Read the project's capability policy: the `policy` entry in the nearest
-/// `zttp.json` walking up from `start_path`, resolved against the project root
-/// and loaded. Returns null when there is no project or no `policy` entry.
-/// Discovery and read failures propagate so callers that publish a verdict
-/// cannot silently analyze without a configured policy. Caller frees.
-///
-/// One resolver for every boundary that owns project context - `zts check`,
-/// the `edit-simulate` CLI, and the expert veto - for the reason
-/// `discoverProjectPaths` prevents a hand-written copy per caller from making
-/// `check` and `edit-simulate` produce different verdicts for one handler.
-///
 pub fn discoverProjectPolicySource(allocator: std.mem.Allocator, start_path: ?[]const u8) !?[]u8 {
     var paths = try discoverProjectPaths(allocator, start_path);
     defer paths.deinit(allocator);
-    const path = paths.policy orelse return null;
-    return try file_io.readFile(allocator, path, 1024 * 1024);
+    return try paths.readPolicySource(allocator);
 }
 
 /// Single-path wrapper for callers that need only a SQL schema.
@@ -512,9 +456,10 @@ pub fn discoverProjectPolicySource(allocator: std.mem.Allocator, start_path: ?[]
 /// returned slice.
 pub fn discoverProjectSqlSchemaPath(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
     var paths = discoverProjectPaths(allocator, start_path) catch return null;
-    if (paths.policy) |p| allocator.free(p);
-    paths.policy = null;
-    return paths.sqlite;
+    const sqlite = paths.sqlite;
+    paths.sqlite = null;
+    paths.deinit(allocator);
+    return sqlite;
 }
 
 // ---------------------------------------------------------------------------
@@ -557,12 +502,6 @@ fn consumeViolationKeyCount(
     if (value.* == 0) return false;
     value.* -= 1;
     return true;
-}
-
-fn deleteTempFile(allocator: std.mem.Allocator, path: []const u8) void {
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return;
-    defer allocator.free(path_z);
-    _ = std.c.unlink(path_z);
 }
 
 /// Read stdin to EOF, capped at `max_stdin_json_bytes`. Public so the v2
@@ -609,23 +548,21 @@ fn printHelp() !void {
 // ---------------------------------------------------------------------------
 
 test "writeResultJson empty result" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
     const result = SimulateResult{};
     try writeResultJson(&aw.writer, &result);
 
-    buf = aw.toArrayList();
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"total\":0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"violations\":[]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"properties\"") == null);
+    const written = aw.written();
+    try std.testing.expect(std.mem.find(u8, written, "\"total\":0") != null);
+    try std.testing.expect(std.mem.find(u8, written, "\"violations\":[]") != null);
+    try std.testing.expect(std.mem.find(u8, written, "\"properties\"") == null);
 }
 
 test "writeResultJson includes properties when present" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
     const result = SimulateResult{
         .properties = .{
@@ -642,20 +579,19 @@ test "writeResultJson includes properties when present" {
     };
     try writeResultJson(&aw.writer, &result);
 
-    buf = aw.toArrayList();
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"properties\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"deterministic\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"injection_safe\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"state_isolated\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"fault_covered\":false") != null);
+    const written = aw.written();
+    try std.testing.expect(std.mem.find(u8, written, "\"properties\"") != null);
+    try std.testing.expect(std.mem.find(u8, written, "\"deterministic\":true") != null);
+    try std.testing.expect(std.mem.find(u8, written, "\"injection_safe\":true") != null);
+    try std.testing.expect(std.mem.find(u8, written, "\"state_isolated\":true") != null);
+    try std.testing.expect(std.mem.find(u8, written, "\"fault_covered\":false") != null);
     // Without an import forbidding it, behavioral read_only surfaces as declarable.
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"read_only\":true") != null);
+    try std.testing.expect(std.mem.find(u8, written, "\"read_only\":true") != null);
 }
 
 test "writeResultJson reports read_only as not-declarable under a forbidding import" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
     // A behaviorally read-only handler (a SELECT) whose zttp:sql import forbids
     // DECLARING read_only: the HUD the agent reads must show read_only:false so it
@@ -678,10 +614,10 @@ test "writeResultJson reports read_only as not-declarable under a forbidding imp
     };
     try writeResultJson(&aw.writer, &result);
 
-    buf = aw.toArrayList();
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"read_only\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"retry_safe\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"idempotent\":true") != null);
+    const written = aw.written();
+    try std.testing.expect(std.mem.find(u8, written, "\"read_only\":false") != null);
+    try std.testing.expect(std.mem.find(u8, written, "\"retry_safe\":true") != null);
+    try std.testing.expect(std.mem.find(u8, written, "\"idempotent\":true") != null);
 }
 
 test "violationKey excludes line numbers" {
@@ -726,28 +662,25 @@ test "violation key counts preserve duplicate diagnostics" {
 
 test "runWithArgs accepts redundant --json flag" {
     const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
     const handler =
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var uniquifier: u8 = undefined;
-    const addr = @intFromPtr(&uniquifier);
-    const path = try allocator.print("/tmp/zts-edit-sim-json-{x}.ts", .{addr});
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = handler });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
     defer allocator.free(path);
-    try file_io.writeFile(allocator, path, handler);
-    defer deleteTempFile(allocator, path);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
 
     // The redundant --json must be accepted (not error.InvalidArgument).
     _ = try runWithArgsWriter(allocator, &.{ path, "--json" }, &aw.writer);
 
-    buf = aw.toArrayList();
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"violations\"") != null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), "\"violations\"") != null);
 }
 
 test "simulate flags newly introduced canonical diagnostics" {
@@ -860,15 +793,23 @@ test "simulate refuses a configured policy it cannot load" {
         .content = source,
     }));
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
     const verdict_available = try runWithArgsWriter(std.testing.allocator, &.{handler_path}, &aw.writer);
-    buf = aw.toArrayList();
+    const written = aw.written();
     try std.testing.expect(!verdict_available);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"code\":\"ZTS000\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"new\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "missing-policy.json") == null);
+    try std.testing.expect(std.mem.find(u8, written, "missing-policy.json") == null);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, written, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    const violations = root.get("violations").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), violations.len);
+    try std.testing.expectEqualStrings("ZTS000", violations[0].object.get("code").?.string);
+    const summary = root.get("summary").?.object;
+    try std.testing.expectEqual(@as(i64, 1), summary.get("total").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), summary.get("new").?.integer);
+    try std.testing.expectEqual(@as(i64, 0), summary.get("preexisting").?.integer);
 }
 
 test "simulate reports an unmapped analyzer failure as ZTS000" {
@@ -949,12 +890,59 @@ test "a repairable diagnostic carries its repair intent to the caller" {
 
     // And it has to survive serialization, because the JSON is what the tool
     // returns as the model's text - the struct field alone reaches nobody.
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
     try writeResultJson(&aw.writer, &result);
-    buf = aw.toArrayList();
     try std.testing.expect(
-        std.mem.indexOf(u8, buf.items, "\"repair_intent\":\"replace_compound_assign_with_explicit\"") != null,
+        std.mem.find(u8, aw.written(), "\"repair_intent\":\"replace_compound_assign_with_explicit\"") != null,
     );
+}
+
+test "discoverProjectSqlSchemaPath frees required_properties and policy without leaking" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "zttp.json",
+        .data =
+        \\{
+        \\  "entry": "src/handler.ts",
+        \\  "sqlite": "schema.sql",
+        \\  "policy": "policy.json",
+        \\  "requiredProperties": ["state_isolated", "deterministic"]
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/handler.ts", .data = "" });
+
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
+    defer allocator.free(handler_path);
+
+    const schema_path = discoverProjectSqlSchemaPath(allocator, handler_path) orelse return error.TestExpectedSchemaPath;
+    defer allocator.free(schema_path);
+    try std.testing.expect(std.mem.endsWith(u8, schema_path, "schema.sql"));
+}
+
+test "discoverProjectPaths marks found when zttp.json has neither sqlite nor policy" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/handler.ts\"}",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/handler.ts", .data = "" });
+
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
+    defer allocator.free(handler_path);
+
+    var paths = try discoverProjectPaths(allocator, handler_path);
+    defer paths.deinit(allocator);
+    try std.testing.expect(paths.found);
+    try std.testing.expect(paths.sqlite == null);
+    try std.testing.expect(paths.policy == null);
 }

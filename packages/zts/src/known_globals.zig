@@ -47,7 +47,6 @@ pub const runtime_only_names = [_][]const u8{
     "Result",
     "SyntaxError",
     "TypeError",
-    "_processRequest",
     "console",
     "fetchSync",
     "httpRequest",

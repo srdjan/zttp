@@ -100,7 +100,7 @@ pub fn execute(
     };
     defer input.deinit(allocator);
 
-    // Read the source and compute a repair plan without writing workspace files.
+    // Read the source once and compute a repair candidate without writing workspace files.
     const source = readWorkspaceFile(allocator, input.path) catch |e| {
         return registry_mod.ToolResult.errFmt(
             allocator,
@@ -109,81 +109,39 @@ pub fn execute(
         );
     };
     defer allocator.free(source);
-    var repair_result = try pi_repair_plan.planFromSource(allocator, source, input.path, input.goals);
-    defer repair_result.deinit(allocator);
 
-    if (repair_result.ok) {
-        return try alreadySatisfied(allocator, input, repair_result.llm_text);
-    }
-
-    var plans = parsePlans(allocator, repair_result.llm_text) catch {
-        return registry_mod.ToolResult.err(allocator, name ++ ": pi_repair_plan returned invalid JSON\n");
+    var detailed = computeCandidateInternal(
+        allocator,
+        source,
+        input.path,
+        input.goals,
+        input.max_repairs,
+        true,
+    ) catch |err| switch (err) {
+        error.InvalidRepairPlanJson => return registry_mod.ToolResult.err(allocator, name ++ ": pi_repair_plan returned invalid JSON\n"),
+        error.InvalidApplyPlanJson => return registry_mod.ToolResult.err(allocator, name ++ ": pi_apply_repair_plan returned invalid JSON\n"),
+        else => return err,
     };
-    defer plans.deinit(allocator);
-    if (plans.items.len == 0) {
-        return try noCandidate(allocator, input, "no_repair_plans", "pi_repair_plan found violations but no supported repair plans");
-    }
-    std.sort.insertion(ParsedPlan, plans.items, {}, comparePlanLineDesc);
+    defer detailed.deinit(allocator);
 
-    var current_source = try readWorkspaceFile(allocator, input.path);
-    defer allocator.free(current_source);
-    var applied_ids: std.ArrayList([]u8) = .empty;
-    defer {
-        for (applied_ids.items) |id| allocator.free(id);
-        applied_ids.deinit(allocator);
-    }
-
-    var last_apply_json: ?[]u8 = null;
-    defer if (last_apply_json) |body| allocator.free(body);
-    var last_failure_reason: ?[]u8 = null;
-    defer if (last_failure_reason) |reason| allocator.free(reason);
-
-    var repairs_applied: usize = 0;
-    for (plans.items) |plan| {
-        if (repairs_applied >= input.max_repairs) break;
-        const apply_args_json = try buildApplyArgsJson(allocator, input.path, current_source, plan.raw_json);
-        defer allocator.free(apply_args_json);
-        var apply_result = try pi_apply_repair_plan.executeSemanticPlan(allocator, &.{apply_args_json});
-        defer apply_result.deinit(allocator);
-
-        var apply_json = parseApplyJson(allocator, apply_result.llm_text) catch {
-            return registry_mod.ToolResult.err(allocator, name ++ ": pi_apply_repair_plan returned invalid JSON\n");
-        };
-        defer apply_json.deinit(allocator);
-
-        if (!apply_json.ok or apply_json.proposed_content == null) {
-            if (last_failure_reason) |reason| allocator.free(reason);
-            last_failure_reason = try allocator.dupe(u8, apply_json.reason orelse "repair_not_verified");
-            continue;
-        }
-
-        const next_source = try allocator.dupe(u8, apply_json.proposed_content.?);
-        allocator.free(current_source);
-        current_source = next_source;
-        try applied_ids.append(allocator, try allocator.dupe(u8, plan.id));
-        repairs_applied += 1;
-
-        if (last_apply_json) |body| allocator.free(body);
-        last_apply_json = try allocator.dupe(u8, std.mem.trim(u8, apply_result.llm_text, " \t\r\n"));
-    }
-
-    if (repairs_applied == 0) {
-        return try noCandidate(
+    return switch (detailed.status) {
+        .already_satisfied => try alreadySatisfied(allocator, input, detailed.candidate.plans_json),
+        .no_repair_plans => try noCandidate(allocator, input, "no_repair_plans", "pi_repair_plan found violations but no supported repair plans"),
+        .all_repairs_failed => try noCandidate(
             allocator,
             input,
-            last_failure_reason orelse "all_repairs_failed",
+            detailed.candidate.reason,
             "all supported repair candidates failed edit-simulate",
-        );
-    }
-
-    return try candidateResult(
-        allocator,
-        input,
-        applied_ids.items,
-        current_source,
-        repairs_applied,
-        last_apply_json orelse "{}",
-    );
+        ),
+        .candidate_verified => try candidateResult(
+            allocator,
+            input,
+            detailed.candidate.plan_ids,
+            detailed.candidate.proposed_content.?,
+            detailed.candidate.plan_ids.len,
+            detailed.last_apply_json orelse "{}",
+        ),
+    };
 }
 
 fn parseInput(allocator: std.mem.Allocator, value: std.json.Value) !ParsedInput {
@@ -327,11 +285,18 @@ fn parseApplyJson(allocator: std.mem.Allocator, json_text: []const u8) !ApplyJso
     const ok_val = obj.get("ok") orelse return error.InvalidToolOutput;
     if (ok_val != .bool) return error.InvalidToolOutput;
 
+    const proposed_content = if (obj.get("proposed_content")) |v| try dupeOptionalString(allocator, v) else null;
+    errdefer if (proposed_content) |s| allocator.free(s);
+    const reason = if (obj.get("reason")) |v| try dupeOptionalString(allocator, v) else null;
+    errdefer if (reason) |s| allocator.free(s);
+    const message = if (obj.get("message")) |v| try dupeOptionalString(allocator, v) else null;
+    errdefer if (message) |s| allocator.free(s);
+
     return .{
         .ok = ok_val.bool,
-        .proposed_content = if (obj.get("proposed_content")) |v| try dupeOptionalString(allocator, v) else null,
-        .reason = if (obj.get("reason")) |v| try dupeOptionalString(allocator, v) else null,
-        .message = if (obj.get("message")) |v| try dupeOptionalString(allocator, v) else null,
+        .proposed_content = proposed_content,
+        .reason = reason,
+        .message = message,
     };
 }
 
@@ -440,13 +405,30 @@ pub const Candidate = struct {
     }
 };
 
+const CandidateStatus = enum {
+    already_satisfied,
+    no_repair_plans,
+    all_repairs_failed,
+    candidate_verified,
+};
+
+const DetailedCandidate = struct {
+    status: CandidateStatus,
+    candidate: Candidate,
+    last_apply_json: ?[]u8 = null,
+
+    fn deinit(self: *DetailedCandidate, allocator: std.mem.Allocator) void {
+        self.candidate.deinit(allocator);
+        if (self.last_apply_json) |body| allocator.free(body);
+        self.* = undefined;
+    }
+};
+
 /// Run the deterministic repair lane over an in-memory `source` snapshot and
 /// return a compiler-verified candidate (or the reason none could be built).
 /// Side-effect free: it plans from `source` and
 /// dry-runs each supported repair through pi_apply_repair_plan in memory; it
-/// never writes files or calls the model. The apply loop mirrors `execute`'s
-/// (parse plans, sort by line desc, apply each, keep the verified source) but
-/// returns the candidate struct instead of the tool JSON.
+/// never writes files or calls the model.
 pub fn candidateFromSource(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -454,6 +436,18 @@ pub fn candidateFromSource(
     goal_args: []const []const u8,
     max_repairs: usize,
 ) !Candidate {
+    const detailed = try computeCandidateInternal(allocator, source, rel_path, goal_args, max_repairs, false);
+    return detailed.candidate;
+}
+
+fn computeCandidateInternal(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    rel_path: []const u8,
+    goal_args: []const []const u8,
+    max_repairs: usize,
+    capture_last_apply_json: bool,
+) !DetailedCandidate {
     var rr = try pi_repair_plan.planFromSource(allocator, source, rel_path, goal_args);
     defer rr.deinit(allocator);
     const plans_json = try allocator.dupe(u8, rr.llm_text);
@@ -461,21 +455,30 @@ pub fn candidateFromSource(
 
     if (rr.ok) {
         return .{
-            .reason = try allocator.dupe(u8, "already_satisfied"),
-            .proposed_content = null,
-            .plan_ids = &.{},
-            .plans_json = plans_json,
+            .status = .already_satisfied,
+            .candidate = .{
+                .reason = try allocator.dupe(u8, "already_satisfied"),
+                .proposed_content = null,
+                .plan_ids = &.{},
+                .plans_json = plans_json,
+            },
         };
     }
 
-    var plans = try parsePlans(allocator, rr.llm_text);
+    var plans = parsePlans(allocator, rr.llm_text) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidRepairPlanJson,
+    };
     defer plans.deinit(allocator);
     if (plans.items.len == 0) {
         return .{
-            .reason = try allocator.dupe(u8, "no_repair_plans"),
-            .proposed_content = null,
-            .plan_ids = &.{},
-            .plans_json = plans_json,
+            .status = .no_repair_plans,
+            .candidate = .{
+                .reason = try allocator.dupe(u8, "no_repair_plans"),
+                .proposed_content = null,
+                .plan_ids = &.{},
+                .plans_json = plans_json,
+            },
         };
     }
     std.sort.insertion(ParsedPlan, plans.items, {}, comparePlanLineDesc);
@@ -487,6 +490,8 @@ pub fn candidateFromSource(
         for (applied_ids.items) |id| allocator.free(id);
         applied_ids.deinit(allocator);
     }
+    var last_apply_json: ?[]u8 = null;
+    defer if (last_apply_json) |body| allocator.free(body);
     var last_failure_reason: ?[]u8 = null;
     defer if (last_failure_reason) |r| allocator.free(r);
     var repairs_applied: usize = 0;
@@ -497,46 +502,65 @@ pub fn candidateFromSource(
         defer allocator.free(apply_args_json);
         var apply_result = try pi_apply_repair_plan.executeSemanticPlan(allocator, &.{apply_args_json});
         defer apply_result.deinit(allocator);
-        var apply_json = try parseApplyJson(allocator, apply_result.llm_text);
+        var apply_json = parseApplyJson(allocator, apply_result.llm_text) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidApplyPlanJson,
+        };
         defer apply_json.deinit(allocator);
         if (!apply_json.ok or apply_json.proposed_content == null) {
-            // Dupe into a temp BEFORE freeing the previous reason: if the dupe
-            // OOMs after the free, the function-level defer would double-free the
-            // already-freed pointer (benign on the loop's arena, a real fault on
-            // a non-arena allocator).
+            // Dupe into a temp BEFORE freeing the previous reason so an OOM
+            // cannot trigger a double-free in the function-level defer.
             const reason_copy = try allocator.dupe(u8, apply_json.reason orelse "repair_not_verified");
             if (last_failure_reason) |r| allocator.free(r);
             last_failure_reason = reason_copy;
             continue;
         }
-        const next_source = try allocator.dupe(u8, apply_json.proposed_content.?);
-        allocator.free(current_source);
-        current_source = next_source;
-        try applied_ids.append(allocator, try allocator.dupe(u8, plan.id));
-        repairs_applied += 1;
+        {
+            const next_source = try allocator.dupe(u8, apply_json.proposed_content.?);
+            errdefer allocator.free(next_source);
+            const id_copy = try allocator.dupe(u8, plan.id);
+            errdefer allocator.free(id_copy);
+            try applied_ids.ensureUnusedCapacity(allocator, 1);
+            if (capture_last_apply_json) {
+                const apply_copy = try allocator.dupe(u8, std.mem.trim(u8, apply_result.llm_text, " \t\r\n"));
+                if (last_apply_json) |body| allocator.free(body);
+                last_apply_json = apply_copy;
+            }
+            allocator.free(current_source);
+            current_source = next_source;
+            applied_ids.appendAssumeCapacity(id_copy);
+            repairs_applied += 1;
+        }
     }
 
     if (repairs_applied == 0) {
         return .{
-            .reason = try allocator.dupe(u8, last_failure_reason orelse "all_repairs_failed"),
-            .proposed_content = null,
-            .plan_ids = &.{},
-            .plans_json = plans_json,
+            .status = .all_repairs_failed,
+            .candidate = .{
+                .reason = try allocator.dupe(u8, last_failure_reason orelse "all_repairs_failed"),
+                .proposed_content = null,
+                .plan_ids = &.{},
+                .plans_json = plans_json,
+            },
         };
     }
 
     const proposed = try allocator.dupe(u8, current_source);
     errdefer allocator.free(proposed);
+    const reason = try allocator.dupe(u8, "candidate_verified");
+    errdefer allocator.free(reason);
     const ids = try applied_ids.toOwnedSlice(allocator);
-    errdefer {
-        for (ids) |id| allocator.free(id);
-        allocator.free(ids);
-    }
+    const owned_last_apply = last_apply_json;
+    last_apply_json = null;
     return .{
-        .reason = try allocator.dupe(u8, "candidate_verified"),
-        .proposed_content = proposed,
-        .plan_ids = ids,
-        .plans_json = plans_json,
+        .status = .candidate_verified,
+        .candidate = .{
+            .reason = reason,
+            .proposed_content = proposed,
+            .plan_ids = ids,
+            .plans_json = plans_json,
+        },
+        .last_apply_json = owned_last_apply,
     };
 }
 
@@ -556,9 +580,9 @@ test "candidateFromSource verifies a guard repair in memory" {
     defer cand.deinit(testing.allocator);
     try testing.expect(cand.verified());
     try testing.expect(cand.proposed_content != null);
-    try testing.expect(std.mem.indexOf(u8, cand.proposed_content.?, "if (!result.ok)") != null);
+    try testing.expect(std.mem.find(u8, cand.proposed_content.?, "if (!result.ok)") != null);
     try testing.expect(cand.plan_ids.len >= 1);
-    try testing.expect(std.mem.indexOf(u8, cand.plans_json, cand.plan_ids[0]) != null);
+    try testing.expect(std.mem.find(u8, cand.plans_json, cand.plan_ids[0]) != null);
 }
 
 test "candidateFromSource reports already_satisfied for a clean handler" {
@@ -618,9 +642,9 @@ test "execute returns verified candidate without writing the file" {
     var result = try execute(allocator, &.{"{\"path\":\"handler.ts\",\"max_repairs\":1}"});
     defer result.deinit(allocator);
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"reason\":\"candidate_verified\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (!result.ok)") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"applied\":false") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"reason\":\"candidate_verified\"") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "if (!result.ok)") != null);
 
     const path = try tmp.childPath(allocator, "handler.ts");
     defer allocator.free(path);
@@ -659,7 +683,7 @@ test "execute does not persist witnesses to the on-disk corpus" {
     defer result.deinit(allocator);
     // A verified candidate proves the repair lane ran over the failing handler.
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"reason\":\"candidate_verified\"") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"reason\":\"candidate_verified\"") != null);
 
     const corpus_root = try tmp.childPath(allocator, ".zttp/witnesses");
     defer allocator.free(corpus_root);
@@ -678,4 +702,21 @@ test "candidateFromSource reports no_repair_plans when every plan is help text" 
     defer cand.deinit(testing.allocator);
     try testing.expectEqualStrings("no_repair_plans", cand.reason);
     try testing.expect(cand.proposed_content == null);
+}
+
+test "parseApplyJson handles OOM without leaking partial strings" {
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var parsed = try parseApplyJson(
+                allocator,
+                "{\"ok\":true,\"proposed_content\":\"next\",\"reason\":\"ok\",\"message\":\"done\"}",
+            );
+            defer parsed.deinit(allocator);
+            try testing.expect(parsed.ok);
+            try testing.expectEqualStrings("next", parsed.proposed_content.?);
+            try testing.expectEqualStrings("ok", parsed.reason.?);
+            try testing.expectEqualStrings("done", parsed.message.?);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Case.run, .{});
 }

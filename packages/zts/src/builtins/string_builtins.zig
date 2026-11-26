@@ -151,7 +151,7 @@ pub fn stringIndexOf(ctx: *context.Context, this: value.JSValue, args: []const v
     const match: ?usize = if (needle_data.len >= 2 and needle_data.len <= 4)
         (if (string.scalarIndexOf(data[byte_start..], needle_data)) |offset| @as(usize, offset) else null)
     else
-        std.mem.indexOf(u8, data[byte_start..], needle_data);
+        std.mem.find(u8, data[byte_start..], needle_data);
     if (match) |rel_idx| {
         const byte_match = byte_start + rel_idx;
         const unit_idx: usize = if (is_ascii) byte_match else string.byteOffsetToUtf16Index(data, byte_match);
@@ -199,7 +199,7 @@ pub fn stringLastIndexOf(ctx: *context.Context, this: value.JSValue, args: []con
     const end = @min(byte_pos +| needle_data.len, data.len);
     if (needle_data.len > end) return value.JSValue.fromInt(-1);
 
-    if (std.mem.lastIndexOf(u8, data[0..end], needle_data)) |idx| {
+    if (std.mem.findLast(u8, data[0..end], needle_data)) |idx| {
         const unit_idx: usize = if (is_ascii) idx else string.byteOffsetToUtf16Index(data, idx);
         return value.JSValue.fromInt(@intCast(unit_idx));
     }
@@ -481,15 +481,15 @@ fn throwInvalidStringLength(ctx: *context.Context) value.JSValue {
 /// String.prototype.repeat(count) - Repeat string
 pub fn stringRepeat(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const data = getStringDataCtx(this, ctx) orelse return value.JSValue.undefined_val;
-    var count: u32 = 0;
+    var count: usize = 0;
     if (args.len > 0) {
         if (args[0].isInt()) {
             const c = args[0].getInt();
-            if (c < 0) return value.JSValue.undefined_val;
+            if (c < 0) return throwInvalidStringLength(ctx);
             count = @intCast(c);
         } else if (args[0].toNumber()) |n| {
-            if (n < 0 or std.math.isInf(n)) return value.JSValue.undefined_val;
-            count = std.math.lossyCast(u32, @floor(n));
+            if (n < 0 or std.math.isInf(n)) return throwInvalidStringLength(ctx);
+            count = std.math.lossyCast(usize, @floor(n));
         }
     }
     if (count == 0 or data.len == 0) {
@@ -498,8 +498,8 @@ pub fn stringRepeat(ctx: *context.Context, this: value.JSValue, args: []const va
     }
     if (count == 1) return this;
 
-    const total_len = @as(usize, data.len) * @as(usize, count);
-    if (total_len > max_built_string_len) return value.JSValue.undefined_val;
+    const total_len = std.math.mul(usize, data.len, count) catch return throwInvalidStringLength(ctx);
+    if (total_len > max_built_string_len) return throwInvalidStringLength(ctx);
 
     const ra = ctx.requestAllocator();
     const buf = ra.alloc(u8, total_len) catch return value.JSValue.undefined_val;
@@ -638,7 +638,7 @@ pub fn stringReplace(ctx: *context.Context, this: value.JSValue, args: []const v
     const replacement = getStringDataCtx(args[1], ctx) orelse "";
     const search = getStringDataCtx(args[0], ctx) orelse return this;
 
-    if (std.mem.indexOf(u8, input, search)) |idx| {
+    if (std.mem.find(u8, input, search)) |idx| {
         var result = std.ArrayList(u8).empty;
         defer result.deinit(allocator);
         result.appendSlice(allocator, input[0..idx]) catch return this;
@@ -666,7 +666,7 @@ pub fn stringReplaceAll(ctx: *context.Context, this: value.JSValue, args: []cons
         var result = std.ArrayList(u8).empty;
         defer result.deinit(allocator);
         var pos: usize = 0;
-        while (std.mem.indexOfPos(u8, input, pos, search)) |idx| {
+        while (std.mem.findPos(u8, input, pos, search)) |idx| {
             result.appendSlice(allocator, input[pos..idx]) catch return this;
             result.appendSlice(allocator, replacement) catch return this;
             pos = idx + search.len;
@@ -816,6 +816,106 @@ test "padStart pads a short string below the limit" {
     try std.testing.expect(result.isString());
     try std.testing.expectEqualStrings("005", getStringDataCtx(result, ctx).?);
     try std.testing.expect(!ctx.hasException());
+}
+
+test "repeat throws RangeError for negative count, Infinity, and overflow" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var request_arena = try arena_mod.Arena.init(allocator, .{ .size = 65536 });
+    defer request_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &request_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    const single = value.JSValue.fromPtr(try string.createString(allocator, "a"));
+    defer string.freeString(allocator, single.toPtr(string.JSString));
+    const pair = value.JSValue.fromPtr(try string.createString(allocator, "ab"));
+    defer string.freeString(allocator, pair.toPtr(string.JSString));
+    const empty = value.JSValue.fromPtr(try string.createString(allocator, ""));
+    defer string.freeString(allocator, empty.toPtr(string.JSString));
+
+    const cases = [_]struct {
+        subject: value.JSValue,
+        count: value.JSValue,
+    }{
+        .{ .subject = single, .count = value.JSValue.fromInt(-1) },
+        .{ .subject = single, .count = value.JSValue.fromFloat(-1.5) },
+        .{ .subject = single, .count = value.JSValue.fromFloat(std.math.inf(f64)) },
+        .{ .subject = single, .count = value.JSValue.fromFloat(-std.math.inf(f64)) },
+        .{ .subject = empty, .count = value.JSValue.fromInt(-1) },
+        .{ .subject = empty, .count = value.JSValue.fromFloat(std.math.inf(f64)) },
+        .{ .subject = single, .count = value.JSValue.fromInt(1048577) },
+        .{ .subject = pair, .count = value.JSValue.fromFloat(1e20) },
+    };
+
+    const pool = ctx.hidden_class_pool orelse return error.TestFailed;
+    for (cases) |case| {
+        ctx.clearException();
+        const result = stringRepeat(ctx, case.subject, &.{case.count});
+        try std.testing.expect(result.isException());
+        try std.testing.expect(ctx.hasException());
+        try std.testing.expect(ctx.exception.isObject());
+        const err_obj = object.JSObject.fromValue(ctx.exception);
+        const name_val = err_obj.getProperty(pool, .name) orelse return error.TestFailed;
+        try std.testing.expectEqualStrings("RangeError", getStringDataCtx(name_val, ctx) orelse return error.TestFailed);
+        const msg_val = err_obj.getProperty(pool, .message) orelse return error.TestFailed;
+        try std.testing.expectEqualStrings("Invalid string length", getStringDataCtx(msg_val, ctx) orelse return error.TestFailed);
+    }
+}
+
+test "repeat handles zero, NaN, negative zero, one, and positive counts" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var request_arena = try arena_mod.Arena.init(allocator, .{ .size = 65536 });
+    defer request_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &request_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    const subject = value.JSValue.fromPtr(try string.createString(allocator, "ab"));
+    defer string.freeString(allocator, subject.toPtr(string.JSString));
+    const empty = value.JSValue.fromPtr(try string.createString(allocator, ""));
+    defer string.freeString(allocator, empty.toPtr(string.JSString));
+
+    const r_three = stringRepeat(ctx, subject, &.{value.JSValue.fromInt(3)});
+    try std.testing.expect(!ctx.hasException());
+    try std.testing.expectEqualStrings("ababab", getStringDataCtx(r_three, ctx) orelse return error.TestFailed);
+
+    const r_zero = stringRepeat(ctx, subject, &.{value.JSValue.fromInt(0)});
+    try std.testing.expect(!ctx.hasException());
+    try std.testing.expectEqualStrings("", getStringDataCtx(r_zero, ctx) orelse return error.TestFailed);
+
+    const r_neg_zero = stringRepeat(ctx, subject, &.{value.JSValue.fromFloat(-0.0)});
+    try std.testing.expect(!ctx.hasException());
+    try std.testing.expectEqualStrings("", getStringDataCtx(r_neg_zero, ctx) orelse return error.TestFailed);
+
+    const r_nan = stringRepeat(ctx, subject, &.{value.JSValue.fromFloat(std.math.nan(f64))});
+    try std.testing.expect(!ctx.hasException());
+    try std.testing.expectEqualStrings("", getStringDataCtx(r_nan, ctx) orelse return error.TestFailed);
+
+    const r_one = stringRepeat(ctx, subject, &.{value.JSValue.fromInt(1)});
+    try std.testing.expect(!ctx.hasException());
+    try std.testing.expectEqual(subject.raw, r_one.raw);
+
+    const r_empty_large = stringRepeat(ctx, empty, &.{value.JSValue.fromFloat(1e20)});
+    try std.testing.expect(!ctx.hasException());
+    try std.testing.expectEqualStrings("", getStringDataCtx(r_empty_large, ctx) orelse return error.TestFailed);
 }
 
 /// String.fromCharCode(...charCodes) - Create string from char codes

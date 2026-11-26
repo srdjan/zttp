@@ -192,7 +192,7 @@ pub const sdk_bridge = struct {
         const obj = obj_val.toPtr(object.JSObject);
         const atom = ctx.atoms.intern(key_ptr[0..key_len]) catch return false;
         const pool = ctx.hidden_class_pool orelse return false;
-        out.* = obj.getProperty(pool, atom) orelse return false;
+        out.* = obj.getOwnProperty(pool, atom) orelse return false;
         return true;
     }
 
@@ -342,10 +342,6 @@ pub const sdk_bridge = struct {
         ctx.setModuleState(slot, env, SdkStateEnvelope.envelopeDeinit);
     }
 
-    pub export fn zttpSdkIsCallable(val: value.JSValue) bool {
-        return val.isCallable();
-    }
-
     pub export fn zttpSdkIsString(val: value.JSValue) bool {
         return val.isAnyString();
     }
@@ -385,14 +381,6 @@ pub const sdk_bridge = struct {
         const ctx = handleToContext(handle);
         const arr = ctx.createArray() catch return false;
         out.* = arr.toValue();
-        return true;
-    }
-
-    pub export fn zttpSdkStringify(handle: *ModuleHandle, val: value.JSValue, out: *value.JSValue) bool {
-        const ctx = handleToContext(handle);
-        const http_mod = @import("../http.zig");
-        const js_str = http_mod.valueToJsonString(ctx, val) catch return false;
-        out.* = value.JSValue.fromPtr(js_str);
         return true;
     }
 
@@ -535,6 +523,7 @@ pub const sdk_bridge = struct {
         sql_len: usize,
         out: **SdkSqliteStmt,
     ) bool {
+        if (sql_len > std.math.maxInt(c_int)) return false;
         const raw_db: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
         var stmt: ?*sqlite_runtime.c.sqlite3_stmt = null;
         var tail: [*c]const u8 = null;
@@ -627,8 +616,24 @@ pub const sdk_bridge = struct {
         ptr: [*]const u8,
         len: usize,
     ) bool {
+        if (len > std.math.maxInt(c_int)) return false;
         const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
-        return sqlite_runtime.c.sqlite3_bind_text(raw, @intCast(index), ptr, @intCast(len), null) == sqlite_runtime.c.SQLITE_OK;
+        // SQLITE_TRANSIENT ((sqlite3_destructor_type)-1) instructs SQLite to
+        // copy the string immediately rather than keeping a borrowed pointer.
+        // Function pointers on aarch64 require 4-byte alignment so Zig rejects
+        // `@ptrFromInt(maxInt(usize))` directly as `sqlite3_destructor_type`;
+        // casting the callee's destructor param to `?*align(1) const anyopaque`
+        // preserves the exact C ABI while passing the `-1` sentinel cleanly.
+        const BindTextFn = *const fn (
+            ?*sqlite_runtime.c.sqlite3_stmt,
+            c_int,
+            [*]const u8,
+            c_int,
+            ?*align(1) const anyopaque,
+        ) callconv(.c) c_int;
+        const bind_text: BindTextFn = @ptrCast(&sqlite_runtime.c.sqlite3_bind_text);
+        const sqlite_transient: ?*align(1) const anyopaque = @ptrFromInt(std.math.maxInt(usize));
+        return bind_text(raw, @intCast(index), ptr, @intCast(len), sqlite_transient) == sqlite_runtime.c.SQLITE_OK;
     }
 
     pub export fn zttpSdkSqliteColumnCount(opaque_stmt: *SdkSqliteStmt) u32 {
@@ -686,4 +691,70 @@ pub const sdk_bridge = struct {
 // The SDK bridge is part of the binary ABI.
 comptime {
     _ = sdk_bridge;
+}
+
+test "zttpSdkObjectGet reads own properties and ignores prototype properties" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const proto = try ctx.createObject(null);
+    defer proto.destroy(allocator);
+    const to_string_atom = try ctx.atoms.intern("toString");
+    try ctx.setPropertyChecked(proto, to_string_atom, value.JSValue.fromInt(99));
+
+    const obj = try ctx.createObject(proto);
+    defer obj.destroy(allocator);
+    const own_atom = try ctx.atoms.intern("own");
+    try ctx.setPropertyChecked(obj, own_atom, value.JSValue.fromInt(7));
+
+    const handle: *ModuleHandle = @ptrCast(ctx);
+    var out: value.JSValue = value.JSValue.undefined_val;
+
+    try std.testing.expect(sdk_bridge.zttpSdkObjectGet(handle, obj.toValue(), "own".ptr, "own".len, &out));
+    try std.testing.expectEqual(@as(i32, 7), out.getInt());
+
+    try std.testing.expect(!sdk_bridge.zttpSdkObjectGet(handle, obj.toValue(), "toString".ptr, "toString".len, &out));
+}
+
+test "zttpSdkSqliteBindText copies bound text with SQLITE_TRANSIENT" {
+    var db = try sqlite_runtime.Db.openInMemory();
+    defer db.close();
+
+    const query = "SELECT :v";
+    var stmt: *sdk_bridge.SdkSqliteStmt = undefined;
+    try std.testing.expect(sdk_bridge.zttpSdkSqlitePrepare(@ptrCast(db.handle), query.ptr, query.len, &stmt));
+    defer sdk_bridge.zttpSdkSqliteFinalize(stmt);
+
+    var text_buf = "hello".*;
+    try std.testing.expect(sdk_bridge.zttpSdkSqliteBindText(stmt, 1, &text_buf, text_buf.len));
+    // Overwrite the caller's buffer before stepping: SQLITE_TRANSIENT must have
+    // copied the bytes at bind time rather than aliasing text_buf.
+    text_buf = "XXXXX".*;
+
+    try std.testing.expectEqual(@as(i32, sqlite_runtime.c.SQLITE_ROW), sdk_bridge.zttpSdkSqliteStep(stmt));
+
+    var col_ptr: [*]const u8 = undefined;
+    var col_len: usize = 0;
+    sdk_bridge.zttpSdkSqliteColumnText(stmt, 0, &col_ptr, &col_len);
+    try std.testing.expectEqualStrings("hello", col_ptr[0..col_len]);
+}
+
+test "zttpSdkSqlitePrepare and zttpSdkSqliteBindText reject lengths exceeding c_int max" {
+    var db = try sqlite_runtime.Db.openInMemory();
+    defer db.close();
+
+    const oversized: usize = @as(usize, std.math.maxInt(c_int)) + 1;
+    var bad_stmt: *sdk_bridge.SdkSqliteStmt = undefined;
+    try std.testing.expect(!sdk_bridge.zttpSdkSqlitePrepare(@ptrCast(db.handle), "SELECT 1".ptr, oversized, &bad_stmt));
+
+    const query = "SELECT :v";
+    var stmt: *sdk_bridge.SdkSqliteStmt = undefined;
+    try std.testing.expect(sdk_bridge.zttpSdkSqlitePrepare(@ptrCast(db.handle), query.ptr, query.len, &stmt));
+    defer sdk_bridge.zttpSdkSqliteFinalize(stmt);
+
+    try std.testing.expect(!sdk_bridge.zttpSdkSqliteBindText(stmt, 1, "x".ptr, oversized));
 }

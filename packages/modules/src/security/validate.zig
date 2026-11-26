@@ -150,11 +150,16 @@ pub const SchemaRegistry = struct {
 };
 
 pub fn getOrCreateRegistry(handle: *sdk.ModuleHandle) !*SchemaRegistry {
-    if (sdk.getModuleState(handle, SchemaRegistry, MODULE_STATE_SLOT)) |reg| return reg;
+    return getOrCreateRegistryInSlot(handle, MODULE_STATE_SLOT);
+}
+
+fn getOrCreateRegistryInSlot(handle: *sdk.ModuleHandle, slot: usize) !*SchemaRegistry {
+    if (sdk.getModuleState(handle, SchemaRegistry, slot)) |reg| return reg;
     const allocator = sdk.getStateAllocator(handle);
     const reg = try allocator.create(SchemaRegistry);
+    errdefer allocator.destroy(reg);
     reg.* = SchemaRegistry.init(allocator);
-    try sdk.setModuleState(handle, MODULE_STATE_SLOT, @ptrCast(reg), SchemaRegistry.sdkDeinit);
+    try sdk.setModuleState(handle, slot, @ptrCast(reg), SchemaRegistry.sdkDeinit);
     return reg;
 }
 
@@ -472,7 +477,7 @@ fn jsonToU32(v: std.json.Value) ?u32 {
 fn jsonToF64(v: std.json.Value) ?f64 {
     return switch (v) {
         .integer => |i| @floatFromInt(i),
-        .float => |f| f,
+        .float => |f| if (std.math.isFinite(f)) f else null,
         else => null,
     };
 }
@@ -546,6 +551,8 @@ fn validateFormat(fmt: FormatType, str: []const u8) bool {
 fn validateEmail(str: []const u8) bool {
     var at_index: ?usize = null;
     for (str, 0..) |c, i| {
+        // Reject ASCII control characters (0x00..0x1F, 0x7F) and whitespace (including space 0x20).
+        if (c <= 0x20 or c == 0x7F) return false;
         if (c == '@') {
             if (at_index != null) return false;
             at_index = i;
@@ -555,7 +562,13 @@ fn validateEmail(str: []const u8) bool {
     if (at == 0) return false;
     const domain = str[at + 1 ..];
     if (domain.len == 0) return false;
-    return std.mem.indexOfScalar(u8, domain, '.') != null;
+    var label_count: usize = 0;
+    var labels = std.mem.splitScalar(u8, domain, '.');
+    while (labels.next()) |label| {
+        if (label.len == 0) return false;
+        label_count += 1;
+    }
+    return label_count >= 2;
 }
 
 fn validateUuid(str: []const u8) bool {
@@ -651,7 +664,7 @@ fn validateRecursive(
     if (schema.schema_type) |expected_type| {
         const type_ok = switch (expected_type) {
             .string => sdk.isString(val),
-            .number => val.isNumber(),
+            .number => if (sdk.extractFloat(val)) |f| std.math.isFinite(f) else false,
             .integer => val.isInt() or (val.isNumber() and isWholeNumber(sdk.extractFloat(val) orelse 0)),
             .boolean => val.isBool(),
             .array => sdk.isArray(val),
@@ -817,7 +830,9 @@ pub fn coerceValue(handle: *sdk.ModuleHandle, schema: *const CompiledSchema, val
                 return try sdk.createString(handle, s);
             }
             if (sdk.extractFloat(val)) |f| {
-                var buf: [32]u8 = undefined;
+                // `{d}` prints an f64 in full decimal (no scientific notation), so
+                // extreme finite magnitudes need up to ~327 bytes; match log.zig.
+                var buf: [345]u8 = undefined;
                 const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch return val;
                 return try sdk.createString(handle, s);
             }
@@ -855,7 +870,9 @@ pub fn coerceValue(handle: *sdk.ModuleHandle, schema: *const CompiledSchema, val
 
 fn parseNumberString(str: []const u8) sdk.JSValue {
     if (std.fmt.parseInt(i32, str, 10)) |i| return sdk.JSValue.fromInt(i) else |_| {}
-    if (std.fmt.parseFloat(f64, str)) |f| return sdk.JSValue.fromFloat(f) else |_| {}
+    if (std.fmt.parseFloat(f64, str)) |f| {
+        if (std.math.isFinite(f)) return sdk.JSValue.fromFloat(f);
+    } else |_| {}
     return sdk.JSValue.undefined_val;
 }
 
@@ -1010,6 +1027,83 @@ test "parseNumberString" {
     try std.testing.expect(parseNumberString("42").getInt() == 42);
     try std.testing.expect(parseNumberString("3.14").isNumber());
     try std.testing.expect(parseNumberString("not a number").isUndefined());
+    try std.testing.expect(parseNumberString("NaN").isUndefined());
+    try std.testing.expect(parseNumberString("Infinity").isUndefined());
+    try std.testing.expect(parseNumberString("-Infinity").isUndefined());
+    try std.testing.expect(parseNumberString("inf").isUndefined());
+    try std.testing.expect(parseNumberString("1e400").isUndefined());
+}
+
+test "jsonToF64 rejects non-finite floats" {
+    try std.testing.expectEqual(@as(?f64, 42.0), jsonToF64(.{ .integer = 42 }));
+    try std.testing.expectEqual(@as(?f64, 3.5), jsonToF64(.{ .float = 3.5 }));
+    try std.testing.expectEqual(@as(?f64, null), jsonToF64(.{ .float = std.math.nan(f64) }));
+    try std.testing.expectEqual(@as(?f64, null), jsonToF64(.{ .float = std.math.inf(f64) }));
+    try std.testing.expectEqual(@as(?f64, null), jsonToF64(.{ .float = -std.math.inf(f64) }));
+}
+
+test "validateRecursive rejects non-finite numbers before range checks" {
+    const allocator = std.testing.allocator;
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    const schema: CompiledSchema = .{
+        .schema_type = .number,
+        .minimum = 0.0,
+        .maximum = 10.0,
+    };
+
+    var nan_errors: std.ArrayList(ValidationError) = .empty;
+    defer {
+        for (nan_errors.items) |err| allocator.free(err.path);
+        nan_errors.deinit(allocator);
+    }
+    try validateRecursive(fake_handle, &schema, sdk.JSValue.fromFloat(std.math.nan(f64)), "price", &nan_errors);
+    try std.testing.expectEqual(@as(usize, 1), nan_errors.items.len);
+    try std.testing.expectEqualStrings("price", nan_errors.items[0].path);
+    try std.testing.expectEqualStrings("type mismatch", nan_errors.items[0].message);
+
+    var inf_errors: std.ArrayList(ValidationError) = .empty;
+    defer {
+        for (inf_errors.items) |err| allocator.free(err.path);
+        inf_errors.deinit(allocator);
+    }
+    try validateRecursive(fake_handle, &schema, sdk.JSValue.fromFloat(std.math.inf(f64)), "price", &inf_errors);
+    try std.testing.expectEqual(@as(usize, 1), inf_errors.items.len);
+    try std.testing.expectEqualStrings("type mismatch", inf_errors.items[0].message);
+
+    var neg_inf_errors: std.ArrayList(ValidationError) = .empty;
+    defer {
+        for (neg_inf_errors.items) |err| allocator.free(err.path);
+        neg_inf_errors.deinit(allocator);
+    }
+    try validateRecursive(fake_handle, &schema, sdk.JSValue.fromFloat(-std.math.inf(f64)), "price", &neg_inf_errors);
+    try std.testing.expectEqual(@as(usize, 1), neg_inf_errors.items.len);
+    try std.testing.expectEqualStrings("type mismatch", neg_inf_errors.items[0].message);
+
+    var ok_errors: std.ArrayList(ValidationError) = .empty;
+    defer {
+        for (ok_errors.items) |err| allocator.free(err.path);
+        ok_errors.deinit(allocator);
+    }
+    try validateRecursive(fake_handle, &schema, sdk.JSValue.fromFloat(5.5), "price", &ok_errors);
+    try std.testing.expectEqual(@as(usize, 0), ok_errors.items.len);
+}
+
+test "coerceValue formats large finite floats into strings" {
+    const test_shim = @import("zttp-sdk-test-shim");
+    defer test_shim.resetStrings();
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    const schema: CompiledSchema = .{ .schema_type = .string };
+
+    const coerced = try coerceValue(fake_handle, &schema, sdk.JSValue.fromFloat(1e308));
+    try std.testing.expect(sdk.isString(coerced));
+}
+
+test "getOrCreateRegistryInSlot frees registry when setModuleState fails" {
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        getOrCreateRegistryInSlot(fake_handle, 999),
+    );
 }
 
 test "isWholeNumber: out-of-i64-range value does not panic" {
@@ -1067,12 +1161,23 @@ test "FormatType.fromString" {
 test "validateEmail" {
     try std.testing.expect(validateEmail("user@example.com"));
     try std.testing.expect(validateEmail("a@b.co"));
+    try std.testing.expect(validateEmail("first.last+tag@sub.example.com"));
     try std.testing.expect(!validateEmail(""));
     try std.testing.expect(!validateEmail("noatsign"));
     try std.testing.expect(!validateEmail("@nodomain.com"));
     try std.testing.expect(!validateEmail("user@"));
     try std.testing.expect(!validateEmail("user@nodot"));
     try std.testing.expect(!validateEmail("user@@double.com"));
+    try std.testing.expect(!validateEmail("a@."));
+    try std.testing.expect(!validateEmail("a@.com"));
+    try std.testing.expect(!validateEmail("a@b."));
+    try std.testing.expect(!validateEmail("a@b..c"));
+    try std.testing.expect(!validateEmail("user name@example.com"));
+    try std.testing.expect(!validateEmail("user@example.com "));
+    try std.testing.expect(!validateEmail("user@example.com\r\nBcc:evil@x.com"));
+    try std.testing.expect(!validateEmail("user\x00@example.com"));
+    try std.testing.expect(!validateEmail("user\t@example.com"));
+    try std.testing.expect(!validateEmail("user@example.com\x7f"));
 }
 
 test "validateUuid" {

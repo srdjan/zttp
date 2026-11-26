@@ -665,11 +665,11 @@ test "DirectCheckSource projects each tagged admission outcome" {
         try std.testing.expectEqual(parser.type_syntax.AdmissionKind.any_type, diagnostics[0].kind);
         try std.testing.expectEqual(parser.type_syntax.AdmissionKind.void_type, diagnostics[1].kind);
         try std.testing.expectEqual(
-            @as(u32, @intCast(std.mem.indexOf(u8, source, "any").?)),
+            @as(u32, @intCast(std.mem.find(u8, source, "any").?)),
             diagnostics[0].span.start,
         );
         try std.testing.expectEqual(
-            @as(u32, @intCast(std.mem.indexOf(u8, source, "void").?)),
+            @as(u32, @intCast(std.mem.find(u8, source, "void").?)),
             diagnostics[1].span.start,
         );
         try std.testing.expect(owner.acceptedCapabilities() == null);
@@ -691,10 +691,18 @@ test "DirectCheckSource projects each tagged admission outcome" {
         );
         defer owner.deinit();
         switch (owner.outcome().*) {
-            .accepted => {},
+            .terminal_admission_refused => |failure| switch (failure) {
+                .diagnostic => |diagnostic| {
+                    try std.testing.expectEqual(
+                        parser.type_syntax.AdmissionKind.unterminated_string,
+                        diagnostic.kind,
+                    );
+                },
+                .unterminated_comment => return error.TestUnexpectedResult,
+            },
             else => return error.TestUnexpectedResult,
         }
-        try std.testing.expect(owner.acceptedCapabilities() != null);
+        try std.testing.expect(owner.acceptedCapabilities() == null);
         const last_observation = owner.parser.getLastAdmissionObservation() orelse
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(
@@ -702,11 +710,16 @@ test "DirectCheckSource projects each tagged admission outcome" {
             last_observation.kind,
         );
         try std.testing.expectEqual(
-            @as(u32, @intCast(std.mem.indexOfScalar(u8, source, '\n').?)),
+            @as(u32, @intCast(std.mem.findScalar(u8, source, '\n').?)),
             last_observation.span.start,
         );
         try std.testing.expectEqual(@as(usize, 0), owner.selectedAdmissionDiagnostics().len);
-        try std.testing.expect(owner.terminalAdmissionDiagnostic() == null);
+        const terminal = owner.terminalAdmissionDiagnostic() orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            parser.type_syntax.AdmissionKind.unterminated_string,
+            terminal.kind,
+        );
         try std.testing.expectEqual(@as(usize, 0), owner.parserErrors().len);
     }
 
@@ -781,7 +794,7 @@ test "DirectCheckSource projects each tagged admission outcome" {
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(parser.type_syntax.AdmissionKind.unterminated_string, terminal.kind);
         try std.testing.expectEqual(
-            @as(u32, @intCast(std.mem.indexOfScalar(u8, source, '\n').?)),
+            @as(u32, @intCast(std.mem.findScalar(u8, source, '\n').?)),
             terminal.span.start,
         );
         try std.testing.expectEqual(@as(usize, 0), owner.selectedAdmissionDiagnostics().len);
@@ -995,7 +1008,7 @@ test "direct source exposes ordered refusal diagnostics" {
         var lines = std.mem.splitScalar(u8, source, '\n');
         var line_text: []const u8 = "";
         for (0..want.line) |_| line_text = lines.next() orelse return error.TestUnexpectedResult;
-        const marker_at = std.mem.indexOf(u8, line_text, want.marker) orelse return error.TestUnexpectedResult;
+        const marker_at = std.mem.find(u8, line_text, want.marker) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(u32, @intCast(marker_at + 1)), got.column);
     }
 }

@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const ir = @import("zts-engine").parser.ir;
+const status_text = @import("zts-base").status_text;
 
 /// The lowest and highest status that a response can carry.
 pub const min_status: u16 = 100;
@@ -205,7 +206,7 @@ const status_stubs = blk: {
     var table: [count][]const u8 = undefined;
     for (&table, 0..) |*slot, i| {
         const status: u16 = min_status + @as(u16, @intCast(i));
-        const phrase = std.http.Status.phrase(@fromBackingInt(@intCast(status))) orelse "Unknown";
+        const phrase = status_text.forCode(status);
         const body = if (isOkStatus(status)) "{\\\"id\\\":\\\"1\\\"}" else "{}";
         slot.* = std.fmt.comptimePrint(
             "{{\"status\":{d},\"statusText\":\"{s}\",\"ok\":{s},\"headers\":{{}},\"body\":\"{s}\"}}",

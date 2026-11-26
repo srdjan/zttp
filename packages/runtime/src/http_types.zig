@@ -84,9 +84,6 @@ pub const HttpResponse = struct {
     /// Used to keep the runtime alive until the response is sent.
     requires_runtime: bool,
     allocator: std.mem.Allocator,
-    /// Pre-built raw HTTP response (status line + headers + body).
-    /// When set, sendResponseSync can write this directly without any processing.
-    prebuilt_raw: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) HttpResponse {
         return .{
@@ -97,7 +94,6 @@ pub const HttpResponse = struct {
             .body_owner = null,
             .requires_runtime = false,
             .allocator = allocator,
-            .prebuilt_raw = null,
         };
     }
 
@@ -121,8 +117,6 @@ pub const HttpResponse = struct {
     /// outlives the runtime that produced it. Needed by the owned execution
     /// path: the response is built from the runtime's lifetime arena, and
     /// releasing the slot may destroy that arena before the caller deinits.
-    /// `prebuilt_raw` is dropped rather than copied - it points into the
-    /// runtime's pattern memory and only the borrowed send path reads it.
     pub fn cloneDetached(self: *const HttpResponse, allocator: std.mem.Allocator) !HttpResponse {
         var out = HttpResponse.init(allocator);
         errdefer out.deinit();

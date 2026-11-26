@@ -366,7 +366,7 @@ fn checkAssertions(
         const unescaped = trace.unescapeJson(allocator, needle) catch needle;
         defer if (unescaped.ptr != needle.ptr) allocator.free(unescaped);
 
-        if (std.mem.indexOf(u8, response.body, unescaped) == null) {
+        if (std.mem.find(u8, response.body, unescaped) == null) {
             const msg = try allocator.print("body does not contain: {s}\n        actual body: {s}", .{
                 truncate(unescaped, 100), truncate(response.body, 200),
             });
@@ -639,7 +639,7 @@ test "checkAssertions: status mismatch fails" {
         failures.deinit(std.testing.allocator);
     }
     try std.testing.expectEqual(@as(usize, 1), failures.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, failures.items[0], "expected status: 404") != null);
+    try std.testing.expect(std.mem.find(u8, failures.items[0], "expected status: 404") != null);
 }
 
 test "checkAssertions: bodyContains match passes" {
@@ -662,7 +662,7 @@ test "checkAssertions: bodyContains mismatch fails" {
         failures.deinit(std.testing.allocator);
     }
     try std.testing.expectEqual(@as(usize, 1), failures.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, failures.items[0], "body does not contain") != null);
+    try std.testing.expect(std.mem.find(u8, failures.items[0], "body does not contain") != null);
 }
 
 test "runOneTest: request url with query string yields path without query (CLI-1 scaffold)" {

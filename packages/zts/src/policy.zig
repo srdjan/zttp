@@ -93,7 +93,6 @@ pub const DenyReason = enum {
     /// separate reason because it is a separate check: the name passed and the
     /// answer did not.
     address_scope_not_allowed,
-    policy_unavailable,
 
     pub fn toString(self: DenyReason) []const u8 {
         return switch (self) {
@@ -101,7 +100,6 @@ pub const DenyReason = enum {
             .missing_resource => "missing_resource",
             .not_in_allowlist => "not_in_allowlist",
             .address_scope_not_allowed => "address_scope_not_allowed",
-            .policy_unavailable => "policy_unavailable",
         };
     }
 };
@@ -139,20 +137,6 @@ pub const LocalPolicyChecker = struct {
         };
 
         return if (allowed) .allow else .{ .deny = .not_in_allowlist };
-    }
-};
-
-/// Wasm-backed policy checker - Phase 2 skeleton.
-///
-/// `LocalPolicyChecker` and `WasmPolicyChecker` are interchangeable: both
-/// expose `check(input: PolicyInput) PolicyResult`. The runtime picks one at
-/// startup based on whether a Wasm artifact is present on disk. Call sites
-/// do not change between the two modes.
-pub const WasmPolicyChecker = struct {
-    pub fn check(self: WasmPolicyChecker, input: PolicyInput) PolicyResult {
-        _ = self;
-        _ = input;
-        return .{ .deny = .policy_unavailable };
     }
 };
 
@@ -218,10 +202,10 @@ test "a denial event carries the sink, not the value that was refused" {
     try std.testing.expectEqual(@as(u64, 41), event.policy_generation);
     // The refused endpoint appears nowhere in the event, in whole or in part.
     for ([_][]const u8{ "evil.example.com", "evil", "443" }) |part| {
-        try std.testing.expect(std.mem.indexOf(u8, event.resourceIdSlice(), part) == null);
-        try std.testing.expect(std.mem.indexOf(u8, event.detailSlice(), part) == null);
-        try std.testing.expect(std.mem.indexOf(u8, event.resourceKindSlice(), part) == null);
-        try std.testing.expect(std.mem.indexOf(u8, event.moduleSlice(), part) == null);
+        try std.testing.expect(std.mem.find(u8, event.resourceIdSlice(), part) == null);
+        try std.testing.expect(std.mem.find(u8, event.detailSlice(), part) == null);
+        try std.testing.expect(std.mem.find(u8, event.resourceKindSlice(), part) == null);
+        try std.testing.expect(std.mem.find(u8, event.moduleSlice(), part) == null);
     }
 }
 
@@ -295,15 +279,6 @@ test "checker denies when allowlist excludes" {
         .resource = .{ .kind = "sql_query", .id = "drop_table" },
     });
     try std.testing.expectEqual(DenyReason.not_in_allowlist, result.deny);
-}
-
-test "WasmPolicyChecker fails closed while phase 2 is unavailable" {
-    const checker = WasmPolicyChecker{};
-    const result = checker.check(.{
-        .action = .http_outbound,
-        .resource = .{ .kind = resource_kind_endpoint, .id = "https://api.example.com:443" },
-    });
-    try std.testing.expectEqual(DenyReason.policy_unavailable, result.deny);
 }
 
 test "checker is permissive when allowlist section is omitted" {
@@ -451,12 +426,4 @@ test "http.outbound is decided on the endpoint, not the host" {
         .resource = .{ .kind = resource_kind_endpoint, .id = "https://evil.example.com:443" },
     });
     try std.testing.expectEqual(DenyReason.not_in_allowlist, other.deny);
-}
-
-test "WasmPolicyChecker matches LocalPolicyChecker for known fixtures" {
-    // Phase 2 contract: the Wasm-backed checker must produce identical
-    // results to the in-process checker for all fixtures in
-    // packages/zts/src/fixtures/policy/. This test will fail until the
-    // interpreter is implemented; it locks in the equivalence contract.
-    return error.SkipZigTest; // remove this line once Phase 2 lands
 }

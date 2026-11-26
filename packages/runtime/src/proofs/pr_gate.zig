@@ -599,18 +599,18 @@ fn runGitLimit(allocator: std.mem.Allocator, cwd: []const u8, args: []const []co
 }
 
 fn refExists(allocator: std.mem.Allocator, cwd: []const u8, ref: []const u8) bool {
-    const res = runGit(allocator, cwd, &.{ "git", "rev-parse", "--verify", "--quiet", ref }) catch return false;
+    const res = runGit(allocator, cwd, &.{ "git", "rev-parse", "--verify", "--quiet", "--end-of-options", ref }) catch return false;
     defer allocator.free(res.stdout);
     return res.ok;
 }
 
 fn isHandlerCandidate(path: []const u8) bool {
     if (!zts.classifySourcePath(path).isSupportedFile()) return false;
-    if (std.mem.indexOf(u8, path, ".test.") != null) return false;
-    if (std.mem.indexOf(u8, path, ".spec.") != null) return false;
-    if (std.mem.startsWith(u8, path, "tests/") or std.mem.indexOf(u8, path, "/tests/") != null) return false;
-    if (std.mem.startsWith(u8, path, "test/") or std.mem.indexOf(u8, path, "/test/") != null) return false;
-    if (std.mem.indexOf(u8, path, "fixtures/") != null) return false;
+    if (std.mem.find(u8, path, ".test.") != null) return false;
+    if (std.mem.find(u8, path, ".spec.") != null) return false;
+    if (std.mem.startsWith(u8, path, "tests/") or std.mem.find(u8, path, "/tests/") != null) return false;
+    if (std.mem.startsWith(u8, path, "test/") or std.mem.find(u8, path, "/test/") != null) return false;
+    if (std.mem.find(u8, path, "fixtures/") != null) return false;
     return true;
 }
 
@@ -625,17 +625,17 @@ fn changedSources(
     // `--no-renames` lists a renamed file under both paths: the old path is a
     // deletion and the new path an addition, so a handler that still imports
     // the old path reaches a changed file.
+    // `-z` emits NUL-terminated raw paths without C-quoting.
     const res = if (head) |h| blk: {
         const range = try arena.print("{s}...{s}", .{ base, h });
-        break :blk try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--no-renames", "--diff-filter=ACMRD", range });
-    } else try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--no-renames", "--diff-filter=ACMRD", base });
+        break :blk try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACMRD", "--end-of-options", range, "--" });
+    } else try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACMRD", "--end-of-options", base, "--" });
     defer arena.free(res.stdout);
     if (!res.ok) return error.BadGitRef;
 
     var list: std.ArrayList([]const u8) = .empty;
-    var it = std.mem.tokenizeScalar(u8, res.stdout, '\n');
-    while (it.next()) |line| {
-        const path = std.mem.trim(u8, line, " \t\r");
+    var it = std.mem.tokenizeScalar(u8, res.stdout, 0);
+    while (it.next()) |path| {
         if (path.len == 0) continue;
         if (!zts.classifySourcePath(path).isSupportedFile()) continue;
         try list.append(arena, try arena.dupe(u8, path));
@@ -647,7 +647,7 @@ fn changedSources(
 /// (a newly added handler), which `git show` reports as a non-zero exit.
 fn readAtRef(arena: std.mem.Allocator, cwd: []const u8, ref: []const u8, path: []const u8) !?[]u8 {
     const spec = try arena.print("{s}:{s}", .{ ref, path });
-    const res = try runGit(arena, cwd, &.{ "git", "show", spec });
+    const res = try runGit(arena, cwd, &.{ "git", "show", "--end-of-options", spec });
     if (!res.ok) {
         arena.free(res.stdout);
         return null;
@@ -696,7 +696,7 @@ const RevisionReader = struct {
         defer allocator.free(rel);
         const spec = try allocator.print("{s}:./{s}", .{ self.ref, rel });
         defer allocator.free(spec);
-        const res = try runGit(allocator, self.cwd, &.{ "git", "show", spec });
+        const res = try runGit(allocator, self.cwd, &.{ "git", "show", "--end-of-options", spec });
         if (!res.ok) {
             allocator.free(res.stdout);
             return error.FileNotFound;
@@ -736,15 +736,23 @@ const SourceEntry = struct { path: []const u8, source: []const u8 };
 fn listSideSources(arena: std.mem.Allocator, cwd: []const u8, ref: ?[]const u8) ![]const SourceEntry {
     var list: std.ArrayList(SourceEntry) = .empty;
     if (ref) |r| {
-        const tree = try runGit(arena, cwd, &.{ "git", "ls-tree", "-r", "--name-only", r });
+        // Resolve the ref to an object hash before invoking `git archive`,
+        // which does not accept `--end-of-options`, so a leading-dash ref name
+        // can never be parsed as an archive option.
+        const resolved = try runGit(arena, cwd, &.{ "git", "rev-parse", "--verify", "--quiet", "--end-of-options", r });
+        if (!resolved.ok) return error.GitReadFailed;
+        const rev_oid = std.mem.trim(u8, resolved.stdout, " \t\r\n");
+        if (rev_oid.len == 0) return error.GitReadFailed;
+
+        const tree = try runGit(arena, cwd, &.{ "git", "ls-tree", "-r", "--name-only", "-z", "--end-of-options", rev_oid });
         if (!tree.ok) return error.GitReadFailed;
         var any = false;
-        var lines = std.mem.tokenizeScalar(u8, tree.stdout, '\n');
+        var lines = std.mem.tokenizeScalar(u8, tree.stdout, 0);
         while (lines.next()) |line| {
             if (zts.classifySourcePath(line).isSupportedFile()) any = true;
         }
         if (!any) return &.{};
-        const archive = try runGitLimit(arena, cwd, &.{ "git", "archive", "--format=tar", r, "--", "*.ts" }, max_archive_bytes);
+        const archive = try runGitLimit(arena, cwd, &.{ "git", "archive", "--format=tar", rev_oid, "--", "*.ts" }, max_archive_bytes);
         if (!archive.ok) return error.GitReadFailed;
         var reader: std.Io.Reader = .fixed(archive.stdout);
         var name_buffer: [std.fs.max_path_bytes]u8 = undefined;
@@ -772,7 +780,7 @@ fn listSideSources(arena: std.mem.Allocator, cwd: []const u8, ref: ?[]const u8) 
 
 fn mentionsAny(source: []const u8, needles: []const []const u8) bool {
     for (needles) |needle| {
-        if (needle.len > 0 and std.mem.indexOf(u8, source, needle) != null) return true;
+        if (needle.len > 0 and std.mem.find(u8, source, needle) != null) return true;
     }
     return false;
 }
@@ -795,7 +803,7 @@ fn scanSide(
     var graph: SideGraph = .empty;
     for (try listSideSources(arena, cwd, ref)) |entry| {
         const is_changed = containsPath(changed, entry.path);
-        if (!is_changed and std.mem.indexOf(u8, entry.source, "./") == null) continue;
+        if (!is_changed and std.mem.find(u8, entry.source, "./") == null) continue;
         if (other) |o| {
             if (o.get(entry.path)) |known| {
                 if (std.mem.eql(u8, known.source, entry.source)) {
@@ -1032,7 +1040,8 @@ pub fn run(
             // deletion removed all of its routes -> breaking (must land in
             // results, which worstVerdict ranks). A deleted non-handler is noise.
             if (before) |before_src| {
-                const source_kind = classifySource(gpa, before_src, path) catch |err| {
+                var before_reader: RevisionReader = .{ .cwd = cwd, .ref = base };
+                const source_kind = classifySource(gpa, before_src, path, before_reader.importReader()) catch |err| {
                     try stderr.print(
                         "zttp proofs gate: analysis failed for deleted `{s}`: {s}\n",
                         .{ path, @errorName(err) },
@@ -1061,7 +1070,13 @@ pub fn run(
             // valid handler. Treating every added TypeScript file as additive
             // lets malformed source bypass the same fail-closed boundary used
             // for modified and deleted files.
-            const source_kind = classifySource(gpa, after.?, path) catch |err| {
+            var after_reader: RevisionReader = undefined;
+            var after_import: ?zts_cli.precompile.ImportReader = null;
+            if (opts.head) |head_ref| {
+                after_reader = .{ .cwd = cwd, .ref = head_ref };
+                after_import = after_reader.importReader();
+            }
+            const source_kind = classifySource(gpa, after.?, path, after_import) catch |err| {
                 try stderr.print(
                     "zttp proofs gate: analysis failed for added `{s}`: {s}\n",
                     .{ path, @errorName(err) },
@@ -1218,9 +1233,15 @@ fn isImplicitCapsule(result: *const zts_cli.precompile.CheckResult) bool {
 /// Classify only successfully analyzed source. A compiler failure must not be
 /// mistaken for a library module because that would make a deleted handler look
 /// safe to the gate.
-fn classifySource(gpa: std.mem.Allocator, src: []const u8, path: []const u8) !SourceKind {
+fn classifySource(
+    gpa: std.mem.Allocator,
+    src: []const u8,
+    path: []const u8,
+    import_reader: ?zts_cli.precompile.ImportReader,
+) !SourceKind {
     var result = zts_cli.precompile.runCheckOnlyFromSourceWithOptions(gpa, src, path, .{
         .json_mode = true,
+        .import_reader = import_reader,
     }) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return error.UnanalysableSource,
@@ -1379,15 +1400,16 @@ test "classifySource distinguishes handlers, libraries, and failed analysis" {
             testing.allocator,
             "function handler(req: Request): Proof<Response, \"pure\"> { return Response.text('ok'); }",
             "handler.ts",
+            null,
         ),
     );
     try testing.expectEqual(
         SourceKind.non_handler,
-        try classifySource(testing.allocator, "export const answer: number = 42;", "library.ts"),
+        try classifySource(testing.allocator, "export const answer: number = 42;", "library.ts", null),
     );
     try testing.expectError(
         error.UnanalysableSource,
-        classifySource(testing.allocator, "function handler(", "broken.ts"),
+        classifySource(testing.allocator, "function handler(", "broken.ts", null),
     );
 }
 
@@ -1432,8 +1454,8 @@ test "gate fails closed when a deleted TypeScript file cannot be analyzed" {
 
     try testing.expectEqual(@as(u8, 2), code);
     try testing.expectEqual(@as(usize, 0), out.writer.buffered().len);
-    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "analysis failed for deleted `handler.ts`") != null);
-    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "UnanalysableSource") != null);
+    try testing.expect(std.mem.find(u8, err.writer.buffered(), "analysis failed for deleted `handler.ts`") != null);
+    try testing.expect(std.mem.find(u8, err.writer.buffered(), "UnanalysableSource") != null);
 }
 
 test "gate analyzes newly added TypeScript before classifying it" {
@@ -1511,10 +1533,10 @@ test "gate analyzes newly added TypeScript before classifying it" {
         if (case.expected_output.len == 0) {
             try testing.expectEqual(@as(usize, 0), out.writer.buffered().len);
         } else {
-            try testing.expect(std.mem.indexOf(u8, out.writer.buffered(), case.expected_output) != null);
+            try testing.expect(std.mem.find(u8, out.writer.buffered(), case.expected_output) != null);
         }
         if (case.expected_error) |needle| {
-            try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), needle) != null);
+            try testing.expect(std.mem.find(u8, err.writer.buffered(), needle) != null);
         }
     }
 }
@@ -1565,20 +1587,20 @@ test "renderMarkdown: breaking report carries header, table, and counterexample"
     try renderMarkdown(&aw.writer, "origin/main", "working tree", &results, &.{}, .breaking);
     const out = aw.writer.buffered();
 
-    try testing.expect(std.mem.indexOf(u8, out, sticky_marker) != null);
-    try testing.expect(std.mem.indexOf(u8, out, "**Verdict: `breaking`**") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "| `api/users.ts` | `breaking` |") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1 response changed, 1 removed") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "`- route /users/:id`") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "`DELETE /users/:id` removed") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "`GET /users/:id` status 200 → response changed") != null);
+    try testing.expect(std.mem.find(u8, out, sticky_marker) != null);
+    try testing.expect(std.mem.find(u8, out, "**Verdict: `breaking`**") != null);
+    try testing.expect(std.mem.find(u8, out, "| `api/users.ts` | `breaking` |") != null);
+    try testing.expect(std.mem.find(u8, out, "1 response changed, 1 removed") != null);
+    try testing.expect(std.mem.find(u8, out, "`- route /users/:id`") != null);
+    try testing.expect(std.mem.find(u8, out, "`DELETE /users/:id` removed") != null);
+    try testing.expect(std.mem.find(u8, out, "`GET /users/:id` status 200 → response changed") != null);
 }
 
 test "renderMarkdown: empty range states no changed handlers" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     try renderMarkdown(&aw.writer, "origin/main", "working tree", &.{}, &.{}, .equivalent);
-    try testing.expect(std.mem.indexOf(u8, aw.writer.buffered(), "_No changed handlers in this range._") != null);
+    try testing.expect(std.mem.find(u8, aw.writer.buffered(), "_No changed handlers in this range._") != null);
 }
 
 test "renderJson: shape carries schema, verdict, safe, and behaviorDiff keys" {
@@ -1858,14 +1880,14 @@ test "renderMarkdown: a lost proof is listed, counted in the table, and named as
     try renderMarkdown(&aw.writer, "origin/main", "working tree", &results, &.{}, .breaking);
     const out = aw.writer.buffered();
 
-    try testing.expect(std.mem.indexOf(u8, out, "| `api/users.ts` | `breaking` | 2 proofs lost |") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "| `api/health.ts` | `equivalent` | 1 proof lost |") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "**Lost proofs**") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "- `fault_covered`: proven → not proven (critical)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "- `pure`: proven → not proven (info)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "No lost proof is critical, so the verdict is unchanged.") != null);
+    try testing.expect(std.mem.find(u8, out, "| `api/users.ts` | `breaking` | 2 proofs lost |") != null);
+    try testing.expect(std.mem.find(u8, out, "| `api/health.ts` | `equivalent` | 1 proof lost |") != null);
+    try testing.expect(std.mem.find(u8, out, "**Lost proofs**") != null);
+    try testing.expect(std.mem.find(u8, out, "- `fault_covered`: proven → not proven (critical)") != null);
+    try testing.expect(std.mem.find(u8, out, "- `pure`: proven → not proven (info)") != null);
+    try testing.expect(std.mem.find(u8, out, "No lost proof is critical, so the verdict is unchanged.") != null);
     // The health section exists although its verdict is a safe no-op.
-    try testing.expect(std.mem.indexOf(u8, out, "### `api/health.ts` — equivalent") != null);
+    try testing.expect(std.mem.find(u8, out, "### `api/health.ts` — equivalent") != null);
 }
 
 test "renderJson: lostProperties is always present and lists property and severity" {
@@ -1998,9 +2020,9 @@ test "run: a critical lost proof fails the gate, lists the loss, and writes no l
     const report = out.writer.buffered();
 
     try testing.expectEqual(@as(u8, 1), code);
-    try testing.expect(std.mem.indexOf(u8, report, "**Verdict: `breaking`**") != null);
-    try testing.expect(std.mem.indexOf(u8, report, "**Lost proofs**") != null);
-    try testing.expect(std.mem.indexOf(u8, report, "- `fault_covered`: proven → not proven (critical)") != null);
+    try testing.expect(std.mem.find(u8, report, "**Verdict: `breaking`**") != null);
+    try testing.expect(std.mem.find(u8, report, "**Lost proofs**") != null);
+    try testing.expect(std.mem.find(u8, report, "- `fault_covered`: proven → not proven (critical)") != null);
     // The gate writes no ledger row, with signing left on or off.
     try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, ".zttp/proofs.jsonl", .{}));
     try testing.expectEqualStrings("", err.writer.buffered());
@@ -2189,15 +2211,15 @@ test "run: an implicit-default handler whose status changes gets a breaking verd
     defer g.deinit();
     try testing.expectEqual(@as(u8, 1), g.code);
     try testing.expectEqualStrings("", g.stderr);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"verdict\":\"breaking\"") != null);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"capsule\":\"implicit\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"verdict\":\"breaking\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"capsule\":\"implicit\"") != null);
 }
 
 test "run: an implicit-default handler marks the markdown report with no declared capsule" {
     const g = try gateOverEdit(implicit_handler_base, implicit_handler_status_changed, .md);
     defer g.deinit();
     try testing.expectEqual(@as(u8, 1), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.report, "no declared capsule") != null);
+    try testing.expect(std.mem.find(u8, g.report, "no declared capsule") != null);
 }
 
 test "run: an implicit-default handler with an unchanged behavior is safe" {
@@ -2205,7 +2227,7 @@ test "run: an implicit-default handler with an unchanged behavior is safe" {
     defer g.deinit();
     try testing.expectEqual(@as(u8, 0), g.code);
     try testing.expectEqualStrings("", g.stderr);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"capsule\":\"implicit\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"capsule\":\"implicit\"") != null);
 }
 
 test "run: a declared capsule that fails on both sides still exits 2" {
@@ -2213,7 +2235,7 @@ test "run: a declared capsule that fails on both sides still exits 2" {
     defer g.deinit();
     try testing.expectEqual(@as(u8, 2), g.code);
     try testing.expectEqual(@as(usize, 0), g.report.len);
-    try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
+    try testing.expect(std.mem.find(u8, g.stderr, "UnanalysableSource") != null);
 }
 
 // A default-profile handler that returns the value of a helper that reads the
@@ -2255,8 +2277,8 @@ test "run: a default-profile clock helper that the handler returns gets a breaki
     defer g.deinit();
     try testing.expectEqual(@as(u8, 1), g.code);
     try testing.expectEqualStrings("", g.stderr);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"verdict\":\"breaking\"") != null);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"capsule\":\"implicit\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"verdict\":\"breaking\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"capsule\":\"implicit\"") != null);
 }
 
 // A default-profile handler that imports `zttp:cache` and calls a helper that
@@ -2292,8 +2314,8 @@ test "run: a default-profile cache helper whose read_only the ZTS501 row names g
     defer g.deinit();
     try testing.expectEqual(@as(u8, 1), g.code);
     try testing.expectEqualStrings("", g.stderr);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"verdict\":\"breaking\"") != null);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"capsule\":\"implicit\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"verdict\":\"breaking\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"capsule\":\"implicit\"") != null);
 }
 
 // Control: the same import, and a helper that reads the clock. The handler
@@ -2331,7 +2353,7 @@ test "run: a default-profile clock helper under a cache import still exits 2 whe
     defer g.deinit();
     try testing.expectEqual(@as(u8, 2), g.code);
     try testing.expectEqual(@as(usize, 0), g.report.len);
-    try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
+    try testing.expect(std.mem.find(u8, g.stderr, "UnanalysableSource") != null);
 }
 
 test "run: a default-profile clock helper that the handler returns is safe when only a comment changes" {
@@ -2339,7 +2361,7 @@ test "run: a default-profile clock helper that the handler returns is safe when 
     defer g.deinit();
     try testing.expectEqual(@as(u8, 0), g.code);
     try testing.expectEqualStrings("", g.stderr);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"capsule\":\"implicit\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"capsule\":\"implicit\"") != null);
 }
 
 // The handler calls the clock helper and drops the value, so it holds
@@ -2395,7 +2417,7 @@ test "run: a ZTS606 under a declared deterministic capsule still exits 2" {
     defer g.deinit();
     try testing.expectEqual(@as(u8, 2), g.code);
     try testing.expectEqual(@as(usize, 0), g.report.len);
-    try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
+    try testing.expect(std.mem.find(u8, g.stderr, "UnanalysableSource") != null);
 }
 
 // Control (passes at HEAD): the handler holds `deterministic`, so the marked
@@ -2406,7 +2428,7 @@ test "run: a default-profile clock helper whose value the handler drops still ex
     defer g.deinit();
     try testing.expectEqual(@as(u8, 2), g.code);
     try testing.expectEqual(@as(usize, 0), g.report.len);
-    try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
+    try testing.expect(std.mem.find(u8, g.stderr, "UnanalysableSource") != null);
 }
 
 // The handler branches on the clock value. A branch on a varying value clears
@@ -2504,17 +2526,17 @@ test "run: an implicit-default handler whose imports were not all followed exits
     defer g.deinit();
     try testing.expectEqual(@as(u8, 2), g.code);
     try testing.expectEqual(@as(usize, 0), g.report.len);
-    try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
+    try testing.expect(std.mem.find(u8, g.stderr, "UnanalysableSource") != null);
 }
 
 test "classifySource: an implicit-default handler is a handler and a failing declared capsule is not analyzable" {
     try testing.expectEqual(
         SourceKind.implicit_handler,
-        try classifySource(testing.allocator, implicit_handler_base, "handler.ts"),
+        try classifySource(testing.allocator, implicit_handler_base, "handler.ts", null),
     );
     try testing.expectError(
         error.UnanalysableSource,
-        classifySource(testing.allocator, declared_failing_base, "handler.ts"),
+        classifySource(testing.allocator, declared_failing_base, "handler.ts", null),
     );
 }
 
@@ -2609,9 +2631,9 @@ test "run: a pure helper that gains a cache write breaks the handler that import
     );
     defer g.deinit();
     try testing.expectEqual(@as(u8, 1), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"verdict\":\"breaking\"") != null);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"path\":\"handler.ts\"") != null);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"property\":\"retry_safe\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"verdict\":\"breaking\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"path\":\"handler.ts\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"property\":\"retry_safe\"") != null);
 }
 
 test "run: a helper that fails its own analysis is not a root and its importer is compared" {
@@ -2644,8 +2666,8 @@ test "run: a helper that fails its own analysis is not a root and its importer i
     );
     defer g.deinit();
     try testing.expectEqual(@as(u8, 1), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.stderr, "analysis failed for") == null);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"path\":\"handler.ts\"") != null);
+    try testing.expect(std.mem.find(u8, g.stderr, "analysis failed for") == null);
+    try testing.expect(std.mem.find(u8, g.report, "\"path\":\"handler.ts\"") != null);
 }
 
 test "run: a changed helper that no handler imports is skipped as unreferenced" {
@@ -2671,8 +2693,8 @@ test "run: a changed helper that no handler imports is skipped as unreferenced" 
     );
     defer g.deinit();
     try testing.expectEqual(@as(u8, 0), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"handlersChecked\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, g.report, "{\"path\":\"orphan.ts\",\"reason\":\"unreferenced_helper\"}") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"handlersChecked\":0") != null);
+    try testing.expect(std.mem.find(u8, g.report, "{\"path\":\"orphan.ts\",\"reason\":\"unreferenced_helper\"}") != null);
 }
 
 test "run: a change two imports away from a handler reaches the handler" {
@@ -2712,7 +2734,7 @@ test "run: a change two imports away from a handler reaches the handler" {
     );
     defer g.deinit();
     try testing.expectEqual(@as(u8, 1), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"path\":\"handler.ts\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"path\":\"handler.ts\"") != null);
 }
 
 test "run: a renamed helper that an importer still names by the old path exits 2" {
@@ -2724,7 +2746,7 @@ test "run: a renamed helper that an importer still names by the old path exits 2
     );
     defer g.deinit();
     try testing.expectEqual(@as(u8, 2), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.stderr, "analysis failed for `handler.ts`") != null);
+    try testing.expect(std.mem.find(u8, g.stderr, "analysis failed for `handler.ts`") != null);
 }
 
 test "run: a deleted helper that a handler still imports exits 2" {
@@ -2736,7 +2758,7 @@ test "run: a deleted helper that a handler still imports exits 2" {
     );
     defer g.deinit();
     try testing.expectEqual(@as(u8, 2), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.stderr, "analysis failed for `handler.ts`") != null);
+    try testing.expect(std.mem.find(u8, g.stderr, "analysis failed for `handler.ts`") != null);
 }
 
 test "run: a helper change with no effect change lists the importer as compared and exits 0" {
@@ -2748,9 +2770,9 @@ test "run: a helper change with no effect change lists the importer as compared 
     );
     defer g.deinit();
     try testing.expectEqual(@as(u8, 0), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"handlersChecked\":1") != null);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"path\":\"handler.ts\"") != null);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"verdict\":\"equivalent\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"handlersChecked\":1") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"path\":\"handler.ts\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"verdict\":\"equivalent\"") != null);
 }
 
 test "run: an unchanged file that fails strict checks and imports nothing does not affect a helper verdict" {
@@ -2766,7 +2788,7 @@ test "run: an unchanged file that fails strict checks and imports nothing does n
     );
     defer g.deinit();
     try testing.expectEqual(@as(u8, 1), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.report, "probe.ts") == null);
+    try testing.expect(std.mem.find(u8, g.report, "probe.ts") == null);
 }
 
 // The module graph has no depth limit, so the chain of nine helpers is checked in
@@ -2808,7 +2830,7 @@ test "run: a handler that reaches a changed helper through a chain of nine helpe
     );
     defer g.deinit();
     try testing.expectEqual(@as(u8, 1), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"path\":\"handler.ts\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"path\":\"handler.ts\"") != null);
 }
 
 test "run: an unparseable file that names a changed helper stops the gate" {
@@ -2821,7 +2843,7 @@ test "run: an unparseable file that names a changed helper stops the gate" {
     );
     defer g.deinit();
     try testing.expectEqual(@as(u8, 2), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.stderr, "cannot read the imports of `broken.ts`") != null);
+    try testing.expect(std.mem.find(u8, g.stderr, "cannot read the imports of `broken.ts`") != null);
 }
 
 test "run: an unparseable file that names no changed helper does not stop the gate" {
@@ -2834,7 +2856,7 @@ test "run: an unparseable file that names no changed helper does not stop the ga
     );
     defer g.deinit();
     try testing.expectEqual(@as(u8, 0), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.report, "{\"path\":\"lib.ts\",\"reason\":\"unreferenced_helper\"}") != null);
+    try testing.expect(std.mem.find(u8, g.report, "{\"path\":\"lib.ts\",\"reason\":\"unreferenced_helper\"}") != null);
 }
 
 test "run: a handler that imports a changed helper without an extension is followed and breaking" {
@@ -2853,5 +2875,5 @@ test "run: a handler that imports a changed helper without an extension is follo
     );
     defer g.deinit();
     try testing.expectEqual(@as(u8, 1), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.report, "\"path\":\"handler.ts\"") != null);
+    try testing.expect(std.mem.find(u8, g.report, "\"path\":\"handler.ts\"") != null);
 }

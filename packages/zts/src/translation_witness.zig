@@ -127,9 +127,11 @@ pub const Recorder = struct {
 
     fn currentIndex(self: *Recorder) Error!usize {
         if (self.stack.items.len == 0) {
+            errdefer self.incomplete = true;
             // The module's own scope, opened lazily so a caller does not have
             // to remember to start it.
             try self.scopes.append(self.allocator, .{ .node = module_scope });
+            errdefer _ = self.scopes.pop();
             try self.stack.append(self.allocator, self.scopes.items.len - 1);
         }
         return self.stack.items[self.stack.items.len - 1];
@@ -141,8 +143,10 @@ pub const Recorder = struct {
 
     /// Enter a nested function's code buffer.
     pub fn beginFunctionScope(self: *Recorder, node: u32) Error!void {
+        errdefer self.incomplete = true;
         _ = try self.currentIndex();
         try self.scopes.append(self.allocator, .{ .node = node });
+        errdefer _ = self.scopes.pop();
         try self.stack.append(self.allocator, self.scopes.items.len - 1);
     }
 
@@ -157,14 +161,15 @@ pub const Recorder = struct {
 
     /// Open a frame for an IR node about to be emitted.
     pub fn beginNode(self: *Recorder, node: u32, code_start: u32) Error!void {
+        errdefer self.incomplete = true;
         try self.open.append(self.allocator, .{ .node = node, .code_start = code_start });
     }
 
     /// Close the innermost frame. `record` is false for a node the proof IR does
     /// not carry, so the frame is still balanced but nothing is emitted.
     pub fn endNode(self: *Recorder, code_end: u32, record: bool) Error!void {
+        errdefer self.incomplete = true;
         if (self.open.items.len == 0) {
-            self.incomplete = true;
             return error.WitnessIncomplete;
         }
         const frame = self.open.pop().?;
@@ -172,7 +177,6 @@ pub const Recorder = struct {
         if (code_end < frame.code_start) {
             // A span that runs backwards means the code buffer moved under the
             // frame. Recording it would describe a range that does not exist.
-            self.incomplete = true;
             return error.WitnessIncomplete;
         }
         const scope = try self.current();
@@ -185,6 +189,7 @@ pub const Recorder = struct {
 
     /// Record a jump emitted inside the innermost open frame.
     pub fn recordJump(self: *Recorder, instruction_offset: u32, target_label: u32) Error!void {
+        errdefer self.incomplete = true;
         const node = if (self.open.items.len == 0)
             0
         else
@@ -205,11 +210,11 @@ pub const Recorder = struct {
         context: anytype,
         comptime labelOffset: fn (@TypeOf(context), u32) ?u32,
     ) Error!void {
+        errdefer self.incomplete = true;
         const scope = try self.current();
         for (scope.jumps.items) |*jump| {
             if (jump.resolved) continue;
             const offset = labelOffset(context, jump.target_label) orelse {
-                self.incomplete = true;
                 return error.WitnessIncomplete;
             };
             jump.target_offset = offset;
@@ -251,10 +256,19 @@ pub const Recorder = struct {
             return;
         };
         for (scope.emissions.items) |*emission| {
+            const pre_end_wide: u64 = @as(u64, emission.code_start) + @as(u64, emission.code_len);
+            if (pre_end_wide > std.math.maxInt(u32)) {
+                self.incomplete = true;
+                return;
+            }
             const start = remap(context, emission.code_start);
-            const end = remap(context, emission.code_start + emission.code_len);
+            const end = remap(context, @intCast(pre_end_wide));
+            if (end < start) {
+                self.incomplete = true;
+                return;
+            }
             emission.code_start = start;
-            emission.code_len = if (end >= start) end - start else 0;
+            emission.code_len = end - start;
         }
         for (scope.jumps.items) |*jump| {
             jump.instruction_offset = remap(context, jump.instruction_offset);
@@ -453,4 +467,29 @@ test "every rewrite kind names itself" {
         try testing.expect(kind.name().len > 0);
         try testing.expectEqualStrings(field, kind.name());
     }
+}
+
+test "OOM on endNode and inverted compaction mark the recorder incomplete" {
+    // OOM after popping the open frame must still mark incomplete so check() refuses.
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    var rec_oom = Recorder.init(failing.allocator());
+    defer rec_oom.deinit();
+    try rec_oom.beginNode(1, 0); // allocation 0: open frame list
+    try testing.expectError(error.OutOfMemory, rec_oom.endNode(4, true)); // allocation 1 fails in scopes.append
+    try testing.expect(rec_oom.incomplete);
+    try testing.expectError(error.WitnessIncomplete, rec_oom.check());
+
+    // Compaction that inverts an emission span must mark incomplete.
+    const InvertRemap = struct {
+        fn map(_: @This(), offset: u32) u32 {
+            return if (offset < 20) 20 - offset else 0;
+        }
+    };
+    var rec_inv = Recorder.init(testing.allocator);
+    defer rec_inv.deinit();
+    try rec_inv.beginNode(1, 2);
+    try rec_inv.endNode(10, true);
+    rec_inv.applyCompaction(InvertRemap{}, InvertRemap.map, 10);
+    try testing.expect(rec_inv.incomplete);
+    try testing.expectError(error.WitnessIncomplete, rec_inv.check());
 }

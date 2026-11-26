@@ -776,7 +776,7 @@ pub fn buildFetchUrl(
     const keys = try q.getOwnEnumerableKeys(rt.allocator, pool);
     defer rt.allocator.free(keys);
 
-    var wrote_any = std.mem.indexOfScalar(u8, base_url, '?') != null;
+    var wrote_any = std.mem.findScalar(u8, base_url, '?') != null;
     for (keys) |key_atom| {
         const key_name = rt.ctx.atoms.getName(key_atom) orelse continue;
         const item = q.getOwnProperty(pool, key_atom) orelse continue;
@@ -874,11 +874,17 @@ fn parseFetchInitOptions(
             if (key_name.len == 0) {
                 return fetchInitError(rt, allocator, &options, "InvalidHeaders", "header name must be non-empty");
             }
-            if (std.mem.indexOfAny(u8, key_name, "\r\n") != null) {
+            if (std.mem.findAny(u8, key_name, "\r\n") != null) {
                 return fetchInitError(rt, allocator, &options, "InvalidHeaders", "header name contains newline");
             }
-            if (std.mem.indexOfAny(u8, header_str, "\r\n") != null) {
+            if (!http_parser.isValidHeaderName(key_name)) {
+                return fetchInitError(rt, allocator, &options, "InvalidHeaders", "header name contains invalid character");
+            }
+            if (std.mem.findAny(u8, header_str, "\r\n") != null) {
                 return fetchInitError(rt, allocator, &options, "InvalidHeaders", "header value contains newline");
+            }
+            if (std.mem.findScalar(u8, header_str, 0) != null) {
+                return fetchInitError(rt, allocator, &options, "InvalidHeaders", "header value contains NUL byte");
             }
             try options.headers.append(allocator, .{ .name = key_name, .value = header_str });
         }
@@ -1013,7 +1019,7 @@ const OwnedExchange = struct {
 
 fn outboundExchange(rt: View, input: ExchangeInput, failure: *ExchangeFailure) !OwnedExchange {
     const allocator = rt.transport_allocator;
-    const backend = rt.backend.?;
+    const backend = rt.backend orelse return failure.set("OutboundIoUnavailable", "outbound I/O backend is not initialized");
     var client = std.http.Client{
         .allocator = allocator,
         .io = backend.io(),
@@ -1112,7 +1118,7 @@ fn outboundExchange(rt: View, input: ExchangeInput, failure: *ExchangeFailure) !
         return failure.set("TimedOut", "exceeded outbound_timeout_ms");
     }
 
-    return .{ .head = owned_head, .body = response_body, .status = status, .ok = response.head.status.class() != .server_error and response.head.status.class() != .client_error };
+    return .{ .head = owned_head, .body = response_body, .status = status, .ok = status >= 200 and status < 300 };
 }
 
 fn fetchSyncResult(rt: View, args: []const zq.JSValue) !zq.JSValue {
@@ -1366,12 +1372,12 @@ fn httpRequestResultJsonAlloc(rt: View, args: []const zq.JSValue) ![]u8 {
     if (!rt.config.enabled) {
         return try httpRequestErrorJsonAlloc(a, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
     }
-    if (args.len == 0 or !args[0].isString()) {
+    const input_json = if (args.len > 0) getStringData(args[0]) else null;
+    if (input_json == null) {
         return try httpRequestErrorJsonAlloc(a, "InvalidArgs", "expected one JSON string argument");
     }
 
-    const input_json = args[0].toPtr(zq.JSString).data();
-    var parsed = std.json.parseFromSlice(std.json.Value, a, input_json, .{}) catch {
+    var parsed = std.json.parseFromSlice(std.json.Value, a, input_json.?, .{}) catch {
         return try httpRequestErrorJsonAlloc(a, "InvalidJson", "failed to parse request JSON");
     };
     defer parsed.deinit();
@@ -1452,8 +1458,10 @@ fn httpRequestResultJsonAlloc(rt: View, args: []const zq.JSValue) ![]u8 {
             const name = entry.key_ptr.*;
             const value = entry.value_ptr.string;
             if (name.len == 0) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header name must be non-empty");
-            if (std.mem.indexOfAny(u8, name, "\r\n") != null) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header name contains newline");
-            if (std.mem.indexOfAny(u8, value, "\r\n") != null) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header value contains newline");
+            if (std.mem.findAny(u8, name, "\r\n") != null) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header name contains newline");
+            if (!http_parser.isValidHeaderName(name)) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header name contains invalid character");
+            if (std.mem.findAny(u8, value, "\r\n") != null) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header value contains newline");
+            if (std.mem.findScalar(u8, value, 0) != null) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header value contains NUL byte");
 
             try headers.append(.{ .name = name, .value = value });
         }

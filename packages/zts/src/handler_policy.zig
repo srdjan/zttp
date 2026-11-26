@@ -244,9 +244,46 @@ pub fn normalizedSqlQuery(name: []const u8, read_only: bool) contract_mod.SqlQue
     return .{ .name = name, .operation = if (read_only) "select" else "write", .statement = "" };
 }
 
+/// Static operation name ("select", "insert", "update", "delete", or "")
+/// derived from the first SQL keyword after leading whitespace and comments.
+pub fn sqlOperationForStatement(statement: []const u8) []const u8 {
+    const first = firstSqlToken(statement) orelse return "";
+    if (std.ascii.eqlIgnoreCase(first, "select")) return "select";
+    if (std.ascii.eqlIgnoreCase(first, "insert")) return "insert";
+    if (std.ascii.eqlIgnoreCase(first, "update")) return "update";
+    if (std.ascii.eqlIgnoreCase(first, "delete")) return "delete";
+    return "";
+}
+
 fn firstSqlToken(statement: []const u8) ?[]const u8 {
     var start: usize = 0;
-    while (start < statement.len and std.ascii.isWhitespace(statement[start])) : (start += 1) {}
+    while (start < statement.len) {
+        if (std.ascii.isWhitespace(statement[start])) {
+            start += 1;
+            continue;
+        }
+        // Skip `-- ...` line comments.
+        if (statement[start] == '-' and start + 1 < statement.len and statement[start + 1] == '-') {
+            start += 2;
+            while (start < statement.len and statement[start] != '\n') : (start += 1) {}
+            continue;
+        }
+        // Skip `/* ... */` block comments; unterminated comments fail closed.
+        if (statement[start] == '/' and start + 1 < statement.len and statement[start + 1] == '*') {
+            start += 2;
+            var closed = false;
+            while (start + 1 < statement.len) : (start += 1) {
+                if (statement[start] == '*' and statement[start + 1] == '/') {
+                    start += 2;
+                    closed = true;
+                    break;
+                }
+            }
+            if (!closed) return null;
+            continue;
+        }
+        break;
+    }
     if (start == statement.len) return null;
 
     var end = start;
@@ -962,14 +999,14 @@ test "the retired egress key names its replacement" {
 
     // The developer is told the replacement, not only that something failed.
     const help = policyErrorHelp(error.EgressAllowHostsRetired);
-    try std.testing.expect(std.mem.indexOf(u8, help, endpoints_field) != null);
-    try std.testing.expect(std.mem.indexOf(u8, help, scopes_field) != null);
-    try std.testing.expect(std.mem.indexOf(u8, policyErrorHelp(error.InvalidEgressEndpoint), "scheme://host") != null);
+    try std.testing.expect(std.mem.find(u8, help, endpoints_field) != null);
+    try std.testing.expect(std.mem.find(u8, help, scopes_field) != null);
+    try std.testing.expect(std.mem.find(u8, policyErrorHelp(error.InvalidEgressEndpoint), "scheme://host") != null);
     // The help for an unknown scope lists every scope the enum accepts.
     const scope_help = policyErrorHelp(error.UnknownAddressScope);
     inline for (@typeInfo(endpoint.AddressScope).@"enum".field_names) |field| {
         const scope: endpoint.AddressScope = @fromBackingInt(@intCast(@backingInt(@field(endpoint.AddressScope, field))));
-        try std.testing.expect(std.mem.indexOf(u8, scope_help, scope.name()) != null);
+        try std.testing.expect(std.mem.find(u8, scope_help, scope.name()) != null);
     }
     // An error with nothing extra to say says nothing rather than something
     // generic, which is how the caller decides whether to print a second line.
@@ -1386,4 +1423,34 @@ test "the index keeps a named read out of the write section" {
     try std.testing.expect(!built.allows(.sql_write, "listTodos"));
     try std.testing.expect(built.allows(.sql_write, "insertTodo"));
     try std.testing.expect(!built.allows(.sql_read, "insertTodo"));
+}
+
+test "commented SELECT queries stay read-only and never enter the write allowlist" {
+    const allocator = std.testing.allocator;
+    const queries = [_]contract_mod.SqlQueryInfo{
+        .{ .name = "lineCommentSelect", .statement = "-- read users\nSELECT id FROM users", .operation = "", .tables = .empty },
+        .{ .name = "blockCommentSelect", .statement = "/* read */ SELECT id FROM users", .operation = "", .tables = .empty },
+        .{ .name = "multiCommentSelect", .statement = "/* a */ -- b\n  SELECT id FROM users", .operation = "", .tables = .empty },
+        .{ .name = "commentedInsert", .statement = "/* write */ INSERT INTO users(id) VALUES (1)", .operation = "", .tables = .empty },
+        .{ .name = "unclosedComment", .statement = "/* unclosed SELECT id FROM users", .operation = "", .tables = .empty },
+    };
+    var built = try buildIndex(allocator, .{ .sql = .{ .enabled = true, .queries = &queries } });
+    defer built.deinit(allocator);
+
+    try std.testing.expect(built.allows(.sql_read, "lineCommentSelect"));
+    try std.testing.expect(!built.allows(.sql_write, "lineCommentSelect"));
+    try std.testing.expect(built.allows(.sql_read, "blockCommentSelect"));
+    try std.testing.expect(!built.allows(.sql_write, "blockCommentSelect"));
+    try std.testing.expect(built.allows(.sql_read, "multiCommentSelect"));
+    try std.testing.expect(!built.allows(.sql_write, "multiCommentSelect"));
+    try std.testing.expect(built.allows(.sql_write, "commentedInsert"));
+    try std.testing.expect(!built.allows(.sql_read, "commentedInsert"));
+    try std.testing.expect(built.allows(.sql_write, "unclosedComment"));
+    try std.testing.expect(!built.allows(.sql_read, "unclosedComment"));
+
+    try std.testing.expectEqualStrings("select", sqlOperationForStatement("-- note\nSELECT 1"));
+    try std.testing.expectEqualStrings("insert", sqlOperationForStatement("/* note */ INSERT INTO t VALUES (1)"));
+    try std.testing.expectEqualStrings("update", sqlOperationForStatement("UPDATE t SET x = 1"));
+    try std.testing.expectEqualStrings("delete", sqlOperationForStatement("DELETE FROM t"));
+    try std.testing.expectEqualStrings("", sqlOperationForStatement("/* unterminated SELECT 1"));
 }

@@ -173,7 +173,7 @@ pub fn dischargeWithStateWriters(
         const signature = try functionSignature(source, ir_view, fe.decl_node);
 
         const flow_index: ?usize = if (functionOwnerNode(ir_view, fe.decl_node)) |owner|
-            std.mem.indexOfScalar(ir.NodeIndex, writers.flow_functions, owner)
+            std.mem.findScalar(ir.NodeIndex, writers.flow_functions, owner)
         else
             null;
         const flow_writer = flow_index != null;

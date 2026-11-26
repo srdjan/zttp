@@ -37,7 +37,7 @@ pub fn audit(allocator: std.mem.Allocator, inventory: []const u8, executed: []co
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
         var fields = std.mem.tokenizeAny(u8, line, " \t");
-        const name = fields.next().?;
+        const name = fields.next() orelse continue;
         if (fields.next() == null) return error.MissingManualReason;
         if (allowed.contains(name)) return error.DuplicateManualRow;
         try allowed.put(name, {});

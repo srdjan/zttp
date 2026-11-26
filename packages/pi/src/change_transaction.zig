@@ -79,16 +79,20 @@ const WorkspaceLock = struct {
     fd: std.c.fd_t,
     path: []u8,
     workspace_root: []u8,
+    io_backend: *std.Io.Threaded,
 
     pub fn acquire(allocator: std.mem.Allocator, workspace_root: []const u8) !WorkspaceLock {
         const canonical_workspace = try common.resolveInsideWorkspace(allocator, workspace_root, ".");
         errdefer allocator.free(canonical_workspace);
         const state_dir = try std.fs.path.resolve(allocator, &.{ canonical_workspace, ".zttp" });
         defer allocator.free(state_dir);
-        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-        defer io_backend.deinit();
-        try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), state_dir);
-        try syncDirectory(allocator, state_dir);
+        const io_backend = try allocator.create(std.Io.Threaded);
+        errdefer allocator.destroy(io_backend);
+        io_backend.* = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+        errdefer io_backend.deinit();
+        const lock_io = io_backend.io();
+        try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), lock_io, state_dir);
+        try syncDirectory(lock_io, state_dir);
 
         const path = try std.fs.path.resolve(allocator, &.{ state_dir, "change-set.lock" });
         errdefer allocator.free(path);
@@ -102,12 +106,24 @@ const WorkspaceLock = struct {
         );
         errdefer std.Io.Threaded.closeFd(fd);
         try lockExclusiveNonBlocking(fd);
-        return .{ .allocator = allocator, .fd = fd, .path = path, .workspace_root = canonical_workspace };
+        return .{
+            .allocator = allocator,
+            .fd = fd,
+            .path = path,
+            .workspace_root = canonical_workspace,
+            .io_backend = io_backend,
+        };
+    }
+
+    pub fn io(self: *const WorkspaceLock) std.Io {
+        return self.io_backend.io();
     }
 
     pub fn deinit(self: *WorkspaceLock) void {
         _ = std.c.flock(self.fd, std.posix.LOCK.UN);
         std.Io.Threaded.closeFd(self.fd);
+        self.io_backend.deinit();
+        self.allocator.destroy(self.io_backend);
         self.allocator.free(self.path);
         self.allocator.free(self.workspace_root);
         self.* = undefined;
@@ -213,55 +229,52 @@ fn commitLocked(
     proof: *const aggregate_proof.AggregateProof,
     options: CommitOptions,
 ) !CommitReceipt {
-    _ = lock;
+    const io = lock.io();
     try snapshot.recheck(allocator);
 
     const transaction_dir = try transactionPath(allocator, prepared.workspace_root, &proof.proof_id);
     defer allocator.free(transaction_dir);
-    if (try pathExists(allocator, transaction_dir)) {
+    if (try pathExists(io, transaction_dir)) {
         const receipted = try markerPresent(allocator, transaction_dir, "committed") and
             try markerPresent(allocator, transaction_dir, "receipted");
         if (!receipted) return error.TransactionAlreadyExists;
-        try archiveReceiptedTransaction(allocator, transaction_dir, &proof.proof_id);
+        try archiveReceiptedTransaction(io, allocator, transaction_dir, &proof.proof_id);
     }
     const images_dir = try std.fs.path.resolve(allocator, &.{ transaction_dir, "images" });
     defer allocator.free(images_dir);
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, images_dir);
 
     if (options.fault == .before_manifest_write) return error.InjectedTransactionFailure;
-    try writeManifest(allocator, transaction_dir, prepared, proof);
-    try writeImages(allocator, transaction_dir, prepared, options.fault);
+    try writeManifest(io, allocator, transaction_dir, prepared, proof);
+    try writeImages(io, allocator, transaction_dir, prepared, options.fault);
     if (options.fault == .before_receipt_write) return error.InjectedTransactionFailure;
     if (options.receipt_json) |receipt_json|
-        try writeProvidedReceipt(allocator, transaction_dir, receipt_json, &proof.proof_id)
+        try writeProvidedReceipt(io, allocator, transaction_dir, receipt_json, &proof.proof_id)
     else
-        try writeReceipt(allocator, transaction_dir, prepared, proof);
-    try writeMarker(allocator, transaction_dir, "prepared");
-    try syncDirectory(allocator, transaction_dir);
+        try writeReceipt(io, allocator, transaction_dir, prepared, proof);
+    try writeMarker(io, allocator, transaction_dir, "prepared");
+    try syncDirectory(io, transaction_dir);
     // A power loss must not keep a renamed target and lose its journal. The
     // entries that name the transaction directory, `change-sets`, and `.zttp`
     // become durable here, before the first stage file.
     const change_sets_dir = std.fs.path.dirname(transaction_dir) orelse return error.InvalidTargetPath;
     const zttp_dir = std.fs.path.dirname(change_sets_dir) orelse return error.InvalidTargetPath;
-    try syncDirectory(allocator, change_sets_dir);
-    try syncDirectory(allocator, zttp_dir);
-    try syncDirectory(allocator, std.fs.path.dirname(zttp_dir) orelse return error.InvalidTargetPath);
+    try syncDirectory(io, change_sets_dir);
+    try syncDirectory(io, zttp_dir);
+    try syncDirectory(io, std.fs.path.dirname(zttp_dir) orelse return error.InvalidTargetPath);
     if (options.fault == .after_prepared) return error.InjectedTransactionFailure;
 
     try snapshot.recheck(allocator);
-    const stages = try stageCandidates(allocator, prepared, &proof.proof_id, options.fault);
+    const stages = try stageCandidates(io, allocator, prepared, &proof.proof_id, options.fault);
     defer {
         for (stages) |stage| {
-            deleteFileIfPresent(allocator, stage) catch {};
+            deleteFileIfPresent(io, stage) catch {};
             allocator.free(stage);
         }
         allocator.free(stages);
     }
     try snapshot.recheck(allocator);
-    try writeMarker(allocator, transaction_dir, "applying");
+    try writeMarker(io, allocator, transaction_dir, "applying");
     if (options.fault == .after_applying) return error.InjectedTransactionFailure;
 
     for (prepared.changes, stages, 0..) |change, stage, index| {
@@ -269,15 +282,15 @@ fn commitLocked(
             .before_rename => |fault_index| if (fault_index == index) return error.RenameFailure,
             else => {},
         }
-        try renameAndSync(allocator, stage, change.resolved_path);
-        try writeProgressMarker(allocator, transaction_dir, index);
+        try renameAndSync(io, allocator, stage, change.resolved_path);
+        try writeProgressMarker(io, allocator, transaction_dir, index);
         switch (options.fault) {
             .after_rename => |fault_index| if (fault_index == index) return error.InjectedTransactionFailure,
             else => {},
         }
     }
     try verifyCandidates(allocator, prepared);
-    try writeMarker(allocator, transaction_dir, "committed");
+    try writeMarker(io, allocator, transaction_dir, "committed");
     if (options.fault == .after_committed) return error.InjectedTransactionFailure;
     return .{
         .transaction_id = proof.proof_id,
@@ -295,14 +308,11 @@ fn pendingReceiptsLocked(
     lock: *const WorkspaceLock,
     workspace_root: []const u8,
 ) ![]PendingReceipt {
-    _ = lock;
     const canonical_workspace = try common.resolveInsideWorkspace(allocator, workspace_root, ".");
     defer allocator.free(canonical_workspace);
     const root = try std.fs.path.resolve(allocator, &.{ canonical_workspace, ".zttp", "change-sets" });
     defer allocator.free(root);
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
+    const io = lock.io();
     var dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return allocator.alloc(PendingReceipt, 0),
         else => return err,
@@ -384,13 +394,13 @@ fn markReceiptedLockedWithOptions(
     transaction_id: *const [64]u8,
     options: RecoveryOptions,
 ) !void {
-    _ = lock;
+    const io = lock.io();
     if (!isCanonicalProofId(transaction_id)) return error.InvalidTransactionId;
     const transaction_dir = try transactionPath(allocator, workspace_root, transaction_id);
     defer allocator.free(transaction_dir);
     // The archive fills from `.1` upward, so an id that was ever archived has
     // `.1`, whichever number the last rename took.
-    if (!try pathExists(allocator, transaction_dir)) {
+    if (!try pathExists(io, transaction_dir)) {
         const first_archive = try archivedRecordPath(allocator, transaction_dir, transaction_id, 1);
         defer allocator.free(first_archive);
         if (try markerPresent(allocator, first_archive, "receipted")) return;
@@ -402,10 +412,10 @@ fn markReceiptedLockedWithOptions(
     }
     try validateReceipt(allocator, transaction_dir, transaction_id);
     if (!try markerPresent(allocator, transaction_dir, "receipted")) {
-        try writeMarker(allocator, transaction_dir, "receipted");
+        try writeMarker(io, allocator, transaction_dir, "receipted");
         if (options.fault == .after_receipted_marker) return error.InjectedTransactionFailure;
     }
-    try archiveReceiptedTransaction(allocator, transaction_dir, transaction_id);
+    try archiveReceiptedTransaction(io, allocator, transaction_dir, transaction_id);
 }
 
 fn recoverAllLocked(
@@ -425,14 +435,11 @@ fn recoverAllLockedWithOptions(
     workspace_root: []const u8,
     options: RecoveryOptions,
 ) !usize {
-    _ = lock;
     const canonical_workspace = try common.resolveInsideWorkspace(allocator, workspace_root, ".");
     defer allocator.free(canonical_workspace);
     const root = try std.fs.path.resolve(allocator, &.{ canonical_workspace, ".zttp", "change-sets" });
     defer allocator.free(root);
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
+    const io = lock.io();
     var dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return 0,
         else => return err,
@@ -445,7 +452,7 @@ fn recoverAllLockedWithOptions(
         if (entry.kind != .directory or !isCanonicalProofId(entry.name)) return error.CorruptTransactionDirectory;
         const transaction_dir = try std.fs.path.resolve(allocator, &.{ root, entry.name });
         defer allocator.free(transaction_dir);
-        if (try recoverOne(allocator, transaction_dir, options)) recovered += 1;
+        if (try recoverOne(io, allocator, transaction_dir, options)) recovered += 1;
     }
     return recovered;
 }
@@ -574,6 +581,7 @@ fn observePreparedPhase(allocator: std.mem.Allocator, transaction_dir: []const u
 }
 
 fn recoverOne(
+    io: std.Io,
     allocator: std.mem.Allocator,
     transaction_dir: []const u8,
     options: RecoveryOptions,
@@ -582,7 +590,7 @@ fn recoverOne(
         var planner: RecoveryPlanner = .{ .unprepared = {} };
         var plan = try planner.finish();
         defer plan.deinit(allocator);
-        return executeRecoveryPlan(allocator, transaction_dir, &plan, options);
+        return executeRecoveryPlan(io, allocator, transaction_dir, &plan, options);
     }
 
     const phase = try observePreparedPhase(allocator, transaction_dir);
@@ -592,14 +600,14 @@ fn recoverOne(
     if (phase == .committed and try markerPresent(allocator, transaction_dir, "receipted")) {
         const name = std.fs.path.basename(transaction_dir);
         if (!isCanonicalProofId(name)) return error.CorruptTransactionDirectory;
-        try archiveReceiptedTransaction(allocator, transaction_dir, name[0..64]);
+        try archiveReceiptedTransaction(io, allocator, transaction_dir, name[0..64]);
         return false;
     }
     // A prepared transaction without an applying marker has written no target,
     // and recovery removes its stage files before it writes the aborted marker,
     // so finishing the delete is what the prepared plan does.
     var parsed = loadManifest(allocator, transaction_dir) catch |err| {
-        if ((phase == .aborted or phase == .prepared) and err == error.FileNotFound) return finishAbortedDelete(allocator, transaction_dir, options);
+        if ((phase == .aborted or phase == .prepared) and err == error.FileNotFound) return finishAbortedDelete(io, allocator, transaction_dir, options);
         return err;
     };
     defer parsed.deinit();
@@ -607,8 +615,8 @@ fn recoverOne(
     // Recovery never writes a committed transaction, so a moved or copied
     // workspace keeps its receipts replayable. Every transaction that recovery
     // writes must still name the workspace it lives in.
-    validateManifestAndImages(allocator, transaction_dir, manifest, phase != .committed) catch |err| {
-        if ((phase == .aborted or phase == .prepared) and err == error.FileNotFound) return finishAbortedDelete(allocator, transaction_dir, options);
+    validateManifestAndImages(io, allocator, transaction_dir, manifest, phase != .committed) catch |err| {
+        if ((phase == .aborted or phase == .prepared) and err == error.FileNotFound) return finishAbortedDelete(io, allocator, transaction_dir, options);
         return err;
     };
     if (phase == .committed) {
@@ -636,7 +644,7 @@ fn recoverOne(
 
     if (phase == .applying) {
         for (manifest.changes) |change| {
-            const current = try readStateDigest(allocator, change.path);
+            const current = try readStateDigest(io, allocator, change.path);
             const candidate = parseDigest(change.candidate_sha256) orelse return error.CorruptTransactionJournal;
             const baseline = parseDigest(change.baseline_sha256) orelse return error.CorruptTransactionJournal;
             try planner.observe(.{
@@ -651,11 +659,12 @@ fn recoverOne(
     planner_owned = false;
     defer plan.deinit(allocator);
     // A killed process leaves stage files beside the targets.
-    if (phase == .prepared or phase == .applying) try removeStageFiles(allocator, manifest, manifest.proof_id);
-    return executeRecoveryPlan(allocator, transaction_dir, &plan, options);
+    if (phase == .prepared or phase == .applying) try removeStageFiles(io, allocator, manifest, manifest.proof_id);
+    return executeRecoveryPlan(io, allocator, transaction_dir, &plan, options);
 }
 
 fn executeRecoveryPlan(
+    io: std.Io,
     allocator: std.mem.Allocator,
     transaction_dir: []const u8,
     plan: *const RecoveryPlan,
@@ -663,14 +672,14 @@ fn executeRecoveryPlan(
 ) !bool {
     switch (plan.*) {
         .unprepared, .aborted => {
-            try deleteTransactionDirectory(allocator, transaction_dir, options);
+            try deleteTransactionDirectory(io, transaction_dir, options);
             return true;
         },
         .committed => return false,
         .prepared => {
-            try writeMarker(allocator, transaction_dir, "aborted");
+            try writeMarker(io, allocator, transaction_dir, "aborted");
             if (options.fault == .after_aborted_marker) return error.InjectedTransactionFailure;
-            try deleteTransactionDirectory(allocator, transaction_dir, options);
+            try deleteTransactionDirectory(io, transaction_dir, options);
             return true;
         },
         .applying => |applying| {
@@ -684,7 +693,7 @@ fn executeRecoveryPlan(
                         defer allocator.free(after_path);
                         const after = try zts.file_io.readFile(allocator, after_path, change_set.max_file_bytes);
                         defer allocator.free(after);
-                        try durableRecoveryWrite(allocator, change.path, after, index, options);
+                        try durableRecoveryWrite(io, allocator, change.path, after, index, options);
                         switch (options.fault) {
                             .after_source_write => |fault_index| if (fault_index == index)
                                 return error.InjectedTransactionFailure,
@@ -693,9 +702,9 @@ fn executeRecoveryPlan(
                     },
                 }
             }
-            try verifyManifestCandidates(allocator, applying.manifest);
+            try verifyManifestCandidates(io, allocator, applying.manifest);
             if (options.fault == .after_candidate_verification) return error.InjectedTransactionFailure;
-            try writeMarker(allocator, transaction_dir, "committed");
+            try writeMarker(io, allocator, transaction_dir, "committed");
             if (options.fault == .after_committed_marker) return error.InjectedTransactionFailure;
             return true;
         },
@@ -703,6 +712,7 @@ fn executeRecoveryPlan(
 }
 
 fn durableRecoveryWrite(
+    io: std.Io,
     allocator: std.mem.Allocator,
     path: []const u8,
     bytes: []const u8,
@@ -710,9 +720,7 @@ fn durableRecoveryWrite(
     options: RecoveryOptions,
 ) !void {
     const parent = std.fs.path.dirname(path) orelse return error.InvalidJournalPath;
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), parent);
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, parent);
     try zts.file_io.writeFile(allocator, path, bytes);
     switch (options.fault) {
         .before_source_file_sync => |fault_index| if (fault_index == index)
@@ -725,10 +733,11 @@ fn durableRecoveryWrite(
             return error.DirectorySyncFailure,
         else => {},
     }
-    try syncDirectory(allocator, parent);
+    try syncDirectory(io, parent);
 }
 
 fn writeManifest(
+    io: std.Io,
     allocator: std.mem.Allocator,
     transaction_dir: []const u8,
     prepared: *const change_set.PreparedChangeSet,
@@ -759,10 +768,11 @@ fn writeManifest(
     }, .{}, buffer.writer());
     const path = try std.fs.path.resolve(allocator, &.{ transaction_dir, "manifest.json" });
     defer allocator.free(path);
-    try durableWriteWithDigest(allocator, path, buffer.written());
+    try durableWriteWithDigest(io, allocator, path, buffer.written());
 }
 
 fn writeImages(
+    io: std.Io,
     allocator: std.mem.Allocator,
     transaction_dir: []const u8,
     prepared: *const change_set.PreparedChangeSet,
@@ -777,15 +787,16 @@ fn writeImages(
         if (change.baseline.bytes()) |before| {
             const before_path = try imagePath(allocator, transaction_dir, index, "before");
             defer allocator.free(before_path);
-            try durableWrite(allocator, before_path, before);
+            try durableWrite(io, allocator, before_path, before);
         }
         const after_path = try imagePath(allocator, transaction_dir, index, "after");
         defer allocator.free(after_path);
-        try durableWrite(allocator, after_path, change.candidate);
+        try durableWrite(io, allocator, after_path, change.candidate);
     }
 }
 
 fn writeReceipt(
+    io: std.Io,
     allocator: std.mem.Allocator,
     transaction_dir: []const u8,
     prepared: *const change_set.PreparedChangeSet,
@@ -822,10 +833,11 @@ fn writeReceipt(
     try writer.writeAll("]}");
     const path = try std.fs.path.resolve(allocator, &.{ transaction_dir, "receipt.json" });
     defer allocator.free(path);
-    try durableWriteWithDigest(allocator, path, buffer.written());
+    try durableWriteWithDigest(io, allocator, path, buffer.written());
 }
 
 fn writeProvidedReceipt(
+    io: std.Io,
     allocator: std.mem.Allocator,
     transaction_dir: []const u8,
     receipt_json: []const u8,
@@ -848,16 +860,16 @@ fn writeProvidedReceipt(
     }
     const path = try std.fs.path.resolve(allocator, &.{ transaction_dir, "receipt.json" });
     defer allocator.free(path);
-    try durableWriteWithDigest(allocator, path, receipt_json);
+    try durableWriteWithDigest(io, allocator, path, receipt_json);
 }
 
 /// A delete of an aborted or prepared transaction that stopped partway leaves journal files
 /// missing. Corrupt content still fails closed; only absence finishes the delete.
-fn finishAbortedDelete(allocator: std.mem.Allocator, transaction_dir: []const u8, options: RecoveryOptions) !bool {
+fn finishAbortedDelete(io: std.Io, allocator: std.mem.Allocator, transaction_dir: []const u8, options: RecoveryOptions) !bool {
     var planner: RecoveryPlanner = .{ .aborted = {} };
     var plan = try planner.finish();
     defer plan.deinit(allocator);
-    return executeRecoveryPlan(allocator, transaction_dir, &plan, options);
+    return executeRecoveryPlan(io, allocator, transaction_dir, &plan, options);
 }
 
 /// `change_set.prepare` accepts a target only at its canonical path. The
@@ -882,18 +894,19 @@ fn stagePath(allocator: std.mem.Allocator, target: []const u8, proof_id: []const
     return allocator.print("{s}/.{s}.zttp-{s}.stage", .{ parent, base, proof_id[0..16] });
 }
 
-fn removeStageFiles(allocator: std.mem.Allocator, manifest: Manifest, proof_id: []const u8) !void {
+fn removeStageFiles(io: std.Io, allocator: std.mem.Allocator, manifest: Manifest, proof_id: []const u8) !void {
     for (manifest.changes) |change| {
         const stage = try stagePath(allocator, change.path, proof_id);
         defer allocator.free(stage);
-        if (!try pathExists(allocator, stage)) continue;
+        if (!try pathExists(io, stage)) continue;
         // The unlink must be durable before the journal that names it is deleted.
-        try deleteFileIfPresent(allocator, stage);
-        try syncDirectory(allocator, std.fs.path.dirname(stage) orelse return error.InvalidTargetPath);
+        try deleteFileIfPresent(io, stage);
+        try syncDirectory(io, std.fs.path.dirname(stage) orelse return error.InvalidTargetPath);
     }
 }
 
 fn stageCandidates(
+    io: std.Io,
     allocator: std.mem.Allocator,
     prepared: *const change_set.PreparedChangeSet,
     proof_id: *const [64]u8,
@@ -904,13 +917,13 @@ fn stageCandidates(
     for (prepared.changes) |change| {
         const leftover = try stagePath(allocator, change.resolved_path, proof_id);
         defer allocator.free(leftover);
-        try deleteFileIfPresent(allocator, leftover);
+        try deleteFileIfPresent(io, leftover);
     }
     const stages = try allocator.alloc([]u8, prepared.changes.len);
     var initialized: usize = 0;
     errdefer {
         for (stages[0..initialized]) |stage| {
-            deleteFileIfPresent(allocator, stage) catch {};
+            deleteFileIfPresent(io, stage) catch {};
             allocator.free(stage);
         }
         allocator.free(stages);
@@ -920,13 +933,13 @@ fn stageCandidates(
         errdefer allocator.free(stage);
         // The leftovers are gone, so a file at this path is the stage of an
         // earlier target: on this filesystem two target names are one file.
-        if (try pathExists(allocator, stage)) return error.DuplicateTarget;
+        if (try pathExists(io, stage)) return error.DuplicateTarget;
         switch (fault) {
             .before_stage_write => |fault_index| if (fault_index == index)
                 return error.InjectedTransactionFailure,
             else => {},
         }
-        try durableWrite(allocator, stage, change.candidate);
+        try durableWrite(io, allocator, stage, change.candidate);
         stages[index] = stage;
         initialized += 1;
     }
@@ -941,32 +954,30 @@ fn verifyCandidates(allocator: std.mem.Allocator, prepared: *const change_set.Pr
     }
 }
 
-fn verifyManifestCandidates(allocator: std.mem.Allocator, manifest: Manifest) !void {
+fn verifyManifestCandidates(io: std.Io, allocator: std.mem.Allocator, manifest: Manifest) !void {
     for (manifest.changes) |change| {
         const expected = parseDigest(change.candidate_sha256) orelse return error.CorruptTransactionJournal;
-        const current = try readStateDigest(allocator, change.path);
+        const current = try readStateDigest(io, allocator, change.path);
         if (!std.mem.eql(u8, &current, &expected)) return error.PostCommitVerificationFailed;
     }
 }
 
-fn durableWrite(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
+fn durableWrite(io: std.Io, allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
     const parent = std.fs.path.dirname(path) orelse return error.InvalidJournalPath;
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), parent);
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, parent);
     try zts.file_io.writeFile(allocator, path, bytes);
     try syncFile(allocator, path);
-    try syncDirectory(allocator, parent);
+    try syncDirectory(io, parent);
 }
 
-fn durableWriteWithDigest(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
-    try durableWrite(allocator, path, bytes);
+fn durableWriteWithDigest(io: std.Io, allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
+    try durableWrite(io, allocator, path, bytes);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     const digest_hex = std.fmt.bytesToHex(digest, .lower);
     const digest_path = try allocator.print("{s}.sha256", .{path});
     defer allocator.free(digest_path);
-    try durableWrite(allocator, digest_path, &digest_hex);
+    try durableWrite(io, allocator, digest_path, &digest_hex);
 }
 
 fn readVerifiedFile(
@@ -999,11 +1010,9 @@ fn syncFile(allocator: std.mem.Allocator, path: []const u8) !void {
 // directory with `O_PATH` unless iteration is requested, and `fsync` on an
 // `O_PATH` descriptor fails with EBADF; macOS has no `O_PATH`, so the same code
 // syncs there and refuses every transaction on Linux.
-fn syncDirectory(allocator: std.mem.Allocator, path: []const u8) !void {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    var dir = try std.Io.Dir.openDirAbsolute(io_backend.io(), path, .{ .iterate = true });
-    defer dir.close(io_backend.io());
+fn syncDirectory(io: std.Io, path: []const u8) !void {
+    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
+    defer dir.close(io);
     if (std.c.fsync(dir.handle) != 0) return error.DirectorySyncFailure;
 }
 
@@ -1011,6 +1020,7 @@ fn syncDirectory(allocator: std.mem.Allocator, path: []const u8) !void {
 /// the id that a new commit needs. A receipted record is history, not pending
 /// work, so it moves out of the scanned directory to a numbered archive name.
 fn archiveReceiptedTransaction(
+    io: std.Io,
     allocator: std.mem.Allocator,
     transaction_dir: []const u8,
     proof_id: *const [64]u8,
@@ -1019,17 +1029,15 @@ fn archiveReceiptedTransaction(
     const zttp_dir = std.fs.path.dirname(change_sets_dir) orelse return error.InvalidTargetPath;
     const archive_dir = try std.fs.path.resolve(allocator, &.{ zttp_dir, "change-sets-archive" });
     defer allocator.free(archive_dir);
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), archive_dir);
-    try syncDirectory(allocator, zttp_dir);
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, archive_dir);
+    try syncDirectory(io, zttp_dir);
     var n: usize = 1;
     while (n <= max_archived_transactions) : (n += 1) {
         const target = try archivedRecordPath(allocator, transaction_dir, proof_id, n);
         defer allocator.free(target);
-        if (try pathExists(allocator, target)) continue;
-        try renameAndSync(allocator, transaction_dir, target);
-        return syncDirectory(allocator, change_sets_dir);
+        if (try pathExists(io, target)) continue;
+        try renameAndSync(io, allocator, transaction_dir, target);
+        return syncDirectory(io, change_sets_dir);
     }
     return error.TooManyArchivedTransactions;
 }
@@ -1051,19 +1059,19 @@ fn archivedRecordPath(
 
 const max_archived_transactions: usize = 1024;
 
-fn renameAndSync(allocator: std.mem.Allocator, source: []const u8, target: []const u8) !void {
+fn renameAndSync(io: std.Io, allocator: std.mem.Allocator, source: []const u8, target: []const u8) !void {
     const source_z = try allocator.dupeSentinel(u8, source, 0);
     defer allocator.free(source_z);
     const target_z = try allocator.dupeSentinel(u8, target, 0);
     defer allocator.free(target_z);
     if (std.c.rename(source_z, target_z) != 0) return error.RenameFailure;
-    try syncDirectory(allocator, std.fs.path.dirname(target) orelse return error.InvalidTargetPath);
+    try syncDirectory(io, std.fs.path.dirname(target) orelse return error.InvalidTargetPath);
 }
 
-fn writeMarker(allocator: std.mem.Allocator, transaction_dir: []const u8, name: []const u8) !void {
+fn writeMarker(io: std.Io, allocator: std.mem.Allocator, transaction_dir: []const u8, name: []const u8) !void {
     const path = try markerPath(allocator, transaction_dir, name);
     defer allocator.free(path);
-    try durableWrite(allocator, path, name);
+    try durableWrite(io, allocator, path, name);
 }
 
 fn markerPresent(allocator: std.mem.Allocator, transaction_dir: []const u8, name: []const u8) !bool {
@@ -1078,10 +1086,10 @@ fn markerPresent(allocator: std.mem.Allocator, transaction_dir: []const u8, name
     return true;
 }
 
-fn writeProgressMarker(allocator: std.mem.Allocator, transaction_dir: []const u8, index: usize) !void {
+fn writeProgressMarker(io: std.Io, allocator: std.mem.Allocator, transaction_dir: []const u8, index: usize) !void {
     const name = try allocator.print("applied-{d}", .{index});
     defer allocator.free(name);
-    try writeMarker(allocator, transaction_dir, name);
+    try writeMarker(io, allocator, transaction_dir, name);
 }
 
 fn markerPath(allocator: std.mem.Allocator, transaction_dir: []const u8, name: []const u8) ![]u8 {
@@ -1128,6 +1136,7 @@ fn loadManifest(allocator: std.mem.Allocator, transaction_dir: []const u8) !std.
 }
 
 fn validateManifestAndImages(
+    io: std.Io,
     allocator: std.mem.Allocator,
     transaction_dir: []const u8,
     manifest: Manifest,
@@ -1167,7 +1176,7 @@ fn validateManifestAndImages(
             const before_digest = change_set.digestBaseline(before);
             if (!std.mem.eql(u8, &before_digest, &baseline_digest)) return error.CorruptTransactionJournal;
         } else if (std.mem.eql(u8, change.baseline_state, "absent")) {
-            if (try pathExists(allocator, before_path) or
+            if (try pathExists(io, before_path) or
                 !std.mem.eql(u8, &baseline_digest, &change_set.digestBaseline(null)))
             {
                 return error.CorruptTransactionJournal;
@@ -1204,37 +1213,31 @@ fn validateReceipt(
     }
 }
 
-fn deleteFileIfPresent(allocator: std.mem.Allocator, path: []const u8) !void {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    std.Io.Dir.cwd().deleteFile(io_backend.io(), path) catch |err| switch (err) {
+fn deleteFileIfPresent(io: std.Io, path: []const u8) !void {
+    std.Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
 }
 
 fn deleteTransactionDirectory(
-    allocator: std.mem.Allocator,
+    io: std.Io,
     transaction_dir: []const u8,
     options: RecoveryOptions,
 ) !void {
     const parent_path = std.fs.path.dirname(transaction_dir) orelse return error.CorruptTransactionDirectory;
     const name = std.fs.path.basename(transaction_dir);
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
     // `iterate` keeps the descriptor off `O_PATH` so the fsync below works on
     // Linux; see `syncDirectory`.
-    var parent = try std.Io.Dir.openDirAbsolute(io_backend.io(), parent_path, .{ .iterate = true });
-    defer parent.close(io_backend.io());
-    try parent.deleteTree(io_backend.io(), name);
+    var parent = try std.Io.Dir.openDirAbsolute(io, parent_path, .{ .iterate = true });
+    defer parent.close(io);
+    try parent.deleteTree(io, name);
     if (options.fault == .before_transaction_directory_sync) return error.DirectorySyncFailure;
     if (std.c.fsync(parent.handle) != 0) return error.DirectorySyncFailure;
 }
 
-fn readStateDigest(allocator: std.mem.Allocator, path: []const u8) ![32]u8 {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const stat = std.Io.Dir.cwd().statFile(io_backend.io(), path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+fn readStateDigest(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![32]u8 {
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return change_set.digestBaseline(null),
         else => return err,
     };
@@ -1254,10 +1257,8 @@ fn parseDigest(value: []const u8) ?[32]u8 {
     return out;
 }
 
-fn pathExists(allocator: std.mem.Allocator, path: []const u8) !bool {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    _ = std.Io.Dir.cwd().statFile(io_backend.io(), path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+fn pathExists(io: std.Io, path: []const u8) !bool {
+    _ = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return false,
         else => return err,
     };
@@ -1561,9 +1562,9 @@ fn setMarker(
     const path = try markerPath(allocator, transaction_dir, name);
     defer allocator.free(path);
     if (present) {
-        try writeMarker(allocator, transaction_dir, name);
+        try writeMarker(testing.io, allocator, transaction_dir, name);
     } else {
-        try deleteFileIfPresent(allocator, path);
+        try deleteFileIfPresent(testing.io, path);
     }
 }
 
@@ -1624,24 +1625,24 @@ fn assertMarkerCase(mask: u8) !void {
                 error.CorruptTransactionJournal,
                 recoverAllLocked(testing.allocator, &lock, fixture.root),
             );
-            try testing.expect(try pathExists(testing.allocator, transaction_dir));
+            try testing.expect(try pathExists(testing.io, transaction_dir));
             try expectFixtureCandidates(&fixture, false);
         },
         .delete_transaction => {
             try testing.expectEqual(@as(usize, 1), try recoverAllLocked(testing.allocator, &lock, fixture.root));
-            try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+            try testing.expect(!try pathExists(testing.io, transaction_dir));
             try expectFixtureCandidates(&fixture, false);
             try expectPendingReceiptCount(&lock, fixture.root, 0);
         },
         .preserve_committed => {
             try testing.expectEqual(@as(usize, 0), try recoverAllLocked(testing.allocator, &lock, fixture.root));
-            try testing.expect(try pathExists(testing.allocator, transaction_dir));
+            try testing.expect(try pathExists(testing.io, transaction_dir));
             try expectFixtureCandidates(&fixture, false);
             try expectPendingReceiptCount(&lock, fixture.root, 1);
         },
         .archive_receipted => {
             try testing.expectEqual(@as(usize, 0), try recoverAllLocked(testing.allocator, &lock, fixture.root));
-            try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+            try testing.expect(!try pathExists(testing.io, transaction_dir));
             const archived = try archivedRecordPath(testing.allocator, transaction_dir, &fixture.proof.proof_id, 1);
             defer testing.allocator.free(archived);
             try testing.expect(try markerPresent(testing.allocator, archived, "receipted"));
@@ -1650,7 +1651,7 @@ fn assertMarkerCase(mask: u8) !void {
         },
         .roll_forward => {
             try testing.expectEqual(@as(usize, 1), try recoverAllLocked(testing.allocator, &lock, fixture.root));
-            try testing.expect(try pathExists(testing.allocator, transaction_dir));
+            try testing.expect(try pathExists(testing.io, transaction_dir));
             try expectFixtureCandidates(&fixture, true);
             try expectPendingReceiptCount(
                 &lock,
@@ -1666,11 +1667,11 @@ const TargetState = enum { baseline, candidate, third };
 fn setTargetState(change: change_set.PreparedChange, state: TargetState) !void {
     switch (state) {
         .baseline => if (change.baseline.bytes()) |bytes|
-            try durableWrite(testing.allocator, change.resolved_path, bytes)
+            try durableWrite(testing.io, testing.allocator, change.resolved_path, bytes)
         else
-            try deleteFileIfPresent(testing.allocator, change.resolved_path),
-        .candidate => try durableWrite(testing.allocator, change.resolved_path, change.candidate),
-        .third => try durableWrite(testing.allocator, change.resolved_path, "third-state"),
+            try deleteFileIfPresent(testing.io, change.resolved_path),
+        .candidate => try durableWrite(testing.io, testing.allocator, change.resolved_path, change.candidate),
+        .third => try durableWrite(testing.io, testing.allocator, change.resolved_path, "third-state"),
     }
 }
 
@@ -1685,7 +1686,7 @@ fn expectTargetState(change: change_set.PreparedChange, state: TargetState) !voi
         defer testing.allocator.free(current);
         try testing.expectEqualStrings(bytes, current);
     } else {
-        try testing.expect(!try pathExists(testing.allocator, change.resolved_path));
+        try testing.expect(!try pathExists(testing.io, change.resolved_path));
     }
 }
 
@@ -1757,9 +1758,9 @@ test "recovery ignores progress markers when classifying a transaction" {
     );
     const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
     defer testing.allocator.free(transaction_dir);
-    try writeProgressMarker(testing.allocator, transaction_dir, 0);
+    try writeProgressMarker(testing.io, testing.allocator, transaction_dir, 0);
     try testing.expectEqual(@as(usize, 1), try recoverAllLocked(testing.allocator, &lock, fixture.root));
-    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    try testing.expect(!try pathExists(testing.io, transaction_dir));
     try expectFixtureCandidates(&fixture, false);
 }
 
@@ -1781,12 +1782,12 @@ test "recovery validates images before an aborted marker takes precedence" {
     const after_path = try imagePath(testing.allocator, transaction_dir, 0, "after");
     defer testing.allocator.free(after_path);
     try zts.file_io.writeFile(testing.allocator, after_path, "corrupt");
-    try writeMarker(testing.allocator, transaction_dir, "aborted");
+    try writeMarker(testing.io, testing.allocator, transaction_dir, "aborted");
     try testing.expectError(
         error.CorruptTransactionJournal,
         recoverAllLocked(testing.allocator, &lock, fixture.root),
     );
-    try testing.expect(try pathExists(testing.allocator, transaction_dir));
+    try testing.expect(try pathExists(testing.io, transaction_dir));
     try expectFixtureCandidates(&fixture, false);
 }
 
@@ -1836,19 +1837,19 @@ test "recovery does not read markers below the selected precedence" {
         defer testing.allocator.free(transaction_dir);
         switch (selected) {
             .aborted => {
-                try writeMarker(testing.allocator, transaction_dir, "aborted");
+                try writeMarker(testing.io, testing.allocator, transaction_dir, "aborted");
                 try writeMalformedMarker(testing.allocator, transaction_dir, "committed");
                 try writeMalformedMarker(testing.allocator, transaction_dir, "applying");
                 try writeMalformedMarker(testing.allocator, transaction_dir, "receipted");
             },
             // Recovery reads `receipted` on a committed record to archive it.
             .committed => {
-                try writeMarker(testing.allocator, transaction_dir, "committed");
+                try writeMarker(testing.io, testing.allocator, transaction_dir, "committed");
                 try writeMalformedMarker(testing.allocator, transaction_dir, "applying");
             },
             .prepared => try writeMalformedMarker(testing.allocator, transaction_dir, "receipted"),
             .applying => {
-                try writeMarker(testing.allocator, transaction_dir, "applying");
+                try writeMarker(testing.io, testing.allocator, transaction_dir, "applying");
                 try writeMalformedMarker(testing.allocator, transaction_dir, "receipted");
             },
         }
@@ -1860,7 +1861,7 @@ test "recovery does not read markers below the selected precedence" {
         try expectFixtureCandidates(&fixture, selected == .applying);
         try testing.expectEqual(
             selected == .committed or selected == .applying,
-            try pathExists(testing.allocator, transaction_dir),
+            try pathExists(testing.io, transaction_dir),
         );
     }
 }
@@ -1886,6 +1887,7 @@ test "aborted recovery ignores a corrupt receipt but committed recovery validate
             defer testing.allocator.free(receipt_path);
             try zts.file_io.writeFile(testing.allocator, receipt_path, "corrupt");
             try writeMarker(
+                testing.io,
                 testing.allocator,
                 transaction_dir,
                 if (committed) "committed" else "aborted",
@@ -1895,13 +1897,13 @@ test "aborted recovery ignores a corrupt receipt but committed recovery validate
                     error.CorruptTransactionJournal,
                     recoverAllLocked(testing.allocator, &lock, fixture.root),
                 );
-                try testing.expect(try pathExists(testing.allocator, transaction_dir));
+                try testing.expect(try pathExists(testing.io, transaction_dir));
             } else {
                 try testing.expectEqual(
                     @as(usize, 1),
                     try recoverAllLocked(testing.allocator, &lock, fixture.root),
                 );
-                try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+                try testing.expect(!try pathExists(testing.io, transaction_dir));
             }
             try expectFixtureCandidates(&fixture, false);
         }
@@ -1945,14 +1947,12 @@ test "recovery preserves target conflict and read error precedence" {
             "third-state",
         );
         try deleteFileIfPresent(
-            testing.allocator,
+            testing.io,
             fixture.prepared.changes[nonregular_index].resolved_path,
         );
-        var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-        defer io_backend.deinit();
         try std.Io.Dir.createDirPath(
             std.Io.Dir.cwd(),
-            io_backend.io(),
+            testing.io,
             fixture.prepared.changes[nonregular_index].resolved_path,
         );
 
@@ -1969,7 +1969,7 @@ test "recovery preserves target conflict and read error precedence" {
         }
         try expectTargetState(fixture.prepared.changes[third_index], .third);
         const stat = try std.Io.Dir.cwd().statFile(
-            io_backend.io(),
+            testing.io,
             fixture.prepared.changes[nonregular_index].resolved_path,
             .{ .follow_symlinks = false },
         );
@@ -1986,7 +1986,7 @@ test "transaction commits every path and one durable receipt" {
     defer lock.deinit();
     var receipt = try commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
     defer receipt.deinit(testing.allocator);
-    try testing.expect(try pathExists(testing.allocator, receipt.receipt_path));
+    try testing.expect(try pathExists(testing.io, receipt.receipt_path));
     for (fixture.prepared.changes) |change| {
         const bytes = try zts.file_io.readFile(testing.allocator, change.resolved_path, 64);
         defer testing.allocator.free(bytes);
@@ -2093,9 +2093,9 @@ test "recovery removes a prepared transaction that changed no source" {
     );
     const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
     defer testing.allocator.free(transaction_dir);
-    try testing.expect(try pathExists(testing.allocator, transaction_dir));
+    try testing.expect(try pathExists(testing.io, transaction_dir));
     try testing.expectEqual(@as(usize, 1), try recoverAllLocked(testing.allocator, &lock, fixture.root));
-    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    try testing.expect(!try pathExists(testing.io, transaction_dir));
     for (fixture.prepared.changes) |change| {
         const bytes = try zts.file_io.readFile(testing.allocator, change.resolved_path, 64);
         defer testing.allocator.free(bytes);
@@ -2204,7 +2204,7 @@ test "transaction recovery covers journal image receipt stage and rename failure
         defer testing.allocator.free(transaction_dir);
         try testing.expectEqual(
             case.rolls_forward,
-            try pathExists(testing.allocator, transaction_dir),
+            try pathExists(testing.io, transaction_dir),
         );
     }
 }
@@ -2233,7 +2233,7 @@ test "recovery retries after the durable aborted marker completes" {
     try testing.expect(try markerPresent(testing.allocator, transaction_dir, "aborted"));
     try expectFixtureCandidates(&fixture, false);
     try testing.expectEqual(@as(usize, 1), try recoverAllLocked(testing.allocator, &lock, fixture.root));
-    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    try testing.expect(!try pathExists(testing.io, transaction_dir));
     try expectFixtureCandidates(&fixture, false);
 }
 
@@ -2260,7 +2260,7 @@ test "recovery reports directory sync failure after namespace deletion" {
     // makes no claim that the parent directory reached durable storage.
     const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
     defer testing.allocator.free(transaction_dir);
-    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    try testing.expect(!try pathExists(testing.io, transaction_dir));
     try expectFixtureCandidates(&fixture, false);
     try testing.expectEqual(@as(usize, 0), try recoverAllLocked(testing.allocator, &lock, fixture.root));
 }
@@ -2441,7 +2441,7 @@ test "full read set mutation causes zero writes" {
     }
     const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
     defer testing.allocator.free(transaction_dir);
-    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    try testing.expect(!try pathExists(testing.io, transaction_dir));
     try testing.expectError(error.WorkspaceRecoveryRequired, workspace.pendingReceipts());
 }
 
@@ -2555,7 +2555,7 @@ test "recovered workspace binds canonical roots before checking proof inputs" {
     for ([_]*const Fixture{ &first, &second }) |fixture| {
         const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
         defer testing.allocator.free(transaction_dir);
-        try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+        try testing.expect(!try pathExists(testing.io, transaction_dir));
     }
     try testing.expectError(error.WorkspaceRecoveryRequired, workspace.pendingReceipts());
     try testing.expectError(error.WorkspaceRecoveryRequired, workspace.markReceipted(&first.proof.proof_id));
@@ -2753,12 +2753,12 @@ test "acquire deletes an aborted transaction whose manifest is already gone" {
         );
         const manifest_path = try std.fs.path.resolve(testing.allocator, &.{ transaction_dir, "manifest.json" });
         defer testing.allocator.free(manifest_path);
-        try deleteFileIfPresent(testing.allocator, manifest_path);
+        try deleteFileIfPresent(testing.io, manifest_path);
     }
 
     var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
     defer workspace.deinit();
-    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    try testing.expect(!try pathExists(testing.io, transaction_dir));
     try expectFixtureCandidates(&fixture, false);
 }
 
@@ -2786,15 +2786,15 @@ test "acquire deletes a transaction whose delete removed the aborted marker befo
         );
         const manifest_path = try std.fs.path.resolve(testing.allocator, &.{ transaction_dir, "manifest.json" });
         defer testing.allocator.free(manifest_path);
-        try deleteFileIfPresent(testing.allocator, manifest_path);
+        try deleteFileIfPresent(testing.io, manifest_path);
         const aborted_path = try std.fs.path.resolve(testing.allocator, &.{ transaction_dir, "aborted" });
         defer testing.allocator.free(aborted_path);
-        try deleteFileIfPresent(testing.allocator, aborted_path);
+        try deleteFileIfPresent(testing.io, aborted_path);
     }
 
     var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
     defer workspace.deinit();
-    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    try testing.expect(!try pathExists(testing.io, transaction_dir));
     try expectFixtureCandidates(&fixture, false);
 }
 
@@ -2949,7 +2949,7 @@ test "acquire recovers a prepared transaction whose target directory is gone" {
 
     var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
     defer workspace.deinit();
-    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    try testing.expect(!try pathExists(testing.io, transaction_dir));
 }
 
 test "acquire removes the stage files of an applying transaction it rolls forward" {
@@ -3069,6 +3069,7 @@ test "acquire and pending receipts report a failed allocation as out of memory" 
 fn writeFixtureReceipt(allocator: std.mem.Allocator, transaction_dir: []const u8) !void {
     const proof_id: [64]u8 = @splat('a');
     try writeProvidedReceipt(
+        testing.io,
         allocator,
         transaction_dir,
         "{\"kind\":\"verified_change_set\",\"transaction_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",

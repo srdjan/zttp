@@ -54,10 +54,10 @@ fn execute(
 const testing = std.testing;
 
 test "tool description matches the current zts check properties contract" {
-    try testing.expect(std.mem.indexOf(u8, tool.description, "pure") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "result_safe") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "current on-disk proof state") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "proof_card") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "pure") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "result_safe") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "current on-disk proof state") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "proof_card") != null);
 }
 
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
@@ -82,8 +82,8 @@ test "zts_check runs in a workspace that has no build.zig" {
     var result = try execute(allocator, &.{"handler.ts"});
     defer result.deinit(allocator);
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"exit_code\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "proof") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"exit_code\":0") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "proof") != null);
 }
 
 test "zts_check reports a failing handler as not ok" {
@@ -100,6 +100,6 @@ test "zts_check reports a failing handler as not ok" {
     var result = try execute(allocator, &.{"handler.ts"});
     defer result.deinit(allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"exit_code\":1") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "success") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"exit_code\":1") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "success") != null);
 }

@@ -189,7 +189,7 @@ fn bytesFromOctetsNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue)
     const ra = ctx.requestAllocator();
     const elements = try ra.alloc(JSValue, len);
     defer ra.free(elements);
-    for (elements, 0..) |*slot, i| slot.* = list.getSlot(@intCast(i + 1));
+    for (elements, 0..) |*slot, i| slot.* = list.getIndex(@intCast(i)) orelse JSValue.undefined_val;
 
     return switch (try bytes.fromOctets(ctx, elements)) {
         .ok => |obj| helpers.createResultOk(ctx, JSValue.fromPtr(obj)),
@@ -257,7 +257,7 @@ fn concatBytesNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) any
     var total: u64 = 0;
     var i: u32 = 0;
     while (i < count) : (i += 1) {
-        const part = bytes.asBytes(list.getSlot(@intCast(i + 1))) orelse return failure(ctx, .{
+        const part = bytes.asBytes(list.getIndex(i) orelse JSValue.undefined_val) orelse return failure(ctx, .{
             .kind = .invalid_octet,
             .index = @floatFromInt(i),
             .val = std.math.nan(f64),
@@ -273,7 +273,7 @@ fn concatBytesNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) any
     var written: usize = 0;
     i = 0;
     while (i < count) : (i += 1) {
-        const part = bytes.asBytes(list.getSlot(@intCast(i + 1))).?;
+        const part = bytes.asBytes(list.getIndex(i) orelse JSValue.undefined_val).?;
         const octets = bytes.data(part);
         @memcpy(buf[written..][0..octets.len], octets);
         written += octets.len;
@@ -639,4 +639,17 @@ test "an empty Bytes encodes to the empty string and back" {
 
     const decoded = try okValue(h, try call(h, "decodeBase64", &.{try h.ctx.createString("")}));
     try testing.expectEqual(@as(u32, 0), bytes.length(bytes.asBytes(decoded).?));
+}
+
+test "bytesFromOctets and concatBytes reject sparse arrays safely without OOB" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    const sparse = try h.ctx.createArray();
+    sparse.setArrayLength(10);
+    const oct_err = try errValue(h, try call(h, "bytesFromOctets", &.{sparse.toValue()}));
+    try testing.expectEqualStrings("invalid-octet", helpers.getStringDataCtx(try field(h, oct_err, "kind"), h.ctx).?);
+
+    const cat_err = try errValue(h, try call(h, "concatBytes", &.{sparse.toValue()}));
+    try testing.expectEqualStrings("invalid-octet", helpers.getStringDataCtx(try field(h, cat_err, "kind"), h.ctx).?);
 }

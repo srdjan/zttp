@@ -918,8 +918,11 @@ pub const BoolChecker = struct {
         if (callee_tag == .identifier) {
             const binding = self.ir_view.getBinding(call.callee) orelse return .unknown;
 
-            // Check virtual module import bindings first
-            if (self.module_fn_types.get(binding.slot)) |ret_type| return ret_type;
+            // Check virtual module import bindings first (only module-level
+            // bindings carry atom slots; local/arg slots can collide).
+            if (binding.kind == .global or binding.kind == .undeclared_global) {
+                if (self.module_fn_types.get(binding.slot)) |ret_type| return ret_type;
+            }
 
             // Then check locally-inferred function return types
             const key = bindingKey(binding);
@@ -937,6 +940,7 @@ pub const BoolChecker = struct {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return false;
         if (callee_tag != .identifier) return false;
         const binding = self.ir_view.getBinding(call.callee) orelse return false;
+        if (binding.kind != .global and binding.kind != .undeclared_global) return false;
         return self.module_result_fn_slots.contains(binding.slot);
     }
 
@@ -1445,15 +1449,17 @@ pub const BoolChecker = struct {
         const str_idx = self.ir_view.getStringIdx(lit_node) orelse return null;
         const lit_str = self.ir_view.getString(str_idx) orelse return null;
 
-        // Map ExprType to typeof result string
+        // Map ExprType to typeof result string. Optional types can be
+        // `undefined` at runtime, so a `typeof` check on them is never a
+        // tautology or contradiction.
         const expected_typeof: ?[]const u8 = switch (operand_type) {
             .boolean => "boolean",
             .number => "number",
-            .string, .optional_string => "string",
+            .string => "string",
             .undefined => "undefined",
-            .object, .optional_object => "object",
+            .object => "object",
             .function => "function",
-            .unknown => null,
+            .optional_string, .optional_object, .unknown => null,
         };
 
         if (expected_typeof) |expected| {
@@ -1698,9 +1704,13 @@ pub const BoolChecker = struct {
         }
     }
 
-    /// Restore narrowed_types to saved values, removing entries that had no prior value.
+    /// Restore narrowed_types to saved values in reverse install order so
+    /// duplicate binding keys in one guard list restore the original entry.
     fn restoreGuards(self: *BoolChecker, guards: []const TypeofGuard, saved: []const ?ExprType) void {
-        for (guards, 0..) |g, i| {
+        var i: usize = guards.len;
+        while (i > 0) {
+            i -= 1;
+            const g = guards[i];
             if (saved[i]) |prev| {
                 self.narrowed_types.put(self.allocator, g.binding_key, prev) catch self.markAllocationFailure();
             } else {
@@ -2852,8 +2862,6 @@ test "sound: result.error is string, catches arithmetic on it" {
     , 1);
 }
 
-const import_corpus = @import("tests/import_corpus.zig");
-
 test "the import scan maps builtin slots to return types in both atom modes" {
     // Replaces the differential that proved this scan matches the pre-C1
     // implementation (commit 383ea758). Both atom-table modes, because the
@@ -2919,4 +2927,33 @@ test "sound: ! on a number in a computed key is refused" {
 
 test "sound: ! on a boolean in a spread operand passes" {
     try checkSource("const b = 1 > 0; const z = [...[!b]];", 0);
+}
+
+test "typeof check on optional string or optional object is not a tautology" {
+    try checkSource(
+        \\import { env } from "zttp:env";
+        \\const v = env("KEY");
+        \\const a = typeof v === "string";
+        \\const b = typeof v === "undefined";
+    , 0);
+}
+
+test "restoreGuards unwinds duplicate binding guards in reverse order" {
+    const allocator = std.testing.allocator;
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "const x = 1;", .compile);
+    defer parser.deinit();
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var checker = BoolChecker.init(allocator, ir_view, null);
+    defer checker.deinit();
+
+    const guards = [_]BoolChecker.TypeofGuard{
+        .{ .binding_key = 42, .narrowed_type = .string, .op = .strict_eq },
+        .{ .binding_key = 42, .narrowed_type = .number, .op = .strict_eq },
+    };
+    var saved: [2]?ExprType = .{ null, null };
+    checker.installGuards(&guards, &saved);
+    try std.testing.expectEqual(@as(?ExprType, .number), checker.narrowed_types.get(42));
+    checker.restoreGuards(&guards, &saved);
+    try std.testing.expectEqual(@as(?ExprType, null), checker.narrowed_types.get(42));
 }

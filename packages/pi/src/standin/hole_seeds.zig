@@ -88,7 +88,7 @@ pub fn findById(id: []const u8) ?*const HoleSeed {
 pub fn countHoles(source: []const u8) usize {
     var n: usize = 0;
     var i: usize = 0;
-    while (std.mem.indexOfPos(u8, source, i, hole_call)) |pos| : (i = pos + hole_call.len) {
+    while (std.mem.findPos(u8, source, i, hole_call)) |pos| : (i = pos + hole_call.len) {
         n += 1;
     }
     return n;
@@ -123,7 +123,7 @@ fn replaceFirstHole(
     source: []const u8,
     expression: []const u8,
 ) ![]u8 {
-    const at = std.mem.indexOf(u8, source, hole_call) orelse return error.NoHole;
+    const at = std.mem.find(u8, source, hole_call) orelse return error.NoHole;
     return std.mem.concat(allocator, u8, &.{
         source[0..at],
         expression,

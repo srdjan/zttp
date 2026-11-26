@@ -222,7 +222,7 @@ test "declaration full spans retain consumed equals and trailing whitespace" {
         try store.validate();
         try std.testing.expectEqualStrings(source, full_span.text(source));
         try std.testing.expectEqualStrings(source, store.declarations.items[0].full_span.text(source));
-        if (std.mem.indexOfScalar(u8, source, '\n')) |newline| {
+        if (std.mem.findScalar(u8, source, '\n')) |newline| {
             const body = switch (store.declarations.items[0].body) {
                 .absent => return error.TestUnexpectedResult,
                 .present => |present| present,
@@ -283,7 +283,7 @@ test "declaration terminators must start at the raw whitespace endpoint" {
         .not_declaration, .excluded => return error.TestUnexpectedResult,
     };
     try store.validate();
-    const comment_start = std.mem.indexOf(u8, source, "/*c*/") orelse return error.TestUnexpectedResult;
+    const comment_start = std.mem.find(u8, source, "/*c*/") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, @intCast(comment_start)), full_span.end);
     try std.testing.expect(store.declarations.items[0].terminator_span == null);
     try std.testing.expectEqual(token_mod.TokenType.semicolon, cursor.current.type);
@@ -415,7 +415,7 @@ test "annotation publication failure preserves its cursor and prior syntax" {
             try std.testing.expectEqual(@as(usize, 2), store.nodes.capacity);
             try std.testing.expectEqual(@as(usize, 1), store.annotations.capacity);
             const prior = store.checkpoint();
-            const second_start: u32 = @intCast(std.mem.indexOf(u8, source, "string").?);
+            const second_start: u32 = @intCast(std.mem.find(u8, source, "string").?);
             var second = Cursor.init(source);
             while (second.current.type != .eof and second.current.start < second_start) second.advance();
             const before = second;
@@ -489,7 +489,7 @@ test "excluded compound annotation rolls back all arrays and keeps its cursor" {
     try std.testing.expect(prior.params > 0);
     try std.testing.expect(prior.template_parts > 0);
 
-    const second_start: u32 = @intCast(std.mem.indexOf(u8, source, "{ a:").?);
+    const second_start: u32 = @intCast(std.mem.find(u8, source, "{ a:").?);
     var second = Cursor.init(source);
     while (second.current.type != .eof and second.current.start < second_start) second.advance();
     const before = second;
@@ -580,7 +580,7 @@ test "second compound annotation rolls back every allocation failure" {
         "{ tags: string[] } = second;";
     const Context = struct {
         fn run(allocator: std.mem.Allocator, observed_failures: *usize) !void {
-            const second_start: u32 = @intCast(std.mem.indexOf(u8, source, "{ field:").?);
+            const second_start: u32 = @intCast(std.mem.find(u8, source, "{ field:").?);
             var store = Store.init(allocator, source);
             defer store.deinit();
             var first = Cursor.init(source);
@@ -778,7 +778,7 @@ test "second generic application rolls back every allocation failure" {
         "Proof<Readonly<{ data: Dict<string, number> }>, \"pure\"> = second;";
     const Context = struct {
         fn run(allocator: std.mem.Allocator, observed_later_failures: *usize) !void {
-            const second_start: u32 = @intCast(std.mem.indexOf(u8, source, "Proof<").?);
+            const second_start: u32 = @intCast(std.mem.find(u8, source, "Proof<").?);
             var store = Store.init(allocator, source);
             defer store.deinit();
 
@@ -964,7 +964,7 @@ test "admission generic scanner reports raw angle and bracket depth" {
 
 test "admission call scanner retains caught rows before a grammar nonmatch" {
     const source = "const value = f<`a${\"open\n 1}tail` || T>(x);\n";
-    const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
+    const list_start: u32 = @intCast(std.mem.findScalar(u8, source, '<').?);
     var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
     defer caught.deinit(std.testing.allocator);
 
@@ -1040,8 +1040,8 @@ test "admission call scanner retains caught rows before a grammar nonmatch" {
 
 test "admission interface brace scanner preserves raw boundaries" {
     const quoted_source = "interface X extends { field: \"open\n next: any } trailing";
-    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, quoted_source, '{').?);
-    const body_end: u32 = @intCast(std.mem.indexOfScalar(u8, quoted_source, '}').? + 1);
+    const body_start: u32 = @intCast(std.mem.findScalar(u8, quoted_source, '{').?);
+    const body_end: u32 = @intCast(std.mem.findScalar(u8, quoted_source, '}').? + 1);
     var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
     defer caught.deinit(std.testing.allocator);
 
@@ -1056,14 +1056,14 @@ test "admission interface brace scanner preserves raw boundaries" {
     try std.testing.expectEqual(@as(usize, 1), caught.items.len);
     try std.testing.expectEqual(AdmissionKind.unterminated_string, caught.items[0].kind);
     try std.testing.expectEqual(
-        @as(u32, @intCast(std.mem.indexOfScalar(u8, quoted_source, '\n').?)),
+        @as(u32, @intCast(std.mem.findScalar(u8, quoted_source, '\n').?)),
         caught.items[0].span.start,
     );
 
     caught.clearRetainingCapacity();
     const comment_source = "interface X extends { /* } */ field: any } trailing";
-    const comment_body: u32 = @intCast(std.mem.indexOfScalar(u8, comment_source, '{').?);
-    const comment_close: u32 = @intCast(std.mem.indexOfScalar(u8, comment_source, '}').? + 1);
+    const comment_body: u32 = @intCast(std.mem.findScalar(u8, comment_source, '{').?);
+    const comment_close: u32 = @intCast(std.mem.findScalarLast(u8, comment_source, '}').? + 1);
     switch (try scanAdmissionBraceBody(std.testing.allocator, .{
         .source = comment_source,
         .start = comment_body,
@@ -1167,7 +1167,7 @@ test "type owners reject direct indirect and overlapping cross-owner ranges" {
             .parsed => {},
             .failure, .excluded => return error.TestUnexpectedResult,
         }
-        const second_start: u32 = @intCast(std.mem.indexOf(u8, source, switch (case) {
+        const second_start: u32 = @intCast(std.mem.find(u8, source, switch (case) {
             .direct_child => "(string)",
             .indirect_member_child => "[string]",
             .application_base, .application_argument => "Outer<string>",
@@ -1531,7 +1531,7 @@ test "generic syntax resumes combined operator tokens at exact boundaries" {
             .parsed => {},
             .failure, .excluded => return error.TestUnexpectedResult,
         }
-        const equals = std.mem.indexOfScalar(u8, source, '=') orelse return error.TestUnexpectedResult;
+        const equals = std.mem.findScalar(u8, source, '=') orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(token_mod.TokenType.assign, cursor.current.type);
         try std.testing.expectEqual(@as(u32, @intCast(equals)), cursor.current.start);
         try std.testing.expectEqual(@as(u32, @intCast(equals + 1)), cursor.tokenizer.saveState().pos);
@@ -1633,7 +1633,7 @@ test "group metadata participates in application planning" {
 
 test "admitted annotation publishes a confirmed caught prefix once" {
     const source = "\"open\n";
-    const admitted_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '\n').?);
+    const admitted_end: u32 = @intCast(std.mem.findScalar(u8, source, '\n').?);
     var store = Store.init(std.testing.allocator, source);
     defer store.deinit();
     const binding = BindingRef.global(300);
@@ -1673,7 +1673,7 @@ test "admitted annotation publishes a confirmed caught prefix once" {
 
 test "admitted annotation reuses strict semantic assembly" {
     const source = "number   ;";
-    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+    const admission_end: u32 = @intCast(std.mem.findScalar(u8, source, ';').?);
     var strict_store = Store.init(std.testing.allocator, source);
     defer strict_store.deinit();
     var strict_cursor = Cursor.init(source);
@@ -1707,11 +1707,11 @@ test "admitted annotation reuses strict semantic assembly" {
 
 test "admitted declaration preserves body endpoint and generic backlink" {
     const source = "structural Box<T> = { value: T }   ;";
-    const generic_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
-    const generic_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1);
-    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
-    const body_end: u32 = @intCast(std.mem.indexOf(u8, source, "   ;").?);
-    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+    const generic_start: u32 = @intCast(std.mem.findScalar(u8, source, '<').?);
+    const generic_end: u32 = @intCast(std.mem.findScalar(u8, source, '>').? + 1);
+    const body_start: u32 = @intCast(std.mem.findScalar(u8, source, '{').?);
+    const body_end: u32 = @intCast(std.mem.find(u8, source, "   ;").?);
+    const admission_end: u32 = @intCast(std.mem.findScalar(u8, source, ';').?);
     var store = Store.init(std.testing.allocator, source);
     defer store.deinit();
     var cursor = Cursor.init(source);
@@ -1756,7 +1756,7 @@ test "admitted declaration publishes a confirmed caught generic list" {
     const source =
         "structural Box<T = (\"open\n" ++
         ")> = number; const live = 1;";
-    const generic_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
+    const generic_start: u32 = @intCast(std.mem.findScalar(u8, source, '<').?);
     var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
     defer caught.deinit(std.testing.allocator);
     const generic_scan = switch (try scanAdmissionGenericList(std.testing.allocator, .{
@@ -1771,8 +1771,8 @@ test "admitted declaration publishes a confirmed caught generic list" {
     try std.testing.expectEqual(@as(usize, 1), caught.items.len);
     try std.testing.expectEqual(AdmissionKind.unterminated_string, caught.items[0].kind);
 
-    const body_start: u32 = @intCast(std.mem.indexOf(u8, source, "number").?);
-    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+    const body_start: u32 = @intCast(std.mem.find(u8, source, "number").?);
+    const admission_end: u32 = @intCast(std.mem.findScalar(u8, source, ';').?);
     var store = Store.init(std.testing.allocator, source);
     defer store.deinit();
     var cursor = Cursor.init(source);
@@ -1855,13 +1855,13 @@ test "admitted declaration raw resume preserves caught body endpoints" {
         var cursor = Cursor.init(source);
         const keyword = cursor.current;
         cursor.advance();
-        const terminator_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
-        const expected_const: u32 = @intCast(std.mem.indexOf(u8, source, "const").?);
+        const terminator_start: u32 = @intCast(std.mem.findScalar(u8, source, ';').?);
+        const expected_const: u32 = @intCast(std.mem.find(u8, source, "const").?);
         const expected_line: u32 = if (case == .strict) 1 else 2;
         const expected_line_start: u32 = if (case == .strict)
             0
         else
-            @intCast(std.mem.indexOfScalar(u8, source, '\n').? + 1);
+            @intCast(std.mem.findScalar(u8, source, '\n').? + 1);
         const expected_admission_end: u32 = if (case == .quoted)
             expected_line_start - 1
         else
@@ -1881,7 +1881,7 @@ test "admitted declaration raw resume preserves caught body endpoints" {
                 .excluded, .not_declaration => return error.TestUnexpectedResult,
             }
         } else {
-            const assign: u32 = @intCast(std.mem.indexOfScalar(u8, source, '=').?);
+            const assign: u32 = @intCast(std.mem.findScalar(u8, source, '=').?);
             const body_start = skipTypeWhitespace(source, assign + 1);
             var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
             defer caught.deinit(std.testing.allocator);
@@ -1939,10 +1939,10 @@ test "admitted declaration raw resume preserves caught body endpoints" {
 
 test "admitted declaration rejects inconsistent confirmed generic spans" {
     const source = "structural Box<T> = number;";
-    const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
-    const list_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1);
-    const body_start: u32 = @intCast(std.mem.indexOf(u8, source, "number").?);
-    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+    const list_start: u32 = @intCast(std.mem.findScalar(u8, source, '<').?);
+    const list_end: u32 = @intCast(std.mem.findScalar(u8, source, '>').? + 1);
+    const body_start: u32 = @intCast(std.mem.find(u8, source, "number").?);
+    const admission_end: u32 = @intCast(std.mem.findScalar(u8, source, ';').?);
     const Case = enum { missing, wrong_start, wrong_angle, out_of_range };
     for (std.meta.tags(Case)) |case| {
         var store = Store.init(std.testing.allocator, source);
@@ -1983,8 +1983,8 @@ test "admitted declaration rejects inconsistent confirmed generic spans" {
     const plain_keyword = plain_cursor.current;
     plain_cursor.advance();
     const plain_before = plain_cursor;
-    const plain_body_start: u32 = @intCast(std.mem.indexOf(u8, plain_source, "number").?);
-    const plain_end: u32 = @intCast(std.mem.indexOfScalar(u8, plain_source, ';').?);
+    const plain_body_start: u32 = @intCast(std.mem.find(u8, plain_source, "number").?);
+    const plain_end: u32 = @intCast(std.mem.findScalar(u8, plain_source, ';').?);
     try std.testing.expectError(
         error.InvalidAdmissionSpan,
         parseAdmittedDeclarationAndStore(&plain_store, .{
@@ -2013,7 +2013,7 @@ test "admitted declaration body presence matches the equals token" {
             .absent, .unexpected_body => "structural Empty;",
             .empty, .missing_body => "structural Empty =   ;",
         };
-        const semicolon: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+        const semicolon: u32 = @intCast(std.mem.findScalar(u8, source, ';').?);
         var store = Store.init(std.testing.allocator, source);
         defer store.deinit();
         var cursor = Cursor.init(source);
@@ -2089,10 +2089,10 @@ test "admitted nominal missing body retains its exclusion and rollback" {
 
 test "admitted nominal exclusion rolls back its generic projection" {
     const source = "nominal Box<T> = T;";
-    const generic_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
-    const generic_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1);
-    const body_start: u32 = @intCast(std.mem.lastIndexOfScalar(u8, source, 'T').?);
-    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+    const generic_start: u32 = @intCast(std.mem.findScalar(u8, source, '<').?);
+    const generic_end: u32 = @intCast(std.mem.findScalar(u8, source, '>').? + 1);
+    const body_start: u32 = @intCast(std.mem.findScalarLast(u8, source, 'T').?);
+    const admission_end: u32 = @intCast(std.mem.findScalar(u8, source, ';').?);
     var store = Store.init(std.testing.allocator, source);
     defer store.deinit();
     var cursor = Cursor.init(source);
@@ -2175,10 +2175,10 @@ test "admitted semantic publication restores its entry checkpoint on allocation 
                     const keyword = cursor.current;
                     cursor.advance();
                     const before_cursor = cursor;
-                    const generic_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
-                    const generic_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1);
-                    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
-                    const admission_end: u32 = @intCast(std.mem.lastIndexOfScalar(u8, source, ';').?);
+                    const generic_start: u32 = @intCast(std.mem.findScalar(u8, source, '<').?);
+                    const generic_end: u32 = @intCast(std.mem.findScalar(u8, source, '>').? + 1);
+                    const body_start: u32 = @intCast(std.mem.findScalar(u8, source, '{').?);
+                    const admission_end: u32 = @intCast(std.mem.findScalarLast(u8, source, ';').?);
                     const outcome = parseAdmittedDeclarationAndStore(&store, .{
                         .keyword = keyword,
                         .export_span = null,
@@ -2230,16 +2230,16 @@ test "admitted generic declaration failure preserves a published seed" {
     try std.testing.expect(prior.nodes > 0);
     try std.testing.expect(prior.annotations > 0);
 
-    const declaration_start: u32 = @intCast(std.mem.indexOf(u8, source, "structural").?);
+    const declaration_start: u32 = @intCast(std.mem.find(u8, source, "structural").?);
     var cursor = Cursor.init(source);
     advanceCursorTo(&cursor, declaration_start);
     const keyword = cursor.current;
     cursor.advance();
     const before_cursor = cursor;
-    const generic_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
-    const generic_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1);
-    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
-    const admission_end: u32 = @intCast(std.mem.lastIndexOfScalar(u8, source, ';').?);
+    const generic_start: u32 = @intCast(std.mem.findScalar(u8, source, '<').?);
+    const generic_end: u32 = @intCast(std.mem.findScalar(u8, source, '>').? + 1);
+    const body_start: u32 = @intCast(std.mem.findScalar(u8, source, '{').?);
+    const admission_end: u32 = @intCast(std.mem.findScalarLast(u8, source, ';').?);
     failing.fail_index = failing.alloc_index;
     failing.resize_fail_index = failing.resize_index;
 
@@ -2379,7 +2379,7 @@ test "type-only module scanner spills nested template frames without truncation"
         .scanned => |module| module,
         .not_type_only, .refused, .excluded => return error.TestExpectedTypeOnlyModule,
     };
-    const semicolon = std.mem.lastIndexOfScalar(u8, source.items, ';') orelse
+    const semicolon = std.mem.findScalarLast(u8, source.items, ';') orelse
         return error.TestExpectedTypeOnlyModule;
     try std.testing.expectEqual(@as(u32, @intCast(semicolon + 1)), module.raw_span.end);
     try std.testing.expectEqual(@as(usize, 0), diagnostics.items.len);
@@ -2399,7 +2399,7 @@ test "type-only module scanner retains exact lexical exclusions" {
             .excluded => |module| module,
             .not_type_only, .refused, .scanned => return error.TestExpectedTypeOnlyModule,
         };
-        const newline = std.mem.indexOfScalar(u8, source, '\n') orelse
+        const newline = std.mem.findScalar(u8, source, '\n') orelse
             return error.TestExpectedTypeOnlyModule;
         try std.testing.expectEqual(@as(u32, @intCast(newline)), module.raw_span.end);
         try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
@@ -2422,8 +2422,8 @@ test "type-only module scanner retains exact lexical exclusions" {
         };
         try std.testing.expectEqual(@as(u32, @intCast(source.len)), module.raw_span.end);
         try std.testing.expectEqual(@as(usize, 2), diagnostics.items.len);
-        try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOfScalar(u8, source, '\n').?)), diagnostics.items[0].offset);
-        try std.testing.expectEqual(@as(u32, @intCast(std.mem.lastIndexOfScalar(u8, source, '\n').?)), diagnostics.items[1].offset);
+        try std.testing.expectEqual(@as(u32, @intCast(std.mem.findScalar(u8, source, '\n').?)), diagnostics.items[0].offset);
+        try std.testing.expectEqual(@as(u32, @intCast(std.mem.findScalarLast(u8, source, '\n').?)), diagnostics.items[1].offset);
     }
 
     {
@@ -2447,7 +2447,7 @@ test "type-only module scanner retains exact lexical exclusions" {
             .excluded => |module| module,
             .not_type_only, .refused, .scanned => return error.TestExpectedTypeOnlyModule,
         };
-        const semicolon = std.mem.indexOfScalarPos(u8, source.items, diagnostic_offset, ';') orelse
+        const semicolon = std.mem.findScalarPos(u8, source.items, diagnostic_offset, ';') orelse
             return error.TestExpectedTypeOnlyModule;
         try std.testing.expectEqual(@as(u32, @intCast(semicolon + 1)), module.raw_span.end);
         try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
@@ -2521,7 +2521,7 @@ test "type-only module spill failure removes a diagnostic appended in the same s
     try source.appendSlice(std.testing.allocator, "import type `${\"open\n");
     for (0..max_template_levels) |_| try source.appendSlice(std.testing.allocator, "`${");
     try source.appendSlice(std.testing.allocator, "value");
-    const fault = std.mem.indexOfScalar(u8, source.items, '\n') orelse return error.TestUnexpectedResult;
+    const fault = std.mem.findScalar(u8, source.items, '\n') orelse return error.TestUnexpectedResult;
     const prior: TypeOnlyModuleDiagnostic = .{ .kind = .nesting_too_deep, .offset = 1 };
     var diagnostics: std.ArrayListUnmanaged(TypeOnlyModuleDiagnostic) = .empty;
     defer diagnostics.deinit(std.testing.allocator);
@@ -2604,11 +2604,11 @@ test "admitted absent declarations preserve comment boundaries and cursor accoun
         const keyword = cursor.current;
         cursor.advance();
         const consumed_before = cursor.consumed;
-        const generic_list: ?Span = if (std.mem.indexOfScalar(u8, source, '<')) |start| .{
+        const generic_list: ?Span = if (std.mem.findScalar(u8, source, '<')) |start| .{
             .start = @intCast(start),
-            .end = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1),
+            .end = @intCast(std.mem.findScalar(u8, source, '>').? + 1),
         } else null;
-        const comment: u32 = @intCast(std.mem.indexOfScalar(u8, source, '/').?);
+        const comment: u32 = @intCast(std.mem.findScalar(u8, source, '/').?);
         const span = switch (try parseAdmittedDeclarationAndStore(&store, .{
             .keyword = keyword,
             .export_span = export_span,
@@ -2650,9 +2650,9 @@ test "admitted absent declarations preserve comment boundaries and cursor accoun
 
 test "admitted absent declarations validate boundaries before allocation" {
     const source = "structural Shape<T> /* gap */ const live = 1;";
-    const generic_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
-    const generic_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1);
-    const comment: u32 = @intCast(std.mem.indexOfScalar(u8, source, '/').?);
+    const generic_start: u32 = @intCast(std.mem.findScalar(u8, source, '<').?);
+    const generic_end: u32 = @intCast(std.mem.findScalar(u8, source, '>').? + 1);
+    const comment: u32 = @intCast(std.mem.findScalar(u8, source, '/').?);
     const Case = enum { nominal, body, keyword, name, export_span, generic_span, missing_generic, early, late, outside };
     inline for (std.meta.tags(Case)) |case| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
@@ -2709,11 +2709,11 @@ test "admitted absent declaration allocation failures restore syntax and cursor"
                 .kind = .structural,
                 .authored_scope = 0,
                 .generic_list = .{
-                    .start = @intCast(std.mem.indexOfScalar(u8, source, '<').?),
-                    .end = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1),
+                    .start = @intCast(std.mem.findScalar(u8, source, '<').?),
+                    .end = @intCast(std.mem.findScalar(u8, source, '>').? + 1),
                 },
                 .body = null,
-                .raw_header_end = @intCast(std.mem.indexOfScalar(u8, source, '/').?),
+                .raw_header_end = @intCast(std.mem.findScalar(u8, source, '/').?),
             }, &cursor) catch |err| {
                 try std.testing.expectEqualDeep(prior, store.checkpoint());
                 try std.testing.expectEqualDeep(prior_cursor, cursor);

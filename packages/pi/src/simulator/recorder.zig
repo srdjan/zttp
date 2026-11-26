@@ -372,7 +372,7 @@ pub const Recorder = struct {
         // A Chat Completions provider always supplies the digest of its wire
         // body; a recording that lost it would replay as an absent-versus-
         // present mismatch on every call, so refuse it at capture time.
-        if (recordsWireDigest(self.options.provider) and snapshot.wire_request_sha256 == null) {
+        if (snapshot.wire_request_sha256 == null) {
             return error.InconsistentModelExchange;
         }
         const request_budget = snapshot.budget orelse return error.InconsistentModelExchange;
@@ -881,13 +881,6 @@ fn artifactDigest(digest: model_request.Sha256Hex) artifact.Sha256Hex {
     return .{ .bytes = digest.bytes };
 }
 
-/// Every provider hashes the exact serialized request body before transport.
-/// Replay rebuilds and hashes the same bytes before releasing a response.
-fn recordsWireDigest(provider: artifact.Provider) bool {
-    _ = provider;
-    return true;
-}
-
 fn mlxLmVersion(allocator: std.mem.Allocator, raw_response: []const u8) !?[]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -897,7 +890,7 @@ fn mlxLmVersion(allocator: std.mem.Allocator, raw_response: []const u8) !?[]u8 {
     if (parsed != .object) return null;
     const fingerprint = parsed.object.get("system_fingerprint") orelse return null;
     if (fingerprint != .string) return null;
-    const end = std.mem.indexOfScalar(u8, fingerprint.string, '-') orelse fingerprint.string.len;
+    const end = std.mem.findScalar(u8, fingerprint.string, '-') orelse fingerprint.string.len;
     const version = fingerprint.string[0..end];
     if (version.len == 0) return null;
     for (version) |byte| if (!std.ascii.isDigit(byte) and byte != '.') return null;

@@ -1918,13 +1918,12 @@ pub const StrictChecker = struct {
         if (tag != .identifier) return false;
         const binding = self.ir_view.getBinding(callee) orelse return false;
         if (self.annotated_function_bindings.contains(bindingKey(binding))) return false;
-        if (self.importedFunctionForSlot(binding.slot) != null) return false;
         // `slot` is an atom index only for global bindings; for local/argument/
         // upvalue bindings it is a scope-relative slot number, so resolving it
-        // as an atom can collide with a predefined global-function name and
-        // wrongly suppress the implicit_unknown diagnostic. Only consult it for
-        // globals.
+        // as an atom or import slot can collide with an import or predefined
+        // global-function name and wrongly suppress the diagnostic.
         if (binding.kind == .global or binding.kind == .undeclared_global) {
+            if (self.importedFunctionForSlot(binding.slot) != null) return false;
             if (self.resolveAtomName(binding.name_atom)) |name| {
                 if (isKnownGlobalFunction(name)) return false;
             }
@@ -2075,6 +2074,7 @@ pub const StrictChecker = struct {
     pub fn importedFunctionForCallee(self: *const StrictChecker, callee: NodeIndex) ?ImportedFunction {
         if (self.ir_view.getTag(callee) != .identifier) return null;
         const binding = self.ir_view.getBinding(callee) orelse return null;
+        if (binding.kind != .global and binding.kind != .undeclared_global) return null;
         return self.importedFunctionForSlot(binding.slot);
     }
 
@@ -3316,8 +3316,6 @@ test "canonical ternary diagnostics carry diagnostic-specific repair intents" {
 // prevents the detector from ever running. The detector here is in place so
 // the rule fires automatically once the parser/IR mismatch is fixed.
 
-const import_corpus = @import("tests/import_corpus.zig");
-
 test "the import scan records every specifier in order" {
     // Replaces the differential test that proved this scan matches the pre-C1
     // implementation. Expectations captured from that proven implementation.
@@ -3437,7 +3435,7 @@ const dict_imports =
 fn expectMessageContains(checker: *const StrictChecker, kind: DiagnosticKind, needle: []const u8) !void {
     for (checker.getDiagnostics()) |diag| {
         if (diag.kind != kind) continue;
-        if (std.mem.indexOf(u8, diag.message, needle) != null) return;
+        if (std.mem.find(u8, diag.message, needle) != null) return;
     }
     return error.DiagnosticNotEmitted;
 }

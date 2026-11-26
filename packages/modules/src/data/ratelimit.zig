@@ -13,6 +13,7 @@
 //!     Clears the counter for the given key. Returns true if present.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const sdk = @import("zttp-sdk");
 const state_limits = @import("../internal/state_limits.zig");
 
@@ -75,7 +76,8 @@ pub const RateStore = struct {
     max_key_bytes: usize,
     check_count: u32 = 0,
     // Guards every field. A handler pool shares one store across its runtimes.
-    mutex: std.Io.Mutex = .init,
+    mutex: if (builtin.single_threaded or builtin.os.tag == .freestanding) void else std.c.pthread_mutex_t =
+        if (builtin.single_threaded or builtin.os.tag == .freestanding) {} else .{},
 
     pub fn init(allocator: std.mem.Allocator) RateStore {
         return .{
@@ -132,9 +134,19 @@ pub const RateStore = struct {
 
     const CheckResult = struct { allowed: bool, remaining: u32, reset_at_ms: i64 };
 
+    fn lockMutex(self: *RateStore) void {
+        if (comptime builtin.single_threaded or builtin.os.tag == .freestanding) return;
+        _ = std.c.pthread_mutex_lock(&self.mutex);
+    }
+
+    fn unlockMutex(self: *RateStore) void {
+        if (comptime builtin.single_threaded or builtin.os.tag == .freestanding) return;
+        _ = std.c.pthread_mutex_unlock(&self.mutex);
+    }
+
     fn check(self: *RateStore, key: []const u8, limit: u32, window_sec: i64, now: i64) !CheckResult {
-        self.mutex.lockUncancelable(std.Options.debug_io);
-        defer self.mutex.unlock(std.Options.debug_io);
+        self.lockMutex();
+        defer self.unlockMutex();
         self.check_count +%= 1;
         if (self.check_count % EVICT_INTERVAL == 0) {
             self.evictExpired(now);
@@ -204,8 +216,8 @@ pub const RateStore = struct {
     }
 
     fn reset(self: *RateStore, key: []const u8) bool {
-        self.mutex.lockUncancelable(std.Options.debug_io);
-        defer self.mutex.unlock(std.Options.debug_io);
+        self.lockMutex();
+        defer self.unlockMutex();
         if (self.entries.fetchRemove(key)) |kv| {
             self.total_key_bytes -= kv.key.len;
             self.allocator.free(kv.key);
@@ -262,10 +274,14 @@ fn rateCheckImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     const tag_str = try sdk.createString(handle, "rate_exceeded");
     try sdk.objectSet(handle, err_obj, "tag", tag_str);
 
-    const retry_after_ms = result.reset_at_ms - now_ms;
-    const retry_sec = @divTrunc(@max(@as(i64, 0), retry_after_ms), 1000);
+    const retry_sec = retryAfterSeconds(result.reset_at_ms, now_ms);
     try sdk.objectSet(handle, err_obj, "retryAfter", sdk.numberFromF64(@floatFromInt(retry_sec)));
     return sdk.resultErrValue(handle, err_obj);
+}
+
+fn retryAfterSeconds(reset_at_ms: i64, now_ms: i64) i64 {
+    const retry_after_ms = reset_at_ms -| now_ms;
+    return @divTrunc(@max(@as(i64, 0), retry_after_ms), 1000);
 }
 
 /// An error Result whose error is `{ tag }`.
@@ -394,4 +410,10 @@ test "RateStore: reset releases owned key bytes" {
     try std.testing.expectEqual(@as(usize, "reset-me".len), store.total_key_bytes);
     try std.testing.expect(store.reset("reset-me"));
     try std.testing.expectEqual(@as(usize, 0), store.total_key_bytes);
+}
+
+test "retryAfterSeconds saturates instead of overflowing when reset_at_ms is maxInt and now_ms is negative" {
+    try std.testing.expectEqual(@as(i64, 9223372036854775), retryAfterSeconds(std.math.maxInt(i64), -1000));
+    try std.testing.expectEqual(@as(i64, 0), retryAfterSeconds(500, 1500));
+    try std.testing.expectEqual(@as(i64, 5), retryAfterSeconds(6500, 1000));
 }

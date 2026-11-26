@@ -92,7 +92,7 @@ fn appendRecoveredReceipt(
         receipt.transaction_id,
     });
     errdefer allocator.free(summary);
-    try session.transcript.entries.append(allocator, .{ .verified_change_set = .{
+    try session.transcript.appendOwned(allocator, .{ .verified_change_set = .{
         .llm_text = summary,
         .ui_payload = payload,
     } });

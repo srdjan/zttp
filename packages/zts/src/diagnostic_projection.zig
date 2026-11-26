@@ -108,8 +108,8 @@ pub fn project(comptime source: Source, diagnostic: anytype, ir_view: anytype) ?
 
 fn projectResultShape(comptime source: Source, diagnostic: anytype) ?handler_verifier.ResultShape {
     return switch (source) {
-        .boolean, .strict, .type => diagnostic.result_shape,
-        .flow, .verifier => null,
+        .boolean, .strict, .type, .verifier => diagnostic.result_shape,
+        .flow => null,
     };
 }
 
@@ -382,4 +382,26 @@ test "stable severities preserve wire order and labels" {
         const severity: Severity = @fromBackingInt(@intCast(@backingInt(@field(Severity, field))));
         try std.testing.expectEqualStrings(label, severity.label());
     }
+}
+
+test "project preserves verifier result_shape" {
+    const FakeIrView = struct {
+        fn getLoc(_: @This(), node: u32) ?SourceLocation {
+            if (node != 3) return null;
+            return .{ .line = 2, .column = 5, .offset = 10, .end_offset = 14 };
+        }
+    };
+    const diagnostic: handler_verifier.Diagnostic = .{
+        .severity = .err,
+        .kind = .unchecked_result_value,
+        .node = 3,
+        .message = "unchecked result",
+        .help = "check result.ok",
+        .result_shape = .unchecked_value,
+    };
+
+    const projected = project(.verifier, diagnostic, FakeIrView{}).?;
+    try std.testing.expectEqualStrings("ZTS303", projected.code);
+    try std.testing.expectEqual(@as(?handler_verifier.ResultShape, .unchecked_value), projected.result_shape);
+    try std.testing.expectEqual(@as(?[]const u8, null), projected.result_subject);
 }

@@ -92,7 +92,11 @@ fn runOneTurnWithClient(
         registry,
         &session.transcript,
         user_text,
-        .{ .replay_mode = replay, .workspace_root = workspace_root },
+        .{
+            .replay_mode = replay,
+            .workspace_root = workspace_root,
+            .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
+        },
     );
     const tr = &session.transcript;
 

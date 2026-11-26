@@ -643,7 +643,7 @@ test "the request body is the shared Chat Completions framing" {
     try testing.expectEqual(@as(i64, default_max_tokens), root.get("max_tokens").?.integer);
     try testing.expectEqual(@as(usize, 0), root.get("tools").?.array.items.len);
     try testing.expect(root.get("tool_choice") == null);
-    try testing.expect(std.mem.indexOf(u8, body, "\"api_key\"") == null);
+    try testing.expect(std.mem.find(u8, body, "\"api_key\"") == null);
     const messages = root.get("messages").?.array.items;
     try testing.expectEqual(@as(usize, 2), messages.len);
     try testing.expectEqualStrings("system", messages[0].object.get("role").?.string);
@@ -683,9 +683,9 @@ test "sanitizeResponse strips reasoning fields before capture" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const sanitized = try sanitizeResponse(arena.allocator(), response);
-    try testing.expect(std.mem.indexOf(u8, sanitized, "private chain") == null);
-    try testing.expect(std.mem.indexOf(u8, sanitized, "also private") == null);
-    try testing.expect(std.mem.indexOf(u8, sanitized, "\"content\":\"ok\"") != null);
+    try testing.expect(std.mem.find(u8, sanitized, "private chain") == null);
+    try testing.expect(std.mem.find(u8, sanitized, "also private") == null);
+    try testing.expect(std.mem.find(u8, sanitized, "\"content\":\"ok\"") != null);
 }
 
 test "sanitizeResponse retains only tool-call reasoning continuation" {
@@ -697,8 +697,8 @@ test "sanitizeResponse retains only tool-call reasoning continuation" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const sanitized = try sanitizeResponse(arena.allocator(), response);
-    try testing.expect(std.mem.indexOf(u8, sanitized, "continue exactly") != null);
-    try testing.expect(std.mem.indexOf(u8, sanitized, "discard gateway field") == null);
+    try testing.expect(std.mem.find(u8, sanitized, "continue exactly") != null);
+    try testing.expect(std.mem.find(u8, sanitized, "discard gateway field") == null);
 }
 
 test "tool calls keep the ids DeepSeek assigned" {
@@ -787,7 +787,7 @@ test "malformed responses are refused rather than half-decoded" {
 fn stubPost(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportResponse {
     _ = arena;
     try testing.expectEqualStrings("test-key", config.api_key);
-    try testing.expect(std.mem.indexOf(u8, body, "\"content\":\"hello\"") != null);
+    try testing.expect(std.mem.find(u8, body, "\"content\":\"hello\"") != null);
     return .{ .ok = "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"done\"}}]," ++
         "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}" };
 }

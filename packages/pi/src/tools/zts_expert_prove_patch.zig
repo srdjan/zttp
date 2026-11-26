@@ -79,7 +79,7 @@ test "prove_patch reports a call added on a preserved path as breaking" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "classification: breaking") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "classification: breaking") != null);
 }
 
 test "prove_patch reports a route added to a handler with a dynamic module argument as breaking" {
@@ -93,7 +93,7 @@ test "prove_patch reports a route added to a handler with a dynamic module argum
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "classification: breaking") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "classification: breaking") != null);
 }
 
 test "prove_patch reports a formatting-only edit to a handler with a dynamic module argument as equivalent" {
@@ -106,5 +106,5 @@ test "prove_patch reports a formatting-only edit to a handler with a dynamic mod
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "classification: equivalent") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "classification: equivalent") != null);
 }

@@ -120,7 +120,7 @@ const SseRecordIterator = struct {
         if (self.pos >= self.input.len) return null;
         const start = self.pos;
         const remaining = self.input[start..];
-        const sep_rel = std.mem.indexOf(u8, remaining, "\n\n");
+        const sep_rel = std.mem.find(u8, remaining, "\n\n");
         if (sep_rel) |off| {
             const end = start + off + 2;
             self.pos = end;
@@ -318,7 +318,7 @@ fn drainRequestHead(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, io
         const n = result.data_len;
         if (n == 0) return;
         try buf.appendSlice(allocator, chunk[0..n]);
-        if (std.mem.indexOf(u8, buf.items, "\r\n\r\n") == null) continue;
+        if (std.mem.find(u8, buf.items, "\r\n\r\n") == null) continue;
         // Headers seen; assume any Content-Length body fits in the same
         // buffer chunk we already pulled. For the harness's tiny POST
         // bodies (a few hundred bytes) this holds; on real traffic the

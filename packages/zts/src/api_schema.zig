@@ -46,8 +46,7 @@ fn writeSchema(
     seen: *SeenSet,
 ) anyerror!bool {
     const pool = env.pool;
-    const resolved = resolveAlias(env, type_idx) orelse type_idx;
-    const tag = pool.getTag(resolved) orelse return false;
+    const tag = pool.getTag(type_idx) orelse return false;
 
     switch (tag) {
         .t_boolean => {
@@ -63,36 +62,56 @@ fn writeSchema(
             return true;
         },
         .t_literal_string => {
-            const literal = pool.getRefName(resolved);
+            const literal = pool.getRefName(type_idx);
             try writer.writeAll("{\"type\":\"string\",\"const\":");
             try writeJsonString(writer, literal);
             try writer.writeByte('}');
             return true;
         },
         .t_literal_number => {
-            const data = pool.getData(resolved) orelse return false;
+            const data = pool.getData(type_idx) orelse return false;
+            const val: i16 = @bitCast(data.a);
             try writer.writeAll("{\"const\":");
-            try writer.print("{d}", .{data.a});
+            try writer.print("{d}", .{val});
             try writer.writeByte('}');
             return true;
         },
         .t_literal_bool => {
-            const data = pool.getData(resolved) orelse return false;
+            const data = pool.getData(type_idx) orelse return false;
             try writer.writeAll("{\"const\":");
             try writer.writeAll(if (data.a != 0) "true" else "false");
             try writer.writeByte('}');
             return true;
         },
-        .t_record => return writeRecordSchema(writer, allocator, env, resolved, seen),
-        .t_array => return writeArraySchema(writer, allocator, env, resolved, seen),
-        .t_tuple => return writeTupleSchema(writer, allocator, env, resolved, seen),
-        .t_union => return writeLiteralUnionSchema(writer, allocator, env, resolved, seen),
+        .t_record => {
+            if (seen.get(type_idx) != null) return false;
+            try seen.put(allocator, type_idx, {});
+            defer _ = seen.remove(type_idx);
+            return writeRecordSchema(writer, allocator, env, type_idx, seen);
+        },
+        .t_array => {
+            if (seen.get(type_idx) != null) return false;
+            try seen.put(allocator, type_idx, {});
+            defer _ = seen.remove(type_idx);
+            return writeArraySchema(writer, allocator, env, type_idx, seen);
+        },
+        .t_tuple => {
+            if (seen.get(type_idx) != null) return false;
+            try seen.put(allocator, type_idx, {});
+            defer _ = seen.remove(type_idx);
+            return writeTupleSchema(writer, allocator, env, type_idx, seen);
+        },
+        .t_union => return writeLiteralUnionSchema(writer, allocator, env, type_idx, seen),
         .t_ref => {
-            if (seen.get(resolved) != null) return false;
-            try seen.put(allocator, resolved, {});
-            defer _ = seen.remove(resolved);
+            // Check and mark the ref BEFORE resolving the alias so recursive
+            // type aliases (`type Node = { next?: Node }`) terminate instead
+            // of recursing into a stack overflow.
+            if (seen.get(type_idx) != null) return false;
+            try seen.put(allocator, type_idx, {});
+            defer _ = seen.remove(type_idx);
 
-            const alias = resolveAlias(env, resolved) orelse return false;
+            const alias = resolveAlias(env, type_idx) orelse return false;
+            if (seen.get(alias) != null) return false;
             return writeSchema(writer, allocator, env, alias, seen);
         },
         else => return false,
@@ -222,7 +241,8 @@ fn writeLiteralUnionSchema(
             .t_literal_string => try writeJsonString(writer, pool.getRefName(resolved)),
             .t_literal_number => {
                 const data = pool.getData(resolved) orelse return false;
-                try writer.print("{d}", .{data.a});
+                const val: i16 = @bitCast(data.a);
+                try writer.print("{d}", .{val});
             },
             .t_literal_bool => {
                 const data = pool.getData(resolved) orelse return false;
@@ -272,9 +292,9 @@ test "schemaFromType renders record with required field" {
     const schema = (try schemaFromType(allocator, &env, rec)).?;
     defer allocator.free(schema);
 
-    try std.testing.expect(std.mem.indexOf(u8, schema, "\"type\":\"object\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, schema, "\"id\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, schema, "\"required\":[\"id\"]") != null);
+    try std.testing.expect(std.mem.find(u8, schema, "\"type\":\"object\"") != null);
+    try std.testing.expect(std.mem.find(u8, schema, "\"id\"") != null);
+    try std.testing.expect(std.mem.find(u8, schema, "\"required\":[\"id\"]") != null);
 }
 
 test "schemaFromType resolves alias" {
@@ -329,4 +349,46 @@ test "schemaFromType frees the output buffer when a record field is unsupported"
     });
 
     try std.testing.expect((try schemaFromType(allocator, &env, rec)) == null);
+}
+
+test "schemaFromType returns null on recursive alias without stack overflow" {
+    const allocator = std.testing.allocator;
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const ref_idx = pool.addRef(allocator, "Node");
+    const next_name = pool.addName(allocator, "next");
+    const rec = pool.addRecord(allocator, &.{
+        .{ .name_start = next_name.start, .name_len = next_name.len, .type_idx = ref_idx, .optional = true },
+    });
+    try env.type_aliases.put(allocator, env.internName("Node"), rec);
+
+    // Starting from either the `.t_ref` or the `.t_record` must detect the cycle.
+    try std.testing.expect((try schemaFromType(allocator, &env, ref_idx)) == null);
+    try std.testing.expect((try schemaFromType(allocator, &env, rec)) == null);
+}
+
+test "schemaFromType emits signed negative literal numbers" {
+    const allocator = std.testing.allocator;
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const neg = pool.addLiteralNumber(allocator, -42);
+    const single = (try schemaFromType(allocator, &env, neg)).?;
+    defer allocator.free(single);
+    try std.testing.expectEqualStrings("{\"const\":-42}", single);
+
+    const pos = pool.addLiteralNumber(allocator, 7);
+    const uni = pool.addUnion(allocator, &.{ neg, pos });
+    const union_schema = (try schemaFromType(allocator, &env, uni)).?;
+    defer allocator.free(union_schema);
+    try std.testing.expectEqualStrings("{\"type\":\"number\",\"enum\":[-42,7]}", union_schema);
 }

@@ -214,7 +214,7 @@ fn expectPositionInside(text: []const u8, start: u32, line: u32, column: u32) !v
     try std.testing.expect(column >= 1);
     try std.testing.expect(start <= text.len);
     const before = text[0..start];
-    const line_start = if (std.mem.lastIndexOfScalar(u8, before, '\n')) |newline| newline + 1 else 0;
+    const line_start = if (std.mem.findScalarLast(u8, before, '\n')) |newline| newline + 1 else 0;
     try std.testing.expectEqual(countNewlines(before) + 1, line);
     try std.testing.expectEqual(@as(u32, @intCast(start - line_start + 1)), column);
 }
@@ -775,7 +775,7 @@ fn buildNested(allocator: std.mem.Allocator, shape: Shape, depth: usize) !std.Ar
         // A `#` in the opener stands for the level, so that each nested
         // declaration takes its own name: the parser refuses a name that an
         // enclosing scope already declares.
-        const at = std.mem.indexOfScalar(u8, shape.open, '#') orelse {
+        const at = std.mem.findScalar(u8, shape.open, '#') orelse {
             try out.appendSlice(allocator, shape.open);
             continue;
         };

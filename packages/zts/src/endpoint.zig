@@ -57,9 +57,9 @@ const Scheme = enum {
 /// parser and connects to neither.
 pub fn normalize(value: []const u8, out: []u8) NormalizeError![]const u8 {
     if (value.len == 0) return error.Empty;
-    if (value.len > max_endpoint_bytes) return error.TooLong;
 
-    const separator = std.mem.indexOf(u8, value, "://") orelse return error.Malformed;
+    const prefix = value[0..@min(value.len, 8)];
+    const separator = std.mem.find(u8, prefix, "://") orelse return error.Malformed;
     const scheme = blk: {
         if (asciiEqlIgnoreCase(value[0..separator], "http")) break :blk Scheme.http;
         if (asciiEqlIgnoreCase(value[0..separator], "https")) break :blk Scheme.https;
@@ -67,23 +67,30 @@ pub fn normalize(value: []const u8, out: []u8) NormalizeError![]const u8 {
     };
 
     var rest = value[separator + 3 ..];
-    if (std.mem.indexOfAny(u8, rest, "/?#")) |cut| rest = rest[0..cut];
+    if (std.mem.findAny(u8, rest, "/?#")) |cut| rest = rest[0..cut];
     if (rest.len == 0) return error.Malformed;
-    if (std.mem.indexOfScalar(u8, rest, '@') != null) return error.Malformed;
+    if (rest.len > max_endpoint_bytes) return error.TooLong;
+    if (std.mem.findScalar(u8, rest, '@') != null) return error.Malformed;
+    if (std.mem.findScalar(u8, rest, '\\') != null) return error.Malformed;
 
     var host = rest;
     var port: ?u16 = null;
     if (rest[0] == '[') {
-        const close = std.mem.indexOfScalar(u8, rest, ']') orelse return error.Malformed;
+        const close = std.mem.findScalar(u8, rest, ']') orelse return error.Malformed;
+        if (close <= 1) return error.Malformed;
+        if (std.mem.findAny(u8, rest[1..close], "[]") != null) return error.Malformed;
         host = rest[0 .. close + 1];
         const tail = rest[close + 1 ..];
         if (tail.len > 0) {
             if (tail[0] != ':') return error.Malformed;
             port = try parsePort(tail[1..]);
         }
-    } else if (std.mem.lastIndexOfScalar(u8, rest, ':')) |colon| {
-        host = rest[0..colon];
-        port = try parsePort(rest[colon + 1 ..]);
+    } else {
+        if (std.mem.findScalarLast(u8, rest, ':')) |colon| {
+            host = rest[0..colon];
+            port = try parsePort(rest[colon + 1 ..]);
+        }
+        if (std.mem.findAny(u8, host, ":[]") != null) return error.Malformed;
     }
 
     if (host.len == 0) return error.Malformed;
@@ -308,8 +315,20 @@ test "a form the rule cannot canonicalize is refused, not guessed at" {
     try testing.expectError(error.Malformed, normalize("https://api.example.com:80x", &buf));
     try testing.expectError(error.Malformed, normalize("https://api.example.com..", &buf));
     try testing.expectError(error.Malformed, normalize("https://api example.com", &buf));
+    try testing.expectError(error.Malformed, normalize("https://[]", &buf));
+    try testing.expectError(error.Malformed, normalize("https://[[::1]]", &buf));
+    try testing.expectError(error.Malformed, normalize("https://a[b]", &buf));
+    try testing.expectError(error.Malformed, normalize("https://a:b:80", &buf));
+    try testing.expectError(error.Malformed, normalize("https://a\\b", &buf));
 
-    var long: [max_endpoint_bytes + 1]u8 = @splat('a');
+    var long_path: [8 + 11 + max_endpoint_bytes]u8 = undefined;
+    @memcpy(long_path[0..19], "https://example.com");
+    @memset(long_path[19..], 'a');
+    long_path[19] = '/';
+    try testing.expectEqualStrings("https://example.com:443", try normalized(&long_path, &buf));
+
+    var long: [8 + max_endpoint_bytes + 1]u8 = @splat('a');
+    @memcpy(long[0..8], "https://");
     try testing.expectError(error.TooLong, normalize(&long, &buf));
 }
 
@@ -356,7 +375,7 @@ fn v6(text: []const u8) [16]u8 {
 }
 
 fn countTrailingGroups(text: []const u8) usize {
-    const marker = std.mem.indexOf(u8, text, "::") orelse return 0;
+    const marker = std.mem.find(u8, text, "::") orelse return 0;
     const tail = text[marker + 2 ..];
     if (tail.len == 0) return 0;
     var count: usize = 1;

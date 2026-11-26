@@ -96,7 +96,7 @@ test "buildFromDelta returns a populated preview when cause is recorded" {
     try testing.expectEqualStrings("Date.now()", preview.snippet);
     try testing.expectEqualStrings("src/handler.ts", preview.handler_path);
     try testing.expect(preview.suggestion != null);
-    try testing.expect(std.mem.indexOf(u8, preview.suggestion.?, "Date.now()") != null);
+    try testing.expect(std.mem.find(u8, preview.suggestion.?, "Date.now()") != null);
 }
 
 test "buildFromDelta gives the branch suggestion for a branch cause of deterministic" {

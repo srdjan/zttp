@@ -468,20 +468,20 @@ fn runCase(check: *Check, case: Case) void {
     }
 
     if (case.stderr_contains) |needle| {
-        if (std.mem.indexOf(u8, result.stderr, needle) == null) {
+        if (std.mem.find(u8, result.stderr, needle) == null) {
             check.fail(case.name, "stderr lacks \"{s}\"\nstderr:\n{s}", .{ needle, result.stderr });
             return;
         }
     }
     if (case.stderr_excludes) |needle| {
-        if (std.mem.indexOf(u8, result.stderr, needle) != null) {
+        if (std.mem.find(u8, result.stderr, needle) != null) {
             check.fail(case.name, "stderr contains \"{s}\"\nstderr:\n{s}", .{ needle, result.stderr });
             return;
         }
     }
 
     if (case.stderr_excludes_also) |needle| {
-        if (std.mem.indexOf(u8, result.stderr, needle) != null) {
+        if (std.mem.find(u8, result.stderr, needle) != null) {
             check.fail(case.name, "stderr contains \"{s}\"\nstderr:\n{s}", .{ needle, result.stderr });
             return;
         }

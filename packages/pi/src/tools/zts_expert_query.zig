@@ -258,7 +258,7 @@ fn ruleMatches(value: std.json.Value, query: []const u8) bool {
     const fields = [_][]const u8{ "name", "description", "help" };
     for (fields) |field| {
         const candidate = value.object.get(field) orelse continue;
-        if (candidate == .string and std.mem.indexOf(u8, candidate.string, query) != null) return true;
+        if (candidate == .string and std.mem.find(u8, candidate.string, query) != null) return true;
     }
     return false;
 }
@@ -338,7 +338,7 @@ test "query dispatch preserves schema-v2 envelopes" {
     var features = try registry.invokeJson(testing.allocator, name, "{\"operation\":\"features\"}");
     defer features.deinit(testing.allocator);
     try testing.expect(features.ok);
-    try testing.expect(std.mem.indexOf(u8, features.llm_text, "\"operation\":\"features\"") != null);
+    try testing.expect(std.mem.find(u8, features.llm_text, "\"operation\":\"features\"") != null);
 
     var rule = try registry.invokeJson(
         testing.allocator,
@@ -347,7 +347,7 @@ test "query dispatch preserves schema-v2 envelopes" {
     );
     defer rule.deinit(testing.allocator);
     try testing.expect(rule.ok);
-    try testing.expect(std.mem.indexOf(u8, rule.llm_text, "\"ZTS303\"") != null);
+    try testing.expect(std.mem.find(u8, rule.llm_text, "\"ZTS303\"") != null);
 }
 
 test "trusted operation aliases preserve canonical response bytes" {
@@ -455,7 +455,7 @@ test "custom operations run through query" {
         var result = try tool.execute(testing.allocator, &.{ operation, fixture });
         defer result.deinit(testing.allocator);
         try testing.expect(result.ok);
-        try testing.expect(std.mem.indexOf(u8, result.llm_text, fixture) != null);
+        try testing.expect(std.mem.find(u8, result.llm_text, fixture) != null);
     }
 }
 
@@ -499,5 +499,5 @@ fn expectAliasBytes(
 }
 
 test "tool description says narrow returns diagnostics when the check stops early" {
-    try std.testing.expect(std.mem.indexOf(u8, tool.description, "narrow returns diagnostics in place of witnesses when the check stops early") != null);
+    try std.testing.expect(std.mem.find(u8, tool.description, "narrow returns diagnostics in place of witnesses when the check stops early") != null);
 }

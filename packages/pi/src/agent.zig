@@ -1214,7 +1214,7 @@ test "runOneTurn: fresh stub session grows transcript by 2 and renders model rep
         else => return error.TestFailed,
     }
     switch (session.transcript.at(1).*) {
-        .system_note => |body| try testing.expect(std.mem.indexOf(u8, body, "kind=route_add") != null),
+        .system_note => |body| try testing.expect(std.mem.find(u8, body, "kind=route_add") != null),
         else => return error.TestFailed,
     }
     switch (session.transcript.at(2).*) {
@@ -1222,7 +1222,7 @@ test "runOneTurn: fresh stub session grows transcript by 2 and renders model rep
         else => return error.TestFailed,
     }
     try testing.expect(std.mem.startsWith(u8, rendered, "model: "));
-    try testing.expect(std.mem.indexOf(u8, rendered, stub_reply_text) != null);
+    try testing.expect(std.mem.find(u8, rendered, stub_reply_text) != null);
     try testing.expect(rendered[rendered.len - 1] == '\n');
 }
 
@@ -1248,8 +1248,8 @@ test "runOneTurn: two turns back-to-back accumulate in the transcript" {
     }
     // The second render is the second turn's model reply only, not a
     // cumulative dump of the whole transcript.
-    try testing.expect(std.mem.indexOf(u8, second, "first intent") == null);
-    try testing.expect(std.mem.indexOf(u8, second, stub_reply_text) != null);
+    try testing.expect(std.mem.find(u8, second, "first intent") == null);
+    try testing.expect(std.mem.find(u8, second, stub_reply_text) != null);
 }
 
 test "runOneTurn folds the turn into session metrics" {
@@ -1828,8 +1828,8 @@ test "new model session persists one bounded meta bootstrap across resume" {
             .system_note => |note| {
                 try testing.expect(note.len <= meta_bootstrap.MAX_NOTE_BYTES);
                 try testing.expect(std.mem.startsWith(u8, note, meta_bootstrap.note_prefix));
-                try testing.expect(std.mem.indexOf(u8, note, "\"view\":\"bootstrap\"") != null);
-                try testing.expect(std.mem.indexOf(u8, note, "First-draft strict-mode hazards") == null);
+                try testing.expect(std.mem.find(u8, note, "\"view\":\"bootstrap\"") != null);
+                try testing.expect(std.mem.find(u8, note, "First-draft strict-mode hazards") == null);
             },
             else => return error.TestUnexpectedResult,
         }
@@ -2489,7 +2489,7 @@ test "mid-turn provider failure persists one error exit without fallback" {
         1024 * 1024,
     );
     defer allocator.free(events);
-    try testing.expect(std.mem.indexOf(u8, events, "\"reason\":\"error_exit\"") != null);
+    try testing.expect(std.mem.find(u8, events, "\"reason\":\"error_exit\"") != null);
 }
 
 test "failed error-path persistence is surfaced and keeps the durable cursor" {
@@ -2669,9 +2669,9 @@ const TestSummarizer = struct {
     ) anyerror!compaction.SummaryResponse {
         const self: *TestSummarizer = @ptrCast(@alignCast(context));
         self.calls += 1;
-        self.saw_focus = self.saw_focus or std.mem.indexOf(u8, request.user_prompt, "<focus>") != null;
+        self.saw_focus = self.saw_focus or std.mem.find(u8, request.user_prompt, "<focus>") != null;
         self.saw_previous_summary = self.saw_previous_summary or
-            std.mem.indexOf(u8, request.user_prompt, "<previous-summary>") != null;
+            std.mem.find(u8, request.user_prompt, "<previous-summary>") != null;
         if (self.failure) |failure| return failure;
         return .{
             .response = .{ .final_text = self.response },
@@ -3004,8 +3004,8 @@ test "compact preserves raw entries and installs one active projection" {
 
     try testing.expectEqual(before_len, session.transcript.len());
     const projection = session.transcript.projection orelse return error.TestExpectedProjection;
-    try testing.expect(std.mem.indexOf(u8, projection.summary, "## Critical Context") != null);
-    try testing.expect(std.mem.indexOf(u8, projection.summary, "<read-files>") != null);
+    try testing.expect(std.mem.find(u8, projection.summary, "## Critical Context") != null);
+    try testing.expect(std.mem.find(u8, projection.summary, "<read-files>") != null);
     try testing.expectEqual(@as(transcript_mod.EntryId, 3), projection.first_kept_entry_id);
     try testing.expectEqual(@as(usize, 2), try session.transcript.activeStartIndex());
     try testing.expectEqual(@as(usize, 1), summarizer.calls);
@@ -3082,7 +3082,7 @@ test "compact checkpoint survives immediate session close and resume" {
     defer resumed.deinit(allocator);
     try testing.expectEqual(source_projection.transcript_len, resumed.transcript.len());
     const projection = resumed.transcript.projection orelse return error.TestExpectedProjection;
-    try testing.expect(std.mem.indexOf(u8, projection.summary, "## Goal") != null);
+    try testing.expect(std.mem.find(u8, projection.summary, "## Goal") != null);
     try testing.expectEqual(source_projection.first_kept_entry_id, projection.first_kept_entry_id);
 
     var resumed_snapshot = try model_request.createSnapshot(allocator, .{
@@ -3250,7 +3250,7 @@ test "compact splits one oversized turn before a closed tool pair" {
     try testing.expectEqual(@as(usize, 1), summarizer.calls);
     const projection = session.transcript.projection orelse return error.TestExpectedProjection;
     try testing.expectEqual(@as(transcript_mod.EntryId, 3), projection.first_kept_entry_id);
-    try testing.expect(std.mem.indexOf(u8, projection.summary, "## Original Request") != null);
+    try testing.expect(std.mem.find(u8, projection.summary, "## Original Request") != null);
     try testing.expectEqual(@as(usize, 0), projection.read_files.len);
     try testing.expect(session.transcript.at(2).* == .assistant_tool_use);
     try testing.expect(session.transcript.at(3).* == .tool_result);
@@ -3370,7 +3370,7 @@ test "fork: ephemeral session returns error message" {
 
     const msg = try fork(testing.allocator, &session);
     defer testing.allocator.free(msg);
-    try testing.expect(std.mem.indexOf(u8, msg, "ephemeral") != null);
+    try testing.expect(std.mem.find(u8, msg, "ephemeral") != null);
 }
 
 test "fork copies raw ancestry and projection checkpoints before independent divergence" {
@@ -3480,12 +3480,12 @@ test "initFromEnvWithSessionConfig appends AGENTS and CLAUDE files as read-only 
 
     try testing.expect(session.backend == .provider);
     const actual = (try session.requestConfig()).system_prompt;
-    try testing.expect(std.mem.indexOf(u8, actual, "AGENTS_MARKER_XYZ") != null);
-    try testing.expect(std.mem.indexOf(u8, actual, "CLAUDE_MARKER_ABC") != null);
-    try testing.expect(std.mem.indexOf(u8, actual, "PROJECT INSTRUCTIONS") != null);
+    try testing.expect(std.mem.find(u8, actual, "AGENTS_MARKER_XYZ") != null);
+    try testing.expect(std.mem.find(u8, actual, "CLAUDE_MARKER_ABC") != null);
+    try testing.expect(std.mem.find(u8, actual, "PROJECT INSTRUCTIONS") != null);
     // Persona identity still intact - project context never overrides it.
-    try testing.expect(std.mem.indexOf(u8, actual, "native zts coding agent") != null);
-    try testing.expect(std.mem.indexOf(u8, actual, "END OF PERSONA") != null);
+    try testing.expect(std.mem.find(u8, actual, "native zts coding agent") != null);
+    try testing.expect(std.mem.find(u8, actual, "END OF PERSONA") != null);
 }
 
 test "initFromEnvWithSessionConfig: no_context_files suppresses AGENTS and CLAUDE loading" {
@@ -3514,9 +3514,9 @@ test "initFromEnvWithSessionConfig: no_context_files suppresses AGENTS and CLAUD
     defer session.deinit(allocator);
 
     const actual = (try session.requestConfig()).system_prompt;
-    try testing.expect(std.mem.indexOf(u8, actual, "SHOULD_NOT_APPEAR_A") == null);
-    try testing.expect(std.mem.indexOf(u8, actual, "SHOULD_NOT_APPEAR_B") == null);
-    try testing.expect(std.mem.indexOf(u8, actual, "PROJECT CONTEXT") == null);
+    try testing.expect(std.mem.find(u8, actual, "SHOULD_NOT_APPEAR_A") == null);
+    try testing.expect(std.mem.find(u8, actual, "SHOULD_NOT_APPEAR_B") == null);
+    try testing.expect(std.mem.find(u8, actual, "PROJECT CONTEXT") == null);
 }
 
 test "initFromEnvWithSessionConfig stamps current policy_hash into meta.json" {
@@ -3725,7 +3725,7 @@ test "gate log: an attached log receives one line per turn" {
     );
     defer testing.allocator.free(contents);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, contents, "\n"));
-    try testing.expect(std.mem.indexOf(u8, contents, "\"turn_index\":1") != null);
+    try testing.expect(std.mem.find(u8, contents, "\"turn_index\":1") != null);
 }
 
 test "gate log: a null path attaches nothing" {

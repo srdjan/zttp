@@ -163,7 +163,7 @@ pub fn analyzeUpgrade(
     }
 
     // Synthesize verdict
-    const verdict = synthesizeVerdict(classification, &regressions, diff.behavior_diff);
+    const verdict = synthesizeVerdict(classification, regressions.items, diff.behavior_diff);
 
     // Generate justification
     const justification = try generateJustification(allocator, verdict, &surface, behavioral, &regressions, &gains);
@@ -181,7 +181,7 @@ pub fn analyzeUpgrade(
 
 fn synthesizeVerdict(
     classification: Classification,
-    regressions: *const std.ArrayList(PropertyRegression),
+    regressions: []const PropertyRegression,
     behavior_diff: ?BehaviorDiff,
 ) UpgradeVerdict {
     // Structural breaking is always breaking
@@ -193,12 +193,12 @@ fn synthesizeVerdict(
     }
 
     // Critical property regressions are breaking
-    for (regressions.items) |r| {
+    for (regressions) |r| {
         if (r.severity == .critical) return .breaking;
     }
 
     // Warning property regressions need review
-    for (regressions.items) |r| {
+    for (regressions) |r| {
         if (r.severity == .warning) return .needs_review;
     }
 
@@ -219,9 +219,8 @@ fn generateJustification(
     regressions: *const std.ArrayList(PropertyRegression),
     gains: *const std.ArrayList(PropertyRegression),
 ) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
     const writer = &aw.writer;
 
     switch (verdict) {
@@ -261,8 +260,7 @@ fn generateJustification(
         try writer.print(" Gained {s}.", .{g.field});
     }
 
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+    return aw.toOwnedSlice();
 }
 
 // -------------------------------------------------------------------------
@@ -348,34 +346,29 @@ test "integrated property gain remains informational and safe" {
 }
 
 test "safe verdict for identical contracts" {
-    const empty: std.ArrayList(PropertyRegression) = .empty;
-    const verdict = synthesizeVerdict(.equivalent, &empty, null, null);
+    const verdict = synthesizeVerdict(.equivalent, &.{}, null);
     try std.testing.expectEqual(UpgradeVerdict.safe, verdict);
 }
 
 test "safe_with_additions for additive classification" {
-    const empty: std.ArrayList(PropertyRegression) = .empty;
-    const verdict = synthesizeVerdict(.additive, &empty, null, null);
+    const verdict = synthesizeVerdict(.additive, &.{}, null);
     try std.testing.expectEqual(UpgradeVerdict.safe_with_additions, verdict);
 }
 
 test "breaking for structural breaking" {
-    const empty: std.ArrayList(PropertyRegression) = .empty;
-    const verdict = synthesizeVerdict(.breaking, &empty, null, null);
+    const verdict = synthesizeVerdict(.breaking, &.{}, null);
     try std.testing.expectEqual(UpgradeVerdict.breaking, verdict);
 }
 
 test "breaking for behavioral removal" {
     const bd = BehaviorDiff{ .preserved = 2, .removed = 1 };
-    const empty: std.ArrayList(PropertyRegression) = .empty;
-    const verdict = synthesizeVerdict(.equivalent, &empty, bd, null);
+    const verdict = synthesizeVerdict(.equivalent, &.{}, bd);
     try std.testing.expectEqual(UpgradeVerdict.breaking, verdict);
 }
 
 test "breaking for behavioral response change" {
     const bd = BehaviorDiff{ .preserved = 2, .response_changed = 1 };
-    const empty: std.ArrayList(PropertyRegression) = .empty;
-    const verdict = synthesizeVerdict(.equivalent, &empty, bd, null);
+    const verdict = synthesizeVerdict(.equivalent, &.{}, bd);
     try std.testing.expectEqual(UpgradeVerdict.breaking, verdict);
 }
 
@@ -383,8 +376,7 @@ test "breaking for critical property regression" {
     const regressions = [_]PropertyRegression{
         .{ .field = "retry_safe", .old_value = true, .new_value = false, .severity = .critical },
     };
-    const list = std.ArrayList(PropertyRegression){ .items = @constCast(&regressions), .capacity = regressions.len };
-    const verdict = synthesizeVerdict(.equivalent, &list, null, null);
+    const verdict = synthesizeVerdict(.equivalent, &regressions, null);
     try std.testing.expectEqual(UpgradeVerdict.breaking, verdict);
 }
 
@@ -392,15 +384,13 @@ test "needs_review for warning property regression" {
     const regressions = [_]PropertyRegression{
         .{ .field = "deterministic", .old_value = true, .new_value = false, .severity = .warning },
     };
-    const list = std.ArrayList(PropertyRegression){ .items = @constCast(&regressions), .capacity = regressions.len };
-    const verdict = synthesizeVerdict(.equivalent, &list, null, null);
+    const verdict = synthesizeVerdict(.equivalent, &regressions, null);
     try std.testing.expectEqual(UpgradeVerdict.needs_review, verdict);
 }
 
 test "safe_with_additions for new behavioral paths" {
     const bd = BehaviorDiff{ .preserved = 3, .added = 2 };
-    const empty: std.ArrayList(PropertyRegression) = .empty;
-    const verdict = synthesizeVerdict(.equivalent, &empty, bd, null);
+    const verdict = synthesizeVerdict(.equivalent, &.{}, bd);
     try std.testing.expectEqual(UpgradeVerdict.safe_with_additions, verdict);
 }
 

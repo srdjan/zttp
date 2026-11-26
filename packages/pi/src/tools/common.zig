@@ -209,7 +209,7 @@ const default_search_path = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin";
 /// path, or null when the name already contains '/' (use as-is) or is not found
 /// on PATH (fall back to the original name, preserving prior behavior).
 fn resolveBinaryPath(allocator: std.mem.Allocator, io: std.Io, name: []const u8) !?[]u8 {
-    if (name.len == 0 or std.mem.indexOfScalar(u8, name, '/') != null) return null;
+    if (name.len == 0 or std.mem.findScalar(u8, name, '/') != null) return null;
     const path = if (std.c.getenv("PATH")) |p| std.mem.span(p) else default_search_path;
     var it = std.mem.tokenizeScalar(u8, path, ':');
     while (it.next()) |dir| {
@@ -219,7 +219,15 @@ fn resolveBinaryPath(allocator: std.mem.Allocator, io: std.Io, name: []const u8)
         // absolute PATH dirs.
         if (!std.fs.path.isAbsolute(dir)) continue;
         const candidate = std.fs.path.join(allocator, &.{ dir, name }) catch continue;
-        std.Io.Dir.accessAbsolute(io, candidate, .{}) catch {
+        const stat = std.Io.Dir.cwd().statFile(io, candidate, .{}) catch {
+            allocator.free(candidate);
+            continue;
+        };
+        if (stat.kind != .file) {
+            allocator.free(candidate);
+            continue;
+        }
+        std.Io.Dir.accessAbsolute(io, candidate, .{ .execute = true }) catch {
             allocator.free(candidate);
             continue;
         };
@@ -325,9 +333,9 @@ pub fn ignoredRefusal(
         defer outcome.deinit(allocator);
         if (outcome.exit_code) |code| {
             if (code == 0) {
-                const line_end = std.mem.indexOfScalar(u8, outcome.stdout, '\n') orelse outcome.stdout.len;
+                const line_end = std.mem.findScalar(u8, outcome.stdout, '\n') orelse outcome.stdout.len;
                 const line = outcome.stdout[0..line_end];
-                const match = line[0 .. std.mem.indexOfScalar(u8, line, '\t') orelse line.len];
+                const match = line[0 .. std.mem.findScalar(u8, line, '\t') orelse line.len];
                 return try allocator.print(tool_name ++ ": path is ignored by git and is not readable (source:line:pattern {s})\n", .{match});
             }
         }
@@ -546,14 +554,20 @@ pub fn commandOutcomeToToolResult(
     const command = try std.mem.join(allocator, " ", argv);
     errdefer allocator.free(command);
 
+    const title = try allocator.dupe(u8, if (argv.len > 0) argv[0] else "");
+    errdefer allocator.free(title);
+    const stdout_copy = try allocator.dupe(u8, outcome.stdout);
+    errdefer allocator.free(stdout_copy);
+    const stderr_copy = try allocator.dupe(u8, outcome.stderr);
+
     return .{
         .ok = outcome.ok,
         .llm_text = llm_text,
         .ui_payload = .{ .command_outcome = .{
-            .title = try allocator.dupe(u8, argv[0]),
+            .title = title,
             .exit_code = outcome.exit_code,
-            .stdout = try allocator.dupe(u8, outcome.stdout),
-            .stderr = try allocator.dupe(u8, outcome.stderr),
+            .stdout = stdout_copy,
+            .stderr = stderr_copy,
             .command = command,
         } },
     };
@@ -1285,11 +1299,11 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
     // Every case reaches the comparison, and 165 of them carry a diagnostic, so
     // the equality is not over empty lists. A corpus change moves these counts.
     try testing.expectEqual(cases.items.len, compared);
-    try testing.expectEqual(@as(usize, 165), with_diagnostics);
+    try testing.expectEqual(@as(usize, 169), with_diagnostics);
     // Every error carries a plan, and the tiers show where plans come from.
-    try testing.expectEqual(@as(usize, 104), error_codes.count());
+    try testing.expectEqual(@as(usize, 108), error_codes.count());
     try testing.expectEqual(@as(usize, 1), tier_result);
     try testing.expectEqual(@as(usize, 17), tier_intent);
-    try testing.expectEqual(@as(usize, 158), tier_help);
+    try testing.expectEqual(@as(usize, 162), tier_help);
     try testing.expectEqual(@as(usize, 15), tier_other);
 }

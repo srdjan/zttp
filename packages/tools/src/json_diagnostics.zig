@@ -144,7 +144,7 @@ fn parserErrorCode(kind: ErrorKind) []const u8 {
 /// Extract suggestion from unsupported_feature, type_assertion, misplaced_default_arm, and too_many_parameters
 /// parser errors. These follow the pattern: "'X' is not supported; use Y instead"
 fn splitSuggestion(message: []const u8) struct { msg: []const u8, suggestion: ?[]const u8 } {
-    if (std.mem.indexOf(u8, message, "; ")) |sep| {
+    if (std.mem.find(u8, message, "; ")) |sep| {
         return .{
             .msg = message[0..sep],
             .suggestion = message[sep + 2 ..],
@@ -189,20 +189,22 @@ pub fn fromParseError(err: ParseError, file: []const u8) JsonDiagnostic {
 /// A parse error borrows its text from the parser: a literal for most kinds,
 /// the error list's own storage for a message that names a value (ZTS046 names
 /// the code point). The parser is gone before the JSON is written, so a caller
-/// that keeps the diagnostic past it copies. On out-of-memory the borrowed
-/// slice is kept, as `fromCheckerDiagnostic` does; `deinit` frees what was
-/// copied.
-pub fn fromParseErrorOwned(allocator: std.mem.Allocator, err: ParseError, file: []const u8) JsonDiagnostic {
+/// that keeps the diagnostic past it copies and propagates `OutOfMemory` rather
+/// than returning a dangling borrowed slice.
+pub fn fromParseErrorOwned(
+    allocator: std.mem.Allocator,
+    err: ParseError,
+    file: []const u8,
+) error{OutOfMemory}!JsonDiagnostic {
     var diag = fromParseError(err, file);
-    if (allocator.dupe(u8, diag.message)) |copy| {
-        diag.message = copy;
-        diag.message_owned = true;
-    } else |_| {}
+    const owned_msg = try allocator.dupe(u8, diag.message);
+    errdefer allocator.free(owned_msg);
+    diag.message = owned_msg;
+    diag.message_owned = true;
     if (diag.suggestion) |suggestion| {
-        if (allocator.dupe(u8, suggestion)) |copy| {
-            diag.suggestion = copy;
-            diag.suggestion_owned = true;
-        } else |_| {}
+        const owned_suggestion = try allocator.dupe(u8, suggestion);
+        diag.suggestion = owned_suggestion;
+        diag.suggestion_owned = true;
     }
     return diag;
 }
@@ -268,36 +270,38 @@ pub fn fromUnsupportedSourceExtension(file: []const u8) JsonDiagnostic {
 /// this dupe the slice dangles and the `--json` / edit-simulate surface reads
 /// freed bytes (0xaa in debug). `allocator.dupe` is safe for both heap and
 /// static-string messages; the resulting copy is owned (`message_owned`) and
-/// freed by `JsonDiagnostic.deinit`. On OOM the borrowed slice is returned
-/// unowned, preserving prior behavior.
+/// freed by `JsonDiagnostic.deinit`. Propagates `OutOfMemory` instead of
+/// returning dangling borrowed slices.
 pub fn fromCheckerDiagnostic(
     allocator: std.mem.Allocator,
     comptime source: diagnostic_projection.Source,
     diag: anytype,
     ir_view: IrView,
     file: []const u8,
-) ?JsonDiagnostic {
+) error{OutOfMemory}!?JsonDiagnostic {
     const projected = diagnostic_projection.project(source, diag, ir_view) orelse return null;
-    const owned_msg = allocator.dupe(u8, projected.message) catch null;
+    const owned_msg = try allocator.dupe(u8, projected.message);
+    errdefer allocator.free(owned_msg);
     // A suggestion built at diagnosis time (the first missing `match` case)
     // dies with the checker, like the message, so it is copied the same way.
-    const owned_suggestion: ?[]u8 = if (projected.suggestion) |s| (allocator.dupe(u8, s) catch null) else null;
+    const owned_suggestion: ?[]u8 = if (projected.suggestion) |s| try allocator.dupe(u8, s) else null;
+    errdefer if (owned_suggestion) |s| allocator.free(s);
     // The subject names an atom the checker frees, so it is copied like the message.
-    const owned_subject: ?[]u8 = if (projected.result_subject) |s| (allocator.dupe(u8, s) catch null) else null;
+    const owned_subject: ?[]u8 = if (projected.result_subject) |s| try allocator.dupe(u8, s) else null;
     return .{
         .code = projected.code,
         .severity = projected.severity.label(),
-        .message = owned_msg orelse projected.message,
+        .message = owned_msg,
         .file = file,
         .line = projected.line,
         .column = projected.column,
         .start_offset = projected.start_offset,
         .end_offset = projected.end_offset,
-        .suggestion = owned_suggestion orelse projected.suggestion,
+        .suggestion = owned_suggestion,
         .repair_intent = projected.repair_intent,
-        .message_owned = owned_msg != null,
+        .message_owned = true,
         .suggestion_owned = owned_suggestion != null,
-        .result_shape = if (projected.result_subject != null and owned_subject == null) null else projected.result_shape,
+        .result_shape = projected.result_shape,
         .result_subject = owned_subject,
         .result_subject_owned = owned_subject != null,
     };
@@ -865,7 +869,7 @@ pub fn lookupRestriction(name: []const u8) ?RestrictionInfo {
     }
     for (features) |f| {
         if (f.status != .blocked) continue;
-        if (std.mem.indexOf(u8, f.name, name) != null) return restrictionInfoFrom(f);
+        if (std.mem.find(u8, f.name, name) != null) return restrictionInfoFrom(f);
     }
     return null;
 }
@@ -885,7 +889,7 @@ fn restrictionInfoFrom(f: Feature) RestrictionInfo {
 /// the message does not start with a single-quoted token.
 pub fn extractFeatureFromMessage(message: []const u8) ?[]const u8 {
     if (message.len < 2 or message[0] != '\'') return null;
-    const end = std.mem.indexOfScalarPos(u8, message, 1, '\'') orelse return null;
+    const end = std.mem.findScalarPos(u8, message, 1, '\'') orelse return null;
     return message[1..end];
 }
 
@@ -1248,48 +1252,43 @@ test "blocked features project from the restriction registry" {
 
 test "writeRestrictionsJson includes canonical entries" {
     const allocator = std.testing.allocator;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     try writeRestrictionsJson(&aw.writer);
-    buf = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"try/catch\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Result narrowing") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "async/await") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "deterministic effect boundary") != null);
+    const written = aw.written();
+    try std.testing.expect(std.mem.find(u8, written, "\"try/catch\"") != null);
+    try std.testing.expect(std.mem.find(u8, written, "Result narrowing") != null);
+    try std.testing.expect(std.mem.find(u8, written, "async/await") != null);
+    try std.testing.expect(std.mem.find(u8, written, "deterministic effect boundary") != null);
 }
 
 test "writeRestrictionsText grouped by proof clusters entries" {
     const allocator = std.testing.allocator;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     try writeRestrictionsText(&aw.writer, .proof);
-    buf = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Grouped by proof unlocked") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "finite path enumeration and termination") != null);
+    const written = aw.written();
+    try std.testing.expect(std.mem.find(u8, written, "Grouped by proof unlocked") != null);
+    try std.testing.expect(std.mem.find(u8, written, "finite path enumeration and termination") != null);
 }
 
 test "writeRestrictionsMarkdown renders every restriction" {
     const allocator = std.testing.allocator;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     try writeRestrictionsMarkdown(&aw.writer);
-    buf = aw.toArrayList();
 
+    const written = aw.written();
     for (restrictionCatalog.restrictions()) |entry| {
-        var expected: std.ArrayList(u8) = .empty;
-        defer expected.deinit(allocator);
-        var expected_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &expected);
+        var expected_writer: std.Io.Writer.Allocating = .init(allocator);
+        defer expected_writer.deinit();
         try writeMarkdownCell(&expected_writer.writer, entry.feature);
-        expected = expected_writer.toArrayList();
-        const found = std.mem.indexOf(u8, buf.items, expected.items) != null;
+        const found = std.mem.find(u8, written, expected_writer.written()) != null;
         try std.testing.expect(found);
     }
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Do not edit this file manually") != null);
+    try std.testing.expect(std.mem.find(u8, written, "Do not edit this file manually") != null);
 }
 
 test "fromParseError maps the nesting limit to ZTS044" {
@@ -1340,6 +1339,8 @@ test "every diagnostic code names exactly one diagnostic" {
         .{ .code = "ZTS044", .kinds = .{ "nesting_too_deep", "nesting_too_deep" } },
     };
 
+    var shared_used: [shared_codes.len]bool = @splat(false);
+
     const mappers = .{
         .{ ErrorKind, parserErrorCode },
         .{ zts.StripDiagnosticKind, stripErrorCode },
@@ -1353,7 +1354,7 @@ test "every diagnostic code names exactly one diagnostic" {
             const code = codeOf(kind);
             if (seen.get(code)) |owner| {
                 var allowed = false;
-                for (shared_codes) |shared| {
+                for (shared_codes, 0..) |shared, idx| {
                     if (!std.mem.eql(u8, shared.code, code)) continue;
                     // Both sides of the pair must match, so a listed code does
                     // not become a hole any future kind can slip through.
@@ -1361,6 +1362,7 @@ test "every diagnostic code names exactly one diagnostic" {
                         std.mem.eql(u8, shared.kinds[1], field))
                     {
                         allowed = true;
+                        shared_used[idx] = true;
                     }
                 }
                 if (!allowed) {
@@ -1375,8 +1377,8 @@ test "every diagnostic code names exactly one diagnostic" {
 
     // The floor under the allowance: every listed pair must actually be a
     // sharing that happens, or the list is a hole nothing closes.
-    for (shared_codes) |shared| {
-        try std.testing.expect(seen.get(shared.code) != null);
+    for (shared_used) |used| {
+        try std.testing.expect(used);
     }
 }
 
@@ -1482,5 +1484,26 @@ test "human admission projection preserves full guidance and wide coordinates" {
     try std.testing.expectEqual(@as(u32, 7), diagnostic.line);
     try std.testing.expectEqual(@as(u32, 70_000), diagnostic.column);
     try std.testing.expectEqualStrings(zts.StripDiagnosticKind.optional_parameter.message(), diagnostic.kind.message());
-    try std.testing.expect(std.mem.indexOf(u8, diagnostic.kind.message(), "; ") != null);
+    try std.testing.expect(std.mem.find(u8, diagnostic.kind.message(), "; ") != null);
+}
+
+test "fromParseErrorOwned propagates OutOfMemory cleanly without returning borrowed slices" {
+    const err_val: ParseError = .{
+        .kind = .nesting_too_deep,
+        .message = "statements nest too deeply",
+        .token_text = null,
+        .expected = "reduce nesting",
+        .location = .{ .line = 2, .column = 5, .offset = 0 },
+    };
+    const Helper = struct {
+        fn run(allocator: std.mem.Allocator, parse_err: ParseError) !void {
+            var diag = try fromParseErrorOwned(allocator, parse_err, "handler.ts");
+            defer diag.deinit(allocator);
+            try std.testing.expect(diag.message_owned);
+            try std.testing.expect(diag.suggestion_owned);
+            try std.testing.expectEqualStrings("statements nest too deeply", diag.message);
+            try std.testing.expectEqualStrings("reduce nesting", diag.suggestion.?);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Helper.run, .{err_val});
 }

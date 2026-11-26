@@ -9,6 +9,7 @@ const zts = @import("zts");
 const module_audit = @import("zts_cli").module_audit;
 const registry_mod = @import("../registry/registry.zig");
 const ui_payload = @import("../ui_payload.zig");
+const common = @import("common.zig");
 
 const name = "zts_expert_verify_modules";
 
@@ -86,7 +87,23 @@ fn execute(
         return registry_mod.ToolResult.err(allocator, "zts_expert_verify_modules requires at least one path\n");
     }
 
-    var result = try module_audit.verifyPaths(allocator, paths, .{ .strict = strict });
+    const root = try common.workspaceRoot(allocator);
+    defer allocator.free(root);
+    const resolved_paths = try allocator.alloc([]u8, paths.len);
+    var resolved_count: usize = 0;
+    defer {
+        for (resolved_paths[0..resolved_count]) |p| allocator.free(p);
+        allocator.free(resolved_paths);
+    }
+    const workspace_paths = try allocator.alloc([]const u8, paths.len);
+    defer allocator.free(workspace_paths);
+    for (paths, 0..) |path, i| {
+        resolved_paths[i] = try common.resolveInsideWorkspace(allocator, root, path);
+        resolved_count += 1;
+        workspace_paths[i] = common.relativeToRoot(root, resolved_paths[i]);
+    }
+
+    var result = try module_audit.verifyPaths(allocator, workspace_paths, .{ .strict = strict });
     defer result.deinit(allocator);
 
     var buf = registry_mod.helpers.TextBuffer.init(allocator);
@@ -170,18 +187,18 @@ test "missing args returns not-ok body" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "requires at least one path") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "requires at least one path") != null);
 }
 
 test "nonexistent module path produces a v1 envelope" {
-    var result = try execute(testing.allocator, &.{"/tmp/zts-pi-not-a-module.zig"});
+    var result = try execute(testing.allocator, &.{"zts-pi-not-a-module.zig"});
     defer result.deinit(testing.allocator);
 
     // The audit reports "unknown virtual module file" or similar, but the
     // envelope shape must match regardless of the specific diagnostic.
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"policy_version\":\"2026.04.2\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"checked_files\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"violations\":") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"policy_version\":\"2026.04.2\"") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"checked_files\":") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"violations\":") != null);
     try testing.expect(result.ui_payload != null);
 }
 
@@ -236,9 +253,23 @@ test "a JSON paths argument names each audited path in the envelope" {
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(testing.allocator);
     try registry.register(testing.allocator, tool);
-    var result = try registry.invokeJson(testing.allocator, name, "{\"paths\":[\"/tmp/zts-pi-not-a-module.zig\"]}");
+    var result = try registry.invokeJson(testing.allocator, name, "{\"paths\":[\"zts-pi-not-a-module.zig\"]}");
     defer result.deinit(testing.allocator);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"checked_files\":[\"/tmp/zts-pi-not-a-module.zig\"]") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"checked_files\":[\"zts-pi-not-a-module.zig\"]") != null);
+}
+
+test "out-of-workspace paths are rejected" {
+    try testing.expectError(
+        error.PathOutsideWorkspace,
+        execute(testing.allocator, &.{"/tmp/zts-pi-not-a-module.zig"}),
+    );
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, tool);
+    try testing.expectError(
+        error.PathOutsideWorkspace,
+        registry.invokeJson(testing.allocator, name, "{\"paths\":[\"../../../../../../etc/passwd\"]}"),
+    );
 }
 
 test "a JSON paths argument with a path that is not a string is refused" {

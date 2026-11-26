@@ -21,18 +21,7 @@ const json_utils = @import("zts-base").json_utils;
 
 pub const TRACE_STATE_SLOT = @backingInt(module_slots.Slot.trace);
 
-/// Mutex wrapper compatible with Zig 0.16's Io.Mutex.
-pub const TraceMutex = struct {
-    inner: std.Io.Mutex = .init,
-
-    pub fn lock(self: *TraceMutex) void {
-        self.inner.lockUncancelable(std.Options.debug_io);
-    }
-
-    pub fn unlock(self: *TraceMutex) void {
-        self.inner.unlock(std.Options.debug_io);
-    }
-};
+pub const TraceMutex = @import("zts-base").compat.Mutex;
 
 /// Per-request trace recorder.
 /// Accumulates JSONL lines in a buffer during handler execution,

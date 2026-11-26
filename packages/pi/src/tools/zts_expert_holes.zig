@@ -187,10 +187,10 @@ test "in-process publisher returns the compiler hole frame" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"holes\":[{") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"function\":\"handler\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"line\":3,\"column\":10") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"expectedType\":\"Response\"") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"holes\":[{") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"function\":\"handler\"") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"line\":3,\"column\":10") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"expectedType\":\"Response\"") != null);
 }
 
 test "in-process publisher distinguishes analysis failure from no holes" {
@@ -198,8 +198,8 @@ test "in-process publisher distinguishes analysis failure from no holes" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"holes\":null") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diagnostics\":[{") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"holes\":null") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"diagnostics\":[{") != null);
 }
 
 test "in-process publisher fails closed when a contract has verification errors" {
@@ -213,9 +213,9 @@ test "in-process publisher fails closed when a contract has verification errors"
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"holes\":[{") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diagnostics\":[{") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "ZTS500") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"holes\":[{") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"diagnostics\":[{") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "ZTS500") != null);
 }
 
 test "in-process publisher answers a zttp:sql handler with a result, not a Zig error" {
@@ -233,7 +233,7 @@ test "in-process publisher answers a zttp:sql handler with a result, not a Zig e
     var result = try renderFromSource(testing.allocator, source, "handler.ts", "handler.ts");
     defer result.deinit(testing.allocator);
     try testing.expect(result.llm_text.len > 0);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"holes\":[{") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"holes\":[{") != null);
 }
 
 test "a projection too large for one result comes back trimmed, not as an error" {
@@ -258,5 +258,5 @@ test "a projection too large for one result comes back trimmed, not as an error"
     try testing.expect(result.llm_text.len <= common.max_hole_tool_result_bytes);
     // The empty array is what proves the overflow path ran: the full
     // projection for this source carries diagnostic objects here.
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diagnostics\":[]") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"diagnostics\":[]") != null);
 }

@@ -131,53 +131,8 @@ pub fn createResponse(
     status: u16,
     content_type: []const u8,
 ) !value.JSValue {
-    if (ctx.http.shapes) |shapes| {
-        const resp_obj = try ctx.createObjectWithClass(shapes.response.class_idx, null);
-
-        const body_str = try ctx.createString(body);
-        resp_obj.setSlot(shapes.response.body_slot, body_str);
-
-        resp_obj.setSlot(shapes.response.status_slot, value.JSValue.fromInt(@intCast(status)));
-
-        const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(statusTextFor(status));
-        resp_obj.setSlot(shapes.response.status_text_slot, status_text_val);
-
-        resp_obj.setSlot(shapes.response.ok_slot, value.JSValue.fromBool(status >= 200 and status < 300));
-
-        const headers_obj = try ctx.createObjectWithClass(shapes.response_headers.class_idx, null);
-        const ct_val: value.JSValue = if (ctx.getCachedContentType(content_type)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(content_type);
-        headers_obj.setSlot(shapes.response_headers.content_type_slot, ct_val);
-        resp_obj.setSlot(shapes.response.headers_slot, headers_obj.toValue());
-
-        return resp_obj.toValue();
-    }
-
-    const resp_obj = try ctx.createObject(null);
-
-    // Set body (using predefined atom for efficiency)
-    const body_str = try ctx.createString(body);
-    try ctx.setPropertyChecked(resp_obj, object.Atom.body, body_str);
-
-    // Set status (using predefined atom)
-    try ctx.setPropertyChecked(resp_obj, object.Atom.status, value.JSValue.fromInt(@intCast(status)));
-
-    // Set statusText
-    const status_text_atom = if (ctx.http.strings) |cache| cache.status_text_atom else try ctx.atoms.intern("statusText");
-    const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(statusTextFor(status));
-    try ctx.setPropertyChecked(resp_obj, status_text_atom, status_text_val);
-
-    // Set ok (status 200-299)
-    const ok_atom = object.Atom.ok;
-    try ctx.setPropertyChecked(resp_obj, ok_atom, value.JSValue.fromBool(status >= 200 and status < 300));
-
-    // Set headers (using predefined atom)
-    const headers_obj = try ctx.createObject(null);
-    const ct_atom = if (ctx.http.strings) |cache| cache.content_type_atom else try ctx.atoms.intern("Content-Type");
-    const ct_val: value.JSValue = if (ctx.getCachedContentType(content_type)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(content_type);
-    try ctx.setPropertyChecked(headers_obj, ct_atom, ct_val);
-    try ctx.setPropertyChecked(resp_obj, object.Atom.headers, headers_obj.toValue());
-
-    return resp_obj.toValue();
+    const body_str = try ctx.createStringPtr(body);
+    return createResponseFromString(ctx, body_str, status, content_type);
 }
 
 /// Create a Response object using an existing JSString body (avoids extra copy).
@@ -371,7 +326,7 @@ pub fn responseConstructor(ctx_ptr: *anyopaque, _: value.JSValue, args: []const 
     var content_type: []const u8 = "text/plain; charset=utf-8";
 
     // Get body from first argument
-    if (args.len > 0 and args[0].isString()) {
+    if (args.len > 0 and args[0].isAnyString()) {
         body = try getStringArgWithCtx(args[0], ctx);
     }
 
@@ -390,7 +345,7 @@ pub fn responseConstructor(ctx_ptr: *anyopaque, _: value.JSValue, args: []const 
                 const headers_obj = object.JSObject.fromValue(hdr);
                 const ct_atom = ctx.atoms.intern("Content-Type") catch return createResponse(ctx, body, status, content_type);
                 if (headers_obj.getProperty(pool, ct_atom)) |ct| {
-                    if (ct.isString()) {
+                    if (ct.isAnyString()) {
                         content_type = try getStringArgWithCtx(ct, ctx);
                     }
                 }
@@ -487,6 +442,18 @@ pub fn renderToString(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
         return ctx.createString("") catch return value.JSValue.undefined_val;
     }
 
+    // Reentrant calls (e.g. a function component calling renderToString) must not
+    // clear or overwrite the outer call's shared buffer.
+    if (ctx.render_in_use) {
+        var local_aw: std.Io.Writer.Allocating = .init(ctx.scratchAllocator());
+        defer local_aw.deinit();
+        try renderNode(ctx, args[0], &local_aw.writer, 0);
+        return try ctx.createString(local_aw.written());
+    }
+
+    ctx.render_in_use = true;
+    defer ctx.render_in_use = false;
+
     // Use per-context reusable buffer to avoid allocation per call
     var aw = &ctx.render_writer;
     aw.clearRetainingCapacity();
@@ -495,7 +462,7 @@ pub fn renderToString(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
     return result;
 }
 
-const RenderError = std.Io.Writer.Error || error{ OutOfMemory, ArenaObjectEscape, NoHiddenClassPool, JsonDepthExceeded, RenderDepthExceeded, ComponentFailed, RequestTimeout };
+const RenderError = std.Io.Writer.Error || error{ OutOfMemory, ArenaObjectEscape, NoHiddenClassPool, JsonDepthExceeded, RenderDepthExceeded, ComponentFailed, RequestTimeout, NonStringDictKey };
 
 /// Nesting bound for renderNode, renderRawChildren, and appendChild; matches JSON_MAX_DEPTH.
 const RENDER_MAX_DEPTH: u32 = 512;
@@ -517,6 +484,11 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
     // Handle number
     if (node.isInt()) {
         try writer.print("{d}", .{node.getInt()});
+        return;
+    }
+    if (node.isFloat64()) {
+        var buf: [345]u8 = undefined;
+        try writer.writeAll(string.formatFloatToBuf(&buf, node.getFloat64()));
         return;
     }
 
@@ -589,10 +561,10 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
         }
 
         // HTML element
-        if (tag_val.isString()) {
-            const tag_str = tag_val.toPtr(string.JSString);
+        if (tag_val.isAnyString()) {
+            const tag_data = try getStringArgWithCtx(tag_val, ctx);
             try writer.writeByte('<');
-            try writer.writeAll(tag_str.data());
+            try writer.writeAll(tag_data);
 
             // Render attributes from props
             if (obj.getProperty(pool, .props)) |props_val| {
@@ -602,7 +574,6 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             }
 
             // Check for void elements
-            const tag_data = tag_str.data();
             if (isVoidElement(tag_data)) {
                 try writer.writeAll(" />");
                 return;
@@ -679,10 +650,13 @@ fn renderAttributes(ctx: *context.Context, props: value.JSValue, writer: anytype
 
         if (!val.isTrue()) {
             try writer.writeAll("=\"");
-            if (val.isString()) {
-                try escapeAttr(val.toPtr(string.JSString).data(), writer);
+            if (val.stringBytes()) |str_bytes| {
+                try escapeAttr(str_bytes, writer);
             } else if (val.isInt()) {
                 try writer.print("{d}", .{val.getInt()});
+            } else if (val.isFloat64()) {
+                var buf: [345]u8 = undefined;
+                try writer.writeAll(string.formatFloatToBuf(&buf, val.getFloat64()));
             }
             try writer.writeByte('"');
         }
@@ -765,6 +739,11 @@ fn renderRawChildren(ctx: *context.Context, children: value.JSValue, writer: any
         try writer.print("{d}", .{children.getInt()});
         return;
     }
+    if (children.isFloat64()) {
+        var buf: [345]u8 = undefined;
+        try writer.writeAll(string.formatFloatToBuf(&buf, children.getFloat64()));
+        return;
+    }
 
     // Handle array of children
     if (children.isObject()) {
@@ -794,6 +773,42 @@ fn getStringArgWithCtx(val: value.JSValue, ctx: ?*context.Context) ![]const u8 {
         return val.toPtr(string.SliceString).data();
     }
     return "";
+}
+
+fn writeJsonString(data: []const u8, writer: *std.Io.Writer) RenderError!void {
+    try writer.writeByte('"');
+    // Fast path: check if any escaping is needed
+    var needs_escape = false;
+    for (data) |c| {
+        if (c == '"' or c == '\\' or c == '\n' or c == '\r' or c == '\t' or c < 0x20) {
+            needs_escape = true;
+            break;
+        }
+    }
+    if (!needs_escape) {
+        try writer.writeAll(data);
+    } else {
+        for (data) |c| {
+            switch (c) {
+                '"' => try writer.writeAll("\\\""),
+                '\\' => try writer.writeAll("\\\\"),
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\t' => try writer.writeAll("\\t"),
+                else => {
+                    if (c < 0x20) {
+                        try writer.writeAll("\\u00");
+                        const hex = "0123456789abcdef";
+                        try writer.writeByte(hex[c >> 4]);
+                        try writer.writeByte(hex[c & 0xF]);
+                    } else {
+                        try writer.writeByte(c);
+                    }
+                },
+            }
+        }
+    }
+    try writer.writeByte('"');
 }
 
 /// Estimate JSON size for buffer pre-allocation
@@ -891,7 +906,6 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer, 
             try writer.print("{d}", .{f});
         }
     } else if (val.isAnyString()) {
-        try writer.writeByte('"');
         // Handle all string types: flat strings and slices
         const data = blk: {
             if (val.isString()) {
@@ -902,41 +916,7 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer, 
                 break :blk slice.data();
             }
         };
-        // Fast path: check if any escaping is needed
-        var needs_escape = false;
-        for (data) |c| {
-            if (c == '"' or c == '\\' or c == '\n' or c == '\r' or c == '\t' or c < 0x20) {
-                needs_escape = true;
-                break;
-            }
-        }
-        if (!needs_escape) {
-            // No escaping needed - write entire string at once
-            try writer.writeAll(data);
-        } else {
-            // Slow path: escape special characters
-            for (data) |c| {
-                switch (c) {
-                    '"' => try writer.writeAll("\\\""),
-                    '\\' => try writer.writeAll("\\\\"),
-                    '\n' => try writer.writeAll("\\n"),
-                    '\r' => try writer.writeAll("\\r"),
-                    '\t' => try writer.writeAll("\\t"),
-                    else => {
-                        if (c < 0x20) {
-                            // Control characters as \u00XX
-                            try writer.writeAll("\\u00");
-                            const hex = "0123456789abcdef";
-                            try writer.writeByte(hex[c >> 4]);
-                            try writer.writeByte(hex[c & 0xF]);
-                        } else {
-                            try writer.writeByte(c);
-                        }
-                    },
-                }
-            }
-        }
-        try writer.writeByte('"');
+        try writeJsonString(data, writer);
     } else if (val.isObject()) {
         const obj = object.JSObject.fromValue(val);
         // A Dict keeps its entries in the object's own slots and carries no
@@ -955,7 +935,7 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer, 
                 // A non-string key has no JSON spelling. Skipping it would be
                 // the same silent loss this arm exists to end, so the whole
                 // encode fails and the caller sees it.
-                if (!key.isAnyString()) return RenderError.OutOfMemory;
+                if (!key.isAnyString()) return RenderError.NonStringDictKey;
                 if (written > 0) try writer.writeByte(',');
                 written += 1;
                 try writeJsonDepth(ctx, key, writer, depth + 1);
@@ -1013,9 +993,8 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer, 
                             if (!first) try writer.writeByte(',');
                             first = false;
 
-                            try writer.writeByte('"');
-                            try writer.writeAll(name);
-                            try writer.writeAll("\":");
+                            try writeJsonString(name, writer);
+                            try writer.writeByte(':');
                             try writeJsonDepth(ctx, v, writer, depth + 1);
                         }
                     }
@@ -1369,8 +1348,8 @@ test "valueToJsonString object with properties" {
     const json = (try valueToJsonString(ctx, obj.toValue())).data();
 
     // Must contain both properties
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"hello\":\"world\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"count\":42") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"hello\":\"world\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"count\":42") != null);
     // Must start and end with braces
     try std.testing.expect(json.len >= 2);
     try std.testing.expectEqual(@as(u8, '{'), json[0]);
@@ -1653,4 +1632,85 @@ test "renderToString refuses raw children nested past the render limit" {
     try ctx.setPropertyChecked(node, .props, value.JSValue.null_val);
     try ctx.setPropertyChecked(node, .children, try nestedArray(ctx, 600));
     try std.testing.expectError(error.RenderDepthExceeded, renderToString(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{node.toValue()}));
+}
+
+test "writeJson escapes object keys, renderToString handles floats/SliceString/reentrancy, and responseConstructor accepts SliceString" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+
+    // Escaped object key in writeJson
+    const obj = try ctx.createObject(null);
+    const bad_key = try ctx.atoms.intern("a\"b\\c\nd");
+    try ctx.setPropertyChecked(obj, bad_key, value.JSValue.fromInt(1));
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeJson(ctx, obj.toValue(), &aw.writer, 0);
+    try std.testing.expectEqualStrings("{\"a\\\"b\\\\c\\nd\":1}", aw.written());
+
+    // SliceString in responseConstructor and renderNode/renderAttributes + floats
+    const parent = try ctx.createStringPtr("hello span world");
+    const tag_slice = try ctx.createSlicePtr(parent, 6, 4); // "span"
+    const body_slice = try ctx.createSlicePtr(parent, 0, 5); // "hello"
+    const resp = try responseConstructor(ctx_ptr, value.JSValue.undefined_val, &.{value.JSValue.fromPtr(body_slice)});
+    const resp_obj = object.JSObject.fromValue(resp);
+    try std.testing.expectEqualStrings("hello", resp_obj.getProperty(ctx.hidden_class_pool.?, .body).?.stringBytes().?);
+
+    const props = try ctx.createObject(null);
+    const title_atom = try ctx.atoms.intern("title");
+    const weight_atom = try ctx.atoms.intern("data-w");
+    try ctx.setPropertyChecked(props, title_atom, value.JSValue.fromPtr(body_slice));
+    try ctx.setPropertyChecked(props, weight_atom, value.JSValue.fromFloat(2.5));
+    const vnode = try h(ctx_ptr, value.JSValue.undefined_val, &.{
+        value.JSValue.fromPtr(tag_slice),
+        props.toValue(),
+        value.JSValue.fromFloat(1.5),
+    });
+    const rendered = try renderToString(ctx_ptr, value.JSValue.undefined_val, &.{vnode});
+    try std.testing.expectEqualStrings("<span title=\"hello\" data-w=\"2.5\">1.5</span>", rendered.stringBytes().?);
+
+    // Reentrant renderToString inside a function component preserves outer output
+    const reentrant_cb = struct {
+        fn call(cb_ctx: *context.Context, _: *object.JSObject, _: []const value.JSValue) anyerror!value.JSValue {
+            const inner_text = try cb_ctx.createString("INNER");
+            const inner_html = try renderToString(@ptrCast(cb_ctx), value.JSValue.undefined_val, &.{inner_text});
+            return inner_html;
+        }
+    }.call;
+    setCallFunctionCallback(ctx, reentrant_cb);
+    defer clearCallFunctionCallback(ctx);
+    const comp = try ctx.createObject(null);
+    comp.flags.is_callable = true;
+    const outer_node = try h(ctx_ptr, value.JSValue.undefined_val, &.{
+        try ctx.createString("div"),
+        value.JSValue.null_val,
+        try ctx.createString("BEFORE-"),
+        try h(ctx_ptr, value.JSValue.undefined_val, &.{ comp.toValue(), value.JSValue.null_val }),
+        try ctx.createString("-AFTER"),
+    });
+    const outer_rendered = try renderToString(ctx_ptr, value.JSValue.undefined_val, &.{outer_node});
+    try std.testing.expectEqualStrings("<div>BEFORE-INNER-AFTER</div>", outer_rendered.stringBytes().?);
+}
+
+test "valueToJsonString refuses non-string Dict key with NonStringDictKey" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const empty = try dict_mod.empty(ctx);
+    const bad = try dict_mod.set(ctx, empty, value.JSValue.fromInt(1), value.JSValue.fromInt(2));
+    try std.testing.expectError(error.NonStringDictKey, valueToJsonString(ctx, bad.toValue()));
 }

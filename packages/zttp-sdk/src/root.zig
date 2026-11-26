@@ -11,7 +11,6 @@ pub const object = @import("object.zig");
 pub const array = @import("array.zig");
 pub const result = @import("result.zig");
 pub const sqlite = @import("sqlite.zig");
-pub const callable = @import("callable.zig");
 pub const env = @import("env.zig");
 pub const cache = @import("cache.zig");
 pub const args = @import("args.zig");
@@ -66,7 +65,6 @@ pub const sha256 = crypto.sha256;
 pub const hmacSha256 = crypto.hmacSha256;
 
 pub const parseJson = json.parseJson;
-pub const stringify = json.stringify;
 
 pub const extractString = string.extractString;
 pub const createString = string.createString;
@@ -91,7 +89,6 @@ pub const resultErr = result.resultErr;
 pub const resultErrValue = result.resultErrValue;
 pub const resultErrs = result.resultErrs;
 
-pub const isCallable = callable.isCallable;
 pub const readEnv = env.readEnv;
 pub const allowsEnv = env.allowsEnv;
 pub const allowsCacheNamespace = cache.allowsCacheNamespace;

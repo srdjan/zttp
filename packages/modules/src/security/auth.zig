@@ -143,6 +143,9 @@ fn jwtVerifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
 
     const claims_val = sdk.parseJson(handle, payload_bytes) catch
         return sdk.resultErr(handle, "invalid claims JSON");
+    if (!sdk.isObject(claims_val) or sdk.isArray(claims_val)) {
+        return sdk.resultErr(handle, "invalid claims JSON");
+    }
 
     const now = @divTrunc(sdk.nowMs(handle) catch return sdk.resultErr(handle, "clock error"), 1000);
 
@@ -188,9 +191,9 @@ pub const TokenParts = struct {
 };
 
 pub fn splitToken(token: []const u8) ?TokenParts {
-    const first_dot = std.mem.indexOfScalar(u8, token, '.') orelse return null;
+    const first_dot = std.mem.findScalar(u8, token, '.') orelse return null;
     const rest = token[first_dot + 1 ..];
-    const second_dot = std.mem.indexOfScalar(u8, rest, '.') orelse return null;
+    const second_dot = std.mem.findScalar(u8, rest, '.') orelse return null;
     return .{
         .header_b64 = token[0..first_dot],
         .payload_b64 = rest[0..second_dot],
@@ -204,14 +207,14 @@ pub const SignatureError = error{ InvalidEncoding, InvalidLength, Mismatch };
 /// Decode the base64url signature segment and compare it in constant time
 /// with the MAC the caller computed over the signing input.
 pub fn checkHs256Signature(signature_b64: []const u8, expected_mac: *const [MAC_LEN]u8) SignatureError!void {
-    const sig_clean = trimTrailingPadding(signature_b64);
-    const sig_decoded_len = base64url.Decoder.calcSizeForSlice(sig_clean) catch return error.InvalidEncoding;
+    if (std.mem.findScalar(u8, signature_b64, '=') != null) return error.InvalidEncoding;
+    const sig_decoded_len = base64url.Decoder.calcSizeForSlice(signature_b64) catch return error.InvalidEncoding;
     if (sig_decoded_len != MAC_LEN) return error.InvalidLength;
 
     var sig_decoded: [MAC_LEN]u8 = undefined;
-    base64url.Decoder.decode(&sig_decoded, sig_clean) catch return error.InvalidEncoding;
+    base64url.Decoder.decode(&sig_decoded, signature_b64) catch return error.InvalidEncoding;
 
-    if (!constTimeEqlSlice(&sig_decoded, expected_mac)) return error.Mismatch;
+    if (!std.crypto.timing_safe.eql([MAC_LEN]u8, sig_decoded, expected_mac.*)) return error.Mismatch;
 }
 
 /// A present `exp` must be a finite number, and the token is expired from
@@ -303,7 +306,7 @@ pub fn verifyHs256(
     mac: Hs256Mac,
 ) VerifyError!VerifyResult {
     const parts = splitToken(token) orelse return refuse(.malformed);
-    if (std.mem.indexOfScalar(u8, parts.signature_b64, '.') != null) return refuse(.malformed);
+    if (std.mem.findScalar(u8, parts.signature_b64, '.') != null) return refuse(.malformed);
 
     validateHs256Header(allocator, parts.header_b64) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -452,7 +455,10 @@ fn verifyWebhookSignatureImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: [
         sig_str;
 
     if (provided_hex.len != expected_hex.len) return sdk.JSValue.false_val;
-    return if (constTimeEqlSlice(provided_hex, &expected_hex)) sdk.JSValue.true_val else sdk.JSValue.false_val;
+    return if (std.crypto.timing_safe.eql([expected_hex.len]u8, provided_hex[0..expected_hex.len].*, expected_hex))
+        sdk.JSValue.true_val
+    else
+        sdk.JSValue.false_val;
 }
 
 fn timingSafeEqualImpl(_: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
@@ -461,25 +467,16 @@ fn timingSafeEqualImpl(_: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.J
     return if (constTimeEqlSlice(a, b)) sdk.JSValue.true_val else sdk.JSValue.false_val;
 }
 
-fn trimTrailingPadding(input: []const u8) []const u8 {
-    var end = input.len;
-    while (end > 0 and input[end - 1] == '=') : (end -= 1) {}
-    return input[0..end];
-}
-
 fn constTimeEqlSlice(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
-    var diff: u8 = 0;
-    for (a, b) |ab, bb| diff |= ab ^ bb;
-    return diff == 0;
+    return std.crypto.timing_safe.compare(u8, a, b, .big) == .eq;
 }
 
 fn decodeBase64url(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
-    const clean = trimTrailingPadding(encoded);
-    const decoded_len = base64url.Decoder.calcSizeForSlice(clean) catch return error.InvalidBase64;
+    const decoded_len = base64url.Decoder.calcSizeForSlice(encoded) catch return error.InvalidBase64;
     const buf = try allocator.alloc(u8, decoded_len);
     errdefer allocator.free(buf);
-    base64url.Decoder.decode(buf, clean) catch return error.InvalidBase64;
+    base64url.Decoder.decode(buf, encoded) catch return error.InvalidBase64;
     return buf;
 }
 
@@ -523,15 +520,16 @@ const MAX_JWT_HEADER_LEN = 1024;
 pub fn validateHs256Header(allocator: std.mem.Allocator, header_b64: []const u8) (JwtHeaderError || std.mem.Allocator.Error)!void {
     if (header_b64.len > MAX_JWT_HEADER_LEN) return error.HeaderTooLong;
 
-    const clean = trimTrailingPadding(header_b64);
-    const decoded_len = base64url.Decoder.calcSizeForSlice(clean) catch return error.InvalidBase64;
+    const decoded_len = base64url.Decoder.calcSizeForSlice(header_b64) catch return error.InvalidBase64;
     if (decoded_len > MAX_JWT_HEADER_LEN) return error.HeaderTooLong;
 
     const decoded = try allocator.alloc(u8, decoded_len);
     defer allocator.free(decoded);
-    base64url.Decoder.decode(decoded, clean) catch return error.InvalidBase64;
+    base64url.Decoder.decode(decoded, header_b64) catch return error.InvalidBase64;
 
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, decoded, .{}) catch |err| return switch (err) {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, decoded, .{
+        .duplicate_field_behavior = .@"error",
+    }) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidJson,
     };
@@ -575,13 +573,11 @@ test "constTimeEqlSlice: equality, inequality, length mismatch" {
     try testing.expect(!constTimeEqlSlice(a, b));
 }
 
-test "trimTrailingPadding strips one or more `=` characters" {
-    try testing.expectEqualStrings("abc", trimTrailingPadding("abc"));
-    try testing.expectEqualStrings("abc", trimTrailingPadding("abc="));
-    try testing.expectEqualStrings("abc", trimTrailingPadding("abc=="));
-    try testing.expectEqualStrings("", trimTrailingPadding("===="));
-    try testing.expectEqualStrings("a=b", trimTrailingPadding("a=b"));
-    try testing.expectEqualStrings("a=b", trimTrailingPadding("a=b="));
+test "decodeBase64url rejects `=` padding" {
+    try testing.expectError(error.InvalidBase64, decodeBase64url(testing.allocator, "abc="));
+    try testing.expectError(error.InvalidBase64, decodeBase64url(testing.allocator, "abc=="));
+    try testing.expectError(error.InvalidBase64, decodeBase64url(testing.allocator, "===="));
+    try testing.expectError(error.InvalidBase64, decodeBase64url(testing.allocator, "a=b"));
 }
 
 test "base64url encode/decode round-trip for arbitrary bytes" {
@@ -630,19 +626,17 @@ test "isExpired rejects tokens at exp boundary" {
     try testing.expect(isExpired(101, 100));
 }
 
-test "decodeBase64url tolerates trailing `=` padding the encoder never emits" {
-    // Some JWT libraries still emit padded base64url. The decoder must
-    // accept both forms, otherwise we'd reject valid third-party tokens.
+test "decodeBase64url requires unpadded base64url and rejects `=`" {
     const allocator = testing.allocator;
-    const padded = "Zm9v"; // canonical, no padding
-    const decoded = try decodeBase64url(allocator, padded);
+    const unpadded = "Zm9v";
+    const decoded = try decodeBase64url(allocator, unpadded);
     defer allocator.free(decoded);
     try testing.expectEqualStrings("foo", decoded);
 
-    const padded_with_eq = "Zm9v==";
-    const decoded2 = try decodeBase64url(allocator, padded_with_eq);
-    defer allocator.free(decoded2);
-    try testing.expectEqualStrings("foo", decoded2);
+    try testing.expectError(error.InvalidBase64, decodeBase64url(allocator, "Zm9v=="));
+    try testing.expectError(error.InvalidBase64, validateHs256Header(allocator, "eyJhbGciOiJIUzI1NiJ9="));
+    const expected_mac: [MAC_LEN]u8 = @splat(0);
+    try testing.expectError(error.InvalidEncoding, checkHs256Signature("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", &expected_mac));
 }
 
 // ---------------------------------------------------------------------------
@@ -740,6 +734,13 @@ test "validateHs256Header is case-sensitive on alg value" {
     const header = try headerForTest(allocator, "{\"alg\":\"hs256\"}");
     defer allocator.free(header);
     try testing.expectError(error.UnsupportedAlg, validateHs256Header(allocator, header));
+}
+
+test "validateHs256Header rejects duplicate alg header" {
+    const allocator = testing.allocator;
+    const header = try headerForTest(allocator, "{\"alg\":\"none\",\"alg\":\"HS256\"}");
+    defer allocator.free(header);
+    try testing.expectError(error.InvalidJson, validateHs256Header(allocator, header));
 }
 
 // ---------------------------------------------------------------------------
@@ -897,7 +898,7 @@ test "verifyHs256 refuses a truncated or undecodable signature as bad_signature"
     const token = try signForTest(testing.allocator, hs256_header, "{\"sub\":\"u1\",\"tid\":\"t1\"}", test_key);
     defer testing.allocator.free(token);
     try expectRefused(.bad_signature, token[0 .. token.len - 4]);
-    const last_dot = std.mem.lastIndexOfScalar(u8, token, '.') orelse return error.TestUnexpectedResult;
+    const last_dot = std.mem.findScalarLast(u8, token, '.') orelse return error.TestUnexpectedResult;
     const bad = try std.mem.concat(testing.allocator, u8, &.{ token[0 .. last_dot + 1], "!!!!" });
     defer testing.allocator.free(bad);
     try expectRefused(.bad_signature, bad);
@@ -905,6 +906,12 @@ test "verifyHs256 refuses a truncated or undecodable signature as bad_signature"
 
 test "verifyHs256 refuses a duplicate sub key as malformed" {
     try expectPayloadRefused(.malformed, "{\"sub\":\"u1\",\"sub\":\"admin\",\"tid\":\"t1\"}");
+}
+
+test "verifyHs256 refuses a duplicate alg header as malformed" {
+    const token = try signForTest(testing.allocator, "{\"alg\":\"none\",\"alg\":\"HS256\"}", "{\"sub\":\"u1\",\"tid\":\"t1\"}", test_key);
+    defer testing.allocator.free(token);
+    try expectRefused(.malformed, token);
 }
 
 test "verifyHs256 refuses a payload that is not a JSON object as malformed" {

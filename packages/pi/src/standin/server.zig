@@ -5,7 +5,16 @@ const playbook = @import("playbook.zig");
 const request = @import("request.zig");
 
 const max_request_bytes: usize = 16 * 1024 * 1024;
+const socket_read_timeout_ms: u64 = 5_000;
 const ErrorInt = u16;
+
+fn setReadTimeoutMs(fd: std.posix.fd_t, timeout_ms: u64) void {
+    const tv = std.posix.timeval{
+        .sec = @intCast(timeout_ms / 1000),
+        .usec = @intCast((timeout_ms % 1000) * 1000),
+    };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+}
 
 pub const Server = struct {
     allocator: std.mem.Allocator,
@@ -179,6 +188,7 @@ const HttpResponse = struct {
 };
 
 fn serveConnection(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, io: std.Io) !void {
+    setReadTimeoutMs(stream.socket.handle, socket_read_timeout_ms);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const request_bytes = try readRequest(arena.allocator(), stream, io);
@@ -201,7 +211,10 @@ fn readRequest(arena: std.mem.Allocator, stream: *std.Io.net.Stream, io: std.Io)
 
     while (bytes.items.len <= max_request_bytes) {
         if (expected_len) |len| {
-            if (bytes.items.len >= len) return try bytes.toOwnedSlice(arena);
+            if (bytes.items.len >= len) {
+                bytes.shrinkRetainingCapacity(len);
+                return try bytes.toOwnedSlice(arena);
+            }
         }
 
         var chunk: [4096]u8 = undefined;
@@ -212,7 +225,7 @@ fn readRequest(arena: std.mem.Allocator, stream: *std.Io.net.Stream, io: std.Io)
         if (bytes.items.len > max_request_bytes) return error.RequestTooLarge;
 
         if (expected_len == null) {
-            if (std.mem.indexOf(u8, bytes.items, "\r\n\r\n")) |head_end| {
+            if (std.mem.find(u8, bytes.items, "\r\n\r\n")) |head_end| {
                 const content_length = try parseContentLength(bytes.items[0..head_end]);
                 if (content_length > max_request_bytes - (head_end + 4)) return error.RequestTooLarge;
                 expected_len = head_end + 4 + content_length;
@@ -227,7 +240,7 @@ fn parseContentLength(head: []const u8) !usize {
     _ = lines.next() orelse return error.InvalidRequest;
     var content_length: ?usize = null;
     while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidRequest;
+        const colon = std.mem.findScalar(u8, line, ':') orelse return error.InvalidRequest;
         const name = std.mem.trim(u8, line[0..colon], " \t");
         if (!std.ascii.eqlIgnoreCase(name, "content-length")) continue;
         if (content_length != null) return error.InvalidRequest;
@@ -238,8 +251,8 @@ fn parseContentLength(head: []const u8) !usize {
 }
 
 fn parseHttpRequest(bytes: []const u8) !HttpRequest {
-    const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.InvalidRequest;
-    const first_line_end = std.mem.indexOf(u8, bytes[0..head_end], "\r\n") orelse return error.InvalidRequest;
+    const head_end = std.mem.find(u8, bytes, "\r\n\r\n") orelse return error.InvalidRequest;
+    const first_line_end = std.mem.find(u8, bytes[0..head_end], "\r\n") orelse return error.InvalidRequest;
     const first_line = bytes[0..first_line_end];
     var parts = std.mem.splitScalar(u8, first_line, ' ');
     const method = parts.next() orelse return error.InvalidRequest;
@@ -278,7 +291,7 @@ fn dispatch(allocator: std.mem.Allocator, incoming: HttpRequest) !HttpResponse {
             else => return err,
         };
         errdefer allocator.free(body);
-        return .{ .status = 200, .reason = "OK", .content_type = "text/event-stream", .body = body };
+        return .{ .status = 200, .reason = "OK", .content_type = "application/json", .body = body };
     }
 
     return plainResponse(allocator, 404, "Not Found", "not found\n");
@@ -313,6 +326,6 @@ test "stand-in health response carries protocol and stand-in version" {
     var response = try dispatch(testing.allocator, .{ .method = "GET", .path = "/_health", .body = "" });
     defer response.deinit(testing.allocator);
     try testing.expectEqual(@as(u16, 200), response.status);
-    try testing.expect(std.mem.indexOf(u8, response.body, playbook.protocol) != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, playbook.version) != null);
+    try testing.expect(std.mem.find(u8, response.body, playbook.protocol) != null);
+    try testing.expect(std.mem.find(u8, response.body, playbook.version) != null);
 }

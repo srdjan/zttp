@@ -147,7 +147,7 @@ fn dictFromEntriesNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue)
     const len = entries.getArrayLength();
     var i: u32 = 0;
     while (i < len) : (i += 1) {
-        const pair_val = entries.getSlot(@intCast(i + 1));
+        const pair_val = entries.getIndex(i) orelse JSValue.undefined_val;
         // A malformed entry is not a duplicate key. Reporting one as the other
         // sends a caller matching on `kind` to the duplicate branch to name a
         // key that does not exist, while the real defect - an entry that is
@@ -157,8 +157,8 @@ fn dictFromEntriesNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue)
         if (pair.class_id != .array or pair.getArrayLength() < 2) {
             return malformedEntryError(ctx, i);
         }
-        const key = pair.getSlot(1);
-        const val = pair.getSlot(2);
+        const key = pair.getIndex(0) orelse JSValue.undefined_val;
+        const val = pair.getIndex(1) orelse JSValue.undefined_val;
         if (dict.has(out, key)) return duplicateKeyError(ctx, key);
         out = try dict.set(ctx, out, key, val);
     }
@@ -288,4 +288,22 @@ fn dictFoldNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anyerr
         acc = try helpers.invokeCallback(ctx, call_fn, callback, &.{ acc, dict.valueAt(d, i), dict.keyAt(d, i) });
     }
     return acc;
+}
+
+test "dictFromEntries handles sparse array safely without OOB" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const sparse = try ctx.createArray();
+    sparse.setArrayLength(10);
+    const res = try dictFromEntriesNative(ctx, JSValue.undefined_val, &.{sparse.toValue()});
+    const res_obj = JSObject.fromValue(res);
+    try std.testing.expect(res_obj.inline_slots[JSObject.Slots.RESULT_IS_OK].isFalse());
 }

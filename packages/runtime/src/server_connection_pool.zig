@@ -119,7 +119,7 @@ pub const ConnectionPool = struct {
             };
         }
 
-        pub fn push(self: *BoundedQueue, item: WorkItem) bool {
+        pub fn push(self: *BoundedQueue, io: Io, item: WorkItem) bool {
             // Fast-fail under obvious saturation to keep accept loop non-blocking.
             if (self.count.load(.acquire) >= QUEUE_SIZE) return false;
 
@@ -134,13 +134,13 @@ pub const ConnectionPool = struct {
             self.tail = (self.tail + 1) % QUEUE_SIZE;
             _ = self.count.fetchAdd(1, .release);
             self.mutex.unlock();
-            self.ready.post(std.Options.debug_io);
+            self.ready.post(io);
             return true;
         }
 
-        pub fn pop(self: *BoundedQueue, running: *std.atomic.Value(bool)) ?WorkItem {
+        pub fn pop(self: *BoundedQueue, io: Io, running: *std.atomic.Value(bool)) ?WorkItem {
             while (true) {
-                self.ready.waitUncancelable(std.Options.debug_io);
+                self.ready.waitUncancelable(io);
 
                 self.mutex.lock();
                 const cnt = self.count.load(.acquire);
@@ -157,8 +157,8 @@ pub const ConnectionPool = struct {
             }
         }
 
-        pub fn wakeWorkers(self: *BoundedQueue, n: usize) void {
-            for (0..n) |_| self.ready.post(std.Options.debug_io);
+        pub fn wakeWorkers(self: *BoundedQueue, io: Io, n: usize) void {
+            for (0..n) |_| self.ready.post(io);
         }
 
         pub fn drainAndClose(self: *BoundedQueue) usize {
@@ -199,7 +199,7 @@ pub const ConnectionPool = struct {
                 // If spawn fails, clean up already spawned workers
                 // errdefers will handle freeing workers array and destroying self
                 self.running.store(false, .release);
-                self.queue.wakeWorkers(i);
+                self.queue.wakeWorkers(server.io_backend.io(), i);
                 for (self.workers[0..i]) |w| w.join();
                 return error.ThreadSpawnFailed;
             };
@@ -211,7 +211,7 @@ pub const ConnectionPool = struct {
     pub fn deinit(self: *ConnectionPool) void {
         self.running.store(false, .release);
         // Wake blocked workers so they can observe running=false and exit.
-        self.queue.wakeWorkers(self.workers.len);
+        self.queue.wakeWorkers(self.server.io_backend.io(), self.workers.len);
         for (self.workers) |w| w.join();
         _ = self.queue.drainAndClose();
         self.allocator.free(self.workers);
@@ -219,12 +219,13 @@ pub const ConnectionPool = struct {
     }
 
     pub fn submit(self: *ConnectionPool, stream_fd: std.posix.fd_t) bool {
-        return self.queue.push(.{ .stream_fd = stream_fd });
+        return self.queue.push(self.server.io_backend.io(), .{ .stream_fd = stream_fd });
     }
 
     fn workerFn(self: *ConnectionPool) void {
+        const io = self.server.io_backend.io();
         while (self.running.load(.acquire)) {
-            const item = self.queue.pop(&self.running) orelse continue;
+            const item = self.queue.pop(io, &self.running) orelse continue;
             self.handleConnection(item.stream_fd);
         }
     }
@@ -261,7 +262,7 @@ pub const ConnectionPool = struct {
 
         while (true) {
             if (requests_on_connection > 0 and pending_request_bytes.bytes.len == 0 and !self.waitForNextRequest(fd)) break;
-            _ = arena.reset(.retain_capacity);
+            _ = arena.reset(.{ .retain_with_limit = 64 * 1024 });
             const req_allocator = arena.allocator();
             const outcome = self.handleSingleRequestSync(fd, requests_on_connection, req_allocator, &pending_request_bytes) catch break;
             requests_on_connection += 1;
@@ -323,31 +324,37 @@ pub const ConnectionPool = struct {
     ) !RequestOutcome {
         _ = request_num;
 
-        // Hold a shared lock across the request so the live-reload watcher's
-        // exclusive contract/proof_cache swap (replaceSourceGeneration) waits for
-        // in-flight readers instead of freeing structures this request still
-        // points into. Gated on reload being active: the production path takes
-        // no lock. Concurrent requests still run in parallel (shared lock).
-        const guard_contract = self.server.reload_active;
-        if (guard_contract) self.server.contract_lock.lockShared();
-        defer if (guard_contract) self.server.contract_lock.unlockShared();
-
         var is_head = false;
         const request_data = self.readRequestData(fd, req_allocator, pending, &is_head) catch |err| {
             if (err == error.EndOfStream or err == error.ConnectionResetByPeer or err == error.WouldBlock) return .close;
-            if (err == error.UnsupportedTransferEncoding) {
-                self.sendErrorSync(fd, 501, "Not Implemented", is_head) catch {};
-                return .close;
+            switch (err) {
+                error.UnsupportedTransferEncoding => {
+                    self.sendErrorSync(fd, 501, "Not Implemented", is_head) catch {};
+                    return .close;
+                },
+                error.FileTooBig => {
+                    self.sendErrorSync(fd, 413, "Payload Too Large", is_head) catch {};
+                    return .close;
+                },
+                error.RequestTimeout => {
+                    self.sendErrorSync(fd, 408, "Request Timeout", is_head) catch {};
+                    return .close;
+                },
+                error.HeaderStorageExhausted => {
+                    self.sendErrorSync(fd, 431, response_mod.getStatusText(431), is_head) catch {};
+                    return .close;
+                },
+                error.InvalidRequest,
+                error.InvalidHeaderName,
+                error.DuplicateContentLength,
+                error.InvalidContentLength,
+                error.InvalidChunkedEncoding,
+                => {
+                    self.sendErrorSync(fd, 400, "Bad Request", is_head) catch {};
+                    return .close;
+                },
+                else => return err,
             }
-            if (err == error.FileTooBig) {
-                self.sendErrorSync(fd, 413, "Payload Too Large", is_head) catch {};
-                return .close;
-            }
-            if (err == error.RequestTimeout) {
-                self.sendErrorSync(fd, 408, "Request Timeout", is_head) catch {};
-                return .close;
-            }
-            return err;
         };
         var request = self.server.parseRequestFromBuffer(req_allocator, request_data) catch |err| {
             // Send an HTTP response for a malformed request instead of silently
@@ -358,6 +365,19 @@ pub const ConnectionPool = struct {
             return .close;
         };
         defer request.deinit(req_allocator);
+
+        // Hold a shared lock across request dispatch so the live-reload watcher's
+        // exclusive contract/proof_cache/attestation swap (replaceSourceGeneration)
+        // waits for in-flight readers instead of freeing structures this request
+        // still points into. Acquired after reading and parsing the request so
+        // an idle keep-alive or slow-reading socket cannot stall live-reload
+        // swaps; readRequestData, parseRequestFromBuffer, and sendErrorSync only
+        // read immutable ServerConfig limits. Gated on reload being active: the
+        // production path takes no lock. Concurrent requests still run in parallel
+        // (shared lock).
+        const guard_contract = self.server.reload_active;
+        if (guard_contract) self.server.contract_lock.lockShared();
+        defer if (guard_contract) self.server.contract_lock.unlockShared();
 
         var access_status: u16 = 500;
         const access_started_ms = unixMillisNow();
@@ -377,7 +397,7 @@ pub const ConnectionPool = struct {
         // Health and readiness probes - before WebSocket, static, and JS handler
         if (std.mem.eql(u8, request.path, "/_health")) {
             access_status = 200;
-            self.sendStatusSync(fd, 200, "OK", keep_alive, is_head) catch {};
+            self.sendStatusSync(fd, 200, "OK", keep_alive, is_head) catch return .close;
             return outcome_if_alive;
         }
         if (std.mem.eql(u8, request.path, "/_readiness")) {
@@ -391,7 +411,7 @@ pub const ConnectionPool = struct {
                 return .close;
             }
             access_status = 200;
-            self.sendStatusSync(fd, 200, "OK", keep_alive, is_head) catch {};
+            self.sendStatusSync(fd, 200, "OK", keep_alive, is_head) catch return .close;
             return outcome_if_alive;
         }
 
@@ -401,19 +421,27 @@ pub const ConnectionPool = struct {
                 // Strip the full "/static/" prefix (8 chars) off request.path,
                 // not request.url[7..], which keeps a leading slash (so the
                 // file resolves as absolute -> 403) and carries the query string.
-                access_status = self.serveStaticFileSync(fd, static_dir, request.path["/static/".len..], keep_alive, request.headers.items, is_head) catch |err| {
-                    if (err == error.StaticFileTruncated) {
-                        // Headers + a partial body already went out; the file
-                        // shrank under us, so the only safe action is to close
-                        // rather than leave a keep-alive client awaiting bytes
-                        // that no longer exist. No 500 - the status line is sent.
-                        access_status = 200;
+                var static_headers_sent = false;
+                access_status = self.serveStaticFileSync(
+                    fd,
+                    static_dir,
+                    request.path["/static/".len..],
+                    keep_alive,
+                    request.headers.items,
+                    is_head,
+                    &static_headers_sent,
+                ) catch |err| {
+                    if (static_headers_sent or err == error.StaticFileTruncated) {
+                        // Response headers (or partial response bytes) already
+                        // went out on the wire. Never emit a second HTTP
+                        // response into the stream — close immediately.
+                        access_status = if (err == error.StaticFileTruncated) 200 else 500;
                         return .close;
                     }
                     std.log.warn("static file error for {s}: {}", .{ request.url, err });
                     access_status = 500;
                     self.sendErrorSync(fd, 500, "Internal Server Error", is_head) catch {};
-                    return outcome_if_alive;
+                    return .close;
                 };
                 return outcome_if_alive;
             }
@@ -440,24 +468,23 @@ pub const ConnectionPool = struct {
         if (self.server.contract) |*contract| {
             if (!contract.matchesRoute(request.method, request.path)) {
                 access_status = 404;
-                self.sendStatusSync(fd, 404, "Not Found", keep_alive, is_head) catch {};
+                self.sendStatusSync(fd, 404, "Not Found", keep_alive, is_head) catch return .close;
                 return outcome_if_alive;
             }
         }
 
         // Proof-driven response memoization: serve cached response without entering JS
-        var proof_cache_key: ?u64 = null;
+        var cache_eligible = false;
         if (self.server.proof_cache) |*cache| {
             if (cache.enabled and proof_adapter.ProofCache.shouldCache(request.method, request.headers)) {
-                const key = proof_adapter.ProofCache.computeKey(request.method, request.url);
-                var cached_opt = cache.get(key, req_allocator);
+                var cached_opt = cache.get(request.method, request.url, req_allocator);
                 if (cached_opt != null) {
                     defer cached_opt.?.deinit();
                     access_status = cached_opt.?.status;
                     self.sendResponseSync(fd, &cached_opt.?, keep_alive, is_head) catch return .close;
                     return outcome_if_alive;
                 }
-                proof_cache_key = key;
+                cache_eligible = true;
             }
         }
 
@@ -512,9 +539,9 @@ pub const ConnectionPool = struct {
             defer handle.deinit();
 
             // Store response in proof cache on miss
-            if (proof_cache_key) |key| {
+            if (cache_eligible) {
                 if (self.server.proof_cache) |*cache| {
-                    cache.put(key, &handle.response);
+                    cache.put(request.method, request.url, &handle.response);
                 }
             }
 
@@ -618,7 +645,7 @@ pub const ConnectionPool = struct {
     pub fn completeRequestLength(self: *ConnectionPool, data: []const u8, chunked_state: *http_parser.ChunkedBodyParseState) !?usize {
         const max_header_bytes: usize = 32 * 1024;
         const header_end = findHeaderEnd(data) orelse {
-            if (data.len > max_header_bytes) return error.InvalidRequest;
+            if (data.len > max_header_bytes) return error.HeaderStorageExhausted;
             return null;
         };
 
@@ -656,33 +683,6 @@ pub const ConnectionPool = struct {
     }
 
     fn sendResponseSync(self: *ConnectionPool, fd: std.posix.fd_t, response: *HttpResponse, keep_alive: bool, is_head: bool) !void {
-        // FAST PATH: If prebuilt_raw is available, write it directly (zero header construction).
-        // Slice 1 of proof receipts intentionally skips this path: cached
-        // static-file responses don't carry handler semantics, so omitting
-        // attestation headers there is the correct shape.
-        //
-        // A HEAD response must NOT take this path: prebuilt_raw embeds the body,
-        // and RFC 7231 forbids a body on a HEAD response (a client reading it
-        // would mis-frame the next response on a keep-alive connection).
-        if (!is_head) {
-            if (response_mod.statusAllowsBody(response.status)) {
-                if (response.prebuilt_raw) |prebuilt| {
-                    // Only take the zero-construction fast path when attestation is off.
-                    // The prebuilt blob omits the Zttp-Proofs/Zttp-Attest header lines,
-                    // so when attestation is active we must fall through to the normal
-                    // builder; otherwise a constant-Response handler would ship attestation
-                    // headers on close connections but drop them on keep-alive, making
-                    // their presence unpredictable for a third-party `zttp verify`.
-                    if (keep_alive and self.server.attestation_headers == null) {
-                        // Prebuilt response already has keep-alive, write directly
-                        try writeAllFd(fd, prebuilt);
-                        return;
-                    }
-                    // For close (or when attestation is active) fall through to normal path.
-                }
-            }
-        }
-
         // Increased buffer to 8KB to fit headers + most response bodies in single write
         var header_buf: [8192]u8 = undefined;
         var pos = try buildDynamicResponseHeader(
@@ -754,7 +754,6 @@ pub const ConnectionPool = struct {
             defer response.deinit();
             response.status = status;
             response.body = "unexpected body";
-            response.prebuilt_raw = "HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: keep-alive\r\n\r\nunexpected body";
 
             const fds = try createUnixSocketPair();
             defer std.Io.Threaded.closeFd(fds[0]);
@@ -763,7 +762,7 @@ pub const ConnectionPool = struct {
 
             var buf: [512]u8 = undefined;
             const n = try readResponse(fds[0], fds[1], &buf);
-            try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "Content-Length:") == null);
+            try std.testing.expect(std.mem.find(u8, buf[0..n], "Content-Length:") == null);
             try std.testing.expect(std.mem.endsWith(u8, buf[0..n], "\r\n\r\n"));
         }
 
@@ -849,16 +848,19 @@ pub const ConnectionPool = struct {
         keep_alive: bool,
         headers: []const HttpHeader,
         is_head: bool,
+        headers_sent: *bool,
     ) !u16 {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         var etag_buf: [34]u8 = undefined;
         var resolved = try resolveStaticFile(self.server.allocator, self.server.io_backend.io(), static_dir, path, &path_buf, &etag_buf);
         switch (resolved) {
             .forbidden => {
+                headers_sent.* = true;
                 try self.sendStatusSync(fd, 403, "Forbidden", keep_alive, is_head);
                 return 403;
             },
             .not_found => {
+                headers_sent.* = true;
                 try self.sendStatusSync(fd, 404, "Not Found", keep_alive, is_head);
                 return 404;
             },
@@ -870,6 +872,7 @@ pub const ConnectionPool = struct {
                     if (std.mem.eql(u8, eff_etag, file_info.etag)) {
                         var out_buf: [256]u8 = undefined;
                         const response = formatStaticNotModified(&out_buf, file_info.etag, keep_alive) catch return error.BufferOverflow;
+                        headers_sent.* = true;
                         try writeAllFd(fd, response);
                         return 304;
                     }
@@ -883,6 +886,7 @@ pub const ConnectionPool = struct {
                     file_info.etag,
                     keep_alive,
                 ) catch return error.BufferOverflow;
+                headers_sent.* = true;
                 try writeAllFd(fd, header);
 
                 // HEAD: the header block already carries Content-Length =
@@ -951,4 +955,67 @@ test "accessLogField caps oversized values" {
     const logged = accessLogField(&oversized, &buf);
     try std.testing.expectEqual(@as(usize, max_logged_access_field_len), logged.len);
     try std.testing.expectEqualStrings(&@as([max_logged_access_field_len:0]u8, @splat('a')), logged);
+}
+
+test "idle socket read with reload_active does not block contract_lock.lock" {
+    var server: Server = undefined;
+    server.config = .{
+        .handler = .{ .inline_code = "" },
+        .timeout_ms = 2_000,
+        .keep_alive = false,
+        .log_requests = false,
+    };
+    server.reload_active = true;
+    server.contract_lock = .{};
+    server.contract = null;
+    server.proof_cache = null;
+    server.well_known_doc = null;
+    server.pool = null;
+    server.attestation_headers = null;
+
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = &server,
+        .allocator = std.testing.allocator,
+    };
+
+    const fds = try createUnixSocketPair();
+    var server_fd_owned = true;
+    defer if (server_fd_owned) std.Io.Threaded.closeFd(fds[0]);
+
+    var worker_started = std.atomic.Value(bool).init(false);
+    var worker_done = std.atomic.Value(bool).init(false);
+    const Worker = struct {
+        fn run(
+            p: *ConnectionPool,
+            fd: std.posix.fd_t,
+            started: *std.atomic.Value(bool),
+            done: *std.atomic.Value(bool),
+        ) void {
+            started.store(true, .release);
+            p.handleConnection(fd);
+            done.store(true, .release);
+        }
+    };
+
+    const worker = try std.Thread.spawn(.{}, Worker.run, .{ &pool, fds[0], &worker_started, &worker_done });
+    server_fd_owned = false;
+    defer worker.join();
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    while (!worker_started.load(.acquire)) {
+        std.Thread.yield() catch {};
+    }
+    const wait_ts = std.c.timespec{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&wait_ts, null);
+
+    var lock_timer = try engine.Timer.start();
+    server.contract_lock.lock();
+    const lock_elapsed_ms = lock_timer.read() / std.time.ns_per_ms;
+    server.contract_lock.unlock();
+
+    try std.testing.expect(lock_elapsed_ms < 500);
+    try std.testing.expect(!worker_done.load(.acquire));
 }

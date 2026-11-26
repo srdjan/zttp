@@ -79,6 +79,8 @@ fn callbackIsSupported(view: IrView, node: NodeIndex) bool {
         element.default_value == null_node;
 }
 
+const max_intrinsic_depth: usize = 512;
+
 fn markIntrinsicReferences(
     view: IrView,
     facts: *const ModuleFacts,
@@ -86,7 +88,7 @@ fn markIntrinsicReferences(
     node: NodeIndex,
     depth: usize,
 ) void {
-    if (depth > handled.len or node >= handled.len) return;
+    if (depth >= max_intrinsic_depth or node >= handled.len) return;
     if (view.getTag(node) == .identifier and importedIntrinsicKind(view, facts, node) != null) {
         handled[node] = true;
     }
@@ -204,7 +206,7 @@ fn lowerPattern(
     context: PatternContext,
     depth: usize,
 ) !NodeIndex {
-    if (depth > handled.len) return error.InvalidMatchPattern;
+    if (depth >= max_intrinsic_depth) return error.InvalidMatchPattern;
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     if (descriptorAt(view, atoms, facts, handled, node)) |descriptor| {
         return switch (descriptor) {

@@ -169,15 +169,27 @@ pub const Transcript = struct {
         self.* = .{};
     }
 
+    /// Append an already-owned entry and notify `observer`. Takes ownership of
+    /// `entry` only on success; on error the caller retains ownership.
+    pub fn appendOwned(
+        self: *Transcript,
+        allocator: std.mem.Allocator,
+        entry: OwnedEntry,
+    ) !void {
+        try self.entries.append(allocator, entry);
+        if (self.observer) |obs| {
+            obs.on_append(obs.context, &self.entries.items[self.entries.items.len - 1]);
+        }
+    }
+
     pub fn append(
         self: *Transcript,
         allocator: std.mem.Allocator,
         message: turn.Message,
     ) !void {
-        try self.entries.append(allocator, try ownMessage(allocator, message));
-        if (self.observer) |obs| {
-            obs.on_append(obs.context, &self.entries.items[self.entries.items.len - 1]);
-        }
+        var owned = try ownMessage(allocator, message);
+        errdefer owned.deinit(allocator);
+        try self.appendOwned(allocator, owned);
     }
 
     pub fn len(self: *const Transcript) usize {
@@ -278,29 +290,48 @@ fn ownMessage(allocator: std.mem.Allocator, message: turn.Message) !OwnedEntry {
         .assistant_tool_use => |calls| blk: {
             const owned = try allocator.alloc(OwnedToolCall, calls.len);
             errdefer allocator.free(owned);
+            var initialized: usize = 0;
+            errdefer for (owned[0..initialized]) |*call| call.deinit(allocator);
             for (calls, 0..) |call, i| {
+                const id = try allocator.dupe(u8, call.id);
+                errdefer allocator.free(id);
+                const name = try allocator.dupe(u8, call.name);
+                errdefer allocator.free(name);
+                const args_json = try allocator.dupe(u8, call.args_json);
+                errdefer allocator.free(args_json);
+                const reasoning_content = if (call.reasoning_content) |body|
+                    try allocator.dupe(u8, body)
+                else
+                    null;
                 owned[i] = .{
-                    .id = try allocator.dupe(u8, call.id),
-                    .name = try allocator.dupe(u8, call.name),
-                    .args_json = try allocator.dupe(u8, call.args_json),
-                    .reasoning_content = if (call.reasoning_content) |body|
-                        try allocator.dupe(u8, body)
-                    else
-                        null,
+                    .id = id,
+                    .name = name,
+                    .args_json = args_json,
+                    .reasoning_content = reasoning_content,
                 };
+                initialized += 1;
             }
             break :blk .{ .assistant_tool_use = owned };
         },
-        .tool_result => |result| .{ .tool_result = .{
-            .tool_use_id = try allocator.dupe(u8, result.tool_use_id),
-            .tool_name = try allocator.dupe(u8, result.tool_name),
-            .ok = result.ok,
-            .llm_text = try allocator.dupe(u8, result.llm_text),
-            .ui_payload = if (result.ui_payload) |payload|
+        .tool_result => |result| blk: {
+            const tool_use_id = try allocator.dupe(u8, result.tool_use_id);
+            errdefer allocator.free(tool_use_id);
+            const tool_name = try allocator.dupe(u8, result.tool_name);
+            errdefer allocator.free(tool_name);
+            const llm_text = try allocator.dupe(u8, result.llm_text);
+            errdefer allocator.free(llm_text);
+            const cloned_payload = if (result.ui_payload) |payload|
                 try payload.clone(allocator)
             else
-                null,
-        } },
+                null;
+            break :blk .{ .tool_result = .{
+                .tool_use_id = tool_use_id,
+                .tool_name = tool_name,
+                .ok = result.ok,
+                .llm_text = llm_text,
+                .ui_payload = cloned_payload,
+            } };
+        },
         .system_note => |body| .{ .system_note = try allocator.dupe(u8, body) },
     };
 }
@@ -309,12 +340,15 @@ fn ownDisplayMessage(
     allocator: std.mem.Allocator,
     message: turn.DisplayMessage,
 ) !OwnedDisplayMessage {
+    const llm_text = try allocator.dupe(u8, message.llm_text);
+    errdefer allocator.free(llm_text);
+    const cloned_payload = if (message.ui_payload) |payload|
+        try payload.clone(allocator)
+    else
+        null;
     return .{
-        .llm_text = try allocator.dupe(u8, message.llm_text),
-        .ui_payload = if (message.ui_payload) |payload|
-            try payload.clone(allocator)
-        else
-            null,
+        .llm_text = llm_text,
+        .ui_payload = cloned_payload,
     };
 }
 
@@ -508,12 +542,12 @@ test "every entry variant renders a stable plain-text label" {
     const out = try renderToString(testing.allocator, &tr);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "user: add a route\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "model: I'll inspect first.\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "assistant: tool_use zts_expert_meta\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "tool zts_expert_meta: {\"ok\":true}\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "proof: contract ok\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "error: ZTS001 unsupported var\n") != null);
+    try testing.expect(std.mem.find(u8, out, "user: add a route\n") != null);
+    try testing.expect(std.mem.find(u8, out, "model: I'll inspect first.\n") != null);
+    try testing.expect(std.mem.find(u8, out, "assistant: tool_use zts_expert_meta\n") != null);
+    try testing.expect(std.mem.find(u8, out, "tool zts_expert_meta: {\"ok\":true}\n") != null);
+    try testing.expect(std.mem.find(u8, out, "proof: contract ok\n") != null);
+    try testing.expect(std.mem.find(u8, out, "error: ZTS001 unsupported var\n") != null);
 }
 
 test "display cap returns original body when under the cap" {
@@ -536,13 +570,13 @@ test "display cap truncates with a byte-count suffix when over the cap" {
     defer testing.allocator.free(out);
 
     try testing.expect(out.len <= 100);
-    try testing.expect(std.mem.indexOf(u8, out, "[truncated") != null);
+    try testing.expect(std.mem.find(u8, out, "[truncated") != null);
 
     // The suffix must encode the exact number of dropped bytes.
     const suffix_prefix = "\n...[truncated ";
-    const idx = std.mem.indexOf(u8, out, suffix_prefix) orelse return error.TestFailed;
+    const idx = std.mem.find(u8, out, suffix_prefix) orelse return error.TestFailed;
     const digits_start = idx + suffix_prefix.len;
-    const digits_end = std.mem.indexOfScalarPos(u8, out, digits_start, ' ') orelse return error.TestFailed;
+    const digits_end = std.mem.findScalarPos(u8, out, digits_start, ' ') orelse return error.TestFailed;
     const dropped = try std.fmt.parseInt(usize, out[digits_start..digits_end], 10);
     try testing.expectEqual(big.len - idx, dropped);
 }
@@ -567,12 +601,12 @@ test "renderRichEntryToOwnedTty caps an oversized tool_result body for the live 
     const tty = try renderRichEntryToOwnedTty(testing.allocator, tr.at(0));
     defer testing.allocator.free(tty);
     try testing.expect(tty.len < big_len);
-    try testing.expect(std.mem.indexOf(u8, tty, "[truncated") != null);
+    try testing.expect(std.mem.find(u8, tty, "[truncated") != null);
 
     // The uncapped renderer (persistence/json paths) keeps the full body.
     const full = try renderRichEntryToOwned(testing.allocator, tr.at(0));
     defer testing.allocator.free(full);
-    try testing.expect(std.mem.indexOf(u8, full, "[truncated") == null);
+    try testing.expect(std.mem.find(u8, full, "[truncated") == null);
     try testing.expect(full.len > tty.len);
 }
 
@@ -589,8 +623,8 @@ test "renderRichEntryToOwnedTty leaves a small tool_result body untouched" {
 
     const tty = try renderRichEntryToOwnedTty(testing.allocator, tr.at(0));
     defer testing.allocator.free(tty);
-    try testing.expect(std.mem.indexOf(u8, tty, "[truncated") == null);
-    try testing.expect(std.mem.indexOf(u8, tty, "ok") != null);
+    try testing.expect(std.mem.find(u8, tty, "[truncated") == null);
+    try testing.expect(std.mem.find(u8, tty, "ok") != null);
 }
 
 test "aggregate proof -> turn -> transcript pipeline still lands a proof entry" {
@@ -625,5 +659,31 @@ test "aggregate proof -> turn -> transcript pipeline still lands a proof entry" 
 
     const rendered = try renderRichEntryToOwned(testing.allocator, tr.at(0));
     defer testing.allocator.free(rendered);
-    try testing.expect(std.mem.indexOf(u8, rendered, llm_text) != null);
+    try testing.expect(std.mem.find(u8, rendered, llm_text) != null);
+}
+
+test "Transcript.append handles OOM across nested message shapes without leaking" {
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var tr: Transcript = .{};
+            defer tr.deinit(allocator);
+            const calls = [_]turn.ToolCall{
+                .{ .id = "call_1", .name = "workspace_read_file", .args_json = "{\"path\":\"a.ts\"}", .reasoning_content = "check a" },
+                .{ .id = "call_2", .name = "workspace_read_file", .args_json = "{\"path\":\"b.ts\"}", .reasoning_content = "check b" },
+            };
+            try tr.append(allocator, .{ .assistant_tool_use = &calls });
+            try tr.append(allocator, .{ .tool_result = .{
+                .tool_use_id = "call_1",
+                .tool_name = "workspace_read_file",
+                .ok = true,
+                .llm_text = "contents",
+                .ui_payload = null,
+            } });
+            try tr.append(allocator, .{ .proof_card = .{
+                .llm_text = "proved",
+                .ui_payload = null,
+            } });
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Case.run, .{});
 }

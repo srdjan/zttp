@@ -6,6 +6,7 @@
 const std = @import("std");
 const writeAllFd = @import("precompile_util.zig").writeAllFd;
 const zts = @import("zts");
+const project_config_mod = @import("project_config");
 const precompile = @import("precompile.zig");
 const precompile_imports = @import("precompile_imports.zig");
 const edit_simulate = @import("edit_simulate.zig");
@@ -87,10 +88,22 @@ pub const SimulationSummary = struct {
     preexisting_count: u32,
 };
 
+pub const CollectOptions = struct {
+    sql_schema_path: ?[]const u8 = null,
+    policy_source: ?[]const u8 = null,
+};
+
 pub fn collect(allocator: std.mem.Allocator, file: []const u8) !Result {
     const source = try zts.file_io.readFile(allocator, file, 10 * 1024 * 1024);
     defer allocator.free(source);
-    return collectFromSource(allocator, source, file);
+    var ctx = try project_config_mod.discoverAnalysisContext(allocator, file, null);
+    defer ctx.deinit(allocator);
+    const policy_source = try ctx.readPolicySource(allocator);
+    defer if (policy_source) |src| allocator.free(src);
+    return collectFromSourceWithOptions(allocator, source, file, .{
+        .sql_schema_path = ctx.sqlite,
+        .policy_source = policy_source,
+    });
 }
 
 /// Like `collect`, but analyzes pre-read `source` against `virtual_path`
@@ -102,7 +115,18 @@ pub fn collectFromSource(
     source: []const u8,
     virtual_path: []const u8,
 ) !Result {
+    return collectFromSourceWithOptions(allocator, source, virtual_path, .{});
+}
+
+pub fn collectFromSourceWithOptions(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    virtual_path: []const u8,
+    options: CollectOptions,
+) !Result {
     var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, source, virtual_path, .{
+        .sql_schema_path = options.sql_schema_path,
+        .policy_source = options.policy_source,
         .json_mode = true,
     });
     defer check.deinit(allocator);
@@ -150,7 +174,7 @@ fn buildLineRepairs(
                 else => return err,
             };
             try appendRepairUnique(allocator, source, result, .{
-                .intent = if (std.mem.indexOf(u8, line, "for (let ") != null)
+                .intent = if (std.mem.find(u8, line, "for (let ") != null)
                     .canonicalize_for_of_const
                 else
                     .replace_let_with_const,
@@ -336,7 +360,7 @@ pub fn canonicalFunctionReplacement(allocator: std.mem.Allocator, line: []const 
 }
 
 pub fn avoidableLetReplacement(allocator: std.mem.Allocator, line: []const u8) ![]u8 {
-    const trimmed_left = trimLeft(line, " \t");
+    const trimmed_left = std.mem.trimStart(u8, line, " \t");
     const indent_len = line.len - trimmed_left.len;
     const indent = line[0..indent_len];
     if (std.mem.startsWith(u8, trimmed_left, "let ")) {
@@ -347,7 +371,7 @@ pub fn avoidableLetReplacement(allocator: std.mem.Allocator, line: []const u8) !
     }
 
     const needle = "for (let ";
-    const at = std.mem.indexOf(u8, line, needle) orelse return error.UnsupportedRefactor;
+    const at = std.mem.find(u8, line, needle) orelse return error.UnsupportedRefactor;
     return allocator.print("{s}for (const {s}", .{
         line[0..at],
         line[at + needle.len ..],
@@ -366,7 +390,7 @@ pub fn avoidableLetReplacement(allocator: std.mem.Allocator, line: []const u8) !
 /// avoid the `<=`/`<<=` and `>=`/`>>=` lexing ambiguity; the agent falls back
 /// to a manual edit there.
 pub fn compoundAssignReplacement(allocator: std.mem.Allocator, line: []const u8) ![]u8 {
-    const trimmed_left = trimLeft(line, " \t");
+    const trimmed_left = std.mem.trimStart(u8, line, " \t");
     const indent = line[0 .. line.len - trimmed_left.len];
 
     // Find the compound-assignment `=`: the first `=` immediately preceded by
@@ -380,20 +404,20 @@ pub fn compoundAssignReplacement(allocator: std.mem.Allocator, line: []const u8)
         if (!isArithmeticOpChar(op_char)) continue;
 
         const lhs = std.mem.trim(u8, line[indent.len .. i - 1], " \t");
-        const rhs = trimLeft(line[i + 1 ..], " \t");
+        const rhs = std.mem.trimStart(u8, line[i + 1 ..], " \t");
         if (!isSimpleLvalue(lhs)) return error.UnsupportedRefactor;
         if (rhs.len == 0) return error.UnsupportedRefactor;
 
         // Separate the expression from a trailing ';' so we parenthesize only
         // the expression. Refuse anything with an interior ';' or a comment -
         // those defeat the simple textual split and must be edited by hand.
-        const rhs_trimmed = trimRight(rhs, " \t");
+        const rhs_trimmed = std.mem.trimEnd(u8, rhs, " \t");
         const has_semi = rhs_trimmed.len > 0 and rhs_trimmed[rhs_trimmed.len - 1] == ';';
-        const expr = if (has_semi) trimRight(rhs_trimmed[0 .. rhs_trimmed.len - 1], " \t") else rhs_trimmed;
+        const expr = if (has_semi) std.mem.trimEnd(u8, rhs_trimmed[0 .. rhs_trimmed.len - 1], " \t") else rhs_trimmed;
         const trailer: []const u8 = if (has_semi) ";" else "";
         if (expr.len == 0) return error.UnsupportedRefactor;
-        if (std.mem.indexOfScalar(u8, expr, ';') != null) return error.UnsupportedRefactor;
-        if (std.mem.indexOf(u8, expr, "//") != null or std.mem.indexOf(u8, expr, "/*") != null) {
+        if (std.mem.findScalar(u8, expr, ';') != null) return error.UnsupportedRefactor;
+        if (std.mem.find(u8, expr, "//") != null or std.mem.find(u8, expr, "/*") != null) {
             return error.UnsupportedRefactor;
         }
 
@@ -575,8 +599,8 @@ fn skipSpaces(line: []const u8, pos: usize) usize {
 /// `x` form and `... negate the boolean directly: \`!x\`` for the `!x` form.
 fn redundantBoolComparePositive(help: ?[]const u8) ?bool {
     const text = help orelse return null;
-    if (std.mem.indexOf(u8, text, "use the boolean directly") != null) return true;
-    if (std.mem.indexOf(u8, text, "negate the boolean directly") != null) return false;
+    if (std.mem.find(u8, text, "use the boolean directly") != null) return true;
+    if (std.mem.find(u8, text, "negate the boolean directly") != null) return false;
     return null;
 }
 
@@ -674,14 +698,14 @@ fn literalLetAliasReplacement(
     diagnostics: []const precompile.json_diag.JsonDiagnostic,
 ) !?AliasReplacement {
     if (!hasDiagnosticAt(diagnostics, "ZTS604", line_num)) return null;
-    const trimmed_left = trimLeft(line, " \t");
+    const trimmed_left = std.mem.trimStart(u8, line, " \t");
     if (!std.mem.startsWith(u8, trimmed_left, "let ")) return null;
     const rest = trimmed_left["let ".len..];
     if (!std.mem.startsWith(u8, rest, ident)) return null;
     const after_name = rest[ident.len..];
     if (after_name.len > 0 and isIdentContinue(after_name[0])) return null;
     const eq = assignmentEquals(after_name) orelse return null;
-    const rhs = trimLeft(after_name[eq + 1 ..], " \t");
+    const rhs = std.mem.trimStart(u8, after_name[eq + 1 ..], " \t");
     if (!isStaticLiteralExpression(rhs)) return null;
     return .{
         .line = line_num,
@@ -691,32 +715,71 @@ fn literalLetAliasReplacement(
 }
 
 fn enclosingBlockStartLine(source: []const u8, use_line: u32) ?u32 {
+    var open_lines: [128]u32 = undefined;
+    var depth: usize = 0;
     var line_num: u32 = 1;
-    var start: usize = 0;
-    var depth: i32 = 0;
-    var best: ?u32 = null;
-    for (source, 0..) |c, i| {
+    var i: usize = 0;
+    while (i < source.len and line_num < use_line) {
+        const c = source[i];
         if (c == '\n') {
-            if (line_num >= use_line) break;
-            updateBlockDepth(source[start..i], line_num, &depth, &best);
             line_num += 1;
-            start = i + 1;
+            i += 1;
+            continue;
         }
-    }
-    if (line_num < use_line) updateBlockDepth(source[start..], line_num, &depth, &best);
-    return best;
-}
-
-fn updateBlockDepth(line: []const u8, line_num: u32, depth: *i32, best: *?u32) void {
-    for (line) |c| {
+        if (c == '/' and i + 1 < source.len and source[i + 1] == '/') {
+            i += 2;
+            while (i < source.len and source[i] != '\n') : (i += 1) {}
+            continue;
+        }
+        if (c == '/' and i + 1 < source.len and source[i + 1] == '*') {
+            i += 2;
+            while (i < source.len and line_num < use_line) {
+                if (source[i] == '\n') {
+                    line_num += 1;
+                    i += 1;
+                    continue;
+                }
+                if (source[i] == '*' and i + 1 < source.len and source[i + 1] == '/') {
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if (c == '"' or c == '\'' or c == '`') {
+            const quote = c;
+            i += 1;
+            while (i < source.len and line_num < use_line) {
+                if (source[i] == '\\' and i + 1 < source.len) {
+                    if (source[i + 1] == '\n') line_num += 1;
+                    i += 2;
+                    continue;
+                }
+                if (source[i] == '\n') {
+                    line_num += 1;
+                    i += 1;
+                    if (quote != '`') break;
+                    continue;
+                }
+                if (source[i] == quote) {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
         if (c == '{') {
-            depth.* += 1;
-            best.* = line_num + 1;
+            if (depth < open_lines.len) open_lines[depth] = line_num + 1;
+            depth += 1;
         } else if (c == '}') {
-            depth.* -= 1;
-            if (depth.* < 0) depth.* = 0;
+            if (depth > 0) depth -= 1;
         }
+        i += 1;
     }
+    if (depth == 0) return null;
+    return open_lines[@min(depth, open_lines.len) - 1];
 }
 
 fn hasDiagnosticAt(diagnostics: []const precompile.json_diag.JsonDiagnostic, code: []const u8, line: u32) bool {
@@ -727,10 +790,10 @@ fn hasDiagnosticAt(diagnostics: []const precompile.json_diag.JsonDiagnostic, cod
 }
 
 fn isStaticLiteralExpression(source: []const u8) bool {
-    const trimmed = trimRight(source, " \t\r;");
+    const trimmed = std.mem.trimEnd(u8, source, " \t\r;");
     if (trimmed.len == 0) return false;
     if (trimmed[0] == '"' or trimmed[0] == '\'') return quotedLiteralConsumes(trimmed, trimmed[0]) == trimmed.len;
-    if (trimmed[0] == '`') return quotedLiteralConsumes(trimmed, '`') == trimmed.len and std.mem.indexOf(u8, trimmed, "${") == null;
+    if (trimmed[0] == '`') return quotedLiteralConsumes(trimmed, '`') == trimmed.len and std.mem.find(u8, trimmed, "${") == null;
     for (trimmed) |c| {
         if (!std.ascii.isDigit(c)) return false;
     }
@@ -754,22 +817,6 @@ fn quotedLiteralConsumes(source: []const u8, quote: u8) usize {
         if (c == quote) return i + 1;
     }
     return 0;
-}
-
-fn trimLeft(source: []const u8, values: []const u8) []const u8 {
-    var start: usize = 0;
-    while (start < source.len and std.mem.indexOfScalar(u8, values, source[start]) != null) {
-        start += 1;
-    }
-    return source[start..];
-}
-
-fn trimRight(source: []const u8, values: []const u8) []const u8 {
-    var end = source.len;
-    while (end > 0 and std.mem.indexOfScalar(u8, values, source[end - 1]) != null) {
-        end -= 1;
-    }
-    return source[0..end];
 }
 
 fn isIdentStart(c: u8) bool {
@@ -969,7 +1016,7 @@ pub fn applyStatementIntent(
     var one = [_]Repair{only};
     const candidate = try applyRepairs(allocator, source, &one);
     errdefer allocator.free(candidate);
-    const validated = try selectValidated(allocator, source, &one, virtual_path, null, null);
+    const validated = try selectValidated(allocator, source, &one, virtual_path, null, null, null);
     defer allocator.free(validated);
     if (validated.len != 1) return error.UnsupportedRepairIntent;
     return candidate;
@@ -1097,12 +1144,12 @@ fn ternaryToMatchRewrite(
     // follows a `{` or `;` on the line (`function f() { return c ? a : b; }`,
     // the shape of an arrow function after `replace_arrow_with_function`).
     const real_start = cond_start + leadingSpaces(source[cond_start..q]);
-    const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..real_start], '\n')) |nl| nl + 1 else 0;
+    const line_start = if (std.mem.findScalarLast(u8, source[0..real_start], '\n')) |nl| nl + 1 else 0;
     const line_prefix = source[line_start..real_start];
     var statement_start = line_start + leadingSpaces(line_prefix);
     var separator: []const u8 = "\n";
     var indent: []const u8 = source[line_start..statement_start];
-    if (std.mem.lastIndexOfAny(u8, line_prefix, "{;")) |boundary| {
+    if (std.mem.findLastAny(u8, line_prefix, "{;")) |boundary| {
         const after_boundary = line_start + boundary + 1;
         statement_start = after_boundary + leadingSpaces(source[after_boundary..real_start]);
         separator = " ";
@@ -1208,7 +1255,7 @@ fn freshParsedName(
 
 fn containsIdentifier(text: []const u8, name: []const u8) bool {
     var from: usize = 0;
-    while (std.mem.indexOfPos(u8, text, from, name)) |at| : (from = at + 1) {
+    while (std.mem.findPos(u8, text, from, name)) |at| : (from = at + 1) {
         const before_ok = at == 0 or !isIdentByte(text[at - 1]);
         const after = at + name.len;
         const after_ok = after >= text.len or !isIdentByte(text[after]);
@@ -1240,7 +1287,7 @@ fn bindableHead(head: []const u8) bool {
     const middle = rest[0 .. rest.len - 1];
     if (middle.len == 0) return true;
     if (middle[0] != ':') return false;
-    return std.mem.indexOfAny(u8, middle, "=;\n") == null;
+    return std.mem.findAny(u8, middle, "=;\n") == null;
 }
 
 /// True when only blanks separate `end` from the statement terminator, a line
@@ -1581,6 +1628,7 @@ fn selectValidated(
     repairs: []const Repair,
     virtual_path: []const u8,
     sql_schema_path: ?[]const u8,
+    policy_source: ?[]const u8,
     import_reader: ?precompile_imports.ImportReader,
 ) ![]const Repair {
     var keep: std.ArrayListUnmanaged(Repair) = .empty;
@@ -1609,6 +1657,7 @@ fn selectValidated(
                 virtual_path,
                 .{
                     .sql_schema_path = sql_schema_path,
+                    .policy_source = policy_source,
                     .json_mode = true,
                     .import_reader = import_reader,
                     .analysis_observer = capture.observer(),
@@ -1822,7 +1871,14 @@ pub fn normalizeWithSchema(
 ) !NormalizeResult {
     const source = try zts.file_io.readFile(allocator, file, 10 * 1024 * 1024);
     defer allocator.free(source);
-    return normalizeSourceWithSchema(allocator, source, file, sql_schema_path);
+    var ctx = try project_config_mod.discoverAnalysisContext(allocator, file, null);
+    defer ctx.deinit(allocator);
+    const policy_source = try ctx.readPolicySource(allocator);
+    defer if (policy_source) |src| allocator.free(src);
+    return normalizeSourceWithOptions(allocator, source, file, .{
+        .sql_schema_path = sql_schema_path orelse ctx.sqlite,
+        .policy_source = policy_source,
+    });
 }
 
 /// Reduce `source` to its Canonical Normal Form by applying every available
@@ -1843,6 +1899,7 @@ pub fn normalizeSource(
 /// What a caller wants out of a normalize run.
 pub const NormalizeOptions = struct {
     sql_schema_path: ?[]const u8 = null,
+    policy_source: ?[]const u8 = null,
     /// Run the canonical formatter over the rewrite fixed point.
     ///
     /// A caller that presents the result as its own edit turns this off. The
@@ -1865,16 +1922,18 @@ const LegacyBatchEdit = struct {
 const LegacyBatch = struct {
     source: []u8,
     intents: std.ArrayListUnmanaged(RepairIntent) = .empty,
+    check: precompile.CheckResult,
 
     fn deinit(self: *LegacyBatch, allocator: std.mem.Allocator) void {
         allocator.free(self.source);
         self.intents.deinit(allocator);
+        self.check.deinit(allocator);
         self.* = undefined;
     }
 };
 
 const LegacyMigrationOutcome = union(enum) {
-    no_forms,
+    no_forms: ?precompile.CheckResult,
     refused,
     migrated: LegacyBatch,
 };
@@ -2400,6 +2459,7 @@ fn migrateLegacyBatch(
     virtual_path: []const u8,
     import_reader: ?precompile_imports.ImportReader,
     sql_schema_path: ?[]const u8,
+    policy_source: ?[]const u8,
 ) !LegacyMigrationOutcome {
     var owner: zts.DirectCheckSource = undefined;
     try owner.initCompileInPlace(allocator, allocator, source, virtual_path);
@@ -2411,7 +2471,6 @@ fn migrateLegacyBatch(
         .scopes = &owner.parser.scopes,
         .type_store = &owner.parser.type_store,
     };
-    if (!try dependenciesAreNormalized(allocator, original_authority, virtual_path, import_reader, 0)) return .refused;
 
     var edits: std.ArrayListUnmanaged(LegacyBatchEdit) = .empty;
     defer {
@@ -2419,7 +2478,8 @@ fn migrateLegacyBatch(
         edits.deinit(allocator);
     }
     var intents: std.ArrayListUnmanaged(RepairIntent) = .empty;
-    errdefer intents.deinit(allocator);
+    var intents_owned = true;
+    defer if (intents_owned) intents.deinit(allocator);
     var need_nominal_type = false;
     const need_match = records.matches.len > 0;
     const need_assert = records.asserts.len > 0;
@@ -2435,6 +2495,7 @@ fn migrateLegacyBatch(
             .structural => {
                 if (!std.mem.eql(u8, declaration.keyword_span.text(source), "structural")) continue;
                 const replacement = try allocator.dupe(u8, "type");
+                errdefer allocator.free(replacement);
                 try edits.append(allocator, .{
                     .start = declaration.keyword_span.start,
                     .end = declaration.keyword_span.end,
@@ -2460,6 +2521,7 @@ fn migrateLegacyBatch(
                     "declare const {s}: unique symbol;\n{s}type {s} = {s}<{s}, typeof {s}>;",
                     .{ brand, export_prefix, name, nominal_type_alias, body, brand },
                 );
+                errdefer allocator.free(replacement);
                 try edits.append(allocator, .{
                     .start = declaration.full_span.start,
                     .end = declaration.full_span.end,
@@ -2477,6 +2539,7 @@ fn migrateLegacyBatch(
             assert_alias,
             record.predicate_span.text(source),
         });
+        errdefer allocator.free(replacement);
         try edits.append(allocator, .{
             .start = record.full_span.start,
             .end = record.full_span.end,
@@ -2508,6 +2571,7 @@ fn migrateLegacyBatch(
             original_authority,
             &next_callback_suffix,
         );
+        errdefer allocator.free(replacement);
         try edits.append(allocator, .{
             .start = record.full_span.start,
             .end = record.full_span.end,
@@ -2515,6 +2579,13 @@ fn migrateLegacyBatch(
             .intent = .replace_legacy_match,
         });
         try intents.append(allocator, .replace_legacy_match);
+    }
+
+    if (edits.items.len == 0 and records.nominal_initializers.len == 0) {
+        return .{ .no_forms = null };
+    }
+    if (edits.items.len > 0) {
+        if (!try dependenciesAreNormalized(allocator, original_authority, virtual_path, import_reader, 0)) return .refused;
     }
 
     var prefix: std.ArrayListUnmanaged(u8) = .empty;
@@ -2545,22 +2616,33 @@ fn migrateLegacyBatch(
         }
     }
 
-    const migrated = if (edits.items.len == 0)
-        try allocator.dupe(u8, source)
+    var migrated_buf: ?[]u8 = if (edits.items.len == 0)
+        null
     else
         try applyLegacyBatchEdits(allocator, source, edits.items, prefix.items);
-    errdefer allocator.free(migrated);
+    defer if (migrated_buf) |buf| allocator.free(buf);
+    const typed_source: []const u8 = migrated_buf orelse source;
 
-    var typed_capture = TypedMigrationCapture{ .allocator = allocator, .source = migrated };
+    var typed_capture = TypedMigrationCapture{ .allocator = allocator, .source = typed_source };
     defer typed_capture.deinit();
-    var migrated_check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, migrated, virtual_path, .{
+    var migrated_check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, typed_source, virtual_path, .{
         .json_mode = true,
         .import_reader = import_reader,
         .sql_schema_path = sql_schema_path,
+        .policy_source = policy_source,
         .analysis_observer = typed_capture.observer(),
     });
-    defer migrated_check.deinit(allocator);
+    var migrated_check_owned = true;
+    defer if (migrated_check_owned) migrated_check.deinit(allocator);
     if (migrated_check.analyzer_error) |err| return err;
+
+    if (edits.items.len == 0 and typed_capture.evidence.items.len == 0) {
+        migrated_check_owned = false;
+        return .{ .no_forms = migrated_check };
+    }
+    if (edits.items.len == 0) {
+        if (!try dependenciesAreNormalized(allocator, original_authority, virtual_path, import_reader, 0)) return .refused;
+    }
 
     var nominal_edits: std.ArrayListUnmanaged(LegacyBatchEdit) = .empty;
     defer {
@@ -2572,34 +2654,34 @@ fn migrateLegacyBatch(
     if (typed_capture.evidence.items.len > 0 and resolved_nominal_alias == null and
         hasModuleParsedBinding(original_authority, "nominal")) return .refused;
     for (typed_capture.evidence.items) |evidence| {
-        const initializer = evidence.initializer_span.text(migrated);
+        const initializer = evidence.initializer_span.text(typed_source);
         if (initializer.len == 0) return .refused;
-        const authored_target = evidence.annotation_span.text(migrated);
+        const authored_target = evidence.annotation_span.text(typed_source);
         if (authored_target.len == 0) return .refused;
+        const replacement = try allocator.print("{s}<{s}>({s})", .{ nominal_alias, authored_target, initializer });
+        errdefer allocator.free(replacement);
         const edit = LegacyBatchEdit{
             .start = evidence.initializer_span.start,
             .end = evidence.initializer_span.end,
-            .replacement = try allocator.print("{s}<{s}>({s})", .{ nominal_alias, authored_target, initializer }),
+            .replacement = replacement,
             .intent = .wrap_implicit_nominal_initializer,
         };
         try nominal_edits.append(allocator, edit);
         try intents.append(allocator, .wrap_implicit_nominal_initializer);
     }
     if (intents.items.len == 0) {
-        allocator.free(migrated);
-        intents.deinit(allocator);
-        return .no_forms;
+        return .{ .no_forms = null };
     }
     var wrapped: ?[]u8 = null;
-    errdefer if (wrapped) |value| allocator.free(value);
+    defer if (wrapped) |value| allocator.free(value);
     if (nominal_edits.items.len > 0) {
         const nominal_prefix: []const u8 = if (resolved_nominal_alias == null)
             "import { nominal } from \"zttp:core\";\n"
         else
             "";
-        wrapped = try applyLegacyBatchEdits(allocator, migrated, nominal_edits.items, nominal_prefix);
+        wrapped = try applyLegacyBatchEdits(allocator, typed_source, nominal_edits.items, nominal_prefix);
     }
-    const candidate = wrapped orelse migrated;
+    const candidate = wrapped orelse migrated_buf orelse unreachable;
 
     var validation_capture = MigrationValidationCapture{
         .allocator = allocator,
@@ -2612,7 +2694,7 @@ fn migrateLegacyBatch(
         .asserts = records.asserts,
         .matches = records.matches,
         .match_arms = records.match_arms,
-        .typed_source = migrated,
+        .typed_source = typed_source,
         .typed_diagnostics = typed_capture.evidence.items,
         .candidate_source = candidate,
         .intents = intents.items,
@@ -2621,31 +2703,26 @@ fn migrateLegacyBatch(
         .json_mode = true,
         .import_reader = import_reader,
         .sql_schema_path = sql_schema_path,
+        .policy_source = policy_source,
         .analysis_observer = validation_capture.observer(),
     });
-    defer candidate_check.deinit(allocator);
+    var candidate_check_owned = true;
+    defer if (candidate_check_owned) candidate_check.deinit(allocator);
     if (candidate_check.analyzer_error) |err| return err;
     const hard_errors = candidate_check.parse_errors + candidate_check.link_errors +
         candidate_check.type_errors + candidate_check.bool_errors;
-    if (hard_errors > 0) {
-        if (wrapped) |value| allocator.free(value);
-        allocator.free(migrated);
-        intents.deinit(allocator);
+    if (hard_errors > 0 or !validation_capture.observed or !validation_capture.validated) {
         return .refused;
     }
-
-    if (!validation_capture.observed or !validation_capture.validated) {
-        if (wrapped) |value| allocator.free(value);
-        allocator.free(migrated);
-        intents.deinit(allocator);
-        return .refused;
-    }
+    candidate_check_owned = false;
+    intents_owned = false;
     if (wrapped) |value| {
-        allocator.free(migrated);
         wrapped = null;
-        return .{ .migrated = .{ .source = value, .intents = intents } };
+        return .{ .migrated = .{ .source = value, .intents = intents, .check = candidate_check } };
     }
-    return .{ .migrated = .{ .source = migrated, .intents = intents } };
+    const owned_migrated = migrated_buf.?;
+    migrated_buf = null;
+    return .{ .migrated = .{ .source = owned_migrated, .intents = intents, .check = candidate_check } };
 }
 
 pub fn normalizeSourceWithSchema(
@@ -2692,6 +2769,7 @@ pub fn normalizeSourceWithOptions(
     options: NormalizeOptions,
 ) !NormalizeResult {
     const sql_schema_path = options.sql_schema_path;
+    const policy_source = options.policy_source;
     var current = try allocator.dupe(u8, source);
     errdefer allocator.free(current);
     var trace: std.ArrayListUnmanaged(RepairIntent) = .empty;
@@ -2700,41 +2778,39 @@ pub fn normalizeSourceWithOptions(
     var iterations: u32 = 0;
     var converged = false;
     var legacy_refused = false;
+    var legacy_checked = false;
+    var current_check: ?precompile.CheckResult = null;
+    defer if (current_check) |*c| c.deinit(allocator);
     while (iterations < max_normalize_iterations) {
         const legacy_migration_validated = repairPolicy.isGradable(.replace_legacy_declaration) and
             repairPolicy.isGradable(.wrap_implicit_nominal_initializer) and
             repairPolicy.isGradable(.replace_legacy_match) and
             repairPolicy.isGradable(.replace_legacy_assert);
-        if (legacy_migration_validated) {
-            const outcome = migrateLegacyBatch(allocator, current, virtual_path, options.import_reader, sql_schema_path) catch |err| switch (err) {
+        if (!legacy_checked and legacy_migration_validated) {
+            legacy_checked = true;
+            const outcome = migrateLegacyBatch(allocator, current, virtual_path, options.import_reader, sql_schema_path, policy_source) catch |err| switch (err) {
                 error.UnsupportedRefactor, error.OverlappingRepairs => LegacyMigrationOutcome.refused,
                 else => return err,
             };
             switch (outcome) {
-                .no_forms => {},
+                .no_forms => |maybe_check| {
+                    if (maybe_check) |checked| {
+                        if (current_check) |*old| old.deinit(allocator);
+                        current_check = checked;
+                    }
+                },
                 .refused => legacy_refused = true,
                 .migrated => |batch_value| {
                     var batch = batch_value;
-                    defer batch.deinit(allocator);
-                    var candidate_check = try precompile.runCheckOnlyFromSourceWithOptions(
-                        allocator,
-                        batch.source,
-                        virtual_path,
-                        .{ .sql_schema_path = sql_schema_path, .json_mode = true, .import_reader = options.import_reader },
-                    );
-                    defer candidate_check.deinit(allocator);
-                    if (candidate_check.analyzer_error) |err| return err;
-                    const candidate_hard_errors = candidate_check.parse_errors +
-                        candidate_check.link_errors +
-                        candidate_check.type_errors +
-                        candidate_check.bool_errors;
-                    if (candidate_hard_errors == 0) {
-                        for (batch.intents.items) |intent| try trace.append(allocator, intent);
-                        allocator.free(current);
-                        current = try allocator.dupe(u8, batch.source);
-                        iterations += 1;
-                        continue;
-                    }
+                    errdefer batch.deinit(allocator);
+                    for (batch.intents.items) |intent| try trace.append(allocator, intent);
+                    allocator.free(current);
+                    current = batch.source;
+                    batch.intents.deinit(allocator);
+                    if (current_check) |*old| old.deinit(allocator);
+                    current_check = batch.check;
+                    iterations += 1;
+                    continue;
                 },
             }
         }
@@ -2742,13 +2818,16 @@ pub fn normalizeSourceWithOptions(
             converged = true;
             break;
         }
-        var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, current, virtual_path, .{
-            .sql_schema_path = sql_schema_path,
-            .json_mode = true,
-            .import_reader = options.import_reader,
-        });
-        defer check.deinit(allocator);
-        if (check.analyzer_error) |err| return err;
+        if (current_check == null) {
+            current_check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, current, virtual_path, .{
+                .sql_schema_path = sql_schema_path,
+                .policy_source = policy_source,
+                .json_mode = true,
+                .import_reader = options.import_reader,
+            });
+            if (current_check.?.analyzer_error) |err| return err;
+        }
+        const check = &current_check.?;
         const cur_band = countBand(check.json_diagnostics.items);
 
         // Line-keyed single-line refactors take priority each pass; they are
@@ -2769,6 +2848,7 @@ pub fn normalizeSourceWithOptions(
             result.repairs.items,
             virtual_path,
             sql_schema_path,
+            policy_source,
             options.import_reader,
         );
         defer allocator.free(line_repairs);
@@ -2778,6 +2858,7 @@ pub fn normalizeSourceWithOptions(
             stmt_result.repairs.items,
             virtual_path,
             sql_schema_path,
+            policy_source,
             options.import_reader,
         );
         defer allocator.free(span_repairs);
@@ -2833,18 +2914,19 @@ pub fn normalizeSourceWithOptions(
         // strict error is exactly the canonicalization we want.
         var next_check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, next, virtual_path, .{
             .sql_schema_path = sql_schema_path,
+            .policy_source = policy_source,
             .json_mode = true,
             .import_reader = options.import_reader,
         });
+        var next_check_owned = true;
+        defer if (next_check_owned) next_check.deinit(allocator);
         if (next_check.analyzer_error) |err| {
-            next_check.deinit(allocator);
             allocator.free(next);
             if (s.intents_owned) allocator.free(s.intents);
             return err;
         }
         const hard_errors = next_check.parse_errors + next_check.link_errors + next_check.type_errors + next_check.bool_errors;
         const next_band = countBand(next_check.json_diagnostics.items);
-        next_check.deinit(allocator);
         const parse_fixed = check.parse_errors > 0 and hard_errors == 0;
         if (hard_errors > 0 or (!parse_fixed and next_band >= cur_band)) {
             allocator.free(next);
@@ -2863,6 +2945,9 @@ pub fn normalizeSourceWithOptions(
         if (s.intents_owned) allocator.free(s.intents);
         allocator.free(current);
         current = next;
+        if (current_check) |*old| old.deinit(allocator);
+        current_check = next_check;
+        next_check_owned = false;
         iterations += 1;
     }
 
@@ -2870,17 +2955,23 @@ pub fn normalizeSourceWithOptions(
     // never has to produce canonical whitespace and the printer never has to
     // understand a half-applied rewrite. It fails closed: a construct outside
     // its coverage leaves the rewritten bytes exactly as they are.
-    var refusal: zts.printer.Refusal = undefined;
+    var refusal: ?zts.printer.Refusal = null;
     var printed = false;
     if (options.layout and !legacy_refused) {
+        var printer_refusal: zts.printer.Refusal = undefined;
         if (zts.printer.print(allocator, current, .{
-            .reason_out = &refusal,
+            .reason_out = &printer_refusal,
         })) |formatted| {
+            const layout_changed = !std.mem.eql(u8, current, formatted);
             allocator.free(current);
             current = formatted;
             printed = true;
+            if (layout_changed) {
+                if (current_check) |*old| old.deinit(allocator);
+                current_check = null;
+            }
         } else |err| switch (err) {
-            error.UnprintableConstruct => {},
+            error.UnprintableConstruct => refusal = printer_refusal,
             error.OutOfMemory => return err,
         }
     }
@@ -2893,12 +2984,15 @@ pub fn normalizeSourceWithOptions(
     // loop has already cleared.
     var residual_diagnostics: std.ArrayListUnmanaged(ResidualDiagnostic) = if (legacy_refused)
         .empty
+    else if (current_check) |*checked|
+        try collectCanonicalResidualDiagnosticsFromCheck(allocator, checked)
     else
         try collectCanonicalResidualDiagnostics(
             allocator,
             current,
             virtual_path,
             sql_schema_path,
+            policy_source,
             options.import_reader,
         );
     errdefer {
@@ -2936,7 +3030,8 @@ pub fn normalizeSourceWithOptions(
         .residual = residual,
         .residual_diagnostics = residual_diagnostics,
         .printed = printed,
-        // No refusal to report when the formatter was never asked to run.
+        // No refusal to report when the formatter was never asked to run or
+        // skipped because legacy migration was refused.
         .printer_refusal = if (printed or !options.layout) null else refusal,
         .changed = !std.mem.eql(u8, source, current),
     };
@@ -2961,17 +3056,25 @@ fn collectCanonicalResidualDiagnostics(
     source: []const u8,
     virtual_path: []const u8,
     sql_schema_path: ?[]const u8,
+    policy_source: ?[]const u8,
     import_reader: ?precompile_imports.ImportReader,
 ) !std.ArrayListUnmanaged(ResidualDiagnostic) {
     var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, source, virtual_path, .{
         .sql_schema_path = sql_schema_path,
+        .policy_source = policy_source,
         .json_mode = true,
         .import_reader = import_reader,
     });
     defer check.deinit(allocator);
 
     if (check.analyzer_error) |err| return err;
+    return collectCanonicalResidualDiagnosticsFromCheck(allocator, &check);
+}
 
+fn collectCanonicalResidualDiagnosticsFromCheck(
+    allocator: std.mem.Allocator,
+    check: *const precompile.CheckResult,
+) !std.ArrayListUnmanaged(ResidualDiagnostic) {
     var out: std.ArrayListUnmanaged(ResidualDiagnostic) = .empty;
     errdefer {
         for (out.items) |*diag| diag.deinit(allocator);
@@ -3102,7 +3205,7 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
     }
     const path = file orelse {
         const usage = "Usage: zts normalize <file> [--write] [--check] [--json] [--sql-schema <path>]\n";
-        _ = std.c.write(std.c.STDERR_FILENO, usage.ptr, usage.len);
+        writeAllFd(std.c.STDERR_FILENO, usage) catch {};
         std.process.exit(1);
     };
     if (write_mode and check_mode) return error.InvalidArgument;
@@ -3114,9 +3217,8 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
     if (written) try zts.file_io.writeFile(allocator, path, nr.canonical_source);
 
     if (json_mode) {
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
         // `written` is the machine channel's answer to "is the file on disk
         // canonical now", so it has to agree with every condition the write
         // path checks - the formatter refusal included. It reported true for a
@@ -3127,8 +3229,7 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
             &nr,
             written,
         );
-        buf = aw.toArrayList();
-        if (buf.items.len > 0) try writeAllFd(std.c.STDOUT_FILENO, buf.items);
+        if (aw.written().len > 0) try writeAllFd(std.c.STDOUT_FILENO, aw.written());
     }
 
     if (!nr.printed) reportPrinterRefusal(path, nr.printer_refusal);
@@ -3147,8 +3248,8 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
         // is false and cannot carry this on its own.
         if (nr.changed or !nr.fully_canonical or !nr.printed) {
             if (!json_mode) {
-                _ = std.c.write(std.c.STDERR_FILENO, path.ptr, path.len);
-                _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
+                writeAllFd(std.c.STDERR_FILENO, path) catch {};
+                writeAllFd(std.c.STDERR_FILENO, "\n") catch {};
             }
             std.process.exit(1);
         }
@@ -3162,7 +3263,7 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
         if (!nr.converged or !nr.fully_canonical) {
             if (!json_mode) {
                 const msg = "normalize: not fully canonical; refusing --write (run `zts check` for residual)\n";
-                _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+                writeAllFd(std.c.STDERR_FILENO, msg) catch {};
             }
             std.process.exit(1);
         }
@@ -3171,7 +3272,7 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
         if (!nr.printed) {
             if (!json_mode) {
                 const msg = "normalize: the canonical formatter refused this file; refusing --write\n";
-                _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+                writeAllFd(std.c.STDERR_FILENO, msg) catch {};
             }
             std.process.exit(1);
         }
@@ -3187,12 +3288,12 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
 /// as coverage, and the gate over the corpus is what widens the printer.
 fn reportPrinterRefusal(path: []const u8, reason: ?zts.printer.Refusal) void {
     const head = "normalize: printer refused ";
-    _ = std.c.write(std.c.STDERR_FILENO, head.ptr, head.len);
-    _ = std.c.write(std.c.STDERR_FILENO, path.ptr, path.len);
+    writeAllFd(std.c.STDERR_FILENO, head) catch {};
+    writeAllFd(std.c.STDERR_FILENO, path) catch {};
     const text = if (reason) |r| r.text() else "unknown";
-    _ = std.c.write(std.c.STDERR_FILENO, ": ", 2);
-    _ = std.c.write(std.c.STDERR_FILENO, text.ptr, text.len);
-    _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
+    writeAllFd(std.c.STDERR_FILENO, ": ") catch {};
+    writeAllFd(std.c.STDERR_FILENO, text) catch {};
+    writeAllFd(std.c.STDERR_FILENO, "\n") catch {};
 }
 
 fn printNormalizeHelp() !void {
@@ -3266,7 +3367,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     }
     const path = file orelse {
         const usage = "Usage: zts canonicalize <file> --json [--simulate]\n";
-        _ = std.c.write(std.c.STDERR_FILENO, usage.ptr, usage.len);
+        writeAllFd(std.c.STDERR_FILENO, usage) catch {};
         std.process.exit(1);
     };
     if (!json_mode) return error.InvalidArgument;
@@ -3278,12 +3379,10 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     else
         null;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     try writeJsonWithSimulation(&aw.writer, &result, simulation);
-    buf = aw.toArrayList();
-    if (buf.items.len > 0) try writeAllFd(std.c.STDOUT_FILENO, buf.items);
+    if (aw.written().len > 0) try writeAllFd(std.c.STDOUT_FILENO, aw.written());
 }
 
 fn printHelp() !void {
@@ -3426,13 +3525,11 @@ fn collectAndWriteJson(source: []const u8) !struct { json: []u8, file: []const u
     var preview = try collectFromSource(std.testing.allocator, source, virtual_path);
     defer preview.deinit(std.testing.allocator);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
     try writeJson(&aw.writer, &preview);
-    buf = aw.toArrayList();
 
-    const json = try buf.toOwnedSlice(std.testing.allocator);
+    const json = try aw.toOwnedSlice();
     errdefer std.testing.allocator.free(json);
     // Dupe so callers can keep their `defer free(out.file)` symmetry.
     const file = try std.testing.allocator.dupe(u8, virtual_path);
@@ -3484,13 +3581,11 @@ test "canonicalize json prints the tag name of each repair intent" {
             .original = "o",
         });
 
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(std.testing.allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+        var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer aw.deinit();
         try writeJson(&aw.writer, &result);
-        buf = aw.toArrayList();
 
-        var parsed = try expectCanonicalizeEnvelope(buf.items, "handler.ts", 1);
+        var parsed = try expectCanonicalizeEnvelope(aw.written(), "handler.ts", 1);
         defer parsed.deinit();
         const refactor = parsed.value.object.get("refactors").?.array.items[0].object;
         try std.testing.expectEqualStrings(case.kind, refactor.get("kind").?.string);
@@ -3804,11 +3899,11 @@ test "applyRepairs applies a replacement that spans lines" {
     };
     const out = try applyRepairs(std.testing.allocator, source, &.{repair});
     defer std.testing.allocator.free(out);
-    try std.testing.expect(std.mem.indexOf(u8, out, "const a = 1;\n  const n = a;") != null);
+    try std.testing.expect(std.mem.find(u8, out, "const a = 1;\n  const n = a;") != null);
     // The lines around it are untouched, so the splice took the span and not
     // the line's neighbourhood.
-    try std.testing.expect(std.mem.indexOf(u8, out, "function handler(req: Request): Response {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "return Response.json({ n: n });") != null);
+    try std.testing.expect(std.mem.find(u8, out, "function handler(req: Request): Response {") != null);
+    try std.testing.expect(std.mem.find(u8, out, "return Response.json({ n: n });") != null);
 }
 
 test "applyRepairs applies two repairs on one line when their spans are disjoint" {
@@ -3817,8 +3912,8 @@ test "applyRepairs applies two repairs on one line when their spans are disjoint
     // carry one rewrite. Two disjoint spans are two independent edits, and the
     // overlap rule is what decides them now.
     const source = "const pair = [alpha, beta];\n";
-    const alpha_start = std.mem.indexOf(u8, source, "alpha").?;
-    const beta_start = std.mem.indexOf(u8, source, "beta").?;
+    const alpha_start = std.mem.find(u8, source, "alpha").?;
+    const beta_start = std.mem.find(u8, source, "beta").?;
     const first = Repair{
         .intent = .replace_let_with_const,
         .start_offset = alpha_start,
@@ -3948,7 +4043,7 @@ test "applyRepairs applies repairs on several lines and edit simulation stays cl
     };
     const proposed = try applyRepairs(std.testing.allocator, source, &.{ first, second });
     defer std.testing.allocator.free(proposed);
-    try std.testing.expect(std.mem.indexOf(u8, proposed, "let ") == null);
+    try std.testing.expect(std.mem.find(u8, proposed, "let ") == null);
 
     // Both lets are rewritten and no canonical diagnostic remains: re-collecting
     // on the multi-line rewrite yields zero refactors. (edit_simulate's
@@ -4074,8 +4169,8 @@ test "normalizeSource fixes avoidable let to const and is fully canonical" {
     try std.testing.expect(nr.fully_canonical);
     try std.testing.expect(nr.iterations >= 1);
     try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const count = 1;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "let count") == null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "const count = 1;") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "let count") == null);
 }
 
 test "normalizeSource records the rewrite trace" {
@@ -4274,9 +4369,9 @@ test "normalizeSource maps multiple nominal edits and later brand origins" {
     );
     defer normalized.deinit(std.testing.allocator);
     try std.testing.expect(normalized.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(u8, normalized.canonical_source, "nominal<FirstId>(\"a\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, normalized.canonical_source, "nominal<FirstId>(\"b\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, normalized.canonical_source, "nominal<Port>(80)") != null);
+    try std.testing.expect(std.mem.find(u8, normalized.canonical_source, "nominal<FirstId>(\"a\")") != null);
+    try std.testing.expect(std.mem.find(u8, normalized.canonical_source, "nominal<FirstId>(\"b\")") != null);
+    try std.testing.expect(std.mem.find(u8, normalized.canonical_source, "nominal<Port>(80)") != null);
 }
 
 test "normalizeSource composes nested legacy matches inside out" {
@@ -4312,7 +4407,7 @@ test "normalizeSource keeps a line comment outside the generated callback suffix
     );
     defer normalized.deinit(std.testing.allocator);
     try std.testing.expect(normalized.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(u8, normalized.canonical_source, "\"yes\" // keep\n)") != null);
+    try std.testing.expect(std.mem.find(u8, normalized.canonical_source, "\"yes\" // keep\n)") != null);
 }
 
 test "normalizeSource resolves single-quoted multiline core aliases" {
@@ -4348,7 +4443,7 @@ test "normalizeSource ignores brand names in strings and refuses real binding co
         .{ .layout = false },
     );
     defer harmless_result.deinit(std.testing.allocator);
-    try std.testing.expect(std.mem.indexOf(u8, harmless_result.canonical_source, "declare const userIdBrand: unique symbol;") != null);
+    try std.testing.expect(std.mem.find(u8, harmless_result.canonical_source, "declare const userIdBrand: unique symbol;") != null);
     try std.testing.expect(harmless_result.fully_canonical);
 
     const collision =
@@ -4575,8 +4670,8 @@ test "normalizeSource rewrites `=== true` comparison and is fully canonical" {
     try std.testing.expect(nr.fully_canonical);
     try std.testing.expect(nr.iterations >= 1);
     try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "if (ready)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "=== true") == null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "if (ready)") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "=== true") == null);
 
     var found = false;
     for (nr.rewrite_trace.items) |intent| {
@@ -4596,8 +4691,8 @@ test "normalizeSource rewrites `=== false` comparison to negation" {
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "if (!ready)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "=== false") == null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "if (!ready)") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "=== false") == null);
 }
 
 test "redundant-bool-compare rewrite is behavior-equivalent (contract diff)" {
@@ -4660,7 +4755,7 @@ test "normalizeSource leaves effectful ternary as an unavailable residual" {
     try std.testing.expect(!nr.fully_canonical);
     try std.testing.expectEqual(@as(u32, 1), nr.residual);
     try std.testing.expectEqual(@as(usize, 0), nr.rewrite_trace.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "ok ? 200 : fallbackStatus()") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "ok ? 200 : fallbackStatus()") != null);
 }
 
 test "normalizeSource: ternary with a relational condition parenthesizes the whole condition" {
@@ -4679,9 +4774,9 @@ test "normalizeSource: ternary with a relational condition parenthesizes the who
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const cond = !!(req.method === \"GET\");") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "const cond = !!(req.method === \"GET\");") != null);
     // The broken precedence form must never appear.
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "!!req.method") == null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "!!req.method") == null);
 }
 
 test "layout off returns the rewrite fixed point in the author's whitespace" {
@@ -4702,9 +4797,9 @@ test "layout off returns the rewrite fixed point in the author's whitespace" {
     try std.testing.expect(!nr.printed);
     try std.testing.expect(nr.printer_refusal == null);
     // The rewrite fired: `+=` is not canonical.
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "total = total + 2;") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "total = total + 2;") != null);
     // The author's eight-space indent is still there.
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "\n        return Response.json") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "\n        return Response.json") != null);
 }
 
 test "layout on lays the same source out" {
@@ -4720,7 +4815,7 @@ test "layout on lays the same source out" {
     defer nr.deinit(allocator);
 
     try std.testing.expect(nr.printed);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "\n  return Response.json") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "\n  return Response.json") != null);
 }
 
 test "normalizeSource is idempotent on a reused arrow helper" {
@@ -4735,7 +4830,7 @@ test "normalizeSource is idempotent on a reused arrow helper" {
     var first = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer first.deinit(std.testing.allocator);
     try std.testing.expect(first.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(u8, first.canonical_source, "function parse") != null);
+    try std.testing.expect(std.mem.find(u8, first.canonical_source, "function parse") != null);
 
     var second = try normalizeSource(std.testing.allocator, first.canonical_source, "handler.ts");
     defer second.deinit(std.testing.allocator);
@@ -4759,8 +4854,8 @@ test "normalizeSource leaves a chained ternary in an arrow body unrepaired" {
     try std.testing.expect(!nr.fully_canonical);
     try std.testing.expectEqual(@as(u32, 1), nr.residual);
     try std.testing.expectEqual(@as(usize, 0), nr.rewrite_trace.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "x > 0 ? 1 : x === 0 ? 0 : -1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match") == null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "x > 0 ? 1 : x === 0 ? 0 : -1") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "match") == null);
 }
 
 test "normalizeSource binds the condition inside a function that replaces an arrow" {
@@ -4776,8 +4871,8 @@ test "normalizeSource binds the condition inside a function that replaces an arr
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const cond = !!(x > 0);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "return matchTernary(\n    cond,\n  ).with(true, () =>") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "const cond = !!(x > 0);") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "return matchTernary(\n    cond,\n  ).with(true, () =>") != null);
 }
 
 test "scanOperandTokenBack refuses a member tail of a call/index chain" {
@@ -4785,11 +4880,11 @@ test "scanOperandTokenBack refuses a member tail of a call/index chain" {
     // cannot be bounded line-locally. Refuse rather than return the partial
     // `foo` (which would splice `!foo` after `obj().`, producing `obj().!foo`).
     const line = "  const ok = obj().foo === false;";
-    const foo_end = std.mem.indexOf(u8, line, "foo").? + 3;
+    const foo_end = std.mem.find(u8, line, "foo").? + 3;
     try std.testing.expectEqual(@as(?usize, null), scanOperandTokenBack(line, foo_end));
     // A plain dotted chain is still accepted.
     const ok_line = "  const ok = a.b.c === true;";
-    const c_end = std.mem.indexOf(u8, ok_line, "c ").? + 1;
+    const c_end = std.mem.find(u8, ok_line, "c ").? + 1;
     try std.testing.expect(scanOperandTokenBack(ok_line, c_end) != null);
 }
 
@@ -4962,7 +5057,7 @@ test "ternaryToMatchRewrite gives a new import a fresh alias" {
         rw.replacement,
         "import { match as matchTernary2 } from \"zttp:core\";\n",
     ));
-    try std.testing.expect(std.mem.indexOf(u8, rw.replacement, "matchTernary2(cond).with") != null);
+    try std.testing.expect(std.mem.find(u8, rw.replacement, "matchTernary2(cond).with") != null);
 }
 
 fn replaceTestRepairText(repair: *Repair, replacement: []const u8) !void {
@@ -4976,6 +5071,7 @@ fn m3RepairSelected(source: []const u8, repair: Repair) !bool {
         source,
         &.{repair},
         "handler.ts",
+        null,
         null,
         null,
     );
@@ -5073,8 +5169,8 @@ test "applyStatementIntent writes an admitted fluent ternary repair" {
         repaired,
         "import { match as matchTernary } from \"zttp:core\";\n",
     ));
-    try std.testing.expect(std.mem.indexOf(u8, repaired, "matchTernary(cond).with(true, () => \"yes\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, repaired, ".otherwise(() => req.method === \"POST\" ? \"maybe\" : \"no\")") != null);
+    try std.testing.expect(std.mem.find(u8, repaired, "matchTernary(cond).with(true, () => \"yes\")") != null);
+    try std.testing.expect(std.mem.find(u8, repaired, ".otherwise(() => req.method === \"POST\" ? \"maybe\" : \"no\")") != null);
 }
 
 test "ternaryToMatchRewrite refuses an optional chain and a nullish operator" {
@@ -5149,10 +5245,10 @@ test "normalizeSource unchains a right-associative nested ternary and stops" {
     try std.testing.expect(nr.fully_canonical);
     try std.testing.expectEqual(@as(u32, 0), nr.residual);
     try std.testing.expect(std.mem.startsWith(u8, nr.canonical_source, "import { match as matchTernary } from \"zttp:core\";\n"));
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const cond = !!(a);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const status = matchTernary(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "() => 200") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, ".otherwise(() => b ? 201 : 500)") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "const cond = !!(a);") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "const status = matchTernary(") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "() => 200") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, ".otherwise(() => b ? 201 : 500)") != null);
 
     // Idempotence: the normalized output is a fixed point.
     var again = try normalizeSource(std.testing.allocator, nr.canonical_source, "handler.ts");
@@ -5176,8 +5272,8 @@ test "normalizeSource ternary rewrite preserves strings containing ? and :" {
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "() => \"yes? a:b\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, ".otherwise(() => alt ? \"no:x?y\" : \"z\")") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "() => \"yes? a:b\"") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, ".otherwise(() => alt ? \"no:x?y\" : \"z\")") != null);
 }
 
 test "normalizeSource leaves a chained ternary in an object-literal value unrepaired" {
@@ -5193,8 +5289,8 @@ test "normalizeSource leaves a chained ternary in an object-literal value unrepa
     try std.testing.expect(nr.converged);
     try std.testing.expect(!nr.fully_canonical);
     try std.testing.expectEqual(@as(usize, 0), nr.rewrite_trace.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "code: ok ? 200 : alt ? 201 : 500") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match") == null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "code: ok ? 200 : alt ? 201 : 500") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "match") == null);
 }
 
 test "normalizeSource binds each condition once under its own name" {
@@ -5210,8 +5306,8 @@ test "normalizeSource binds each condition once under its own name" {
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const cond = !!(ok);\n  const first = matchTernary(\n    cond,\n  ).with") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const cond2 = !!(alt);\n  const second = matchTernary(\n    cond2,\n  ).with") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "const cond = !!(ok);\n  const first = matchTernary(\n    cond,\n  ).with") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "const cond2 = !!(alt);\n  const second = matchTernary(\n    cond2,\n  ).with") != null);
 }
 
 test "normalizeSource binds the condition of a chained return ternary" {
@@ -5226,7 +5322,7 @@ test "normalizeSource binds the condition of a chained return ternary" {
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const cond = !!(ok);\n  return matchTernary(cond).with") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "const cond = !!(ok);\n  return matchTernary(cond).with") != null);
 }
 
 test "normalizeSource leaves a closed literal spread residual because key order is observable" {
@@ -5240,7 +5336,7 @@ test "normalizeSource leaves a closed literal spread residual because key order 
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(!nr.fully_canonical);
     try std.testing.expectEqual(@as(usize, 0), nr.rewrite_trace.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "status: \"ok\",") != null);
+    try std.testing.expect(std.mem.find(u8, nr.canonical_source, "status: \"ok\",") != null);
 }
 
 test "normalizeSource refuses dynamic and colliding spread moves" {
@@ -5292,12 +5388,10 @@ test "normalizeSource reports dynamic computed access as residual diagnostic" {
     }
     try std.testing.expect(found);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
     try writeNormalizeJson(&aw.writer, "handler.ts", &nr, false);
-    buf = aw.toArrayList();
-    const json = try buf.toOwnedSlice(std.testing.allocator);
+    const json = try aw.toOwnedSlice();
     defer std.testing.allocator.free(json);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
@@ -5540,7 +5634,7 @@ fn normalizeOnlyIntent(
             if (r.intent != intent) continue;
             // `applyRefactors` refuses two refactors on one line; take the
             // first and let the next pass pick up the rest.
-            if (std.mem.indexOfScalar(u32, seen_lines.items, r.line) != null) continue;
+            if (std.mem.findScalar(u32, seen_lines.items, r.line) != null) continue;
             try seen_lines.append(allocator, r.line);
             try selected.append(allocator, r);
         }
@@ -5915,4 +6009,68 @@ test "census: the source that the normalizer emits passes the real check" {
 
     try std.testing.expectEqual(@as(usize, 0), problems);
     try std.testing.expectEqual(@as(usize, 16), checked);
+}
+
+test "enclosingBlockStartLine tracks brace nesting and skips strings and comments" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  let key = "API_KEY";
+        \\  if (req.method === "POST") {
+        \\    const brace = "{"; // {
+        \\    /* { */
+        \\    return Response.text(brace);
+        \\  }
+        \\  return Response.text(key);
+        \\}
+        \\const top = 1;
+    ;
+    try std.testing.expectEqual(@as(?u32, 2), enclosingBlockStartLine(source, 8));
+    try std.testing.expectEqual(@as(?u32, 4), enclosingBlockStartLine(source, 6));
+    try std.testing.expectEqual(@as(?u32, null), enclosingBlockStartLine(source, 10));
+}
+
+test "normalizeSourceWithOptions returns null printer_refusal when legacy migration is refused with layout enabled" {
+    const source =
+        \\nominal UserId = string;
+        \\const userIdBrand = "taken";
+    ;
+    var nr = try normalizeSourceWithOptions(std.testing.allocator, source, "handler.ts", .{ .layout = true });
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(!nr.printed);
+    try std.testing.expectEqual(@as(?zts.printer.Refusal, null), nr.printer_refusal);
+    try std.testing.expect(!nr.fully_canonical);
+}
+
+test "migrateLegacyBatch does not refuse modern files with unresolved relative imports" {
+    const source =
+        \\import { helper } from "./missing.ts";
+        \\function handler(req: Request): Response {
+        \\  return Response.text(helper());
+        \\}
+    ;
+    var unresolved_reader: NormalizationImportReader = .{ .source = null };
+    var nr = try normalizeSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+        .layout = false,
+        .import_reader = unresolved_reader.reader(),
+    });
+    defer nr.deinit(std.testing.allocator);
+    for (nr.residual_diagnostics.items) |diag| {
+        try std.testing.expect(!std.mem.eql(u8, diag.message, "legacy syntax migration was refused"));
+    }
+}
+
+test "migrateLegacyBatch frees migrated buffer and intents on nominal binding collision refusal" {
+    const source =
+        \\nominal UserId = string;
+        \\const nominal = "taken";
+        \\function make(): UserId {
+        \\  const id: UserId = "u1";
+        \\  return id;
+        \\}
+    ;
+    var nr = try normalizeSourceWithOptions(std.testing.allocator, source, "handler.ts", .{ .layout = false });
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(source, nr.canonical_source);
+    try std.testing.expect(!nr.fully_canonical);
+    try std.testing.expectEqual(@as(?zts.printer.Refusal, null), nr.printer_refusal);
 }

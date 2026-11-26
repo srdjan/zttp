@@ -102,30 +102,36 @@ test "SecurityLogger flushes events to file" {
     try security_events.initGlobal(allocator, 64);
     defer security_events.deinitGlobal();
 
-    const seed = @import("zts").compat.realtimeNowNs() catch 0;
-    var tmp_buf: [128]u8 = undefined;
-    const path = try std.fmt.bufPrint(&tmp_buf, "/tmp/zttp-secevt-test-{d}.jsonl", .{seed});
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/secevt.jsonl", .{tmp.sub_path});
+    defer allocator.free(path);
 
-    const path_z = try allocator.dupeSentinel(u8, path, 0);
-    defer allocator.free(path_z);
+    {
+        const logger = try SecurityLogger.start(allocator, path);
+        defer logger.deinit();
 
-    const logger = try SecurityLogger.start(allocator, path);
-    defer {
-        logger.deinit();
-        _ = std.c.unlink(path_z);
+        security_events.emitGlobal(security_events.SecurityEvent.init(
+            .policy_denied_env,
+            "zttp:env",
+            "SECRET_KEY",
+        ));
+        security_events.emitGlobal(security_events.SecurityEvent.init(
+            .arena_audit_failure,
+            "runtime",
+            "leak detected",
+        ));
     }
 
-    security_events.emitGlobal(security_events.SecurityEvent.init(
-        .policy_denied_env,
-        "zttp:env",
-        "SECRET_KEY",
-    ));
-    security_events.emitGlobal(security_events.SecurityEvent.init(
-        .arena_audit_failure,
-        "runtime",
-        "leak detected",
-    ));
+    // logger.deinit() joined the drainer thread and called flushRemaining(), so
+    // both events must now be present on disk as JSONL lines.
+    const contents = try zq.file_io.readFile(allocator, path, 64 * 1024);
+    defer allocator.free(contents);
 
-    const sleep_ts = std.c.timespec{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
-    _ = std.c.nanosleep(&sleep_ts, null);
+    try std.testing.expect(std.mem.find(u8, contents, "\"kind\":\"policy_denied_env\"") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "\"module\":\"zttp:env\"") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "\"detail\":\"SECRET_KEY\"") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "\"kind\":\"arena_audit_failure\"") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "\"module\":\"runtime\"") != null);
+    try std.testing.expect(std.mem.find(u8, contents, "\"detail\":\"leak detected\"") != null);
 }

@@ -177,8 +177,10 @@ pub fn mergeModuleContract(
         target.aot = source.aot;
 
         for (source.routes.items) |route| {
+            const pattern = try allocator.dupe(u8, route.pattern);
+            errdefer allocator.free(pattern);
             try target.routes.append(allocator, .{
-                .pattern = try allocator.dupe(u8, route.pattern),
+                .pattern = pattern,
                 .route_type = route.route_type,
                 .field = route.field,
                 .status = route.status,
@@ -238,9 +240,15 @@ pub fn mergeModuleContract(
     for (source.api.routes.items) |route| {
         if (hasApiRoute(target.api.routes.items, route.method, route.path)) continue;
 
+        const method, const path = blk: {
+            const m = try allocator.dupe(u8, route.method);
+            errdefer allocator.free(m);
+            const p = try allocator.dupe(u8, route.path);
+            break :blk .{ m, p };
+        };
         var route_copy = ApiRouteInfo{
-            .method = try allocator.dupe(u8, route.method),
-            .path = try allocator.dupe(u8, route.path),
+            .method = method,
+            .path = path,
             .request_schema_refs = .empty,
             .request_schema_dynamic = route.request_schema_dynamic,
             .requires_bearer = route.requires_bearer,
@@ -256,19 +264,29 @@ pub fn mergeModuleContract(
             try appendUniqueString(allocator, &route_copy.request_schema_refs, schema_ref, false);
         }
         for (route.path_params.items) |param| {
-            try route_copy.path_params.append(allocator, try param.dupeOwned(allocator));
+            var copy = try param.dupeOwned(allocator);
+            errdefer copy.deinit(allocator);
+            try route_copy.path_params.append(allocator, copy);
         }
         for (route.query_params.items) |param| {
-            try route_copy.query_params.append(allocator, try param.dupeOwned(allocator));
+            var copy = try param.dupeOwned(allocator);
+            errdefer copy.deinit(allocator);
+            try route_copy.query_params.append(allocator, copy);
         }
         for (route.header_params.items) |param| {
-            try route_copy.header_params.append(allocator, try param.dupeOwned(allocator));
+            var copy = try param.dupeOwned(allocator);
+            errdefer copy.deinit(allocator);
+            try route_copy.header_params.append(allocator, copy);
         }
         for (route.request_bodies.items) |body| {
-            try route_copy.request_bodies.append(allocator, try body.dupeOwned(allocator));
+            var copy = try body.dupeOwned(allocator);
+            errdefer copy.deinit(allocator);
+            try route_copy.request_bodies.append(allocator, copy);
         }
         for (route.responses.items) |response| {
-            try route_copy.responses.append(allocator, try response.dupeOwned(allocator));
+            var copy = try response.dupeOwned(allocator);
+            errdefer copy.deinit(allocator);
+            try route_copy.responses.append(allocator, copy);
         }
 
         try target.api.routes.append(allocator, route_copy);
@@ -284,8 +302,10 @@ fn getOrCreateFunctionEntry(
         if (std.mem.eql(u8, entry.module, module_name)) return entry;
     }
 
+    const owned_module = try allocator.dupe(u8, module_name);
+    errdefer allocator.free(owned_module);
     try functions.append(allocator, .{
-        .module = try allocator.dupe(u8, module_name),
+        .module = owned_module,
         .names = .empty,
     });
     return &functions.items[functions.items.len - 1];
@@ -304,7 +324,9 @@ pub fn appendUniqueString(
             std.mem.eql(u8, item, value);
         if (matches) return;
     }
-    try list.append(allocator, try allocator.dupe(u8, value));
+    const owned = try allocator.dupe(u8, value);
+    errdefer allocator.free(owned);
+    try list.append(allocator, owned);
 }
 
 fn appendSqlQuery(
@@ -318,9 +340,15 @@ fn appendSqlQuery(
         return;
     }
 
+    const name, const statement = blk: {
+        const n = try allocator.dupe(u8, query.name);
+        errdefer allocator.free(n);
+        const s = try allocator.dupe(u8, query.statement);
+        break :blk .{ n, s };
+    };
     var copy = SqlQueryInfo{
-        .name = try allocator.dupe(u8, query.name),
-        .statement = try allocator.dupe(u8, query.statement),
+        .name = name,
+        .statement = statement,
         .operation = query.operation,
         .tables = .empty,
     };
@@ -341,14 +369,19 @@ fn upsertApiSchema(
 ) !void {
     for (list.items) |*schema| {
         if (!std.mem.eql(u8, schema.name, name)) continue;
+        const owned_json = try allocator.dupe(u8, schema_json);
         allocator.free(schema.schema_json);
-        schema.schema_json = try allocator.dupe(u8, schema_json);
+        schema.schema_json = owned_json;
         return;
     }
 
+    const owned_name = try allocator.dupe(u8, name);
+    errdefer allocator.free(owned_name);
+    const owned_json = try allocator.dupe(u8, schema_json);
+    errdefer allocator.free(owned_json);
     try list.append(allocator, .{
-        .name = try allocator.dupe(u8, name),
-        .schema_json = try allocator.dupe(u8, schema_json),
+        .name = owned_name,
+        .schema_json = owned_json,
     });
 }
 
@@ -562,8 +595,8 @@ test "parseFromJson roundtrip preserves partner contract_section field" {
 
     // The writer mirrors the extension's categories into a top-level
     // partner section keyed by the declared `contractSection` name.
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"stripe\": {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"sourceSpecifier\": \"zttp-ext:stripe\"") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"stripe\": {") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"sourceSpecifier\": \"zttp-ext:stripe\"") != null);
 
     var parsed = try parseFromJson(allocator, output.items);
     defer parsed.deinit(allocator);
@@ -717,14 +750,14 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 25") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"workflowCalls\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"api\": {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"verification\": null") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"properties\": null") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"version\": 25") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"handler.ts\"") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"modules\": []") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"serviceCalls\"") == null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"workflowCalls\"") == null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"api\": {") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"verification\": null") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"properties\": null") != null);
 }
 
 test "behaviors serialization roundtrip" {
@@ -989,9 +1022,9 @@ test "intent assertions roundtrip through writer and parser" {
     output = aw.toArrayList();
 
     // Sanity: section is present in the serialized form.
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"intent\": {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"health returns ok\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"sourceLine\": 14") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"intent\": {") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"health returns ok\"") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"sourceLine\": 14") != null);
 
     var parsed = try parseFromJson(allocator, output.items);
     defer parsed.deinit(allocator);
@@ -1076,7 +1109,7 @@ test "intent absent roundtrips as null" {
     try writeContractJson(&contract, &aw.writer);
     output = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"intent\": null") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"intent\": null") != null);
 
     var parsed = try parseFromJson(allocator, output.items);
     defer parsed.deinit(allocator);
@@ -1123,10 +1156,10 @@ test "sandbox block roundtrips through writeContractJson and parseFromJson" {
     try writeContractJson(&contract, &aw.writer);
     output = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"sandbox\":") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"capabilityHash\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"clock\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"crypto\"") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"sandbox\":") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"capabilityHash\"") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"clock\"") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"crypto\"") != null);
 
     var parsed = try parseFromJson(allocator, output.items);
     defer parsed.deinit(allocator);
@@ -1193,4 +1226,17 @@ test "unionDependencyContract accepts one schema name with identical JSON" {
     var conflict: ?ApiSchemaConflict = null;
     try unionDependencyContract(allocator, &target, &source, &conflict);
     try std.testing.expectEqual(@as(usize, 1), target.api.schemas.items.len);
+}
+
+test "upsertApiSchema preserves existing schema on OOM without double-free" {
+    const allocator = std.testing.allocator;
+    var contract = try testContractWithSchema(allocator, "entry.ts", "{\"type\":\"object\"}");
+    defer contract.deinit(allocator);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        upsertApiSchema(failing.allocator(), &contract.api.schemas, "user", "{\"type\":\"string\"}"),
+    );
+    try std.testing.expectEqualStrings("{\"type\":\"object\"}", contract.api.schemas.items[0].schema_json);
 }

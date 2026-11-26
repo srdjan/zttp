@@ -24,7 +24,7 @@ fn writeOut(s: []const u8) !void {
 }
 
 fn writeErr(s: []const u8) void {
-    _ = std.c.write(std.c.STDERR_FILENO, s.ptr, s.len);
+    writeAllFd(std.c.STDERR_FILENO, s) catch {};
 }
 
 /// The documentation mirror and its managed region. Only the Module Catalog
@@ -39,9 +39,9 @@ const Region = struct { before: []const u8, body: []const u8, after: []const u8 
 /// not a silent skip: the generator must never write a file whose boundary it
 /// could not find.
 fn splitRegion(doc: []const u8) !Region {
-    const begin = std.mem.indexOf(u8, doc, begin_marker) orelse return error.MissingBeginMarker;
+    const begin = std.mem.find(u8, doc, begin_marker) orelse return error.MissingBeginMarker;
     const body_start = begin + begin_marker.len;
-    const end = std.mem.indexOfPos(u8, doc, body_start, end_marker) orelse return error.MissingEndMarker;
+    const end = std.mem.findPos(u8, doc, body_start, end_marker) orelse return error.MissingEndMarker;
     return .{
         .before = doc[0..body_start],
         .body = doc[body_start..end],

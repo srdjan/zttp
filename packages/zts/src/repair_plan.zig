@@ -266,5 +266,5 @@ test "flow diagnostics map to property repair plans" {
     const plan = fromFlowDiagnostic(diag, .no_secret_leakage, .{ .line = 7, .column = 17 }) orelse return error.MissingPlan;
     try std.testing.expectEqual(RepairKind.redact_sensitive_sink, plan.kind);
     try std.testing.expectEqual(EditIntentKind.insert_guard_before_line, plan.edit_intent.kind);
-    try std.testing.expect(std.mem.indexOf(u8, plan.edit_intent.template, "return Response") != null);
+    try std.testing.expect(std.mem.find(u8, plan.edit_intent.template, "return Response") != null);
 }

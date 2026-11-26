@@ -116,12 +116,13 @@ pub const binding = sdk.ModuleBinding{
             .name = "cacheStats",
             // Sums counters already held in the store. Entries are reported as
             // they stand, expired or not, so no expiry is evaluated and no
-            // clock is read. The namespace form still consults policy.
+            // clock is read. Both forms still consult policy.
             .required_capabilities = &.{.policy_check},
             .module_func = cacheStatsImpl,
             .arg_count = 1,
-            // The namespace is optional: `cacheStats()` reports the whole store.
+            // The namespace is optional: `cacheStats()` reports allowed namespaces.
             .required_arg_count = 0,
+            .contract_extractions = &.{.{ .category = .cache_namespace }},
             .effect = .read,
             .returns = .object,
             .param_types = &.{.string},
@@ -211,6 +212,14 @@ pub const CacheStore = struct {
         return ns_cache;
     }
 
+    fn removeNamespace(self: *CacheStore, ns: []const u8) void {
+        if (self.namespaces.fetchRemove(ns)) |removed| {
+            removed.value.entries.deinit();
+            self.allocator.destroy(removed.value);
+            self.allocator.free(removed.key);
+        }
+    }
+
     fn get(self: *CacheStore, ns: []const u8, key: []const u8, now_s: i64) ?[]const u8 {
         const ns_cache = self.namespaces.get(ns) orelse return null;
         const entry = ns_cache.entries.get(key) orelse {
@@ -222,8 +231,8 @@ pub const CacheStore = struct {
             // `>=`: a ttl of 0 expires the entry within the same second it was
             // written, matching the documented "0 means already expired".
             if (now_s >= exp) {
-                self.removeEntry(ns_cache, entry);
                 ns_cache.misses += 1;
+                self.removeEntry(ns_cache, entry);
                 return null;
             }
         }
@@ -239,29 +248,29 @@ pub const CacheStore = struct {
             return error.CacheCapacityExceeded;
         }
 
-        const ns_cache = try self.getOrCreateNamespace(ns);
+        if (self.namespaces.get(ns)) |existing_ns| {
+            if (existing_ns.entries.get(key)) |existing| {
+                // Dupe the new value BEFORE freeing the old one: if the allocation
+                // fails we return the error with the entry still intact, rather than
+                // leaving `cache_value` dangling for the next get to read freed memory.
+                const new_value = try self.allocator.dupe(u8, val);
+                errdefer self.allocator.free(new_value);
 
-        if (ns_cache.entries.get(key)) |existing| {
-            // Dupe the new value BEFORE freeing the old one: if the allocation
-            // fails we return the error with the entry still intact, rather than
-            // leaving `cache_value` dangling for the next get to read freed memory.
-            const new_value = try self.allocator.dupe(u8, val);
-            errdefer self.allocator.free(new_value);
-
-            self.promoteToHead(existing);
-            while (self.total_bytes - existing.byte_size > self.max_bytes - new_byte_size) {
-                if (self.total_entries <= 1 or !self.evictLru()) {
-                    return error.CacheCapacityExceeded;
+                self.promoteToHead(existing);
+                while (self.total_bytes - existing.byte_size > self.max_bytes - new_byte_size) {
+                    if (self.total_entries <= 1 or !self.evictLru()) {
+                        return error.CacheCapacityExceeded;
+                    }
                 }
-            }
 
-            self.total_bytes -= existing.byte_size;
-            self.allocator.free(existing.cache_value);
-            existing.cache_value = new_value;
-            existing.byte_size = new_byte_size;
-            existing.expires_at = expiresAt(now_s, ttl);
-            self.total_bytes += existing.byte_size;
-            return;
+                self.total_bytes -= existing.byte_size;
+                self.allocator.free(existing.cache_value);
+                existing.cache_value = new_value;
+                existing.byte_size = new_byte_size;
+                existing.expires_at = expiresAt(now_s, ttl);
+                self.total_bytes += existing.byte_size;
+                return;
+            }
         }
 
         while (self.total_entries >= self.max_entries or self.total_bytes > self.max_bytes - new_byte_size) {
@@ -288,6 +297,8 @@ pub const CacheStore = struct {
             .next = null,
         };
 
+        const ns_cache = try self.getOrCreateNamespace(ns);
+        errdefer if (ns_cache.entries.count() == 0) self.removeNamespace(ns);
         try ns_cache.entries.put(key_owned, entry);
         self.total_entries += 1;
         self.total_bytes += entry.byte_size;
@@ -306,6 +317,12 @@ pub const CacheStore = struct {
         _ = ns_cache.entries.fetchRemove(entry.key);
         self.total_entries -= 1;
         self.total_bytes -= entry.byte_size;
+        // Prune emptied namespaces before freeing `entry.ns` so churn across
+        // distinct namespaces stays bounded by `max_entries` (and drops to 0
+        // once emptied).
+        if (ns_cache.entries.count() == 0) {
+            self.removeNamespace(entry.ns);
+        }
         self.freeEntry(entry);
     }
 
@@ -483,19 +500,26 @@ fn cacheStatsImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.J
             }
             return makeStatsObject(handle, 0, 0, 0, 0);
         }
+        return makeStatsObject(handle, 0, 0, 0, 0);
     }
 
     const store = store_opt orelse return makeStatsObject(handle, 0, 0, 0, 0);
 
     var total_hits: u64 = 0;
     var total_misses: u64 = 0;
+    var total_entries: usize = 0;
+    var total_bytes: usize = 0;
     var ns_it = store.namespaces.iterator();
     while (ns_it.next()) |entry| {
+        if (!sdk.allowsCacheNamespace(handle, entry.key_ptr.*)) continue;
         total_hits += entry.value_ptr.*.hits;
         total_misses += entry.value_ptr.*.misses;
+        total_entries += entry.value_ptr.*.entries.count();
+        var e_it = entry.value_ptr.*.entries.valueIterator();
+        while (e_it.next()) |e| total_bytes += e.*.byte_size;
     }
 
-    return makeStatsObject(handle, total_hits, total_misses, store.total_entries, store.total_bytes);
+    return makeStatsObject(handle, total_hits, total_misses, total_entries, total_bytes);
 }
 
 fn makeStatsObject(handle: *sdk.ModuleHandle, hits: u64, misses: u64, entries: usize, bytes: usize) !sdk.JSValue {
@@ -677,4 +701,72 @@ test "addCacheDelta rejects signed overflow" {
     try std.testing.expectEqual(@as(?i64, 3), addCacheDelta(1, 2));
     try std.testing.expect(addCacheDelta(std.math.maxInt(i64), 1) == null);
     try std.testing.expect(addCacheDelta(std.math.minInt(i64), -1) == null);
+}
+
+test "CacheStore: namespace churn stays bounded and prunes emptied namespaces" {
+    var store = CacheStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+    store.max_entries = 4;
+
+    const churn_namespaces = [_][]const u8{
+        "ns-00", "ns-01", "ns-02", "ns-03",
+        "ns-04", "ns-05", "ns-06", "ns-07",
+        "ns-08", "ns-09", "ns-10", "ns-11",
+        "ns-12", "ns-13", "ns-14", "ns-15",
+    };
+    for (churn_namespaces) |ns| {
+        try store.set(ns, "k", "v", null, 1000);
+        try std.testing.expect(store.namespaces.count() <= store.max_entries);
+    }
+    try std.testing.expectEqual(@as(usize, 4), store.namespaces.count());
+    try std.testing.expectEqual(@as(usize, 4), store.total_entries);
+    try std.testing.expect(store.get("ns-00", "k", 1000) == null);
+    try std.testing.expectEqualStrings("v", store.get("ns-15", "k", 1000) orelse return error.TestFailed);
+
+    try std.testing.expect(store.delete("ns-12", "k"));
+    try std.testing.expect(store.delete("ns-13", "k"));
+    try std.testing.expect(store.delete("ns-14", "k"));
+    try std.testing.expect(store.delete("ns-15", "k"));
+    try std.testing.expectEqual(@as(usize, 0), store.namespaces.count());
+    try std.testing.expectEqual(@as(usize, 0), store.total_entries);
+    try std.testing.expectEqual(@as(usize, 0), store.total_bytes);
+}
+
+test "CacheStore: TTL expiry prunes empty namespace and same-namespace eviction works" {
+    var store = CacheStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+    store.max_entries = 1;
+
+    try store.set("same", "a", "1", null, 1000);
+    try store.set("same", "b", "2", null, 1000);
+    try std.testing.expect(store.get("same", "a", 1000) == null);
+    try std.testing.expectEqualStrings("2", store.get("same", "b", 1000) orelse return error.TestFailed);
+    try std.testing.expectEqual(@as(usize, 1), store.namespaces.count());
+    try std.testing.expectEqual(@as(usize, 1), store.total_entries);
+
+    try store.set("exp", "k", "v", 0, 1000);
+    try std.testing.expect(store.get("exp", "k", 1000) == null);
+    try std.testing.expectEqual(@as(usize, 0), store.namespaces.count());
+    try std.testing.expectEqual(@as(usize, 0), store.total_entries);
+    try std.testing.expectEqual(@as(usize, 0), store.total_bytes);
+}
+
+test "CacheStore: rejected and OOM sets do not leak or retain empty namespaces" {
+    var store = CacheStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+    store.max_bytes = 4;
+    try std.testing.expectError(
+        error.CacheCapacityExceeded,
+        store.set("oversized", "k", "1234", null, 1000),
+    );
+    try std.testing.expectEqual(@as(usize, 0), store.namespaces.count());
+
+    const OomInsert = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var s = CacheStore.init(allocator);
+            defer s.deinitSelf();
+            try s.set("ns", "k", "v", null, 1000);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, OomInsert.run, .{});
 }

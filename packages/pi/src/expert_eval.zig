@@ -113,7 +113,7 @@ test "static expert eval routes common ZigTS coding asks" {
         }
         const note = maybe_note orelse return error.MissingWorkflowNote;
         defer testing.allocator.free(note);
-        try testing.expect(std.mem.indexOf(u8, note, case.note_must_contain) != null);
+        try testing.expect(std.mem.find(u8, note, case.note_must_contain) != null);
     }
 }
 

@@ -16,7 +16,7 @@ Verification runs after parsing and before bytecode generation. If any error-sev
 
 ## Why This Works
 
-zttp's JavaScript subset bans most sources of non-trivial control flow:
+zttp's `zts-model-1` TypeScript subset bans most sources of non-trivial control flow:
 
 - No `while`/`do-while` (no back-edges)
 - No `try`/`catch` (no exceptional paths)
@@ -44,12 +44,12 @@ Every code path through the handler must return a Response. The verifier recursi
 verify error[ZTS302]: not all code paths return a Response
   --> handler.ts:2:17
    |
-  2 | function handler(req) {
+  2 | function handler(req: Request): Response {
    |                 ^
-   = help: ensure every branch (if/else, match/default) ends with a return statement
+   = help: ensure every branch (if/else, match(...).with(...).otherwise(...) or .exhaustive()) ends with a return statement
 ```
 
-**Fix:** add `else` clauses, `match` default arms, or trailing return statements.
+**Fix:** add `else` clauses, `match(...).otherwise(...)` / `.exhaustive()` arms, or trailing return statements.
 
 ### 2. Result Checking
 
@@ -57,10 +57,10 @@ Values from Result-producing virtual module calls (`jwtVerify`, `validateJson`, 
 
 The verifier tracks result bindings through the control flow tree:
 
-```javascript
+```typescript
 import { jwtVerify } from "zttp:auth";
 
-function handler(req) {
+function handler(req: Request): Response {
     const token = req.headers.authorization;
     const result = jwtVerify(token, secret, "HS256");
 
@@ -92,7 +92,7 @@ verify error[ZTS303]: result.value accessed without checking result.ok first
 - a Result passed to a function, returned, put in an object or array, or spread;
 - a method call on the binding, and a computed key that is not a string literal;
 - a member read on a Result call that is not bound to a `const`;
-- a `match` on the Result, and a check inside a `switch` or `try`, which covers nothing.
+- a `match` on the Result itself.
 
 Each refusal names its shape in the ZTS303 message. An unguarded `.value` read keeps the message `result.value accessed without checking result.ok first`. Other shapes have their own message and help: an `.error` read, an `.error` read on the ok path, a check that the proof does not recognize, a closure read, a read inside `assert`, an unknown member, a computed key, a method call, an alias, a function alias, an argument, a returned Result, an object or array member, a spread, a `match`, an unbound call, an ambiguous captured name, a deep expression, and any other use. The source of the messages is `packages/zts/src/handler_verifier.zig#ResultShape`. The shape changes the text and the repair plan only. It never changes which programs the verifier refuses.
 
@@ -154,10 +154,10 @@ before use. Using an optional value as a function argument, object property
 value, numeric operand, or string-array element without first checking for
 `undefined` is an error.
 
-```javascript
+```typescript
 import { env } from "zttp:env";
 
-function handler(req) {
+function handler(req: Request): Response {
     const appName = env("APP_NAME");
 
     // ERROR: optional value used without checking for undefined
@@ -235,7 +235,7 @@ The result feeds into `HandlerProperties.state_isolated`. When no module-scope m
 
 A write to shared state also removes six other properties. When the verifier ran and found a module-scope mutation or an unresolved route dispatch, `pure`, `stateless`, `read_only`, `retry_safe`, `deterministic`, and `idempotent` are not proven. A response can then depend on state that earlier requests wrote. The virtual-module effect row does not see a write to module state, so `clearSharedStateProperties` in `packages/tools/src/precompile_check_run.zig` applies the verifier fact. A contract built without verification keeps these properties.
 
-The flow evaluator supplies a second fact that removes the same seven properties. It follows each request through the handler, the helpers that it calls, and the modules that it imports. It records each write that the request makes to state that outlives the request: a module binding, a builtin object, a capture of module initialization, or an object that one of them reaches. This covers what the verifier does not name: a write through a helper's parameter, through a call result, through an element read, or through an alias that the verifier does not follow. Each mutating array method counts, including `pop` and `shift`. A write during module initialization does not count. An evaluation that cannot follow the handler, for example after an unknown callee or at the step budget, also counts, because it proves nothing about state. `flowSharesState` in `packages/tools/src/precompile_check_run.zig` holds this rule. CHECK, the single-module compile, and the graph compile each read it. One evaluation of the entry handler covers the whole module graph, so a dependency needs no separate evaluation.
+The flow evaluator supplies a second fact that removes the same seven properties. It follows each request through the handler, the helpers that it calls, and the modules that it imports. It records each write that the request makes to state that outlives the request: a module binding, a builtin object, a capture of module initialization, or an object that one of them reaches. This covers what the verifier does not name: a write through a helper's parameter, through a call result, through an element read, or through an alias that the verifier does not follow. Calls to `push`, the one admitted mutating array method, count too. A write during module initialization does not count. An evaluation that cannot follow the handler, for example after an unknown callee or at the step budget, also counts, because it proves nothing about state. `flowSharesState` in `packages/tools/src/precompile_check_run.zig` holds this rule. CHECK, the single-module compile, and the graph compile each read it. One evaluation of the entry handler covers the whole module graph, so a dependency needs no separate evaluation.
 
 A write that only the flow evaluator finds is a ZTS310 warning at the write, in the file that holds it. A write that the verifier names is not reported twice. The ZTS500 hint of a property that a write removed names the line of the first write in the entry file. A property that another cause removed, such as `Date.now()` for `deterministic` or a `zttp:cache` write for `read_only`, keeps its own cause and hint. When the entry file has no write, the hint names the file and the line of the earliest write in the dependency that runs first, for example "demoted at dep.ts:4:12". The remedy then asks to remove every write that a ZTS310 row names, because the hint names only the first write. A property that a dependency removes for another reason gets no write in its hint, because removing the write does not restore it. CHECK, the single-module compile, and the graph compile choose the write with the same rule (`firstWriteCause` in `packages/tools/src/precompile_check_run.zig`).
 
@@ -345,8 +345,8 @@ Missing files, missing exports, parse failures, cycles, and depth limits leave e
 Incomplete effects cannot establish an absence of writes or egress.
 With incomplete effects, `has_egress` reports possible egress. The proof trace identifies the incomplete analysis.
 
-CHECK computes these effects during its existing imported-flow reads.
-CHECK retains a separate fault traversal, with its existing read order and stopping rules.
+CHECK computes these effects when building the imported module graph for flow analysis (reusing the compiled modules when a graph check already built them).
+CHECK retains a separate fault traversal, with its existing read order and stopping rules (D-006 in [decisions.md](decisions.md)).
 Graph extraction uses the loaded compilation parsers and makes no additional reads for effect summaries.
 The entry contract receives these facts before merging. The build of a handler with file imports merges each dependency into the entry contract, and the merged contract keeps real aggregate properties. See [Handlers with file imports](#handlers-with-file-imports).
 Legacy capability and purity charging remains conservative for relative imports.
@@ -412,8 +412,8 @@ The `FaultCoverageChecker` (`packages/zts/src/fault_coverage.zig`) analyzes the 
 
 | Severity | Functions | Meaning |
 |----------|-----------|---------|
-| `critical` | `jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart`, `verifyWebhookSignature`, `rateCheck` | Auth, validation, signature, and rate-limit failures must not produce 2xx |
-| `expected` | `cacheGet`, `env`, `cacheSet` | Cache misses and missing env vars are normal degradation. A failed `cacheSet` can leave an earlier value in place. |
+| `critical` | `jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart`, `verifyWebhookSignature`, `rateCheck`, `sseEvents` | Auth, validation, signature, rate-limit, and SSE stream parsing failures must not produce 2xx |
+| `expected` | `cacheGet`, `cacheSet`, `env`, `sqlOne`, `negotiate`, `routerMatch`, `parseIso`, `parseBearer` | Cache misses, missing env vars, absent query/match/parse results, and unmet negotiation are normal degradation. A failed `cacheSet` can leave an earlier value in place. |
 | `upstream` | `fetch`, `fetchWithRetry` | An external service failure. These calls return the fetch response record. The `res.ok` and status forks cover them. A 2xx answer can be an intended fallback. |
 
 The checker warns when a critical I/O failure path (e.g., `jwtVerify` returning `{ok: false}`) produces a 2xx response. This is a structural pattern overwhelmingly correlated with bugs. Cache misses returning 200 are correctly classified as graceful degradation and do not trigger warnings.
@@ -427,7 +427,7 @@ Every call to a failable function counts as its own site, keyed by call site. Tw
 
 - every counted site has a failure path (a branch on its failure, or a `??` fallback on an optional export);
 - no failable call sits where the walk cannot see it: inside a nested function or callback, inside a helper, inline in an expression, as a call argument, as a `match` scrutinee, or in a branch that does not return. The analysis fails closed on such a call: the property is unproven, and the trace names the first call;
-- every import that is not a builtin module was scanned and holds no failable call. A sibling file imported with `./` or `../` is scanned whole, with its own imports in turn. An unreadable or unparsable file, a chain deeper than eight files, a bare package specifier, and a partner module each block the property, because no failure model reaches them. The browser analyzer has no filesystem, so any relative import blocks there. The trace names the import line and the file;
+- every import that is not a builtin module was scanned and holds no failable call. A sibling file imported with `./` or `../` is scanned whole, with its own imports in turn. An unreadable or unparsable file, a chain deeper than eight files, a bare package specifier, and a partner module each block the property, because no failure model reaches them. The trace names the import line and the file;
 - the enumerated paths are exhaustive (a loop walked once, recursion, or a path limit makes them a summary, which blocks the property);
 - an `&&` condition counts every way it can be false. `if (!auth.ok && req.method === "POST") { return 401; }` falls through when the check fails on a GET too, so that path is enumerated, and a 2xx on it is a critical warning. A failable call tested by a later conjunct can have failed even when short-circuit evaluation skips the test, so that case is enumerated as well;
 - no critical failure path returns 2xx.
@@ -438,7 +438,7 @@ A 2xx fallback on an upstream failure does not block the property. It is reporte
 
 A handler that proved `fault_covered` under an earlier analysis can lose it
 when a `fetch` moves into a callback. The upgrade verifier
-(`upgrade_verifier.zig`) classifies a lost `fault_covered` as a critical
+(`packages/tools/src/upgrade_verifier.zig`) classifies a lost `fault_covered` as a critical
 regression. The policy hash includes the path analysis version. An older
 contract no longer matches and is rebuilt.
 

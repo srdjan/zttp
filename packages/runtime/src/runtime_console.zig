@@ -51,6 +51,9 @@ fn printValue(val: zq.JSValue, fd: std.c.fd_t) void {
     } else if (val.isString()) {
         const str = val.toPtr(zq.JSString);
         writeToFd(fd, str.data());
+    } else if (val.isStringSlice()) {
+        const slice = val.toPtr(zq.string.SliceString);
+        writeToFd(fd, slice.data());
     } else if (val.isObject()) {
         writeToFd(fd, "[Object]");
     } else {

@@ -157,15 +157,64 @@ const Parser = struct {
         return val;
     }
 
+    fn isHexDigit(c: u8) bool {
+        return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+    }
+
+    fn parseHex4(self: *Parser, start: usize) ParseError!u21 {
+        if (self.text.len - start < 4) return self.fail(.invalid_syntax, start);
+        const slice = self.text[start..][0..4];
+        for (slice) |ch| {
+            if (!isHexDigit(ch)) return self.fail(.invalid_syntax, start);
+        }
+        return std.fmt.parseInt(u21, slice, 16) catch return self.fail(.invalid_syntax, start);
+    }
+
     fn parseNumber(self: *Parser) ParseError!JSValue {
         const start = self.pos;
         if (self.pos < self.text.len and self.text[self.pos] == '-') self.pos += 1;
-        while (self.pos < self.text.len) : (self.pos += 1) {
-            switch (self.text[self.pos]) {
-                '0'...'9', '.', 'e', 'E', '+', '-' => {},
-                else => break,
+        if (self.pos >= self.text.len) return self.fail(.invalid_syntax, start);
+
+        // RFC 8259 integer part: '0' (not followed by a digit) or [1-9][0-9]*
+        if (self.text[self.pos] == '0') {
+            self.pos += 1;
+            if (self.pos < self.text.len and self.text[self.pos] >= '0' and self.text[self.pos] <= '9') {
+                return self.fail(.invalid_syntax, start);
+            }
+        } else if (self.text[self.pos] >= '1' and self.text[self.pos] <= '9') {
+            self.pos += 1;
+            while (self.pos < self.text.len and self.text[self.pos] >= '0' and self.text[self.pos] <= '9') {
+                self.pos += 1;
+            }
+        } else {
+            return self.fail(.invalid_syntax, start);
+        }
+
+        // Optional fractional part: '.' [0-9]+
+        if (self.pos < self.text.len and self.text[self.pos] == '.') {
+            self.pos += 1;
+            if (self.pos >= self.text.len or self.text[self.pos] < '0' or self.text[self.pos] > '9') {
+                return self.fail(.invalid_syntax, start);
+            }
+            while (self.pos < self.text.len and self.text[self.pos] >= '0' and self.text[self.pos] <= '9') {
+                self.pos += 1;
             }
         }
+
+        // Optional exponent part: ('e' | 'E') ['+' | '-'] [0-9]+
+        if (self.pos < self.text.len and (self.text[self.pos] == 'e' or self.text[self.pos] == 'E')) {
+            self.pos += 1;
+            if (self.pos < self.text.len and (self.text[self.pos] == '+' or self.text[self.pos] == '-')) {
+                self.pos += 1;
+            }
+            if (self.pos >= self.text.len or self.text[self.pos] < '0' or self.text[self.pos] > '9') {
+                return self.fail(.invalid_syntax, start);
+            }
+            while (self.pos < self.text.len and self.text[self.pos] >= '0' and self.text[self.pos] <= '9') {
+                self.pos += 1;
+            }
+        }
+
         const text = self.text[start..self.pos];
         const parsed = std.fmt.parseFloat(f64, text) catch return self.fail(.invalid_syntax, start);
         // JSON has no syntax for a non-finite number, so one can only arrive
@@ -215,8 +264,7 @@ const Parser = struct {
                 't' => '\t',
                 'u' => {
                     if (self.text.len - self.pos < 4) return self.fail(.invalid_syntax, open);
-                    var code: u21 = std.fmt.parseInt(u21, self.text[self.pos..][0..4], 16) catch
-                        return self.fail(.invalid_syntax, self.pos);
+                    var code: u21 = try self.parseHex4(self.pos);
                     self.pos += 4;
                     // A non-BMP character is written as a surrogate pair, which
                     // is what `JSON.stringify` emits with ASCII-only escaping.
@@ -229,8 +277,7 @@ const Parser = struct {
                         self.text.len - self.pos >= 6 and
                         self.text[self.pos] == '\\' and self.text[self.pos + 1] == 'u')
                     {
-                        const low = std.fmt.parseInt(u21, self.text[self.pos + 2 ..][0..4], 16) catch
-                            return self.fail(.invalid_syntax, self.pos);
+                        const low = try self.parseHex4(self.pos + 2);
                         if (low >= 0xDC00 and low <= 0xDFFF) {
                             code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
                             self.pos += 6;
@@ -289,7 +336,7 @@ const Parser = struct {
     /// silently decode to the same value.
     fn parseObject(self: *Parser, depth: u16) ParseError!JSValue {
         self.pos += 1; // '{'
-        var out = dict.empty(self.ctx) catch return error.OutOfMemory;
+        const out = dict.empty(self.ctx) catch return error.OutOfMemory;
 
         self.skipWs();
         if (self.pos < self.text.len and self.text[self.pos] == '}') {
@@ -297,30 +344,43 @@ const Parser = struct {
             return JSValue.fromPtr(out);
         }
 
+        // Build the Dict linearly in place using a hash set for O(1) duplicate
+        // key checks, avoiding O(N^2) copying through `dict.set`.
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer {
+            var key_it = seen.keyIterator();
+            while (key_it.next()) |k| self.temp.free(k.*);
+            seen.deinit(self.temp);
+        }
+        var count: u32 = 0;
+
         while (true) {
             self.skipWs();
             const key_offset = self.pos;
             const key_bytes = try self.readString();
-            const key_val = self.ctx.createString(key_bytes) catch {
-                self.temp.free(key_bytes);
-                return error.OutOfMemory;
-            };
+            var key_owned = true;
+            errdefer if (key_owned) self.temp.free(key_bytes);
 
-            if (dict.has(out, key_val)) {
+            if (seen.contains(key_bytes)) {
                 const n = @min(key_bytes.len, self.dup_key_buf.len);
                 @memcpy(self.dup_key_buf[0..n], key_bytes[0..n]);
-                self.temp.free(key_bytes);
                 self.failure = .{ .kind = .duplicate_key, .offset = key_offset, .key = self.dup_key_buf[0..n] };
                 return error.Failed;
             }
-            defer self.temp.free(key_bytes);
+            if (count >= JSObject.MAX_DICT_ENTRIES) return error.OutOfMemory;
+
+            const key_val = self.ctx.createString(key_bytes) catch return error.OutOfMemory;
+            seen.put(self.temp, key_bytes, {}) catch return error.OutOfMemory;
+            key_owned = false;
 
             self.skipWs();
             if (self.pos >= self.text.len or self.text[self.pos] != ':') return self.fail(.invalid_syntax, self.pos);
             self.pos += 1;
 
             const val = try self.parseValue(depth + 1);
-            out = dict.set(self.ctx, out, key_val, val) catch return error.OutOfMemory;
+            out.setDictEntry(self.ctx.allocator, count, key_val, val) catch return error.OutOfMemory;
+            count += 1;
+            out.setDictCount(count);
 
             self.skipWs();
             if (self.pos >= self.text.len) return self.fail(.invalid_syntax, self.pos);
@@ -514,7 +574,7 @@ fn encode(ctx: *context.Context, val: JSValue, buf: *std.ArrayListUnmanaged(u8),
         var i: u32 = 0;
         while (i < len) : (i += 1) {
             if (i > 0) buf.append(allocator, ',') catch return error.OutOfMemory;
-            try encode(ctx, obj.getSlot(@intCast(i + 1)), buf, depth + 1);
+            try encode(ctx, obj.getIndex(i) orelse JSValue.undefined_val, buf, depth + 1);
         }
         buf.append(allocator, ']') catch return error.OutOfMemory;
         return;
@@ -891,4 +951,22 @@ test "a non-finite number and an undefined element are refused by name" {
     try testing.expectError(error.NonFinite, encode(h.ctx, JSValue.fromFloat(std.math.inf(f64)), &buf, 0));
     buf.clearRetainingCapacity();
     try testing.expectError(error.Unencodable, encode(h.ctx, JSValue.undefined_val, &buf, 0));
+}
+
+test "RFC 8259 rejects malformed numbers, non-hex unicode escapes, and encodes sparse arrays safely" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    try testing.expectEqual(ErrorKind.invalid_syntax, (try parseFailure(h, "01", .{})).kind);
+    try testing.expectEqual(ErrorKind.invalid_syntax, (try parseFailure(h, "1.", .{})).kind);
+    try testing.expectEqual(ErrorKind.invalid_syntax, (try parseFailure(h, "-.5", .{})).kind);
+    try testing.expectEqual(ErrorKind.invalid_syntax, (try parseFailure(h, "1e", .{})).kind);
+    try testing.expectEqual(ErrorKind.invalid_syntax, (try parseFailure(h, "\"\\u+041\"", .{})).kind);
+    try testing.expectEqual(ErrorKind.invalid_syntax, (try parseFailure(h, "\"\\u0_41\"", .{})).kind);
+
+    const sparse = try h.ctx.createArray();
+    sparse.setArrayLength(10);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(h.ctx.allocator);
+    try testing.expectError(error.Unencodable, encode(h.ctx, sparse.toValue(), &buf, 0));
 }

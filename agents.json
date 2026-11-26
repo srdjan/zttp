@@ -739,15 +739,6 @@
       "requiredWhen": "after analyzer process or machine output changes"
     },
     {
-      "task": "release",
-      "route": "aggregate",
-      "intent": "build",
-      "effect": "local-write",
-      "approval": "none",
-      "does": "builds optimized release binaries",
-      "requiredWhen": "before release artifacts are inspected"
-    },
-    {
       "task": "bench",
       "route": "manual",
       "reason": "measurement",

@@ -121,16 +121,10 @@ const usage =
     \\
 ;
 
-pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_alloc: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
-    defer _ = debug_alloc.deinit();
-    const allocator = debug_alloc.allocator();
-
-    const argv = try collectArgs(allocator, init.args);
-    defer freeArgs(allocator, argv);
-    var environ = try std.process.Environ.createMap(init.environ, allocator);
-    defer environ.deinit();
-    const defaults = checkDefaultsFromEnvironment(environ) catch |err| {
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    const defaults = checkDefaultsFromEnvironment(init.environ_map.*) catch |err| {
         std.debug.print("error: invalid benchmark environment: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -139,9 +133,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.process.exit(1);
     };
 
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = init.environ });
-    defer io_backend.deinit();
-    run(allocator, io_backend.io(), mode) catch |err| {
+    run(allocator, init.io, mode) catch |err| {
         std.debug.print("error: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -275,24 +267,6 @@ fn parsePositiveFloat(value: []const u8) !f64 {
     const parsed = try std.fmt.parseFloat(f64, value);
     if (!std.math.isFinite(parsed) or parsed <= 0) return error.InvalidArgument;
     return parsed;
-}
-
-fn collectArgs(allocator: std.mem.Allocator, vector: std.process.Args) ![]const []const u8 {
-    var iterator = std.process.Args.Iterator.init(vector);
-    defer iterator.deinit();
-    var args: std.ArrayList([]const u8) = .empty;
-    errdefer freeArgs(allocator, args.items);
-    while (iterator.next()) |arg| {
-        const owned = try allocator.dupe(u8, arg);
-        errdefer allocator.free(owned);
-        try args.append(allocator, owned);
-    }
-    return args.toOwnedSlice(allocator);
-}
-
-fn freeArgs(allocator: std.mem.Allocator, args: []const []const u8) void {
-    for (args) |arg| allocator.free(arg);
-    allocator.free(args);
 }
 
 fn loadBaseline(allocator: std.mem.Allocator, path: []const u8) !Report {
@@ -914,7 +888,7 @@ test "sampler rejects missing and unsupported report schemas" {
             1,
             .{ .context = &fake, .run = FakeSampler.run },
         );
-        if (std.mem.indexOf(u8, report, "schema_version") == null) {
+        if (std.mem.find(u8, report, "schema_version") == null) {
             try std.testing.expectError(error.InvalidBenchmarkReport, result);
         } else {
             try std.testing.expectError(error.InvalidBenchmarkSchema, result);

@@ -17,6 +17,11 @@ pub const Sources = struct {
     root: ?[]const u8,
     zts_zon: ?[]const u8,
     runtime_zon: ?[]const u8,
+    modules_zon: ?[]const u8,
+    pi_zon: ?[]const u8,
+    proof_checker_zon: ?[]const u8,
+    tools_zon: ?[]const u8,
+    sdk_zon: ?[]const u8,
     install: ?[]const u8,
 };
 
@@ -27,12 +32,22 @@ pub fn check(sources: Sources) Alignment {
     const root_bytes = sources.root orelse return .missing;
     const zts_zon_bytes = sources.zts_zon orelse return .missing;
     const runtime_zon_bytes = sources.runtime_zon orelse return .missing;
+    const modules_zon_bytes = sources.modules_zon orelse return .missing;
+    const pi_zon_bytes = sources.pi_zon orelse return .missing;
+    const proof_checker_zon_bytes = sources.proof_checker_zon orelse return .missing;
+    const tools_zon_bytes = sources.tools_zon orelse return .missing;
+    const sdk_zon_bytes = sources.sdk_zon orelse return .missing;
     const install_bytes = sources.install orelse return .missing;
     const version = extractVersionMarker(marker_bytes) orelse return .malformed_marker;
     if (!std.mem.eql(u8, extractZonVersion(zon_bytes) orelse "", version) or
         !rootHasVersion(root_bytes, version) or
         !std.mem.eql(u8, extractZonVersion(zts_zon_bytes) orelse "", version) or
         !std.mem.eql(u8, extractZonVersion(runtime_zon_bytes) orelse "", version) or
+        !std.mem.eql(u8, extractZonVersion(modules_zon_bytes) orelse "", version) or
+        !std.mem.eql(u8, extractZonVersion(pi_zon_bytes) orelse "", version) or
+        !std.mem.eql(u8, extractZonVersion(proof_checker_zon_bytes) orelse "", version) or
+        !std.mem.eql(u8, extractZonVersion(tools_zon_bytes) orelse "", version) or
+        !std.mem.eql(u8, extractZonVersion(sdk_zon_bytes) orelse "", version) or
         !std.mem.eql(u8, extractInstallVersion(install_bytes) orelse "", version))
     {
         return .mismatch;
@@ -53,6 +68,16 @@ pub fn firstDrift(sources: Sources) ?[]const u8 {
     if (!std.mem.eql(u8, extractZonVersion(zts_zon) orelse "", version)) return "packages/zts/build.zig.zon";
     const runtime_zon = sources.runtime_zon orelse return "packages/runtime/build.zig.zon (unreadable)";
     if (!std.mem.eql(u8, extractZonVersion(runtime_zon) orelse "", version)) return "packages/runtime/build.zig.zon";
+    const modules_zon = sources.modules_zon orelse return "packages/modules/build.zig.zon (unreadable)";
+    if (!std.mem.eql(u8, extractZonVersion(modules_zon) orelse "", version)) return "packages/modules/build.zig.zon";
+    const pi_zon = sources.pi_zon orelse return "packages/pi/build.zig.zon (unreadable)";
+    if (!std.mem.eql(u8, extractZonVersion(pi_zon) orelse "", version)) return "packages/pi/build.zig.zon";
+    const proof_checker_zon = sources.proof_checker_zon orelse return "packages/proof-checker/build.zig.zon (unreadable)";
+    if (!std.mem.eql(u8, extractZonVersion(proof_checker_zon) orelse "", version)) return "packages/proof-checker/build.zig.zon";
+    const tools_zon = sources.tools_zon orelse return "packages/tools/build.zig.zon (unreadable)";
+    if (!std.mem.eql(u8, extractZonVersion(tools_zon) orelse "", version)) return "packages/tools/build.zig.zon";
+    const sdk_zon = sources.sdk_zon orelse return "packages/zttp-sdk/build.zig.zon (unreadable)";
+    if (!std.mem.eql(u8, extractZonVersion(sdk_zon) orelse "", version)) return "packages/zttp-sdk/build.zig.zon";
     const install = sources.install orelse return "install.sh (unreadable)";
     if (!std.mem.eql(u8, extractInstallVersion(install) orelse "", version)) return "install.sh";
     return null;
@@ -60,36 +85,36 @@ pub fn firstDrift(sources: Sources) ?[]const u8 {
 
 pub fn extractZonVersion(bytes: []const u8) ?[]const u8 {
     const marker = ".version = \"";
-    const start = std.mem.indexOf(u8, bytes, marker) orelse return null;
+    const start = std.mem.find(u8, bytes, marker) orelse return null;
     const value_start = start + marker.len;
     const rest = bytes[value_start..];
-    const value_end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+    const value_end = std.mem.findScalar(u8, rest, '"') orelse return null;
     return rest[0..value_end];
 }
 
 /// The version in the installer comment `(current: vX.Y.Z)`, without the `v`.
 pub fn extractInstallVersion(bytes: []const u8) ?[]const u8 {
     const marker = "(current: v";
-    const start = std.mem.indexOf(u8, bytes, marker) orelse return null;
+    const start = std.mem.find(u8, bytes, marker) orelse return null;
     const rest = bytes[start + marker.len ..];
-    const end = std.mem.indexOfScalar(u8, rest, ')') orelse return null;
+    const end = std.mem.findScalar(u8, rest, ')') orelse return null;
     return rest[0..end];
 }
 
 pub fn extractVersionMarker(bytes: []const u8) ?[]const u8 {
     if (bytes.len < 2 or bytes[bytes.len - 1] != '\n') return null;
     const version = bytes[0 .. bytes.len - 1];
-    if (std.mem.indexOfAny(u8, version, "\r\n") != null) return null;
+    if (std.mem.findAny(u8, version, "\r\n") != null) return null;
     _ = std.SemanticVersion.parse(version) catch return null;
     return version;
 }
 
 fn rootHasVersion(bytes: []const u8, expected: []const u8) bool {
     const marker = "string = \"";
-    const start = std.mem.indexOf(u8, bytes, marker) orelse return false;
+    const start = std.mem.find(u8, bytes, marker) orelse return false;
     const value_start = start + marker.len;
     const rest = bytes[value_start..];
-    const value_end = std.mem.indexOfScalar(u8, rest, '"') orelse return false;
+    const value_end = std.mem.findScalar(u8, rest, '"') orelse return false;
     return std.mem.eql(u8, rest[0..value_end], expected);
 }
 
@@ -113,6 +138,11 @@ fn testSources() Sources {
         .root = test_root,
         .zts_zon = test_zon,
         .runtime_zon = test_zon,
+        .modules_zon = test_zon,
+        .pi_zon = test_zon,
+        .proof_checker_zon = test_zon,
+        .tools_zon = test_zon,
+        .sdk_zon = test_zon,
         .install = test_install,
     };
 }
@@ -138,6 +168,11 @@ test "alignment requires every release version source to agree" {
     stale_root.root = "pub const string = \"0.19.0\";";
     try std.testing.expectEqual(Alignment.mismatch, check(stale_root));
     try std.testing.expectEqualStrings("packages/zts/src/root.zig", firstDrift(stale_root) orelse "");
+
+    var stale_proof_checker = testSources();
+    stale_proof_checker.proof_checker_zon = ".{ .version = \"0.0.0\" }\n";
+    try std.testing.expectEqual(Alignment.mismatch, check(stale_proof_checker));
+    try std.testing.expectEqualStrings("packages/proof-checker/build.zig.zon", firstDrift(stale_proof_checker) orelse "");
 }
 
 test "alignment names a drifted installer comment" {

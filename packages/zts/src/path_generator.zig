@@ -1287,9 +1287,9 @@ pub const PathGenerator = struct {
             try handler_contract.writeJsonString(writer, test_case.name);
             try writer.writeAll("}\n");
 
-            try writer.writeAll("{\"type\":\"request\",\"method\":\"");
-            try writer.writeAll(test_case.method);
-            try writer.writeAll("\",\"url\":");
+            try writer.writeAll("{\"type\":\"request\",\"method\":");
+            try handler_contract.writeJsonString(writer, test_case.method);
+            try writer.writeAll(",\"url\":");
             try handler_contract.writeJsonString(writer, test_case.url);
             if (test_case.has_auth_header) {
                 try writer.writeAll(",\"headers\":{\"authorization\":\"Bearer test-token\"},\"body\":null}\n");
@@ -1299,12 +1299,11 @@ pub const PathGenerator = struct {
 
             // I/O stubs
             for (test_case.io_stubs.items) |stub| {
-                try writer.print("{{\"type\":\"io\",\"seq\":{d},\"module\":\"{s}\",\"fn\":\"{s}\",\"result\":{s}}}\n", .{
-                    stub.seq,
-                    stub.module,
-                    stub.func,
-                    stub.result_json,
-                });
+                try writer.print("{{\"type\":\"io\",\"seq\":{d},\"module\":", .{stub.seq});
+                try handler_contract.writeJsonString(writer, stub.module);
+                try writer.writeAll(",\"fn\":");
+                try handler_contract.writeJsonString(writer, stub.func);
+                try writer.print(",\"result\":{s}}}\n", .{stub.result_json});
             }
 
             // Expected response. An unknown status writes no status key, so the
@@ -1563,7 +1562,7 @@ pub const PathGenerator = struct {
                 // this handler's enumeration is a summary.
                 self.summarized = true;
                 const bound = self.resolveLoopBound(fi.iterable, node);
-                self.retired_loop_descs.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+                self.retired_loop_descs.ensureUnusedCapacity(self.allocator, self.loop_stack.items.len + 1) catch |err| {
                     self.freeLoopBound(bound);
                     return err;
                 };
@@ -2159,18 +2158,52 @@ pub const PathGenerator = struct {
     }
 
     /// Whether an `if` forks its continuation: a branch that can fall through
-    /// holds a module call, or the then-branch returns and the else-branch
-    /// falls through. Not inside a loop body, which is walked once as a
-    /// representative iteration and ends with the loop.
+    /// holds a module call or a conditional return, or one branch returns
+    /// while the other falls through. Not inside a loop body, which is walked
+    /// once as a representative iteration and ends with the loop.
     fn ifForks(self: *PathGenerator, if_s: Node.IfStmt) error{OutOfMemory}!bool {
         if (self.loop_stack.items.len > 0) return false;
+        const then_always = self.stmtAlwaysReturns(if_s.then_branch);
+        const else_always = if_s.else_branch != null_node and self.stmtAlwaysReturns(if_s.else_branch);
+        if (then_always and else_always) return false;
         // A then-branch that returns beside an else-branch that falls through:
         // the paths after the `if` run only through the else-branch.
-        if (if_s.else_branch != null_node and self.stmtAlwaysReturns(if_s.then_branch) and
-            !self.stmtAlwaysReturns(if_s.else_branch)) return true;
-        if (!self.stmtAlwaysReturns(if_s.then_branch) and try self.branchHasCall(if_s.then_branch)) return true;
+        if (if_s.else_branch != null_node and then_always and !else_always) return true;
+        // A branch with a nested conditional return (e.g. `if (!res.ok) { if (c) return 502; }`)
+        // must fork `after` so its fall-through path retains this `if`'s
+        // constraints instead of merging unconstrained into `after` and
+        // bypassing fault coverage.
+        if (!then_always and (self.stmtMayReturn(if_s.then_branch) or try self.branchHasCall(if_s.then_branch))) return true;
         if (if_s.else_branch == null_node) return false;
-        return !self.stmtAlwaysReturns(if_s.else_branch) and try self.branchHasCall(if_s.else_branch);
+        return self.stmtMayReturn(if_s.else_branch) or (!else_always and try self.branchHasCall(if_s.else_branch));
+    }
+
+    fn stmtMayReturn(self: *const PathGenerator, node: NodeIndex) bool {
+        if (node == null_node) return false;
+        const tag = self.ir_view.getTag(node) orelse return false;
+        return switch (tag) {
+            .return_stmt => true,
+            .block, .program => blk: {
+                const block = self.ir_view.getBlock(node) orelse break :blk false;
+                var i: u16 = 0;
+                while (i < block.stmts_count) : (i += 1) {
+                    const stmt_idx = self.ir_view.getListIndex(block.stmts_start, i);
+                    if (self.stmtMayReturn(stmt_idx)) break :blk true;
+                }
+                break :blk false;
+            },
+            .if_stmt => blk: {
+                const if_s = self.ir_view.getIfStmt(node) orelse break :blk false;
+                break :blk self.stmtMayReturn(if_s.then_branch) or self.stmtMayReturn(if_s.else_branch);
+            },
+            .for_of_stmt => blk: {
+                const fi = self.ir_view.getForIter(node) orelse break :blk false;
+                break :blk self.stmtMayReturn(fi.body);
+            },
+            // exhaustive: nested function literals return from themselves, not
+            // the enclosing handler; other statements cannot return.
+            else => false,
+        };
     }
 
     fn branchHasCall(self: *PathGenerator, branch: NodeIndex) error{OutOfMemory}!bool {
@@ -2220,6 +2253,12 @@ pub const PathGenerator = struct {
                 try self.walkBlockFrom(block, 0, after);
             },
             .if_stmt => try self.walkIfThen(branch, after),
+            .assert_stmt => {
+                const assert = self.ir_view.getAssertStmt(branch) orelse return self.resumeAfter(after);
+                try self.walkAssertFailure(assert);
+                try self.extractAllConstraints(assert.condition);
+                try self.resumeAfter(after);
+            },
             // A single unbraced statement.
             else => {
                 try self.walkPaths(branch);
@@ -2860,7 +2899,7 @@ pub const PathGenerator = struct {
         const fi = self.ir_view.getForIter(node) orelse return;
         try self.trackModuleCallUnder(fi.iterable, null, false);
         const bound = self.resolveLoopBound(fi.iterable, node);
-        self.retired_loop_descs.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+        self.retired_loop_descs.ensureUnusedCapacity(self.allocator, self.loop_stack.items.len + 1) catch |err| {
             self.freeLoopBound(bound);
             return err;
         };
@@ -2957,7 +2996,7 @@ pub const PathGenerator = struct {
                     };
                     // A `|` in the raw text would make the joined encoding
                     // ambiguous, so the literal is unknown.
-                    if (std.mem.indexOfScalar(u8, raw, '|') != null) {
+                    if (std.mem.findScalar(u8, raw, '|') != null) {
                         try buf.append(allocator, '?');
                         continue;
                     }
@@ -3457,6 +3496,7 @@ pub const PathGenerator = struct {
         const tag = ir_view.getTag(callee) orelse return null;
         if (tag != .identifier) return null;
         const binding = ir_view.getBinding(callee) orelse return null;
+        if (binding.kind != .global and binding.kind != .undeclared_global) return null;
         return bindings.get(binding.slot);
     }
 
@@ -3578,14 +3618,14 @@ pub const PathGenerator = struct {
         if (call.args_count == 1) {
             const end_node = self.ir_view.getListIndex(call.args_start, 0);
             const end = self.intLiteralValue(end_node) orelse return null;
-            return nonNegativeI64ToU32(end);
+            return nonNegativeI128ToU32(end);
         }
         if (call.args_count == 2) {
             const start_node = self.ir_view.getListIndex(call.args_start, 0);
             const end_node = self.ir_view.getListIndex(call.args_start, 1);
             const start = self.intLiteralValue(start_node) orelse return null;
             const end = self.intLiteralValue(end_node) orelse return null;
-            return nonNegativeI64ToU32(end - start);
+            return nonNegativeI128ToU32(@as(i128, end) - @as(i128, start));
         }
         return null;
     }
@@ -3601,7 +3641,7 @@ pub const PathGenerator = struct {
         const start = self.intLiteralValue(start_node) orelse return null;
         const end = self.intLiteralValue(end_node) orelse return null;
         if (start != 0 or end < 0) return null;
-        return nonNegativeI64ToU32(end);
+        return nonNegativeI128ToU32(end);
     }
 
     fn objectKeysLiteralCount(self: *const PathGenerator, node: NodeIndex) ?u32 {
@@ -3780,29 +3820,95 @@ pub const PathGenerator = struct {
         return self.ir_view.getString(str_idx);
     }
 
-    fn nonNegativeI64ToU32(value: i64) u32 {
+    fn nonNegativeI128ToU32(value: i128) u32 {
         if (value <= 0) return 0;
         if (value > std.math.maxInt(u32)) return std.math.maxInt(u32);
         return @intCast(value);
     }
 
     fn trailingLimitValue(statement: []const u8) ?u32 {
-        var end = statement.len;
-        while (end > 0 and std.ascii.isWhitespace(statement[end - 1])) : (end -= 1) {}
+        const TokenKind = enum { none, word, digits, other };
+        const Token = struct { kind: TokenKind = .none, text: []const u8 = "" };
+        var prev: Token = .{};
+        var last: Token = .{};
 
-        const digits_end = end;
-        var digits_start = digits_end;
-        while (digits_start > 0 and isAsciiDigit(statement[digits_start - 1])) : (digits_start -= 1) {}
-        if (digits_start == digits_end) return null;
+        var i: usize = 0;
+        while (i < statement.len) {
+            const c = statement[i];
+            if (std.ascii.isWhitespace(c)) {
+                i += 1;
+                continue;
+            }
+            // Strip `-- ...` line comments.
+            if (c == '-' and i + 1 < statement.len and statement[i + 1] == '-') {
+                i += 2;
+                while (i < statement.len and statement[i] != '\n') : (i += 1) {}
+                continue;
+            }
+            // Strip `/* ... */` block comments; unterminated comments fail closed.
+            if (c == '/' and i + 1 < statement.len and statement[i + 1] == '*') {
+                i += 2;
+                var closed = false;
+                while (i + 1 < statement.len) : (i += 1) {
+                    if (statement[i] == '*' and statement[i + 1] == '/') {
+                        i += 2;
+                        closed = true;
+                        break;
+                    }
+                }
+                if (!closed) return null;
+                continue;
+            }
+            // Skip SQL single-quoted strings and double-quoted identifiers.
+            if (c == '\'' or c == '"') {
+                const quote = c;
+                i += 1;
+                var closed = false;
+                while (i < statement.len) {
+                    if (statement[i] == quote) {
+                        if (i + 1 < statement.len and statement[i + 1] == quote) {
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        closed = true;
+                        break;
+                    }
+                    i += 1;
+                }
+                if (!closed) return null;
+                prev = last;
+                last = .{ .kind = .other, .text = "" };
+                continue;
+            }
+            if (std.ascii.isAlphabetic(c) or c == '_') {
+                const start = i;
+                while (i < statement.len and (std.ascii.isAlphanumeric(statement[i]) or statement[i] == '_')) : (i += 1) {}
+                prev = last;
+                last = .{ .kind = .word, .text = statement[start..i] };
+                continue;
+            }
+            if (isAsciiDigit(c)) {
+                const start = i;
+                while (i < statement.len and isAsciiDigit(statement[i])) : (i += 1) {}
+                if (i < statement.len and (std.ascii.isAlphabetic(statement[i]) or statement[i] == '_' or statement[i] == '.')) {
+                    while (i < statement.len and (std.ascii.isAlphanumeric(statement[i]) or statement[i] == '_' or statement[i] == '.')) : (i += 1) {}
+                    prev = last;
+                    last = .{ .kind = .other, .text = statement[start..i] };
+                } else {
+                    prev = last;
+                    last = .{ .kind = .digits, .text = statement[start..i] };
+                }
+                continue;
+            }
+            prev = last;
+            last = .{ .kind = .other, .text = statement[i .. i + 1] };
+            i += 1;
+        }
 
-        var limit_end = digits_start;
-        while (limit_end > 0 and std.ascii.isWhitespace(statement[limit_end - 1])) : (limit_end -= 1) {}
-        if (limit_end < "LIMIT".len) return null;
-        const limit_start = limit_end - "LIMIT".len;
-        if (!std.ascii.eqlIgnoreCase(statement[limit_start..limit_end], "LIMIT")) return null;
-        if (limit_start > 0 and !std.ascii.isWhitespace(statement[limit_start - 1])) return null;
-
-        return std.fmt.parseInt(u32, statement[digits_start..digits_end], 10) catch null;
+        if (prev.kind != .word or !std.ascii.eqlIgnoreCase(prev.text, "LIMIT")) return null;
+        if (last.kind != .digits) return null;
+        return std.fmt.parseInt(u32, last.text, 10) catch null;
     }
 
     fn isAsciiDigit(c: u8) bool {
@@ -4329,7 +4435,7 @@ test "route roots stay internal to analysis outputs" {
     var allocating_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &jsonl);
     try fixture.generator.writeJsonl(&allocating_writer.writer);
     jsonl = allocating_writer.toArrayList();
-    try std.testing.expect(std.mem.indexOf(u8, jsonl.items, "\"status\":201") == null);
+    try std.testing.expect(std.mem.find(u8, jsonl.items, "\"status\":201") == null);
 
     var paths = try fixture.generator.toBehaviorPaths(allocator);
     defer {
@@ -4959,8 +5065,6 @@ test "validated field without maxItems stays linear" {
     try std.testing.expectEqualStrings("for...of over `items`", sql_bound.linear.source.desc);
 }
 
-const import_corpus = @import("tests/import_corpus.zig");
-
 test "the import scan maps builtin slots to function metadata in both atom modes" {
     // Replaces the differential that proved this scan matches the pre-C1
     // implementation. Both atom modes, per C1 finding 2.
@@ -5057,7 +5161,7 @@ test "a path that checks two calls to one function stubs each call by its own co
     var checked_both_ok: usize = 0;
     for (tests) |test_case| {
         try std.testing.expect(test_case.io_stubs.items.len >= 1);
-        const first_ok = std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, "\"ok\":true") != null;
+        const first_ok = std.mem.find(u8, test_case.io_stubs.items[0].result_json, "\"ok\":true") != null;
         switch (test_case.expected_status.knownValue() orelse return error.UnknownStatus) {
             401 => {
                 // The first call fails. The second call is never reached.
@@ -5069,13 +5173,13 @@ test "a path that checks two calls to one function stubs each call by its own co
                 // The first call succeeds and only the second call fails.
                 try std.testing.expectEqual(@as(usize, 2), test_case.io_stubs.items.len);
                 try std.testing.expect(first_ok);
-                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[1].result_json, "\"ok\":false") != null);
+                try std.testing.expect(std.mem.find(u8, test_case.io_stubs.items[1].result_json, "\"ok\":false") != null);
                 checked_second_fail += 1;
             },
             200 => {
                 try std.testing.expectEqual(@as(usize, 2), test_case.io_stubs.items.len);
                 try std.testing.expect(first_ok);
-                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[1].result_json, "\"ok\":true") != null);
+                try std.testing.expect(std.mem.find(u8, test_case.io_stubs.items[1].result_json, "\"ok\":true") != null);
                 checked_both_ok += 1;
             },
             else => return error.UnexpectedStatus,
@@ -5444,20 +5548,20 @@ test "a failing fetch path stubs a response the replay reads as a 503" {
             502 => {
                 // The first fetch fails and the second is never reached.
                 try std.testing.expectEqual(@as(usize, 1), test_case.io_stubs.items.len);
-                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, failed_stub) != null);
+                try std.testing.expect(std.mem.find(u8, test_case.io_stubs.items[0].result_json, failed_stub) != null);
                 seen_502 = true;
             },
             504 => {
                 // Only the second fetch fails. Each call has its own stub.
                 try std.testing.expectEqual(@as(usize, 2), test_case.io_stubs.items.len);
-                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, ok_stub) != null);
-                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[1].result_json, failed_stub) != null);
+                try std.testing.expect(std.mem.find(u8, test_case.io_stubs.items[0].result_json, ok_stub) != null);
+                try std.testing.expect(std.mem.find(u8, test_case.io_stubs.items[1].result_json, failed_stub) != null);
                 seen_504 = true;
             },
             200 => {
                 try std.testing.expectEqual(@as(usize, 2), test_case.io_stubs.items.len);
                 for (test_case.io_stubs.items) |stub| {
-                    try std.testing.expect(std.mem.indexOf(u8, stub.result_json, ok_stub) != null);
+                    try std.testing.expect(std.mem.find(u8, stub.result_json, ok_stub) != null);
                 }
                 seen_200 = true;
             },
@@ -5472,9 +5576,9 @@ test "a failing fetch path stubs a response the replay reads as a 503" {
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     try fixture.generator.writeJsonl(&aw.writer);
     buf = aw.toArrayList();
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"statusText\":\"Service Unavailable\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"headers\":{}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"error\":\"test-error\"") == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\"statusText\":\"Service Unavailable\"") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\"headers\":{}") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\"error\":\"test-error\"") == null);
 }
 
 test "a Result export keeps its Result stubs beside a fetch" {
@@ -5496,10 +5600,10 @@ test "a Result export keeps its Result stubs beside a fetch" {
 
     for (fixture.generator.getTests()) |test_case| {
         switch (test_case.expected_status.knownValue() orelse return error.UnknownStatus) {
-            401 => try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, "\"ok\":false") != null),
+            401 => try std.testing.expect(std.mem.find(u8, test_case.io_stubs.items[0].result_json, "\"ok\":false") != null),
             502 => {
-                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, "\"ok\":true") != null);
-                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[1].result_json, "\"status\":503") != null);
+                try std.testing.expect(std.mem.find(u8, test_case.io_stubs.items[0].result_json, "\"ok\":true") != null);
+                try std.testing.expect(std.mem.find(u8, test_case.io_stubs.items[1].result_json, "\"status\":503") != null);
             },
             200 => {},
             else => return error.UnexpectedStatus,
@@ -5544,7 +5648,7 @@ test "an && fall-through keeps the case where a later conjunct is false" {
     try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_ok}));
     try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_not_ok}));
     for (tests) |t| {
-        const failed = std.mem.indexOf(u8, t.io_stubs.items[0].result_json, "\"ok\":false") != null;
+        const failed = std.mem.find(u8, t.io_stubs.items[0].result_json, "\"ok\":false") != null;
         try std.testing.expectEqual(t.constraints[0] == .result_not_ok, failed);
     }
     try std.testing.expect(fixture.generator.pathsExhaustive());
@@ -5726,7 +5830,7 @@ const status_prefix =
 /// The `status` that a recorded fetch stub carries.
 fn stubStatus(result_json: []const u8) !u16 {
     const key = "\"status\":";
-    const at = std.mem.indexOf(u8, result_json, key) orelse return error.NoStatus;
+    const at = std.mem.find(u8, result_json, key) orelse return error.NoStatus;
     var end = at + key.len;
     while (end < result_json.len and std.ascii.isDigit(result_json[end])) end += 1;
     return std.fmt.parseInt(u16, result_json[at + key.len .. end], 10);
@@ -6000,9 +6104,9 @@ test "the canonical stubs for status 200 and 503 are the ok-record stubs" {
     try std.testing.expectEqualStrings(okRecordStub(true), statusStub(200));
     try std.testing.expectEqualStrings(okRecordStub(false), statusStub(503));
     try std.testing.expectEqual(@as(u16, 404), try stubStatus(statusStub(404)));
-    try std.testing.expect(std.mem.indexOf(u8, statusStub(404), "\"statusText\":\"Not Found\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, statusStub(302), "\"headers\":{}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, statusStub(599), "\"status\":599") != null);
+    try std.testing.expect(std.mem.find(u8, statusStub(404), "\"statusText\":\"Not Found\"") != null);
+    try std.testing.expect(std.mem.find(u8, statusStub(302), "\"headers\":{}") != null);
+    try std.testing.expect(std.mem.find(u8, statusStub(599), "\"status\":599") != null);
 }
 
 test "a direct req.method comparison constrains the request method" {
@@ -6733,4 +6837,111 @@ test "a module call in an if branch that does not return stays on the path that 
     try std.testing.expectEqual(@as(usize, 1), tests[0].io_stubs.items.len);
     try std.testing.expectEqualStrings("path 2 !POST", tests[1].name);
     try std.testing.expectEqual(@as(usize, 0), tests[1].io_stubs.items.len);
+}
+
+test "nested conditional return inside failure branch preserves failure constraint on fall-through" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const res = fetch("https://example.com");
+        \\  if (!res.ok) {
+        \\    if (req.method === "POST") {
+        \\      return Response.text("failed", { status: 502 });
+        \\    }
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    // Path 1: !res.ok && POST -> 502
+    try std.testing.expect(tests[0].expected_status.isKnown(502));
+    try std.testing.expectEqual(@as(usize, 2), tests[0].constraints.len);
+    try std.testing.expect(tests[0].constraints[0].isFailure());
+    // Path 2: !res.ok && !POST -> falls through to 200, keeping the failure constraint!
+    try std.testing.expect(tests[1].expected_status.isKnown(200));
+    try std.testing.expectEqual(@as(usize, 2), tests[1].constraints.len);
+    try std.testing.expect(tests[1].constraints[0].isFailure());
+    // Path 3: res.ok -> 200
+    try std.testing.expect(tests[2].expected_status.isKnown(200));
+    try std.testing.expectEqual(@as(usize, 1), tests[2].constraints.len);
+    try std.testing.expect(!tests[2].constraints[0].isFailure());
+}
+
+test "nested for-of loops retire descriptors without overflowing capacity" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { cacheGet } from "zttp:cache";
+        \\function handler(req) {
+        \\  for (const a of req.a) {
+        \\    for (const b of req.b) {
+        \\      for (const c of req.c) {
+        \\        for (const d of req.d) {
+        \\          for (const e of req.e) {
+        \\            cacheGet("ns", e);
+        \\          }
+        \\        }
+        \\      }
+        \\    }
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), fixture.generator.getTests().len);
+    try std.testing.expectEqual(@as(usize, 5), fixture.generator.retired_loop_descs.items.len);
+}
+
+test "trailingLimitValue strips SQL comments and ignores commented LIMIT" {
+    try std.testing.expectEqual(@as(?u32, 3), PathGenerator.trailingLimitValue("SELECT id FROM todos ORDER BY id LIMIT 3"));
+    try std.testing.expectEqual(@as(?u32, null), PathGenerator.trailingLimitValue("SELECT * FROM users -- LIMIT 10"));
+    try std.testing.expectEqual(@as(?u32, null), PathGenerator.trailingLimitValue("SELECT * FROM users /* LIMIT 10 */"));
+    try std.testing.expectEqual(@as(?u32, null), PathGenerator.trailingLimitValue("SELECT * FROM users WHERE note = 'LIMIT 10'"));
+    try std.testing.expectEqual(@as(?u32, null), PathGenerator.trailingLimitValue("SELECT * FROM users /* unterminated LIMIT 10"));
+    try std.testing.expectEqual(@as(?u32, 10), PathGenerator.trailingLimitValue("SELECT * FROM users LIMIT 10 -- trailing"));
+    try std.testing.expectEqual(@as(?u32, 10), PathGenerator.trailingLimitValue("SELECT * FROM users LIMIT /* cap */ 10"));
+}
+
+test "nonNegativeI128ToU32 handles wide i64 range subtraction without overflow" {
+    const wide = @as(i128, std.math.maxInt(i64)) - @as(i128, std.math.minInt(i64));
+    try std.testing.expectEqual(std.math.maxInt(u32), PathGenerator.nonNegativeI128ToU32(wide));
+    const neg = @as(i128, std.math.minInt(i64)) - @as(i128, std.math.maxInt(i64));
+    try std.testing.expectEqual(@as(u32, 0), PathGenerator.nonNegativeI128ToU32(neg));
+    try std.testing.expectEqual(@as(u32, 5), PathGenerator.nonNegativeI128ToU32(@as(i128, 10) - @as(i128, 5)));
+}
+
+test "writeJsonl JSON-escapes method with quotes" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  if (req.method === "BAD\"METHOD") {
+        \\    return Response.text("bad", { status: 400 });
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try fixture.generator.writeJsonl(&aw.writer);
+
+    var it = std.mem.splitScalar(u8, aw.written(), '\n');
+    var saw_escaped_method = false;
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+        defer parsed.deinit();
+        if (parsed.value.object.get("method")) |m| {
+            if (std.mem.eql(u8, m.string, "BAD\"METHOD")) saw_escaped_method = true;
+        }
+    }
+    try std.testing.expect(saw_escaped_method);
 }

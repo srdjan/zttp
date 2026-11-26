@@ -104,9 +104,10 @@ pub const Interpreter = struct {
         self: *Interpreter,
         pic: *PolymorphicInlineCache,
         hidden_class_idx: object.HiddenClassIndex,
+        atom: object.Atom,
         slot_offset: u16,
     ) void {
-        lifecycle.updatePic(self, pic, hidden_class_idx, slot_offset);
+        lifecycle.updatePic(self, pic, hidden_class_idx, atom, slot_offset);
     }
 
     pub fn snapshotPerfStats(self: *const Interpreter) PerfStats {
@@ -114,7 +115,27 @@ pub const Interpreter = struct {
     }
 
     inline fn offsetPc(self: *Interpreter, offset: i16) void {
-        self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+        self.offsetPcI32(offset);
+    }
+
+    inline fn offsetPcI32(self: *Interpreter, offset: i32) void {
+        self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + @as(isize, offset))));
+    }
+
+    /// Return the non-negative array index if `index_val` is an exact non-negative
+    /// integer (int-tagged or integral finite float64 in 0..maxInt(i32)).
+    inline fn exactArrayIndex(index_val: value.JSValue) ?u32 {
+        if (index_val.isInt()) {
+            const idx = index_val.getInt();
+            return if (idx >= 0) @intCast(idx) else null;
+        }
+        if (index_val.isFloat64()) {
+            const f = index_val.getFloat64();
+            if (std.math.isFinite(f) and f == @trunc(f) and f >= 0.0 and f <= @as(f64, std.math.maxInt(i32))) {
+                return @intFromFloat(f);
+            }
+        }
+        return null;
     }
 
     pub inline fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
@@ -883,7 +904,8 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const offset = util.readI16(self.pc);
                 self.pc += 2;
-                self.offsetPc(-offset);
+                // Widen to i32 before negation so offset == minInt(i16) (-32768) does not panic.
+                self.offsetPcI32(-@as(i32, offset));
                 try self.checkBackedge();
                 continue :sw @fromBackingInt(@intCast(self.pc[0]));
             },
@@ -900,6 +922,9 @@ pub const Interpreter = struct {
                 self.pc += 2;
                 if (cond_bool) {
                     self.offsetPc(offset);
+                    if (offset < 0) {
+                        try self.checkBackedge();
+                    }
                 }
                 continue :sw @fromBackingInt(@intCast(self.pc[0]));
             },
@@ -916,6 +941,9 @@ pub const Interpreter = struct {
                 self.pc += 2;
                 if (!cond_bool) {
                     self.offsetPc(offset);
+                    if (offset < 0) {
+                        try self.checkBackedge();
+                    }
                 }
                 continue :sw @fromBackingInt(@intCast(self.pc[0]));
             },
@@ -973,10 +1001,15 @@ pub const Interpreter = struct {
 
                 if (obj_val.isObject()) {
                     const obj = object.JSObject.fromValue(obj_val);
-                    // Barriered: a literal being initialized can be evacuated to
-                    // tenured by an allocation between create and this store, so a
-                    // nursery value needs the cross-gen edge recorded.
-                    try self.ctx.setSlotBarriered(obj, slot_idx, val);
+                    if (obj.class_id == .object) {
+                        if (self.ctx.enforce_arena_escape and self.ctx.hybrid != null and !obj.flags.is_arena and self.ctx.isEphemeralValue(val)) {
+                            return error.ArenaObjectEscape;
+                        }
+                        // Barriered: a literal being initialized can be evacuated to
+                        // tenured by an allocation between create and this store, so a
+                        // nursery value needs the cross-gen edge recorded.
+                        try self.ctx.setSlotBarriered(obj, slot_idx, val);
+                    }
                 }
                 continue :sw @fromBackingInt(@intCast(self.pc[0]));
             },
@@ -1060,7 +1093,7 @@ pub const Interpreter = struct {
                     const obj = object.JSObject.fromValue(obj_val);
                     const pic = &self.pic_cache[cache_idx];
 
-                    if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
+                    if (pic.lookup(obj.hidden_class_idx, atom)) |slot_offset| {
                         self.pic_hits +%= 1;
                         try self.ctx.push(obj.getSlot(slot_offset));
                         continue :sw @fromBackingInt(@intCast(self.pc[0]));
@@ -1072,7 +1105,7 @@ pub const Interpreter = struct {
                         continue :sw @fromBackingInt(@intCast(self.pc[0]));
                     };
                     if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
-                        self.updatePic(pic, obj.hidden_class_idx, slot_offset);
+                        self.updatePic(pic, obj.hidden_class_idx, atom, slot_offset);
                         try self.ctx.push(obj.getSlot(slot_offset));
                     } else if (obj.getProperty(pool, atom)) |prop_val| {
                         try self.ctx.push(prop_val);
@@ -1116,7 +1149,7 @@ pub const Interpreter = struct {
                         return error.ArenaObjectEscape;
                     }
 
-                    if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
+                    if (pic.lookup(obj.hidden_class_idx, atom)) |slot_offset| {
                         self.pic_hits +%= 1;
                         // Arena-escape already checked above; barrier the fast-path store.
                         try self.ctx.setSlotBarriered(obj, slot_offset, val);
@@ -1129,7 +1162,7 @@ pub const Interpreter = struct {
                         continue :sw @fromBackingInt(@intCast(self.pc[0]));
                     };
                     if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
-                        self.updatePic(pic, obj.hidden_class_idx, slot_offset);
+                        self.updatePic(pic, obj.hidden_class_idx, atom, slot_offset);
                         // Arena-escape already checked above; barrier the fast-path store.
                         try self.ctx.setSlotBarriered(obj, slot_offset, val);
                     } else {
@@ -1144,11 +1177,9 @@ pub const Interpreter = struct {
                 const index_val = self.ctx.stack[sp - 1];
                 const obj_val = self.ctx.stack[sp - 2];
 
-                if (obj_val.isObject() and index_val.isInt()) {
-                    const obj = object.JSObject.fromValue(obj_val);
-                    const idx = index_val.getInt();
-                    if (idx >= 0) {
-                        const idx_u: u32 = @intCast(idx);
+                if (obj_val.isObject()) {
+                    if (exactArrayIndex(index_val)) |idx_u| {
+                        const obj = object.JSObject.fromValue(obj_val);
                         if (obj.class_id == .array) {
                             const len = @as(u32, @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt()));
                             if (idx_u < len) {
@@ -1172,7 +1203,7 @@ pub const Interpreter = struct {
                             continue :sw @fromBackingInt(@intCast(self.pc[0]));
                         } else {
                             var idx_buf: [32]u8 = undefined;
-                            const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch {
+                            const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx_u}) catch {
                                 self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
                                 self.ctx.sp = sp - 1;
                                 continue :sw @fromBackingInt(@intCast(self.pc[0]));
@@ -1289,7 +1320,14 @@ pub const Interpreter = struct {
                     bc_ptr,
                     @fromBackingInt(@intCast(bc_ptr.name_atom)),
                 );
+                var func_tracked = false;
+                errdefer if (!func_tracked) {
+                    const bc_data = func_obj.inline_slots[object.JSObject.Slots.FUNC_DATA].toExternPtr(object.BytecodeFunctionData);
+                    self.ctx.allocator.destroy(bc_data);
+                    func_obj.destroy(self.ctx.allocator);
+                };
                 try self.ctx.bytecode_functions.append(self.ctx.allocator, func_obj);
+                func_tracked = true;
                 try self.ctx.push(func_obj.toValue());
                 continue :sw @fromBackingInt(@intCast(self.pc[0]));
             },
@@ -1316,7 +1354,8 @@ pub const Interpreter = struct {
                     const h = self.ctx.hybrid orelse return error.OutOfMemory;
                     break :blk h.arena.allocSlice(*object.Upvalue, upvalue_count) orelse return error.OutOfMemory;
                 } else try self.ctx.allocator.alloc(*object.Upvalue, upvalue_count);
-                errdefer if (!in_request) self.ctx.allocator.free(upvalues);
+                var upvalues_owned = !in_request;
+                errdefer if (upvalues_owned) self.ctx.allocator.free(upvalues);
 
                 for (0..upvalue_count) |i| {
                     const info = bc_ptr.upvalue_info[i];
@@ -1362,7 +1401,16 @@ pub const Interpreter = struct {
                     @fromBackingInt(@intCast(bc_ptr.name_atom)),
                     upvalues,
                 );
+                upvalues_owned = false;
+                var closure_tracked = false;
+                errdefer if (!closure_tracked) {
+                    const cd = closure_obj.inline_slots[object.JSObject.Slots.FUNC_DATA].toExternPtr(object.ClosureData);
+                    self.ctx.allocator.free(cd.upvalues);
+                    self.ctx.allocator.destroy(cd);
+                    closure_obj.destroy(self.ctx.allocator);
+                };
                 try self.ctx.bytecode_functions.append(self.ctx.allocator, closure_obj);
+                closure_tracked = true;
                 try self.ctx.push(closure_obj.toValue());
                 continue :sw @fromBackingInt(@intCast(self.pc[0]));
             },
@@ -1423,7 +1471,7 @@ pub const Interpreter = struct {
                 const idx_val = self.ctx.pop();
                 const target_val = self.ctx.peek();
 
-                if (target_val.isObject() and source_val.isObject() and idx_val.isInt()) {
+                if (target_val.isObject() and source_val.isObject() and idx_val.isInt() and idx_val.getInt() >= 0) {
                     const target = object.JSObject.fromValue(target_val);
                     const source = object.JSObject.fromValue(source_val);
                     var idx: usize = @intCast(idx_val.getInt());
@@ -1603,6 +1651,9 @@ pub const Interpreter = struct {
                 }
                 // Loop done - jump to cleanup
                 self.offsetPc(end_offset);
+                if (end_offset < 0) {
+                    try self.checkBackedge();
+                }
                 continue :sw @fromBackingInt(@intCast(self.pc[0]));
             },
             .for_of_next_put_loc => {
@@ -1648,6 +1699,9 @@ pub const Interpreter = struct {
                 }
                 // Loop done - jump to cleanup
                 self.offsetPc(end_offset);
+                if (end_offset < 0) {
+                    try self.checkBackedge();
+                }
                 continue :sw @fromBackingInt(@intCast(self.pc[0]));
             },
 
@@ -1742,6 +1796,9 @@ pub const Interpreter = struct {
                 self.pc += 2;
                 if (!cond_bool) {
                     self.offsetPc(offset);
+                    if (offset < 0) {
+                        try self.checkBackedge();
+                    }
                 }
                 continue :sw @fromBackingInt(@intCast(self.pc[0]));
             },
@@ -2197,14 +2254,12 @@ pub const Interpreter = struct {
     inline fn storeElem(self: *Interpreter, obj_val: value.JSValue, index_val: value.JSValue, val: value.JSValue) !void {
         if (!obj_val.isObject()) return;
         const obj = object.JSObject.fromValue(obj_val);
-        if (index_val.isInt()) {
-            const idx = index_val.getInt();
-            if (idx < 0) return;
+        if (exactArrayIndex(index_val)) |idx_u| {
             if (obj.class_id == .array) {
-                try self.ctx.setIndexChecked(obj, @intCast(idx), val);
+                try self.ctx.setIndexChecked(obj, idx_u, val);
             } else {
                 var idx_buf: [32]u8 = undefined;
-                const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch return;
+                const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx_u}) catch return;
                 const atom = self.ctx.atoms.intern(idx_slice) catch return;
                 try self.ctx.setPropertyChecked(obj, atom, val);
             }
@@ -4495,53 +4550,55 @@ test "PolymorphicInlineCache unit tests" {
     const class5: object.HiddenClassIndex = @fromBackingInt(@intCast(5));
 
     // Initially empty
-    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class1));
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class1, .length));
     try std.testing.expectEqual(@as(u8, 0), pic.count);
     try std.testing.expect(!pic.megamorphic);
 
     // Add first entry
-    try std.testing.expect(pic.update(class1, 10));
+    try std.testing.expect(pic.update(class1, .length, 10));
     try std.testing.expectEqual(@as(u8, 1), pic.count);
-    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1));
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1, .length));
+    // Different atom on the same hidden class must miss
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class1, .name));
 
     // Add second entry
-    try std.testing.expect(pic.update(class2, 20));
+    try std.testing.expect(pic.update(class2, .length, 20));
     try std.testing.expectEqual(@as(u8, 2), pic.count);
-    try std.testing.expectEqual(@as(?u16, 20), pic.lookup(class2));
+    try std.testing.expectEqual(@as(?u16, 20), pic.lookup(class2, .length));
 
     // First entry still works
-    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1));
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1, .length));
 
     // Fill cache up to effective cap (MAX_POLYMORPHIC_SHAPES)
-    try std.testing.expect(pic.update(class3, 30));
-    try std.testing.expect(pic.update(class4, 40));
+    try std.testing.expect(pic.update(class3, .length, 30));
+    try std.testing.expect(pic.update(class4, .length, 40));
     try std.testing.expectEqual(@as(u8, effective_pic_cap), pic.count);
     try std.testing.expect(!pic.megamorphic);
 
     // All entries work
-    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1));
-    try std.testing.expectEqual(@as(?u16, 20), pic.lookup(class2));
-    try std.testing.expectEqual(@as(?u16, 30), pic.lookup(class3));
-    try std.testing.expectEqual(@as(?u16, 40), pic.lookup(class4));
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1, .length));
+    try std.testing.expectEqual(@as(?u16, 20), pic.lookup(class2, .length));
+    try std.testing.expectEqual(@as(?u16, 30), pic.lookup(class3, .length));
+    try std.testing.expectEqual(@as(?u16, 40), pic.lookup(class4, .length));
 
     // One-past-cap entry triggers megamorphic
-    try std.testing.expect(!pic.update(class5, 50));
+    try std.testing.expect(!pic.update(class5, .length, 50));
     try std.testing.expect(pic.megamorphic);
-    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class5));
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class5, .length));
 
     // Existing entries still work (megamorphic doesn't clear cache)
-    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1));
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1, .length));
 
     // Update existing entry in megamorphic state - returns false because we
     // don't mutate the cache while megamorphic; the original slot remains valid.
-    try std.testing.expect(!pic.update(class1, 100));
-    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1)); // unchanged
+    try std.testing.expect(!pic.update(class1, .length, 100));
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1, .length)); // unchanged
 
     // Reset test
     pic.reset();
     try std.testing.expectEqual(@as(u8, 0), pic.count);
     try std.testing.expect(!pic.megamorphic);
-    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class1));
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class1, .length));
 }
 
 test "PolymorphicInlineCache: megamorphic recovery after stable shape window" {
@@ -4552,31 +4609,32 @@ test "PolymorphicInlineCache: megamorphic recovery after stable shape window" {
     var class_idx: u16 = 1;
     while (class_idx <= effective_pic_cap + 1) : (class_idx += 1) {
         const cls: object.HiddenClassIndex = @fromBackingInt(@intCast(class_idx));
-        _ = pic.update(cls, class_idx * 10);
+        _ = pic.update(cls, .length, class_idx * 10);
     }
     try std.testing.expect(pic.megamorphic);
 
     const dominant: object.HiddenClassIndex = @fromBackingInt(@intCast(42));
     var observations: u16 = 0;
     while (observations < window - 1) : (observations += 1) {
-        try std.testing.expect(!pic.update(dominant, 777));
+        try std.testing.expect(!pic.update(dominant, .length, 777));
     }
     try std.testing.expect(pic.megamorphic);
     try std.testing.expect(!pic.just_recovered);
 
     // One more observation crosses the threshold and performs recovery.
-    try std.testing.expect(pic.update(dominant, 777));
+    try std.testing.expect(pic.update(dominant, .length, 777));
     try std.testing.expect(!pic.megamorphic);
     try std.testing.expect(pic.just_recovered);
     try std.testing.expectEqual(@as(u8, 1), pic.count);
-    try std.testing.expectEqual(@as(?u16, 777), pic.lookup(dominant));
+    try std.testing.expectEqual(@as(?u16, 777), pic.lookup(dominant, .length));
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(dominant, .name));
 
     // A second shape interrupting recovery counting should not recover.
     pic.reset();
     class_idx = 1;
     while (class_idx <= effective_pic_cap + 1) : (class_idx += 1) {
         const cls: object.HiddenClassIndex = @fromBackingInt(@intCast(class_idx));
-        _ = pic.update(cls, class_idx * 10);
+        _ = pic.update(cls, .length, class_idx * 10);
     }
     try std.testing.expect(pic.megamorphic);
 
@@ -4585,7 +4643,7 @@ test "PolymorphicInlineCache: megamorphic recovery after stable shape window" {
     var i: u16 = 0;
     while (i < window * 2) : (i += 1) {
         const cls = if (i % 2 == 0) shape_a else shape_b;
-        try std.testing.expect(!pic.update(cls, 1));
+        try std.testing.expect(!pic.update(cls, .length, 1));
     }
     try std.testing.expect(pic.megamorphic);
     try std.testing.expect(!pic.just_recovered);
@@ -4662,4 +4720,336 @@ test "End-to-end: polymorphic property access" {
     try std.testing.expect(result_val.isInt());
     // 1 + 10 + 100 + 1000 = 1111
     try std.testing.expectEqual(@as(i32, 1111), result_val.getInt());
+}
+
+test "PIC does not alias across modules sharing cache_idx with different atoms" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const pool = ctx.hidden_class_pool.?;
+    const atom_a = try ctx.atoms.intern("propA");
+    const atom_b = try ctx.atoms.intern("propB");
+    const atom_a_u16: u16 = @intCast(@backingInt(atom_a));
+    const atom_b_u16: u16 = @intCast(@backingInt(atom_b));
+
+    const obj = try ctx.createObject(null);
+    try ctx.setPropertyChecked(obj, atom_a, value.JSValue.fromInt(11));
+    try ctx.setPropertyChecked(obj, atom_b, value.JSValue.fromInt(22));
+
+    // Two separately compiled modules both start ic_cache_idx at 0.
+    const get_a_code = [_]u8{
+        @backingInt(bytecode.Opcode.get_loc_0),
+        @backingInt(bytecode.Opcode.get_field_ic),
+        @truncate(atom_a_u16),
+        @truncate(atom_a_u16 >> 8),
+        0,
+        0,
+        @backingInt(bytecode.Opcode.ret),
+    };
+    const get_b_code = [_]u8{
+        @backingInt(bytecode.Opcode.get_loc_0),
+        @backingInt(bytecode.Opcode.get_field_ic),
+        @truncate(atom_b_u16),
+        @truncate(atom_b_u16 >> 8),
+        0,
+        0,
+        @backingInt(bytecode.Opcode.ret),
+    };
+    const put_a_code = [_]u8{
+        @backingInt(bytecode.Opcode.get_loc_0),
+        @backingInt(bytecode.Opcode.get_loc_1),
+        @backingInt(bytecode.Opcode.put_field_ic),
+        @truncate(atom_a_u16),
+        @truncate(atom_a_u16 >> 8),
+        1,
+        0,
+        @backingInt(bytecode.Opcode.ret_undefined),
+    };
+    const put_b_code = [_]u8{
+        @backingInt(bytecode.Opcode.get_loc_0),
+        @backingInt(bytecode.Opcode.get_loc_1),
+        @backingInt(bytecode.Opcode.put_field_ic),
+        @truncate(atom_b_u16),
+        @truncate(atom_b_u16 >> 8),
+        1,
+        0,
+        @backingInt(bytecode.Opcode.ret_undefined),
+    };
+
+    const func_get_a = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 1,
+        .local_count = 1,
+        .stack_size = 8,
+        .flags = .{},
+        .code = &get_a_code,
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const func_get_b = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 1,
+        .local_count = 1,
+        .stack_size = 8,
+        .flags = .{},
+        .code = &get_b_code,
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const func_put_a = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 2,
+        .local_count = 2,
+        .stack_size = 8,
+        .flags = .{},
+        .code = &put_a_code,
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const func_put_b = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 2,
+        .local_count = 2,
+        .stack_size = 8,
+        .flags = .{},
+        .code = &put_b_code,
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const val_a = try interp.callBytecodeFunction(value.JSValue.undefined_val, &func_get_a, value.JSValue.undefined_val, &.{obj.toValue()});
+    const val_b = try interp.callBytecodeFunction(value.JSValue.undefined_val, &func_get_b, value.JSValue.undefined_val, &.{obj.toValue()});
+    try std.testing.expectEqual(@as(i32, 11), val_a.getInt());
+    try std.testing.expectEqual(@as(i32, 22), val_b.getInt());
+
+    _ = try interp.callBytecodeFunction(value.JSValue.undefined_val, &func_put_a, value.JSValue.undefined_val, &.{ obj.toValue(), value.JSValue.fromInt(100) });
+    _ = try interp.callBytecodeFunction(value.JSValue.undefined_val, &func_put_b, value.JSValue.undefined_val, &.{ obj.toValue(), value.JSValue.fromInt(200) });
+    try std.testing.expectEqual(@as(i32, 100), obj.getProperty(pool, atom_a).?.getInt());
+    try std.testing.expectEqual(@as(i32, 200), obj.getProperty(pool, atom_b).?.getInt());
+}
+
+test "peephole does not miscompile empty inner if followed by outer else" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const bytecode_opt = @import("bytecode_opt.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Bytecode emitted for:
+    //   function probe(outer, inner) {
+    //     if (outer) { if (inner) {} } else { return 999; }
+    //     return 1;
+    //   }
+    // Layout:
+    //  0: get_loc_0                  (1)
+    //  1: if_false +10 -> pos 14     (3)
+    //  4: get_loc_1                  (1)
+    //  5: if_false +0  -> pos 8      (3)
+    //  8: goto +10     -> pos 21     (3)
+    // 11: nop, nop, nop (not needed; else starts at 11!)
+    // Let's compute exact offsets:
+    //  0: get_loc_0              (1)
+    //  1: if_false +7 -> pos 11  (3)  [1+3+7 = 11]
+    //  4: get_loc_1              (1)
+    //  5: if_false +0 -> pos 8   (3)  [5+3+0 = 8]
+    //  8: goto +4     -> pos 15  (3)  [8+3+4 = 15]
+    // 11: push_const 0 (999)     (3)
+    // 14: ret                    (1)
+    // 15: push_1                 (1)
+    // 16: ret                    (1)
+    var code = [_]u8{
+        @backingInt(bytecode.Opcode.get_loc_0),
+        @backingInt(bytecode.Opcode.if_false),
+        7,
+        0,
+        @backingInt(bytecode.Opcode.get_loc_1),
+        @backingInt(bytecode.Opcode.if_false),
+        0,
+        0,
+        @backingInt(bytecode.Opcode.goto),
+        4,
+        0,
+        @backingInt(bytecode.Opcode.push_const),
+        0,
+        0,
+        @backingInt(bytecode.Opcode.ret),
+        @backingInt(bytecode.Opcode.push_1),
+        @backingInt(bytecode.Opcode.ret),
+    };
+    const opt_res = try bytecode_opt.optimizeBytecode(allocator, &code);
+    const consts = [_]value.JSValue{value.JSValue.fromInt(999)};
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 2,
+        .local_count = 2,
+        .stack_size = 8,
+        .flags = .{},
+        .code = code[0..opt_res.len],
+        .constants = &consts,
+        .source_map = null,
+        .line_table = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const r_tt = try interp.callBytecodeFunction(value.JSValue.undefined_val, &func, value.JSValue.undefined_val, &.{ value.JSValue.true_val, value.JSValue.true_val });
+    const r_tf = try interp.callBytecodeFunction(value.JSValue.undefined_val, &func, value.JSValue.undefined_val, &.{ value.JSValue.true_val, value.JSValue.false_val });
+    const r_ft = try interp.callBytecodeFunction(value.JSValue.undefined_val, &func, value.JSValue.undefined_val, &.{ value.JSValue.false_val, value.JSValue.true_val });
+    try std.testing.expectEqual(@as(i32, 1), r_tt.getInt());
+    try std.testing.expectEqual(@as(i32, 1), r_tf.getInt());
+    try std.testing.expectEqual(@as(i32, 999), r_ft.getInt());
+}
+
+test "130-element array literal preserves indices 128 and 129" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const Parser = @import("parser/parse.zig").Parser;
+    const CodeGen = @import("parser/codegen.zig").CodeGen;
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 65536 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const source =
+        \\function makeArr() {
+        \\  const a = [
+        \\    0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+        \\    10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+        \\    20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+        \\    30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+        \\    40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+        \\    50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
+        \\    60, 61, 62, 63, 64, 65, 66, 67, 68, 69,
+        \\    70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+        \\    80, 81, 82, 83, 84, 85, 86, 87, 88, 89,
+        \\    90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+        \\    100, 101, 102, 103, 104, 105, 106, 107, 108, 109,
+        \\    110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+        \\    120, 121, 122, 123, 124, 125, 126, 127, 128, 129
+        \\  ];
+        \\  return a[0] + a[127] * 10 + a[128] * 1000 + a[129] * 1000000;
+        \\}
+    ;
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&ctx.atoms);
+    const root = try parser.parse();
+    var gen = CodeGen.initWithIRStore(allocator, &parser.nodes, &parser.constants, &parser.scopes, null, &ctx.atoms);
+    defer gen.deinit();
+    const compiled = try gen.generate(root);
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = compiled.local_count,
+        .stack_size = compiled.stack_size,
+        .flags = .{},
+        .code = compiled.code,
+        .constants = compiled.constants,
+        .source_map = null,
+        .line_table = null,
+    };
+    var interp = Interpreter.init(ctx);
+    _ = try interp.callBytecodeFunction(value.JSValue.undefined_val, &func, value.JSValue.undefined_val, &.{});
+    const make_arr_atom = try ctx.atoms.intern("makeArr");
+    const make_arr_fn = ctx.getGlobal(make_arr_atom).?;
+    const make_arr_bc = make_arr_fn.toPtr(object.JSObject).getBytecodeFunctionData().?.bytecode;
+    const res = try interp.callBytecodeFunction(make_arr_fn, make_arr_bc, value.JSValue.undefined_val, &.{});
+    // 0 + 1270 + 128000 + 129000000 = 129129270
+    try std.testing.expectEqual(@as(i32, 129129270), res.getInt());
+}
+
+test "get_elem and put_elem accept exact non-negative integral floats and frame preserves ctx.exception on error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const arr = try ctx.createArray();
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
+    try arr.setIndex(allocator, 1, value.JSValue.fromInt(20));
+
+    // Write arr[1.0] = 99 and read arr[1.0]
+    const consts = [_]value.JSValue{
+        value.JSValue.fromFloat(1.0),
+        value.JSValue.fromInt(99),
+    };
+    const rw_code = [_]u8{
+        @backingInt(bytecode.Opcode.get_loc_0),
+        @backingInt(bytecode.Opcode.push_const), 0, 0, // 1.0
+        @backingInt(bytecode.Opcode.push_const), 1,                                      0, // 99
+        @backingInt(bytecode.Opcode.put_elem),   @backingInt(bytecode.Opcode.get_loc_0),
+        @backingInt(bytecode.Opcode.push_const), 0,                                0, // 1.0
+        @backingInt(bytecode.Opcode.get_elem),   @backingInt(bytecode.Opcode.ret),
+    };
+    const rw_func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 1,
+        .local_count = 1,
+        .stack_size = 8,
+        .flags = .{},
+        .code = &rw_code,
+        .constants = &consts,
+        .source_map = null,
+        .line_table = null,
+    };
+    var interp = Interpreter.init(ctx);
+    const got = try interp.callBytecodeFunction(value.JSValue.undefined_val, &rw_func, value.JSValue.undefined_val, &.{arr.toValue()});
+    try std.testing.expectEqual(@as(i32, 99), got.getInt());
+
+    // Exception preservation across callBytecodeFunction error unwind:
+    // if_false on a non-boolean sets ctx.exception and returns error.TypeError.
+    const err_code = [_]u8{
+        @backingInt(bytecode.Opcode.push_1),
+        @backingInt(bytecode.Opcode.if_false),
+        0,
+        0,
+        @backingInt(bytecode.Opcode.ret_undefined),
+    };
+    const err_func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 4,
+        .flags = .{},
+        .code = &err_code,
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    try std.testing.expect(!ctx.hasException());
+    try std.testing.expectError(error.TypeError, interp.callBytecodeFunction(value.JSValue.undefined_val, &err_func, value.JSValue.undefined_val, &.{}));
+    try std.testing.expect(ctx.hasException());
 }

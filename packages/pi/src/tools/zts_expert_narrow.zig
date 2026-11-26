@@ -62,10 +62,10 @@ pub fn run(
     var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
     defer text_buf.deinit();
     const w = text_buf.writer();
-    try w.writeAll("{\"path\":\"");
-    try w.writeAll(path);
+    try w.writeAll("{\"path\":");
+    try writeJsonString(w, path);
     if (observed.ran) {
-        try w.writeAll("\",\"witnesses\":[");
+        try w.writeAll(",\"witnesses\":[");
         try w.writeAll(observed.body.written());
         try w.writeAll("]}");
         return .{ .ok = true, .llm_text = try text_buf.toOwnedSlice() };
@@ -80,7 +80,7 @@ pub fn run(
             name ++ ": no handler function found in file\n",
         );
     }
-    try w.writeAll("\",\"diagnostics\":[");
+    try w.writeAll(",\"diagnostics\":[");
     try common.writeProductionDiagnostics(w, check.json_diagnostics.items);
     try w.writeAll("],\"witnesses\":[]}");
     return .{ .ok = false, .llm_text = try text_buf.toOwnedSlice() };
@@ -122,9 +122,9 @@ fn writeWitness(
     diag: flow_checker.Diagnostic,
     witness: flow_checker.Witness,
 ) !void {
-    try writer.writeAll("{\"property\":\"");
-    try writer.writeAll(tag.asString());
-    try writer.writeAll("\",\"message\":");
+    try writer.writeAll("{\"property\":");
+    try writeJsonString(writer, tag.asString());
+    try writer.writeAll(",\"message\":");
     try writeJsonString(writer, diag.message);
     try writer.writeAll(",\"conditions\":[");
     for (witness.path_constraints, 0..) |c, i| {

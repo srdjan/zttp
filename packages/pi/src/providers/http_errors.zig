@@ -44,7 +44,7 @@ pub fn classify(status_code: u16, body: []const u8) anyerror {
 
 fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
     for (needles) |n| {
-        if (std.mem.indexOf(u8, haystack, n) != null) return true;
+        if (std.mem.find(u8, haystack, n) != null) return true;
     }
     return false;
 }

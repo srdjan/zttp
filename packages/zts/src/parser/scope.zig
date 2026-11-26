@@ -172,8 +172,6 @@ pub const ScopeAnalyzer = struct {
 
     fn pushScopeInternal(self: *ScopeAnalyzer, kind: ScopeKind, enclosing_fn: ScopeId) !ScopeId {
         const id = self.next_scope_id;
-        self.next_scope_id += 1;
-
         const parent: ?ScopeId = if (self.scopes.items.len > 0) self.current_scope else null;
 
         // Inherit local slot from parent (for block scopes in same function)
@@ -189,6 +187,7 @@ pub const ScopeAnalyzer = struct {
         scope.current_local_slot = initial_slot;
 
         try self.scopes.append(self.allocator, scope);
+        self.next_scope_id += 1;
         self.current_scope = id;
 
         return id;
@@ -232,7 +231,6 @@ pub const ScopeAnalyzer = struct {
         // `const`, a function, an import, and a pattern binding share the rule.
         if (scope.findLocalMutByAtom(name_atom) != null) return error.DuplicateBinding;
         if (self.shadows(name_atom)) return error.ShadowedBinding;
-        try self.recordDeclaration(name_atom);
 
         // Global scope - use atom index as slot, no local allocation
         if (scope.kind == .global) {
@@ -244,6 +242,8 @@ pub const ScopeAnalyzer = struct {
                 .is_const = is_const,
                 .is_captured = false,
             });
+            errdefer _ = scope.bindings.pop();
+            try self.recordDeclaration(name_atom);
 
             return .{
                 .scope_id = self.current_scope,
@@ -256,7 +256,7 @@ pub const ScopeAnalyzer = struct {
         // Local scope - allocate local slot
         const slot = scope.current_local_slot;
 
-        // Check for 255 local limit
+        // Check for 255 local limit before mutating any analyzer state.
         if (slot >= 255) {
             return error.TooManyLocals;
         }
@@ -269,6 +269,8 @@ pub const ScopeAnalyzer = struct {
             .is_const = is_const,
             .is_captured = false,
         });
+        errdefer _ = scope.bindings.pop();
+        try self.recordDeclaration(name_atom);
 
         scope.current_local_slot = slot + 1;
         if (scope.current_local_slot > scope.max_local_count) {
@@ -361,15 +363,16 @@ pub const ScopeAnalyzer = struct {
                 }
 
                 if (crossed_function) {
-                    // We need to create an upvalue chain
-                    binding.is_captured = true;
-                    scope.holds_capture = true;
+                    // We need to create an upvalue chain. Mutate capture flags
+                    // only after the chain succeeds so OOM leaves scope state clean.
                     const upvalue_slot = try self.createUpvalueChain(
                         current_function_scope,
                         scope_id,
                         @truncate(binding.slot), // Local slots are u8 (checked at allocation)
                         name,
                     );
+                    binding.is_captured = true;
+                    scope.holds_capture = true;
 
                     return .{
                         .scope_id = current_function_scope,
@@ -430,6 +433,12 @@ pub const ScopeAnalyzer = struct {
             }
         }
 
+        // Reserve capacity and validate slot limit before recursing so a failure
+        // in any level leaves every scope's upvalue list untouched.
+        const inner_scope = &self.scopes.items[inner_function_scope];
+        if (inner_scope.upvalues.items.len >= 255) return error.TooManyUpvalues;
+        try inner_scope.upvalues.ensureUnusedCapacity(self.allocator, 1);
+
         const capture: Upvalue.Capture = if (parent_function_scope == source_function_scope)
             .{ .local = outer_slot }
         else
@@ -440,12 +449,9 @@ pub const ScopeAnalyzer = struct {
                 name,
             ) };
 
-        // Create new upvalue
-        const inner_scope = &self.scopes.items[inner_function_scope];
+        // Create new upvalue (infallible after capacity reservation above)
         const slot: u8 = @intCast(inner_scope.upvalues.items.len);
-        if (slot >= 255) return error.TooManyUpvalues;
-
-        try inner_scope.upvalues.append(self.allocator, .{
+        inner_scope.upvalues.appendAssumeCapacity(.{
             .source_scope_id = outer_scope,
             .source_slot = outer_slot,
             .slot = slot,
@@ -607,4 +613,33 @@ test "captured binding allocation failure propagates" {
     analyzer.allocator = failing.allocator();
 
     try std.testing.expectError(error.OutOfMemory, analyzer.resolveBinding("captured", 1));
+    // Capture flags must remain clean after OOM during upvalue chain creation.
+    try std.testing.expect(!analyzer.scopes.items[1].holds_capture);
+    try std.testing.expect(!analyzer.scopes.items[1].bindings.items[0].is_captured);
+}
+
+test "scope OOM rollback preserves next_scope_id and declaration tracking" {
+    var analyzer = try ScopeAnalyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const real_alloc = analyzer.allocator;
+    defer analyzer.allocator = real_alloc;
+
+    // pushScope OOM must not increment next_scope_id. Drop spare capacity so
+    // the append must allocate.
+    analyzer.scopes.shrinkAndFree(real_alloc, analyzer.scopes.items.len);
+    const before_id = analyzer.next_scope_id;
+    var fail0 = std.testing.FailingAllocator.init(real_alloc, .{ .fail_index = 0, .resize_fail_index = 0 });
+    analyzer.allocator = fail0.allocator();
+    try std.testing.expectError(error.OutOfMemory, analyzer.pushScope(.function));
+    try std.testing.expectEqual(before_id, analyzer.next_scope_id);
+
+    // declareBinding OOM on recordDeclaration must pop the binding cleanly.
+    analyzer.allocator = real_alloc;
+    _ = try analyzer.pushScope(.function);
+    var fail_record = std.testing.FailingAllocator.init(real_alloc, .{ .fail_index = 1 });
+    analyzer.allocator = fail_record.allocator();
+    try std.testing.expectError(error.OutOfMemory, analyzer.declareBinding("x", 10, .variable, true));
+    try std.testing.expectEqual(@as(usize, 0), analyzer.getCurrentScope().bindings.items.len);
+    try std.testing.expectEqual(@as(u8, 0), analyzer.getCurrentScope().current_local_slot);
 }

@@ -163,7 +163,9 @@ pub const LockFreePool = struct {
 
             const gc_state = try allocator.create(gc.GC);
             errdefer allocator.destroy(gc_state);
-            gc_state.* = try gc.GC.init(allocator, config.gc_config);
+            var gc_cfg = config.gc_config;
+            if (config.use_hybrid_allocation) gc_cfg.hybrid_mode = true;
+            gc_state.* = try gc.GC.init(allocator, gc_cfg);
             errdefer gc_state.deinit();
 
             // Initialize heap for size-class allocation and wire up to GC
@@ -372,6 +374,7 @@ pub const LockFreePool = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, config: PoolConfig) !LockFreePool {
+        if (config.max_size == 0) return error.InvalidPoolSize;
         const slots = try allocator.alloc(std.atomic.Value(?*Runtime), config.max_size);
         for (slots) |*slot| {
             slot.* = std.atomic.Value(?*Runtime).init(null);
@@ -455,7 +458,7 @@ pub const LockFreePool = struct {
         const slot = &self.slots[idx];
         const current = slot.load(.acquire);
         if (current) |runtime| {
-            if (slot.cmpxchgWeak(current, null, .release, .monotonic) == null) {
+            if (slot.cmpxchgStrong(current, null, .acquire, .monotonic) == null) {
                 runtime.in_use = true;
                 return runtime;
             }
@@ -767,4 +770,8 @@ test "Runtime.create errdefer ladder closes every failure path" {
         // loud rather than silently passing.
         return error.RuntimeCreateAllocationCountExceededTestBound;
     }
+}
+
+test "LockFreePool.init rejects max_size == 0" {
+    try std.testing.expectError(error.InvalidPoolSize, LockFreePool.init(std.testing.allocator, .{ .max_size = 0 }));
 }

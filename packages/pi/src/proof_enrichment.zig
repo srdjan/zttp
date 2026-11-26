@@ -110,34 +110,60 @@ fn computeProveSummary(
             const classification = diff.classify();
             const recommendation = try contract_diff.generateRecommendation(allocator, classification, &diff);
             defer allocator.free(recommendation);
-            const laws = try allocator.alloc([]u8, diff.laws_used.items.len);
-            errdefer allocator.free(laws);
-            var i: usize = 0;
-            errdefer {
-                while (i > 0) {
-                    i -= 1;
-                    allocator.free(laws[i]);
-                }
-                allocator.free(laws);
-            }
-            while (i < diff.laws_used.items.len) : (i += 1) {
-                laws[i] = try allocator.dupe(u8, diff.laws_used.items[i]);
-            }
-
-            return .{
-                .classification = try allocator.dupe(u8, classification.toString()),
-                .proof_level = try allocator.dupe(u8, zts.ContractProof.level(after_contract).toString()),
-                .recommendation = try allocator.dupe(u8, recommendation),
-                .counterexample = if (diff.canonical_counterexample) |counterexample|
-                    try allocator.dupe(u8, counterexample)
-                else
-                    null,
-                .laws_used = laws,
-            };
+            return try buildProveSummaryFromDiff(
+                allocator,
+                zts.ContractProof.level(after_contract).toString(),
+                classification.toString(),
+                recommendation,
+                diff.laws_used.items,
+                diff.canonical_counterexample,
+            );
         }
     }
 
     return null;
+}
+
+fn buildProveSummaryFromDiff(
+    allocator: std.mem.Allocator,
+    proof_level: []const u8,
+    classification: []const u8,
+    recommendation: []const u8,
+    laws_used: []const []const u8,
+    canonical_counterexample: ?[]const u8,
+) !ui_payload.ProveSummary {
+    const laws = try allocator.alloc([]u8, laws_used.len);
+    var i: usize = 0;
+    errdefer {
+        while (i > 0) {
+            i -= 1;
+            allocator.free(laws[i]);
+        }
+        allocator.free(laws);
+    }
+    while (i < laws_used.len) : (i += 1) {
+        laws[i] = try allocator.dupe(u8, laws_used[i]);
+    }
+
+    const classification_copy = try allocator.dupe(u8, classification);
+    errdefer allocator.free(classification_copy);
+    const proof_level_copy = try allocator.dupe(u8, proof_level);
+    errdefer allocator.free(proof_level_copy);
+    const recommendation_copy = try allocator.dupe(u8, recommendation);
+    errdefer allocator.free(recommendation_copy);
+    const counterexample_copy = if (canonical_counterexample) |counterexample|
+        try allocator.dupe(u8, counterexample)
+    else
+        null;
+    errdefer if (counterexample_copy) |c| allocator.free(c);
+
+    return .{
+        .classification = classification_copy,
+        .proof_level = proof_level_copy,
+        .recommendation = recommendation_copy,
+        .counterexample = counterexample_copy,
+        .laws_used = laws,
+    };
 }
 
 fn resolveHandlerPath(
@@ -293,4 +319,29 @@ test "buildUnifiedDiff emits empty diff for identical content" {
 
     try testing.expectEqual(@as(usize, 0), diff.text.len);
     try testing.expectEqual(@as(usize, 0), diff.hunks.len);
+}
+
+test "buildProveSummaryFromDiff handles OOM without leaking or double-freeing" {
+    const laws = [_][]const u8{ "commutativity", "idempotence" };
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator, input_laws: []const []const u8) !void {
+            var summary = try buildProveSummaryFromDiff(
+                allocator,
+                "full",
+                "breaking",
+                "review change",
+                input_laws,
+                "x = 1",
+            );
+            defer summary.deinit(allocator);
+            try testing.expectEqualStrings("full", summary.proof_level);
+            try testing.expectEqualStrings("breaking", summary.classification);
+            try testing.expectEqualStrings("review change", summary.recommendation);
+            try testing.expectEqualStrings("x = 1", summary.counterexample.?);
+            try testing.expectEqual(@as(usize, 2), summary.laws_used.len);
+            try testing.expectEqualStrings("commutativity", summary.laws_used[0]);
+            try testing.expectEqualStrings("idempotence", summary.laws_used[1]);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Case.run, .{&laws});
 }

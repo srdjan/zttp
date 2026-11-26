@@ -39,7 +39,7 @@ fn routerMatchImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.
         sdk.objectGet(handle, req_val, "path") orelse return sdk.JSValue.undefined_val;
     const full_path = sdk.extractString(path_val) orelse return sdk.JSValue.undefined_val;
 
-    const path_str = if (std.mem.indexOfScalar(u8, full_path, '?')) |qi| full_path[0..qi] else full_path;
+    const path_str = if (std.mem.findScalar(u8, full_path, '?')) |qi| full_path[0..qi] else full_path;
 
     const keys = sdk.objectKeys(handle, routes_val) catch return sdk.JSValue.undefined_val;
     const key_count = sdk.arrayLength(keys) orelse 0;
@@ -73,7 +73,7 @@ const Param = struct { name: []const u8, value: []const u8 };
 const MatchResult = struct { params: [8]Param, count: u8 };
 
 fn matchRoute(route_key: []const u8, method: []const u8, path: []const u8) ?MatchResult {
-    const space_idx = std.mem.indexOfScalar(u8, route_key, ' ') orelse return null;
+    const space_idx = std.mem.findScalar(u8, route_key, ' ') orelse return null;
     const route_method = route_key[0..space_idx];
     const route_pattern = route_key[space_idx + 1 ..];
 

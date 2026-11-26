@@ -8,7 +8,7 @@
 //! A fixture is never deleted and its expectation is never weakened. A change
 //! to an expectation needs a reason in the commit message.
 //!
-//! These are permanent regressions: 33 fixtures are
+//! These are permanent regressions: 36 fixtures are
 //! refused, and five persistent-state readers stay unproven because their
 //! stored value is unknown. Neither outcome may become a proof. Exact
 //! verdicts also prevent an unknown value from acquiring a false refusal
@@ -511,6 +511,15 @@ fn observe(allocator: std.mem.Allocator, fixture: Fixture) !gate.Observed {
         .{ .json_mode = true, .sql_schema_path = schema_path, .policy_source = fixture.policy_source },
     );
     defer result.deinit(allocator);
+
+    if (!result.stages_run.contains(.flow) or result.properties == null) {
+        std.debug.print("fixture {s} reached no flow verdict\n", .{fixture.name});
+        return error.FixtureReachedNoVerdict;
+    }
+    if (result.flow_unresolved != 0) {
+        std.debug.print("flow corpus: {s} left {d} construct(s) unresolved\n", .{ fixture.name, result.flow_unresolved });
+        return error.FlowUnresolvedConstruct;
+    }
 
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();

@@ -125,7 +125,7 @@ END {
 ## Install
 
 \`\`\`
-curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/srdjan/zttp/main/install.sh | sh
 \`\`\`
 
 Or download a tarball below and extract it manually.

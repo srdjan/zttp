@@ -35,7 +35,7 @@ test "stand-in tool reply survives the real local decoder and apply-edit remappe
     switch (reply.response) {
         .change_set => |edit| {
             try std.testing.expectEqualStrings("handler.ts", edit.file);
-            try std.testing.expect(std.mem.indexOf(u8, edit.content, "\"GET /health\": handleGetHealth") != null);
+            try std.testing.expect(std.mem.find(u8, edit.content, "\"GET /health\": handleGetHealth") != null);
         },
         else => return error.TestExpectedEqual,
     }

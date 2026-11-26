@@ -908,7 +908,6 @@ fn renderHistorical(
     var card = review.DeployReview{
         .handler_path = ev.handler_path,
         .service_name = ev.service_name orelse "(unrecorded)",
-        .region = "(historical)",
         .current = ev.facts,
         .baseline = baseline,
         .delta = delta,
@@ -923,7 +922,8 @@ fn renderHistorical(
 /// Writes "YYYY-MM-DD HH:MM" UTC into `buf` (must be ≥16 bytes).
 fn formatTimestampShort(ts_unix_ms: i64, buf: []u8) []const u8 {
     std.debug.assert(buf.len >= 16);
-    const seconds_since_epoch: u64 = @intCast(@divFloor(ts_unix_ms, std.time.ms_per_s));
+    const secs_i64 = @divFloor(ts_unix_ms, std.time.ms_per_s);
+    const seconds_since_epoch: u64 = if (secs_i64 <= 0) 0 else @intCast(secs_i64);
     const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = seconds_since_epoch };
     const epoch_day = epoch_seconds.getEpochDay();
     const day_seconds = epoch_seconds.getDaySeconds();
@@ -962,8 +962,8 @@ test "list: empty ledger prints help-style hint" {
 
     try runWith(testing.allocator, &.{}, &out.writer, &err.writer);
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "No proofs recorded yet") != null);
-    try testing.expect(std.mem.indexOf(u8, text, ".zttp/proofs.jsonl") != null);
+    try testing.expect(std.mem.find(u8, text, "No proofs recorded yet") != null);
+    try testing.expect(std.mem.find(u8, text, ".zttp/proofs.jsonl") != null);
 }
 
 test "list: tabulates two events with verdicts" {
@@ -1000,16 +1000,16 @@ test "list: tabulates two events with verdicts" {
     try runWith(testing.allocator, &.{"list"}, &out.writer, &err.writer);
 
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "Time") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "Kind") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "deploy") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "sha-aaaa") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "sha-bbbb") != null);
+    try testing.expect(std.mem.find(u8, text, "Time") != null);
+    try testing.expect(std.mem.find(u8, text, "Kind") != null);
+    try testing.expect(std.mem.find(u8, text, "deploy") != null);
+    try testing.expect(std.mem.find(u8, text, "sha-aaaa") != null);
+    try testing.expect(std.mem.find(u8, text, "sha-bbbb") != null);
     // First row has no baseline -> safe; second adds a route -> safe_with_additions.
-    try testing.expect(std.mem.indexOf(u8, text, "safe") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "safe_with_additions") != null);
+    try testing.expect(std.mem.find(u8, text, "safe") != null);
+    try testing.expect(std.mem.find(u8, text, "safe_with_additions") != null);
     // Surface column for second row: 1 route, 0 env, 0 egress, 0 cache, 0 caps.
-    try testing.expect(std.mem.indexOf(u8, text, "1r/1e/0h/0c/0cap") != null);
+    try testing.expect(std.mem.find(u8, text, "1r/1e/0h/0c/0cap") != null);
 }
 
 test "show HEAD: re-renders the latest card" {
@@ -1046,12 +1046,12 @@ test "show HEAD: re-renders the latest card" {
     try runWith(testing.allocator, &.{ "show", "HEAD" }, &out.writer, &err.writer);
 
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "Proof review:") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "Handler:    src/handler.ts") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "Contract:   sha-new22") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "Baseline:   sha-old11") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "+ route /healthz") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "Verdict:    safe_with_additions") != null);
+    try testing.expect(std.mem.find(u8, text, "Proof review:") != null);
+    try testing.expect(std.mem.find(u8, text, "Handler:    src/handler.ts") != null);
+    try testing.expect(std.mem.find(u8, text, "Contract:   sha-new22") != null);
+    try testing.expect(std.mem.find(u8, text, "Baseline:   sha-old11") != null);
+    try testing.expect(std.mem.find(u8, text, "+ route /healthz") != null);
+    try testing.expect(std.mem.find(u8, text, "Verdict:    safe_with_additions") != null);
 }
 
 test "show with sha prefix: resolves and renders" {
@@ -1086,7 +1086,7 @@ test "show with sha prefix: resolves and renders" {
     try runWith(testing.allocator, &.{ "show", "sha-bbb" }, &out.writer, &err.writer);
 
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "Contract:   sha-bbb") != null);
+    try testing.expect(std.mem.find(u8, text, "Contract:   sha-bbb") != null);
 }
 
 test "show without ref returns MissingRefArgument" {
@@ -1105,7 +1105,7 @@ test "show without ref returns MissingRefArgument" {
         error.MissingRefArgument,
         runWith(testing.allocator, &.{"show"}, &out.writer, &err.writer),
     );
-    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "requires a ref") != null);
+    try testing.expect(std.mem.find(u8, err.writer.buffered(), "requires a ref") != null);
 }
 
 test "gate refuses the removed --no-sign flag" {
@@ -1130,9 +1130,9 @@ test "help subcommand prints usage" {
 
     try runWith(testing.allocator, &.{"--help"}, &out.writer, &err.writer);
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "Usage:") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "list") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "show <ref>") != null);
+    try testing.expect(std.mem.find(u8, text, "Usage:") != null);
+    try testing.expect(std.mem.find(u8, text, "list") != null);
+    try testing.expect(std.mem.find(u8, text, "show <ref>") != null);
 }
 
 test "replay is no longer a proofs subcommand" {
@@ -1144,7 +1144,7 @@ test "replay is no longer a proofs subcommand" {
     defer err.deinit();
 
     try runWith(testing.allocator, &.{"--help"}, &out.writer, &err.writer);
-    try testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "replay <capsule>") == null);
+    try testing.expect(std.mem.find(u8, out.writer.buffered(), "replay <capsule>") == null);
 }
 
 test "verify explains a manifest without a contract component" {
@@ -1159,7 +1159,7 @@ test "verify explains a manifest without a contract component" {
     try zts.file_io.writeFile(
         testing.allocator,
         "bundle/bundle.json",
-        "{\"components\":{\"replay\":{\"path\":\"trace.jsonl\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}}",
+        "{\"toolVersion\":\"" ++ bundle_mod.tool_version ++ "\",\"components\":{\"replay\":{\"path\":\"trace.jsonl\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}}",
     );
 
     var out = std.Io.Writer.Allocating.init(testing.allocator);
@@ -1170,7 +1170,16 @@ test "verify explains a manifest without a contract component" {
     const result = runWith(testing.allocator, &.{ "verify", "bundle" }, &out.writer, &err.writer);
     try testing.expectError(error.InvalidManifest, result);
     try testing.expect(isExpectedUserError(error.InvalidManifest));
-    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "expected a contract component") != null);
+    try testing.expect(std.mem.find(u8, err.writer.buffered(), "no toolVersion") == null);
+    try testing.expect(std.mem.find(u8, err.writer.buffered(), "missing required 'contract' component") != null);
+    try testing.expect(std.mem.find(u8, err.writer.buffered(), "expected a contract component") != null);
+}
+
+test "formatTimestampShort handles negative timestamps without panicking" {
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("1970-01-01 00:00", formatTimestampShort(-1, &buf));
+    try testing.expectEqualStrings("1970-01-01 00:00", formatTimestampShort(std.math.minInt(i64), &buf));
+    try testing.expectEqualStrings("1970-01-01 00:00", formatTimestampShort(0, &buf));
 }
 
 test "diff: renders b's card with a as baseline" {
@@ -1207,10 +1216,10 @@ test "diff: renders b's card with a as baseline" {
 
     try runWith(testing.allocator, &.{ "diff", "HEAD~1", "HEAD" }, &out.writer, &err.writer);
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "Contract:   sha-current") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "Baseline:   sha-baseline") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "+ route /healthz") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "Verdict:    safe_with_additions") != null);
+    try testing.expect(std.mem.find(u8, text, "Contract:   sha-current") != null);
+    try testing.expect(std.mem.find(u8, text, "Baseline:   sha-baseline") != null);
+    try testing.expect(std.mem.find(u8, text, "+ route /healthz") != null);
+    try testing.expect(std.mem.find(u8, text, "Verdict:    safe_with_additions") != null);
 }
 
 test "diff: reverse order surfaces removals" {
@@ -1246,8 +1255,8 @@ test "diff: reverse order surfaces removals" {
     // Reverse order: a=newer, b=older. The route present in `a` is a removal in the diff.
     try runWith(testing.allocator, &.{ "diff", "HEAD", "HEAD~1" }, &out.writer, &err.writer);
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "- route /healthz") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "Verdict:    breaking") != null);
+    try testing.expect(std.mem.find(u8, text, "- route /healthz") != null);
+    try testing.expect(std.mem.find(u8, text, "Verdict:    breaking") != null);
 }
 
 test "diff: missing or extra args fail with explanation" {
@@ -1266,14 +1275,14 @@ test "diff: missing or extra args fail with explanation" {
         error.MissingRefArgument,
         runWith(testing.allocator, &.{ "diff", "HEAD" }, &out.writer, &err.writer),
     );
-    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "requires two refs") != null);
+    try testing.expect(std.mem.find(u8, err.writer.buffered(), "requires two refs") != null);
 
     err.writer.end = 0;
     try testing.expectError(
         error.TooManyArguments,
         runWith(testing.allocator, &.{ "diff", "HEAD", "HEAD~1", "HEAD~2" }, &out.writer, &err.writer),
     );
-    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "exactly two refs") != null);
+    try testing.expect(std.mem.find(u8, err.writer.buffered(), "exactly two refs") != null);
 }
 
 test "diff: identity diff against same ref is empty + safe" {
@@ -1300,11 +1309,11 @@ test "diff: identity diff against same ref is empty + safe" {
     try runWith(testing.allocator, &.{ "diff", "HEAD", "HEAD" }, &out.writer, &err.writer);
     const text = out.writer.buffered();
     // Same event on both sides: contract == baseline, no add/remove bullets, verdict safe.
-    try testing.expect(std.mem.indexOf(u8, text, "Contract:   sha-only") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "Baseline:   sha-only") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "Verdict:    safe") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "+ route") == null);
-    try testing.expect(std.mem.indexOf(u8, text, "- route") == null);
+    try testing.expect(std.mem.find(u8, text, "Contract:   sha-only") != null);
+    try testing.expect(std.mem.find(u8, text, "Baseline:   sha-only") != null);
+    try testing.expect(std.mem.find(u8, text, "Verdict:    safe") != null);
+    try testing.expect(std.mem.find(u8, text, "+ route") == null);
+    try testing.expect(std.mem.find(u8, text, "- route") == null);
 }
 
 test "show: too many refs returns TooManyArguments" {
@@ -1323,7 +1332,7 @@ test "show: too many refs returns TooManyArguments" {
         error.TooManyArguments,
         runWith(testing.allocator, &.{ "show", "HEAD", "HEAD~1" }, &out.writer, &err.writer),
     );
-    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "exactly one ref") != null);
+    try testing.expect(std.mem.find(u8, err.writer.buffered(), "exactly one ref") != null);
 }
 
 test "diff: bad ref reports through stderr" {
@@ -1351,7 +1360,7 @@ test "diff: bad ref reports through stderr" {
         error.NotFound,
         runWith(testing.allocator, &.{ "diff", "sha-only", "missing" }, &out.writer, &err.writer),
     );
-    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "No event matches") != null);
+    try testing.expect(std.mem.find(u8, err.writer.buffered(), "No event matches") != null);
 }
 
 test "printRows: prints only events from start_idx onward" {
@@ -1381,11 +1390,11 @@ test "printRows: prints only events from start_idx onward" {
     // start_idx=2 should print only the third event.
     try printRows(testing.allocator, &out.writer, events, 2);
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "sha-ccc") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "sha-aaa") == null);
-    try testing.expect(std.mem.indexOf(u8, text, "sha-bbb") == null);
+    try testing.expect(std.mem.find(u8, text, "sha-ccc") != null);
+    try testing.expect(std.mem.find(u8, text, "sha-aaa") == null);
+    try testing.expect(std.mem.find(u8, text, "sha-bbb") == null);
     // Verdict for ccc vs bbb baseline: identical facts -> safe.
-    try testing.expect(std.mem.indexOf(u8, text, "safe") != null);
+    try testing.expect(std.mem.find(u8, text, "safe") != null);
     // Newline-terminated single row.
     var newline_count: usize = 0;
     for (text) |c| if (c == '\n') {
@@ -1415,8 +1424,8 @@ test "printRows: start_idx=0 includes baseline=null for the first row" {
     try printRows(testing.allocator, &out.writer, events, 0);
     const text = out.writer.buffered();
     // First-row classification has no baseline -> verdict safe regardless of facts.
-    try testing.expect(std.mem.indexOf(u8, text, "safe") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "sha-only") != null);
+    try testing.expect(std.mem.find(u8, text, "safe") != null);
+    try testing.expect(std.mem.find(u8, text, "sha-only") != null);
 }
 
 test "export: default md format renders verdict, properties, and changes" {
@@ -1441,15 +1450,15 @@ test "export: default md format renders verdict, properties, and changes" {
 
     try runWith(testing.allocator, &.{"export"}, &out.writer, &err.writer);
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "## Proof review") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "**Verdict**: `safe_with_additions`") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "**Handler**: `src/handler.ts`") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "**Contract**: `sha-feat`") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "**Baseline**: `sha-base`") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "### Proven properties") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "- read-only") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "### Changes") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "`+ route /healthz`") != null);
+    try testing.expect(std.mem.find(u8, text, "## Proof review") != null);
+    try testing.expect(std.mem.find(u8, text, "**Verdict**: `safe_with_additions`") != null);
+    try testing.expect(std.mem.find(u8, text, "**Handler**: `src/handler.ts`") != null);
+    try testing.expect(std.mem.find(u8, text, "**Contract**: `sha-feat`") != null);
+    try testing.expect(std.mem.find(u8, text, "**Baseline**: `sha-base`") != null);
+    try testing.expect(std.mem.find(u8, text, "### Proven properties") != null);
+    try testing.expect(std.mem.find(u8, text, "- read-only") != null);
+    try testing.expect(std.mem.find(u8, text, "### Changes") != null);
+    try testing.expect(std.mem.find(u8, text, "`+ route /healthz`") != null);
 }
 
 test "export: html format produces a self-contained document" {
@@ -1470,10 +1479,10 @@ test "export: html format produces a self-contained document" {
     try runWith(testing.allocator, &.{ "export", "--format", "html" }, &out.writer, &err.writer);
 
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "<!DOCTYPE html>") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "class=\"verdict safe\"") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "<code>sha-only</code>") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "</body></html>") != null);
+    try testing.expect(std.mem.find(u8, text, "<!DOCTYPE html>") != null);
+    try testing.expect(std.mem.find(u8, text, "class=\"verdict safe\"") != null);
+    try testing.expect(std.mem.find(u8, text, "<code>sha-only</code>") != null);
+    try testing.expect(std.mem.find(u8, text, "</body></html>") != null);
 }
 
 test "export: svg renders verdict pill with color" {
@@ -1497,10 +1506,10 @@ test "export: svg renders verdict pill with color" {
     try runWith(testing.allocator, &.{ "export", "--format", "svg" }, &out.writer, &err.writer);
 
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "<svg") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "#3b82f6") != null); // safe_with_additions blue
-    try testing.expect(std.mem.indexOf(u8, text, "proven · safe_with_additions") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "</svg>") != null);
+    try testing.expect(std.mem.find(u8, text, "<svg") != null);
+    try testing.expect(std.mem.find(u8, text, "#3b82f6") != null); // safe_with_additions blue
+    try testing.expect(std.mem.find(u8, text, "proven · safe_with_additions") != null);
+    try testing.expect(std.mem.find(u8, text, "</svg>") != null);
 }
 
 test "export: --ref selects a past entry" {
@@ -1524,8 +1533,8 @@ test "export: --ref selects a past entry" {
     try runWith(testing.allocator, &.{ "export", "--ref", "HEAD~1", "--format", "md" }, &out.writer, &err.writer);
 
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "**Contract**: `sha-old`") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "**Baseline**: _(none - first entry)_") != null);
+    try testing.expect(std.mem.find(u8, text, "**Contract**: `sha-old`") != null);
+    try testing.expect(std.mem.find(u8, text, "**Baseline**: _(none - first entry)_") != null);
 }
 
 test "export svg: safe verdict renders green" {
@@ -1545,8 +1554,8 @@ test "export svg: safe verdict renders green" {
     defer err.deinit();
     try runWith(testing.allocator, &.{ "export", "--format", "svg" }, &out.writer, &err.writer);
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "#22c55e") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "proven · safe") != null);
+    try testing.expect(std.mem.find(u8, text, "#22c55e") != null);
+    try testing.expect(std.mem.find(u8, text, "proven · safe") != null);
 }
 
 test "export svg: breaking verdict renders red" {
@@ -1569,8 +1578,8 @@ test "export svg: breaking verdict renders red" {
     defer err.deinit();
     try runWith(testing.allocator, &.{ "export", "--format", "svg" }, &out.writer, &err.writer);
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "#ef4444") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "proven · breaking") != null);
+    try testing.expect(std.mem.find(u8, text, "#ef4444") != null);
+    try testing.expect(std.mem.find(u8, text, "proven · breaking") != null);
 }
 
 test "export svg: zero proven properties omits trailer" {
@@ -1608,9 +1617,9 @@ test "export svg: zero proven properties omits trailer" {
     try runWith(testing.allocator, &.{ "export", "--format", "svg" }, &out.writer, &err.writer);
 
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "proven · safe") != null);
+    try testing.expect(std.mem.find(u8, text, "proven · safe") != null);
     // No trailing " · " after the verdict word means no property list got concatenated.
-    try testing.expect(std.mem.indexOf(u8, text, "proven · safe · ") == null);
+    try testing.expect(std.mem.find(u8, text, "proven · safe · ") == null);
 }
 
 test "badge: writes svg file and prints markdown snippet for HEAD" {
@@ -1631,16 +1640,16 @@ test "badge: writes svg file and prints markdown snippet for HEAD" {
     try runWith(testing.allocator, &.{"badge"}, &out.writer, &err.writer);
 
     const stdout_text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, stdout_text, "Wrote ./zttp-proof.svg") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_text, "(safe).") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_text, "[![zttp verified](./zttp-proof.svg)](sha-only)") != null);
+    try testing.expect(std.mem.find(u8, stdout_text, "Wrote ./zttp-proof.svg") != null);
+    try testing.expect(std.mem.find(u8, stdout_text, "(safe).") != null);
+    try testing.expect(std.mem.find(u8, stdout_text, "[![zttp verified](./zttp-proof.svg)](sha-only)") != null);
 
     // Verify the SVG file was written and contains the expected verdict header.
     const svg = try zts.file_io.readFile(testing.allocator, "./zttp-proof.svg", 64 * 1024);
     defer testing.allocator.free(svg);
-    try testing.expect(std.mem.indexOf(u8, svg, "<svg") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "#22c55e") != null); // safe = green
-    try testing.expect(std.mem.indexOf(u8, svg, "</svg>") != null);
+    try testing.expect(std.mem.find(u8, svg, "<svg") != null);
+    try testing.expect(std.mem.find(u8, svg, "#22c55e") != null); // safe = green
+    try testing.expect(std.mem.find(u8, svg, "</svg>") != null);
 }
 
 test "badge: --inline emits SVG to stdout without writing a file" {
@@ -1661,11 +1670,11 @@ test "badge: --inline emits SVG to stdout without writing a file" {
     try runWith(testing.allocator, &.{ "badge", "--inline" }, &out.writer, &err.writer);
 
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "<svg") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "</svg>") != null);
+    try testing.expect(std.mem.find(u8, text, "<svg") != null);
+    try testing.expect(std.mem.find(u8, text, "</svg>") != null);
     // No snippet, no file path mention.
-    try testing.expect(std.mem.indexOf(u8, text, "Wrote") == null);
-    try testing.expect(std.mem.indexOf(u8, text, "Paste into your README") == null);
+    try testing.expect(std.mem.find(u8, text, "Wrote") == null);
+    try testing.expect(std.mem.find(u8, text, "Paste into your README") == null);
 }
 
 test "badge: --public-url overrides the snippet link target" {
@@ -1686,7 +1695,7 @@ test "badge: --public-url overrides the snippet link target" {
     try runWith(testing.allocator, &.{ "badge", "--public-url", "https://example.com/h" }, &out.writer, &err.writer);
 
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "[![zttp verified](./zttp-proof.svg)](https://example.com/h)") != null);
+    try testing.expect(std.mem.find(u8, text, "[![zttp verified](./zttp-proof.svg)](https://example.com/h)") != null);
 }
 
 test "export md: proof level change renders" {
@@ -1710,7 +1719,7 @@ test "export md: proof level change renders" {
     defer err.deinit();
     try runWith(testing.allocator, &.{ "export", "--format", "md" }, &out.writer, &err.writer);
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "proof level: complete -> partial") != null);
+    try testing.expect(std.mem.find(u8, text, "proof level: complete -> partial") != null);
 }
 
 test "export html: proof level change renders" {
@@ -1734,7 +1743,7 @@ test "export html: proof level change renders" {
     defer err.deinit();
     try runWith(testing.allocator, &.{ "export", "--format", "html" }, &out.writer, &err.writer);
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "<li>proof level: complete -> partial</li>") != null);
+    try testing.expect(std.mem.find(u8, text, "<li>proof level: complete -> partial</li>") != null);
 }
 
 test "writeHtmlEscaped: escapes <, >, &" {
@@ -1767,7 +1776,7 @@ test "export: unknown format errors via stderr" {
         error.InvalidFormat,
         runWith(testing.allocator, &.{ "export", "--format", "pdf" }, &out.writer, &err.writer),
     );
-    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "Unknown --format") != null);
+    try testing.expect(std.mem.find(u8, err.writer.buffered(), "Unknown --format") != null);
 }
 
 test "formatTimestampShort: known epoch" {

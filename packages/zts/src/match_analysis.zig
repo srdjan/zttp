@@ -2151,5 +2151,5 @@ test "the help text names the missing case or the reason" {
 
     const budget = try missingCaseHelp(allocator, .{ .incomplete = .budget });
     defer allocator.free(budget);
-    try std.testing.expect(std.mem.indexOf(u8, budget, "analysis budget ran out") != null);
+    try std.testing.expect(std.mem.find(u8, budget, "analysis budget ran out") != null);
 }

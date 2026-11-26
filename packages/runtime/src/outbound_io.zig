@@ -89,6 +89,7 @@ pub const OutboundIo = struct {
         // One watchdog per fetch. A concurrent attempt that lost the race is
         // not fatal to `HostName.connect`, which returns the winner.
         if (self.claimed.swap(true, .acq_rel)) return error.ConnectionPending;
+        errdefer self.claimed.store(false, .release);
         deadline.stream = .{ .socket = socket };
         deadline.arm() catch return error.SystemResources;
         return socket;

@@ -239,9 +239,9 @@ pub const TypeChecker = struct {
     binding_types: std.AutoHashMapUnmanaged(u64, TypeIndex),
     /// The `const` and `let` declarations with no type annotation whose
     /// initializer holds literal types (`initializerHoldsLiteralTypes`), keyed
-    /// like `binding_types`.
-    /// A write into such a binding widens the literal types of the slot.
-    unannotated_decls: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    /// like `binding_types`, mapped to their initializer expression node.
+    /// A write into such a binding widens only the literal types the initializer wrote.
+    unannotated_decls: std.AutoHashMapUnmanaged(u64, NodeIndex) = .empty,
     /// The `const` bindings whose initializer is a builtin `range(...)` call.
     /// The call has no type, so a `for...of` over such a name reads this set.
     range_bindings: std.AutoHashMapUnmanaged(u64, void) = .empty,
@@ -1596,7 +1596,7 @@ pub const TypeChecker = struct {
                 const vd = self.ir_view.getVarDecl(node) orelse return;
                 const declared = self.bindVarDeclaration(node, vd.binding);
                 if (declared == null_type_idx and self.initializerHoldsLiteralTypes(vd.init)) {
-                    self.unannotated_decls.put(self.allocator, bindingKey(vd.binding), {}) catch self.markAllocationFailure();
+                    self.unannotated_decls.put(self.allocator, bindingKey(vd.binding), vd.init) catch self.markAllocationFailure();
                 }
                 if (vd.kind == .@"const" and vd.init != null_node and self.isBuiltinRangeCall(vd.init)) {
                     self.range_bindings.put(self.allocator, bindingKey(vd.binding), {}) catch self.markAllocationFailure();
@@ -3255,7 +3255,10 @@ pub const TypeChecker = struct {
             // the site the guard was written for - a parsed JSON document.
             .t_unknown_type => return .{
                 .key = key,
-                .narrowed_type = pool.addDict(self.allocator, pool.idx_unknown, pool.idx_unknown),
+                .narrowed_type = if (current == pool.idx_json_value)
+                    pool.addDict(self.allocator, pool.idx_string, pool.idx_unknown)
+                else
+                    pool.addDict(self.allocator, pool.idx_unknown, pool.idx_unknown),
                 .negated = false,
             },
             .t_union => {
@@ -3477,8 +3480,6 @@ pub const TypeChecker = struct {
 
         for (members) |candidate| {
             const resolved = pool.unwrapNominal(self.env.resolveRef(candidate));
-            // A member without the field, or whose field cannot hold the
-            // literal, stays on the else side only.
             var in_then = false;
             var in_else = true;
             if (pool.lookupRecordField(resolved, prop_name)) |field| {
@@ -3489,6 +3490,28 @@ pub const TypeChecker = struct {
                     in_else = false;
                 } else if (self.env.isAssignableTo(literal_type, field.type_idx)) {
                     in_then = true;
+                }
+            } else {
+                const candidate_tag = pool.getTag(resolved) orelse .t_error;
+                switch (candidate_tag) {
+                    // Structural records permit extra fields at runtime, so a
+                    // member omitting `prop_name` can still arrive with
+                    // `prop_name === literal` and reach the then-branch.
+                    .t_record,
+                    .t_intersection,
+                    .t_unknown_type,
+                    .t_generic_param,
+                    .t_generic_app,
+                    .t_ref,
+                    .t_nullable,
+                    .t_dict,
+                    .t_function,
+                    => in_then = true,
+                    else => {
+                        if (self.primitiveMemberPresence(resolved, prop_name) != .absent) {
+                            in_then = true;
+                        }
+                    },
                 }
             }
             if (in_then) {
@@ -3842,7 +3865,7 @@ pub const TypeChecker = struct {
         var next: usize = 0;
         while (next < pending.items.len) : (next += 1) {
             const pending_type = pending.items[next];
-            if (std.mem.indexOfScalar(TypeIndex, visited.items, pending_type) != null) continue;
+            if (std.mem.findScalar(TypeIndex, visited.items, pending_type) != null) continue;
             if (!self.appendArrayInferenceTypes(&visited, &.{pending_type})) return .failed;
             const shape = self.resolvedType(pending_type);
             switch (pool.getTag(shape) orelse return .invalid) {
@@ -3882,7 +3905,7 @@ pub const TypeChecker = struct {
 
         const pool = self.env.pool;
         while (pending.pop()) |pending_type| {
-            if (std.mem.indexOfScalar(TypeIndex, visited.items, pending_type) != null) continue;
+            if (std.mem.findScalar(TypeIndex, visited.items, pending_type) != null) continue;
             if (!self.appendArrayInferenceTypes(&visited, &.{pending_type})) return .failed;
             std.debug.assert(visited.items.len <= std.math.maxInt(TypeIndex));
             const shape = self.resolvedType(pending_type);
@@ -6957,17 +6980,19 @@ pub const TypeChecker = struct {
         };
     }
 
-    /// Whether the Dict key type `key` has a member that is definitely not a
-    /// string. The JSON encoder fails the whole payload on such a key. A
-    /// string, a string literal, a template literal, `never`, and `unknown`
-    /// are accepted. A type the walk cannot resolve is accepted too: like
-    /// `firstUnencodable`, this refuses only what it knows is wrong.
+    /// Whether the Dict key type `key` admits a member that is not a string.
+    /// The JSON encoder fails the whole payload on such a key. A string, a
+    /// string literal, a template literal, and `never` are accepted. `unknown`
+    /// and an unconstrained or non-string-bounded type parameter can hold a
+    /// number or other non-string key and are refused. An intersection is
+    /// accepted when at least one member guarantees a string.
     fn dictKeyAdmitsNonString(self: *const TypeChecker, key: TypeIndex, depth: u8) bool {
         if (key == null_type_idx or depth >= 16) return false;
         const pool = self.env.pool;
         const tag = pool.getTag(key) orelse return false;
         return switch (tag) {
-            .t_string, .t_literal_string, .t_template_literal, .t_never, .t_unknown_type => false,
+            .t_string, .t_literal_string, .t_template_literal, .t_never => false,
+            .t_unknown_type,
             .t_boolean,
             .t_number,
             .t_null,
@@ -6991,10 +7016,17 @@ pub const TypeChecker = struct {
             },
             .t_ref => blk: {
                 const resolved = self.env.resolveRef(key);
-                if (resolved == key) break :blk false;
-                break :blk self.dictKeyAdmitsNonString(resolved, depth + 1);
+                if (resolved != key) break :blk self.dictKeyAdmitsNonString(resolved, depth + 1);
+                break :blk self.typeParamDictKeyAdmitsNonString(pool.getRefName(key), depth, false);
             },
-            .t_intersection, .t_generic_param, .t_generic_app, .t_error => false,
+            .t_generic_param => self.typeParamDictKeyAdmitsNonString(pool.getRefName(key), depth, true),
+            .t_intersection => blk: {
+                for (pool.getIntersectionMembers(key)) |member| {
+                    if (!self.dictKeyAdmitsNonString(member, depth + 1)) break :blk false;
+                }
+                break :blk true;
+            },
+            .t_generic_app, .t_error => false,
         };
     }
 
@@ -7607,7 +7639,8 @@ pub const TypeChecker = struct {
         const pool = self.env.pool;
         if (pool.getTag(type_idx) != .t_dict) return type_idx;
         if (pool.getDictKey(type_idx) != pool.idx_never) return type_idx;
-        return pool.addDict(self.allocator, pool.idx_unknown, pool.idx_unknown);
+        const key_union = pool.addUnion(self.allocator, &.{ pool.idx_string, pool.idx_number });
+        return pool.addDict(self.allocator, key_union, pool.idx_unknown);
     }
 
     /// The type that a `zttp:collections` call stores or reads for the value
@@ -8843,8 +8876,54 @@ pub const TypeChecker = struct {
                 break :blk self.typeParamKeyViolates(pool.getRefName(key), own, depth);
             },
             .t_generic_param => self.typeParamKeyViolates(pool.getRefName(key), own, depth),
-            .t_intersection, .t_generic_app, .t_error => false,
+            .t_intersection => blk: {
+                for (pool.getIntersectionMembers(key)) |member| {
+                    if (!self.dictKeyViolatesBound(member, own, depth + 1)) break :blk false;
+                }
+                break :blk true;
+            },
+            .t_generic_app => true,
+            .t_error => false,
         };
+    }
+
+    const TypeParamConstraint = struct {
+        constraint: TypeIndex,
+        params: []const type_env_mod.GenericParam,
+    };
+
+    fn findTypeParamConstraint(
+        self: *const TypeChecker,
+        name: []const u8,
+        own: []const type_env_mod.GenericParam,
+    ) ?TypeParamConstraint {
+        for (own) |param| {
+            if (std.mem.eql(u8, param.name, name)) {
+                return .{ .constraint = param.constraint, .params = own };
+            }
+        }
+        var level = @min(self.function_depth, max_function_stack);
+        while (level > 0) {
+            level -= 1;
+            const sig = self.sourceFunctionSignature(self.function_stack[level]) orelse continue;
+            for (sig.typeParams()) |param| {
+                if (std.mem.eql(u8, param.name, name)) {
+                    return .{ .constraint = param.constraint, .params = sig.typeParams() };
+                }
+            }
+        }
+        return null;
+    }
+
+    fn typeParamDictKeyAdmitsNonString(
+        self: *const TypeChecker,
+        name: []const u8,
+        depth: u8,
+        unscoped_admits_non_string: bool,
+    ) bool {
+        const found = self.findTypeParamConstraint(name, &.{}) orelse return unscoped_admits_non_string;
+        if (found.constraint == null_type_idx) return true;
+        return self.dictKeyAdmitsNonString(found.constraint, depth + 1);
     }
 
     /// A type parameter used as a Dict key breaks the bound when its
@@ -8856,20 +8935,8 @@ pub const TypeChecker = struct {
         own: []const type_env_mod.GenericParam,
         depth: u8,
     ) bool {
-        for (own) |param| {
-            if (std.mem.eql(u8, param.name, name)) return self.constraintViolatesKey(param.constraint, own, depth);
-        }
-        var level = @min(self.function_depth, max_function_stack);
-        while (level > 0) {
-            level -= 1;
-            const sig = self.sourceFunctionSignature(self.function_stack[level]) orelse continue;
-            for (sig.typeParams()) |param| {
-                if (std.mem.eql(u8, param.name, name)) {
-                    return self.constraintViolatesKey(param.constraint, sig.typeParams(), depth);
-                }
-            }
-        }
-        return false;
+        const found = self.findTypeParamConstraint(name, own) orelse return false;
+        return self.constraintViolatesKey(found.constraint, found.params, depth);
     }
 
     fn constraintViolatesKey(
@@ -9227,6 +9294,8 @@ pub const TypeChecker = struct {
         return null;
     }
 
+    const SlotPresence = enum { absent, maybe, always };
+
     /// Widen a slot type that an unannotated binding holds, to its base types.
     /// A literal, a record field, and a union member widen.
     /// An array and a tuple keep their types, because inference widens a literal array already.
@@ -9274,39 +9343,241 @@ pub const TypeChecker = struct {
     }
 
     /// Whether a binding initialized with `node` holds literal types that a
-    /// later write may widen: an object or array literal, or a name bound to
-    /// such a binding, such as `t` in `const t = table`. A binding from any
-    /// other value, such as `const alias = s` with `s: S` or `const r = mk()`,
-    /// holds a declared type that a write through it must keep.
+    /// later write may widen: an object or array literal, a ternary of such
+    /// containers, or a name bound to such a binding, such as `t` in `const t
+    /// = table`. A binding from any other value, such as `const alias = s`
+    /// with `s: S` or `const r = mk()`, holds a declared type that a write
+    /// through it must keep.
     fn initializerHoldsLiteralTypes(self: *const TypeChecker, node: NodeIndex) bool {
         if (node == null_node) return false;
         const tag = self.ir_view.getTag(node) orelse return false;
         if (tag == .object_literal or tag == .array_literal) return true;
+        if (tag == .ternary) {
+            const t = self.ir_view.getTernary(node) orelse return false;
+            return self.initializerHoldsLiteralTypes(t.then_branch) and
+                self.initializerHoldsLiteralTypes(t.else_branch);
+        }
         if (tag != .identifier) return false;
         const binding = self.ir_view.getBinding(node) orelse return false;
         const declaration = self.captureSource(binding) orelse return false;
         return self.unannotated_decls.contains(bindingKey(declaration));
     }
 
-    /// Whether the root of a write target is a `const` or `let` with no type
-    /// annotation and an initializer that holds literal types. The root is the
-    /// identifier at the start of the chain of member, computed, and index
-    /// reads.
-    fn writeRootIsUnannotated(self: *const TypeChecker, target: NodeIndex) bool {
-        var current = target;
-        var steps: u8 = 0;
-        while (steps < 64) : (steps += 1) {
-            const tag = self.ir_view.getTag(current) orelse return false;
+    fn isWidenableLiteralLeaf(self: *const TypeChecker, expr: NodeIndex) bool {
+        const tag = self.ir_view.getTag(expr) orelse return false;
+        return switch (tag) {
+            .lit_string, .lit_int, .lit_float, .lit_bool => true,
+            .unary_op => blk: {
+                const un = self.ir_view.getUnary(expr) orelse break :blk false;
+                if (un.op != .neg) break :blk false;
+                const op_tag = self.ir_view.getTag(un.operand) orelse break :blk false;
+                break :blk op_tag == .lit_int or op_tag == .lit_float;
+            },
+            // exhaustive: only scalar literal forms are widened as leaves.
+            else => false,
+        };
+    }
+
+    /// Whether the target `(target_object, final_slot)` comes from literal
+    /// initializers written inside unannotated bindings rather than crossing a
+    /// declared parameter, call, or external binding (such as `{ a: s }`).
+    fn targetAllowsWriteWidening(
+        self: *const TypeChecker,
+        target_object: NodeIndex,
+        final_slot: WriteSlot,
+    ) bool {
+        var rev_steps: [64]WriteSlot = undefined;
+        var count: usize = 0;
+        const root_init = self.collectChainSteps(target_object, &rev_steps, &count) orelse return false;
+        var steps: [65]WriteSlot = undefined;
+        for (0..count) |i| {
+            steps[i] = rev_steps[count - 1 - i];
+        }
+        steps[count] = final_slot;
+        return self.exprAllowsWriteWidening(root_init, steps[0 .. count + 1], 0);
+    }
+
+    fn collectChainSteps(
+        self: *const TypeChecker,
+        start: NodeIndex,
+        rev_steps: []WriteSlot,
+        count: *usize,
+    ) ?NodeIndex {
+        var current = start;
+        var depth: u8 = 0;
+        while (depth < 64) : (depth += 1) {
+            const tag = self.ir_view.getTag(current) orelse return null;
             if (tag == .identifier) {
-                const binding = self.ir_view.getBinding(current) orelse return false;
-                const declaration = self.captureSource(binding) orelse return false;
-                return self.unannotated_decls.contains(bindingKey(declaration));
+                const binding = self.ir_view.getBinding(current) orelse return null;
+                const declaration = self.captureSource(binding) orelse return null;
+                return self.unannotated_decls.get(bindingKey(declaration));
             }
-            if (tag != .member_access and tag != .optional_chain and tag != .computed_access) return false;
-            const member = self.ir_view.getMember(current) orelse return false;
+            if (tag != .member_access and tag != .computed_access) return null;
+            const member = self.ir_view.getMember(current) orelse return null;
+            const step = self.writeSlotOf(tag, member) orelse return null;
+            if (count.* >= rev_steps.len) return null;
+            rev_steps[count.*] = step;
+            count.* += 1;
             current = member.object;
         }
+        return null;
+    }
+
+    fn exprAllowsWriteWidening(
+        self: *const TypeChecker,
+        expr: NodeIndex,
+        steps: []const WriteSlot,
+        depth: u8,
+    ) bool {
+        if (depth >= 32 or expr == null_node) return false;
+        const tag = self.ir_view.getTag(expr) orelse return false;
+        if (tag == .identifier) {
+            const binding = self.ir_view.getBinding(expr) orelse return false;
+            const declaration = self.captureSource(binding) orelse return false;
+            const sub_init = self.unannotated_decls.get(bindingKey(declaration)) orelse return false;
+            return self.exprAllowsWriteWidening(sub_init, steps, depth + 1);
+        }
+        if (tag == .ternary) {
+            const t = self.ir_view.getTernary(expr) orelse return false;
+            return self.exprAllowsWriteWidening(t.then_branch, steps, depth + 1) and
+                self.exprAllowsWriteWidening(t.else_branch, steps, depth + 1);
+        }
+        if (tag == .member_access or tag == .computed_access) {
+            var rev_prefix: [64]WriteSlot = undefined;
+            var prefix_count: usize = 0;
+            const sub_init = self.collectChainSteps(expr, &rev_prefix, &prefix_count) orelse return false;
+            var combined: [65]WriteSlot = undefined;
+            if (prefix_count + steps.len > combined.len) return false;
+            for (0..prefix_count) |i| {
+                combined[i] = rev_prefix[prefix_count - 1 - i];
+            }
+            @memcpy(combined[prefix_count .. prefix_count + steps.len], steps);
+            return self.exprAllowsWriteWidening(sub_init, combined[0 .. prefix_count + steps.len], depth + 1);
+        }
+        if (steps.len == 0) {
+            return tag == .object_literal or tag == .array_literal or self.isWidenableLiteralLeaf(expr);
+        }
+        const step = steps[0];
+        const rest = steps[1..];
+        if (tag == .object_literal) {
+            if (step != .field) return false;
+            return self.objectFieldAllowsWriteWidening(expr, step.field, rest, depth + 1);
+        }
+        if (tag == .array_literal) {
+            return self.arrayElementsAllowWriteWidening(expr, step, rest, depth + 1);
+        }
         return false;
+    }
+
+    fn objectFieldAllowsWriteWidening(
+        self: *const TypeChecker,
+        obj_expr: NodeIndex,
+        field_name: []const u8,
+        rest: []const WriteSlot,
+        depth: u8,
+    ) bool {
+        if (depth >= 32) return false;
+        const obj = self.ir_view.getObject(obj_expr) orelse return false;
+        const slot: WriteSlot = .{ .field = field_name };
+        var i: usize = obj.properties_count;
+        var matched = false;
+        while (i > 0) {
+            i -= 1;
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+            const prop_tag = self.ir_view.getTag(prop_idx) orelse return false;
+            if (prop_tag == .object_spread) {
+                const spread_expr = self.ir_view.getOptValue(prop_idx) orelse return false;
+                const spread_type = self.inferType(spread_expr);
+                switch (self.slotPresence(spread_type, slot)) {
+                    .absent => continue,
+                    .always => {
+                        var step_buf: [65]WriteSlot = undefined;
+                        if (rest.len + 1 > step_buf.len) return false;
+                        step_buf[0] = slot;
+                        @memcpy(step_buf[1 .. rest.len + 1], rest);
+                        return self.exprAllowsWriteWidening(spread_expr, step_buf[0 .. rest.len + 1], depth + 1);
+                    },
+                    .maybe => {
+                        var step_buf: [65]WriteSlot = undefined;
+                        if (rest.len + 1 > step_buf.len) return false;
+                        step_buf[0] = slot;
+                        @memcpy(step_buf[1 .. rest.len + 1], rest);
+                        if (!self.exprAllowsWriteWidening(spread_expr, step_buf[0 .. rest.len + 1], depth + 1)) return false;
+                        matched = true;
+                        continue;
+                    },
+                }
+            }
+            const prop = self.ir_view.getProperty(prop_idx) orelse return false;
+            if (self.propertyKeyName(prop.key)) |name| {
+                if (std.mem.eql(u8, name, field_name)) {
+                    return self.exprAllowsWriteWidening(prop.value, rest, depth + 1);
+                }
+            }
+        }
+        return matched;
+    }
+
+    fn arrayElementsAllowWriteWidening(
+        self: *const TypeChecker,
+        arr_expr: NodeIndex,
+        step: WriteSlot,
+        rest: []const WriteSlot,
+        depth: u8,
+    ) bool {
+        if (depth >= 32 or step == .field) return false;
+        const arr = self.ir_view.getArray(arr_expr) orelse return false;
+        if (arr.elements_count == 0) return false;
+        // Unannotated array literals infer one shared element type across all
+        // positions, so every element and spread contributes to writes.
+        for (0..arr.elements_count) |i| {
+            const el = self.ir_view.getListIndex(arr.elements_start, @intCast(i));
+            if (self.ir_view.getTag(el) == .spread) {
+                const spread_expr = self.ir_view.getOptValue(el) orelse return false;
+                var step_buf: [65]WriteSlot = undefined;
+                if (rest.len + 1 > step_buf.len) return false;
+                step_buf[0] = .index_any;
+                @memcpy(step_buf[1 .. rest.len + 1], rest);
+                if (!self.exprAllowsWriteWidening(spread_expr, step_buf[0 .. rest.len + 1], depth + 1)) return false;
+            } else {
+                if (!self.exprAllowsWriteWidening(el, rest, depth + 1)) return false;
+            }
+        }
+        return true;
+    }
+
+    fn slotPresence(self: *const TypeChecker, raw: TypeIndex, slot: WriteSlot) SlotPresence {
+        const pool = self.env.pool;
+        const resolved = pool.unwrapNominal(self.env.resolveRef(raw));
+        const tag = pool.getTag(resolved) orelse return .maybe;
+        if (tag == .t_union) {
+            var any_always = false;
+            var any_absent = false;
+            var any_maybe = false;
+            for (pool.getUnionMembers(resolved)) |member| {
+                switch (self.slotPresence(member, slot)) {
+                    .always => any_always = true,
+                    .absent => any_absent = true,
+                    .maybe => any_maybe = true,
+                }
+            }
+            if (!any_maybe and !any_absent and any_always) return .always;
+            if (!any_maybe and !any_always and any_absent) return .absent;
+            return .maybe;
+        }
+        if (tag == .t_intersection) {
+            var any_maybe = false;
+            for (pool.getIntersectionMembers(resolved)) |member| {
+                switch (self.slotPresence(member, slot)) {
+                    .always => return .always,
+                    .maybe => any_maybe = true,
+                    .absent => {},
+                }
+            }
+            return if (any_maybe) .maybe else .absent;
+        }
+        if (tag == .t_unknown_type or tag == .t_generic_param or tag == .t_generic_app) return .maybe;
+        return if (self.slotOfMember(resolved, slot) != null) .always else .absent;
     }
 
     /// Collect the slot of each member of `receiver` that a write through
@@ -9422,7 +9693,7 @@ pub const TypeChecker = struct {
         if (slots.items.len == 0) return;
         const value_type = self.inferType(asgn.value);
         if (value_type == null_type_idx) return;
-        const widen = self.writeRootIsUnannotated(member.object);
+        const widen = self.targetAllowsWriteWidening(member.object, slot);
         for (slots.items) |found| {
             const expected = if (widen) self.widenWriteSlot(found, 0) else found;
             if (self.env.isAssignableTo(value_type, expected)) continue;
@@ -9461,7 +9732,7 @@ pub const TypeChecker = struct {
             return;
         }
         if (slots.items.len == 0) return;
-        const widen = self.writeRootIsUnannotated(member.object);
+        const widen = self.targetAllowsWriteWidening(member.object, .index_any);
         var arg: usize = 0;
         while (arg < call.args_count) : (arg += 1) {
             const value_type = self.inferType(self.ir_view.getListIndex(call.args_start, @intCast(arg)));
@@ -9984,7 +10255,7 @@ fn checkTypedSourceHelping(source: []const u8, expect_errors: u32, needle: []con
     try std.testing.expectEqual(expect_errors, errors);
 
     for (checker.getDiagnostics()) |diag| {
-        if (std.mem.indexOf(u8, diag.message, needle) != null) {
+        if (std.mem.find(u8, diag.message, needle) != null) {
             if (expected_help) |want| try std.testing.expectEqualStrings(want, diag.help orelse "(null)");
             return;
         }
@@ -10071,7 +10342,7 @@ test "ternary join: disjoint branch types form a union" {
         &buf,
     );
     // Step 5: nothing relates number and string, so the join is their union.
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "|") != null);
+    try std.testing.expect(std.mem.find(u8, rendered, "|") != null);
 }
 
 test "ternary join: never on one side is removed" {
@@ -11413,7 +11684,7 @@ test "TypeChecker import diagnostics preserve aliases" {
             for (seen) |diagnostic| {
                 try std.testing.expectEqual(DiagnosticKind.arg_count_mismatch, diagnostic.kind);
                 try std.testing.expectEqual(Severity.err, diagnostic.severity);
-                try std.testing.expect(std.mem.indexOf(u8, diagnostic.message, case.message) != null);
+                try std.testing.expect(std.mem.find(u8, diagnostic.message, case.message) != null);
             }
         }
     }
@@ -11494,7 +11765,7 @@ test "TypeChecker import policy compares named kind and slot without scope or lo
                 if (expected == 1) {
                     const diagnostic = checker.getDiagnostics()[0];
                     try std.testing.expectEqual(DiagnosticKind.arg_count_mismatch, diagnostic.kind);
-                    try std.testing.expect(std.mem.indexOf(u8, diagnostic.message, "expected 1, got 2") != null);
+                    try std.testing.expect(std.mem.find(u8, diagnostic.message, "expected 1, got 2") != null);
                 }
             }
         }
@@ -11528,7 +11799,7 @@ test "TypeChecker owned import cache survives moving a checked value" {
     try std.testing.expectEqual(@as(u32, 2), try checker.check(root));
     try std.testing.expect(cached == checker.owned_import_facts.?.imports.items.ptr);
     try std.testing.expectEqual(DiagnosticKind.arg_count_mismatch, checker.getDiagnostics()[1].kind);
-    try std.testing.expect(std.mem.indexOf(u8, checker.getDiagnostics()[1].message, "expected 1, got 2") != null);
+    try std.testing.expect(std.mem.find(u8, checker.getDiagnostics()[1].message, "expected 1, got 2") != null);
 }
 
 test "TypeChecker import cache allocation failure stays unproven after allocator recovery" {
@@ -12156,8 +12427,8 @@ test "a literal argument binds the type parameter to its base type" {
         "first",
         &buf,
     );
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "string") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"a\"") == null);
+    try std.testing.expect(std.mem.find(u8, rendered, "string") != null);
+    try std.testing.expect(std.mem.find(u8, rendered, "\"a\"") == null);
 }
 
 test "an inferred type argument is checked against the annotation it flows into" {
@@ -12200,7 +12471,7 @@ test "an explicit type argument overrides inference" {
         "first",
         &buf,
     );
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "number") != null);
+    try std.testing.expect(std.mem.find(u8, rendered, "number") != null);
 }
 
 test "a type parameter no argument determines is refused, not widened" {
@@ -13650,7 +13921,7 @@ test "assignment: a let is checked against its declared type" {
 
 /// Replace the first `marker` in `source` with `value`.
 fn withMarker(comptime source: []const u8, comptime marker: []const u8, comptime value: []const u8) []const u8 {
-    const at = comptime std.mem.indexOf(u8, source, marker).?;
+    const at = comptime std.mem.find(u8, source, marker).?;
     return source[0..at] ++ value ++ source[at + marker.len ..];
 }
 
@@ -14777,4 +15048,171 @@ test "a for...of over a const that holds range(n) is admitted" {
         \\  return n;
         \\}
     , 0, 0);
+}
+
+fn expectOnlyImportDiagnostic(source: []const u8, kind: DiagnosticKind) !void {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnosticsWithImportFacts(allocator, source, false, true);
+    defer freeSeenDiagnostics(allocator, seen);
+    if (seen.len != 1) for (seen) |d| std.debug.print("diagnostic: {s}\n", .{d.message});
+    try std.testing.expectEqual(@as(usize, 1), seen.len);
+    try std.testing.expectEqual(kind, seen[0].kind);
+}
+
+fn expectNoImportDiagnostics(source: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnosticsWithImportFacts(allocator, source, false, true);
+    defer freeSeenDiagnostics(allocator, seen);
+    if (seen.len != 0) for (seen) |d| std.debug.print("diagnostic: {s}\n", .{d.message});
+    try std.testing.expectEqual(@as(usize, 0), seen.len);
+}
+
+test "Response.json refuses a Dict from let dictEmpty() with number key (ZTS213)" {
+    try expectOnlyImportDiagnostic(
+        \\import { dictEmpty, dictSet } from "zttp:collections";
+        \\function handler(req: Request): Response {
+        \\  let d = dictEmpty();
+        \\  d = dictSet(d, 2, "x");
+        \\  return Response.json(d);
+        \\}
+    , .unencodable_json_payload);
+}
+
+test "Response.json refuses a Dict with unknown key from isDict (ZTS213)" {
+    try expectOnlyImportDiagnostic(
+        \\function handler(req: Request): Response {
+        \\  const u: unknown = req;
+        \\  if (isDict(u)) {
+        \\    return Response.json(u);
+        \\  }
+        \\  return Response.json({ ok: false });
+        \\}
+    , .unencodable_json_payload);
+}
+
+test "Response.json refuses a Dict whose type-parameter key extends DictKey (ZTS213)" {
+    try expectOnlyImportDiagnostic(
+        \\function f<K extends DictKey>(d: Dict<K, number>): Response {
+        \\  return Response.json(d);
+        \\}
+    , .unencodable_json_payload);
+}
+
+test "Response.json admits a Dict whose type-parameter key extends string or from parseJson isDict" {
+    try expectNoImportDiagnostics(
+        \\import { dictEmpty } from "zttp:collections";
+        \\import { parseJson } from "zttp:json";
+        \\function sendGeneric<K extends string>(d: Dict<K, number>): Response {
+        \\  return Response.json(d);
+        \\}
+        \\function handler(req: Request): Response {
+        \\  const parsed = parseJson("{\"a\":1}");
+        \\  if (!parsed.ok) { return Response.json({ error: parsed.error }, { status: 400 }); }
+        \\  const doc = parsed.value;
+        \\  if (!isDict(doc)) { return Response.json({ error: "bad" }, { status: 400 }); }
+        \\  const empty = dictEmpty();
+        \\  return Response.json({ doc: doc, empty: empty });
+        \\}
+    );
+}
+
+test "container write does not widen nested declared fields inside a literal initializer" {
+    try expectOnlyDiagnostic(
+        \\type S = { kind: "a" | "b" };
+        \\function f(s: S): string {
+        \\  const q = { a: s };
+        \\  q.a.kind = "c";
+        \\  return s.kind;
+        \\}
+    , .type_mismatch);
+}
+
+test "container write does not widen a declared field replaced directly on a literal container" {
+    try expectOnlyDiagnostic(
+        \\type S = { kind: "a" | "b" };
+        \\function f(s: S): string {
+        \\  const q = { a: s };
+        \\  q.a = { kind: "c" };
+        \\  return q.a.kind;
+        \\}
+    , .type_mismatch);
+}
+
+test "container write does not widen a declared element replaced on an array literal" {
+    try expectOnlyDiagnostic(
+        \\type S = { kind: "a" | "b" };
+        \\function f(s: S): string {
+        \\  const q = [s];
+        \\  q[0] = { kind: "c" };
+        \\  return s.kind;
+        \\}
+    , .type_mismatch);
+}
+
+test "container mutation does not widen a declared array held in a literal field" {
+    try expectOnlyDiagnostic(
+        \\function f(ys: ("a" | "b")[]): number {
+        \\  const q = { xs: ys };
+        \\  q.xs.push("c");
+        \\  return q.xs.length;
+        \\}
+    , .arg_type_mismatch);
+}
+
+test "container write still widens literal fields written by the initializer itself" {
+    try expectNoDiagnostics(
+        \\type S = { kind: "a" | "b" };
+        \\function f(req: Request, s: S): string {
+        \\  const q = { a: { n: 0, s: s } };
+        \\  q.a.n = 1;
+        \\  const r = { kind: "a" };
+        \\  const p = { a: r };
+        \\  p.a.kind = "c";
+        \\  const o = { k: req.method === "GET" ? "a" : "b" };
+        \\  o.k = "c";
+        \\  return o.k;
+        \\}
+    );
+}
+
+test "discriminant guard keeps union members that omit the tested field in the then-branch" {
+    try expectOnlyDiagnostic(
+        \\type A = { kind: "a"; n: number };
+        \\type B = { s: string };
+        \\function f(v: A | B): number {
+        \\  if (v.kind === "a") {
+        \\    const n: number = v.n;
+        \\    return n;
+        \\  }
+        \\  return 0;
+        \\}
+    , .type_mismatch);
+}
+
+test "discriminant guard keeps union members that omit the tested field after negated guard" {
+    try expectOnlyDiagnostic(
+        \\type A = { kind: "a"; n: number };
+        \\type B = { s: string };
+        \\function f(v: A | B): number {
+        \\  if (v.kind !== "a") {
+        \\    return 0;
+        \\  }
+        \\  const n: number = v.n;
+        \\  return n;
+        \\}
+    , .type_mismatch);
+}
+
+test "discriminant guard still excludes members with fixed discriminant in the else-branch" {
+    try expectNoDiagnostics(
+        \\type A = { kind: "a"; n: number };
+        \\type B = { s: string };
+        \\function f(v: A | B): number {
+        \\  if (v.kind === "a") {
+        \\    return v.n ?? 0;
+        \\  }
+        \\  const b: B = v;
+        \\  return b.s.length;
+        \\}
+    );
 }

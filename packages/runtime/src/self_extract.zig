@@ -79,12 +79,12 @@ pub const Payload = struct {
 
 // -- Detection: read own executable, check for appended payload --
 
-/// Null means this binary carries no payload: it is a plain runtime. Once the
-/// trailer frames a payload, the binary is a deployment artifact, and a payload
-/// that cannot be read in full, fails its checksum, or does not parse is an
-/// error rather than null. Returning null there would start the plain runtime
-/// on a damaged artifact, which serves whatever project is in the working
-/// directory with no proof and no declared ceiling.
+/// Null means this binary carries no payload: it is a readable plain runtime.
+/// Once the trailer frames a payload, the binary is a deployment artifact, and
+/// a payload that cannot be read in full, fails its checksum, or does not parse
+/// is an error rather than null. Open, size, or trailer-read failures also
+/// return `error.UnreadableSelf` rather than null so an unreadable (e.g. mode
+/// 0111) deployed binary never falls back to the unproven plain runtime.
 pub fn detect(allocator: std.mem.Allocator) !?Payload {
     const self_path = try getSelfExePath(allocator);
     defer allocator.free(self_path);
@@ -95,25 +95,30 @@ pub fn detect(allocator: std.mem.Allocator) !?Payload {
     return detectPath(allocator, self_path_z);
 }
 
-/// A payload is framed and damaged: a short read, a checksum mismatch, or
-/// bytes that do not parse to a payload.
-pub const ArtifactError = error{CorruptArtifact};
+/// Errors produced while inspecting a binary for an appended payload:
+/// - `CorruptArtifact`: a payload is framed and damaged (short read, checksum
+///   mismatch, or unparseable sections).
+/// - `UnreadableSelf`: the binary itself could not be opened, sized, or have
+///   its trailer read.
+pub const ArtifactError = error{
+    CorruptArtifact,
+    UnreadableSelf,
+};
 
 /// `detect` for the file at `path_z`.
 pub fn detectPath(allocator: std.mem.Allocator, path_z: [:0]const u8) !?Payload {
     const fd = std.c.open(path_z, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-    if (fd < 0) return null;
+    if (fd < 0) return error.UnreadableSelf;
     defer _ = std.c.close(fd);
 
-    // Get file size via fstat
-    const file_size = getFileSize(fd) orelse return null;
+    // Get file size via seek; non-seekable or unreadable files fail closed.
+    const file_size = getFileSize(fd) orelse return error.UnreadableSelf;
     if (file_size < TRAILER_SIZE) return null;
 
     // Read trailer from end of file
     var trailer_buf: [TRAILER_SIZE]u8 = undefined;
     const trailer_offset: i64 = @intCast(file_size - TRAILER_SIZE);
-    const bytes_read = std.c.pread(fd, &trailer_buf, TRAILER_SIZE, trailer_offset);
-    if (bytes_read != TRAILER_SIZE) return null;
+    preadExact(fd, &trailer_buf, trailer_offset) catch return error.UnreadableSelf;
 
     // Parse trailer
     const trailer = readTrailer(file_size, &trailer_buf) catch |err| switch (err) {
@@ -138,10 +143,9 @@ pub fn detectPath(allocator: std.mem.Allocator, path_z: [:0]const u8) !?Payload 
     const payload_data = try allocator.alloc(u8, @intCast(payload_size));
     defer allocator.free(payload_data);
 
-    const payload_read = std.c.pread(fd, payload_data.ptr, payload_data.len, @intCast(payload_offset));
-    if (payload_read < 0 or @as(usize, @intCast(payload_read)) != payload_data.len) {
+    preadExact(fd, payload_data, @intCast(payload_offset)) catch {
         return corruptArtifact("the payload could not be read in full");
-    }
+    };
 
     // Verify checksum
     const checksum_actual = std.hash.crc.@"CRC-32/ISO-HDLC".hash(payload_data);
@@ -341,10 +345,7 @@ fn getCleanBinarySizeFromFd(fd: std.c.fd_t) !u64 {
 
     var trailer: [TRAILER_SIZE]u8 = undefined;
     const trailer_offset: i64 = @intCast(file_size - TRAILER_SIZE);
-    const bytes_read = std.c.pread(fd, &trailer, trailer.len, trailer_offset);
-    if (bytes_read < 0 or @as(usize, @intCast(bytes_read)) != trailer.len) {
-        return error.ReadFailed;
-    }
+    try preadExact(fd, &trailer, trailer_offset);
     return cleanBinarySizeFromTrailer(file_size, &trailer);
 }
 
@@ -752,6 +753,7 @@ fn deserializeSqlAllowList(
 
     const count = try readU16(data, pos);
     if (count > handler_policy.max_policy_entries) return error.PolicyTooManyEntries;
+    if (!enabled and count > 0) return error.InvalidPayload;
     if (count == 0) return .{ .enabled = enabled };
     var queries = try allocator.alloc(handler_policy.SqlQueryInfo, count);
     var filled: usize = 0;
@@ -801,6 +803,7 @@ fn deserializeAllowList(
 
     const count = try readU16(data, pos);
     if (count > handler_policy.max_policy_entries) return error.PolicyTooManyEntries;
+    if (!enabled and count > 0) return error.InvalidPayload;
     if (count == 0) return .{ .enabled = enabled };
     var values = try allocator.alloc([]const u8, count);
     var filled: usize = 0;
@@ -872,6 +875,20 @@ fn getFileSize(fd: std.c.fd_t) ?u64 {
 
 const readFile = zts.file_io.readFile;
 
+fn preadExact(fd: std.c.fd_t, buf: []u8, offset: i64) !void {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const cur_offset: i64 = std.math.add(i64, offset, @as(i64, @intCast(total))) catch return error.ReadFailed;
+        const result = std.c.pread(fd, buf[total..].ptr, buf.len - total, cur_offset);
+        if (result < 0) {
+            if (std.posix.errno(result) == .INTR) continue;
+            return error.ReadFailed;
+        }
+        if (result == 0) return error.ReadFailed;
+        total += @intCast(result);
+    }
+}
+
 fn writeAllCapability(_: ?*anyopaque, fd: std.c.fd_t, data: []const u8) !void {
     try writeAll(fd, data);
 }
@@ -880,7 +897,10 @@ fn writeAll(fd: std.c.fd_t, data: []const u8) !void {
     var total: usize = 0;
     while (total < data.len) {
         const result = std.c.write(fd, data[total..].ptr, data.len - total);
-        if (result < 0) return error.WriteFailure;
+        if (result < 0) {
+            if (std.posix.errno(result) == .INTR) continue;
+            return error.WriteFailure;
+        }
         if (result == 0) return error.WriteFailure;
         total += @intCast(result);
     }
@@ -1487,6 +1507,23 @@ test "policy decoder rejects invalid limits flags duplicates and ordering before
             }, &strings),
         );
     }
+    {
+        var strings: std.ArrayList([]const u8) = .empty;
+        defer strings.deinit(allocator);
+        try std.testing.expectError(
+            error.InvalidPayload,
+            deserializePolicy(allocator, &.{ 0, 1, 0, 1, 0, 'a' }, &strings),
+        );
+        try std.testing.expectError(
+            error.InvalidPayload,
+            deserializePolicy(allocator, &.{
+                0, 0, 0, // env
+                0, 0, 0, // egress
+                0, 0, 0, // cache
+                0, 1, 0, 1, 0, 'q', // disabled SQL with nonzero count
+            }, &strings),
+        );
+    }
 }
 
 test "payload parser rejects oversized and duplicate policy sections" {
@@ -1685,7 +1722,7 @@ test "detectPath refuses a framed payload with a changed byte instead of reporti
     defer allocator.free(bytes);
 
     // One byte inside the bytecode string, checksum left as built.
-    const at = std.mem.indexOf(u8, bytes, "payload-bytecode") orelse return error.TestFixture;
+    const at = std.mem.find(u8, bytes, "payload-bytecode") orelse return error.TestFixture;
     bytes[at] ^= 0x01;
     try rewriteDetectFixture(tmp, "artifact", bytes, false);
 
@@ -1714,4 +1751,30 @@ test "detectPath refuses a framed payload whose checksum holds but whose section
     const output_z = try allocator.dupeSentinel(u8, output_path, 0);
     defer allocator.free(output_z);
     try std.testing.expectError(error.CorruptArtifact, detectPath(allocator, output_z));
+}
+
+test "detectPath fails closed with UnreadableSelf for missing and unreadable binaries" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const missing_path = try selfExtractTestPath(allocator, tmp, "missing");
+    defer allocator.free(missing_path);
+    const missing_z = try allocator.dupeSentinel(u8, missing_path, 0);
+    defer allocator.free(missing_z);
+    try std.testing.expectError(error.UnreadableSelf, detectPath(allocator, missing_z));
+
+    const output_path = try selfExtractTestPath(allocator, tmp, "artifact-0111");
+    defer allocator.free(output_path);
+    const bytes = try writeDetectFixture(allocator, tmp, output_path);
+    defer allocator.free(bytes);
+
+    if (std.c.geteuid() != 0) {
+        const output_z = try allocator.dupeSentinel(u8, output_path, 0);
+        defer allocator.free(output_z);
+        try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(output_z, 0o111));
+        defer _ = std.c.chmod(output_z, 0o644);
+        try std.testing.expectError(error.UnreadableSelf, detectPath(allocator, output_z));
+    }
 }

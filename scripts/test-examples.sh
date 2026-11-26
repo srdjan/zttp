@@ -9,11 +9,18 @@
 # builds nothing: `zig build test` wires it that way through addFileArg, and a
 # nested `zig build` inside a running build would re-enter the build graph.
 
-set -e
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
 ZIG="${ZIG:-zig}"
 PASS=0
 FAIL=0
+
+cleanup() {
+    # `zttp check` writes a zttp.d.ts typings stub into the cwd; drop it.
+    rm -f zttp.d.ts
+}
+trap cleanup EXIT
 
 if [ "$#" -ge 1 ]; then
     ZTTP="$1"
@@ -27,7 +34,7 @@ else
     # through `zig build run --` per suite would re-walk the build graph for
     # every suite.
     echo "Building runtime..."
-    $ZIG build
+    "$ZIG" build
     echo ""
 fi
 
@@ -49,9 +56,9 @@ run_tests_with_args() {
     local results
     results=$(echo "$output" | grep "^Results:" || echo "Results: ? passed, ? failed, ? total")
     local passed
-    passed=$(echo "$results" | grep -o '[0-9]* passed' | grep -o '[0-9]*')
+    passed=$(echo "$results" | grep -o '[0-9]* passed' | grep -o '[0-9]*' || true)
     local failed
-    failed=$(echo "$results" | grep -o '[0-9]* failed' | grep -o '[0-9]*')
+    failed=$(echo "$results" | grep -o '[0-9]* failed' | grep -o '[0-9]*' || true)
 
     # A suite that ran no test proves nothing: zero failures over zero tests
     # is not a pass.

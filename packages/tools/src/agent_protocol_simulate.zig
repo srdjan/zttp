@@ -23,48 +23,6 @@ const testRepairJson = support_mod.testRepairJson;
 const ChangingRootReader = support_mod.ChangingRootReader;
 const respondWithRootSourceReader = support_mod.respondWithRootSourceReader;
 
-// ---------------------------------------------------------------------------
-// check
-// ---------------------------------------------------------------------------
-
-/// Run the analyzer once and write both the payload and the diagnostics array.
-///
-/// `success` is exactly "produced no error diagnostic" (spec 4.8): warnings and
-/// advisories never fail a check.
-fn writeApplyRefusalWithGraph(
-    json: *std.json.Stringify,
-    file_rel: []const u8,
-    digest: [64]u8,
-    module_graph_hash: [64]u8,
-    decision: decision_registry.Id,
-    message: []const u8,
-) !bool {
-    try json.beginObject();
-    try json.objectField("file");
-    try json.write(file_rel);
-    try json.objectField("applied");
-    try json.write(0);
-    // The digest the file still carries: nothing was written, and a client
-    // must be able to see that from the response rather than infer it.
-    try json.objectField("source_digest");
-    try json.write(&digest);
-    try json.objectField("module_graph_hash");
-    try json.write(&module_graph_hash);
-    try json.objectField("refusal");
-    try json.beginObject();
-    try json.objectField("reason");
-    try json.write(decision.wire());
-    try json.objectField("message");
-    try json.write(message);
-    // The next action, from the decision registry rather than from this call
-    // site: a client branches on it instead of parsing the message.
-    try json.objectField("next_action");
-    try json.write(@tagName(decision_registry.get(decision).next_action));
-    try json.endObject();
-    try json.endObject();
-    return false;
-}
-
 /// Decode `input.repairs` into line-keyed refactors. Returns a refusal verdict
 /// when the request is malformed, and null when `repairs` is populated.
 ///
@@ -90,25 +48,25 @@ fn parseRepairs(
     };
 
     for (items) |item| {
-        if (item != .object) return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "each entry in `repairs` must be an object");
+        if (item != .object) return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "each entry in `repairs` must be an object");
         const o = item.object;
 
         switch (checkRepairBinding(o.get("bound"), expected_binding)) {
             .valid => {},
-            .malformed => |message| return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, message),
-            .stale => return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .stale_repair, "a repair's `bound` identity is stale; re-run canonicalize"),
+            .malformed => |message| return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, message),
+            .stale => return try writeSimulateRefusal(json, file_rel, digest, .stale_repair, "a repair's `bound` identity is stale; re-run canonicalize"),
         }
 
         const intent_value = o.get("intent") orelse
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "a repair must name its `intent`");
+            return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "a repair must name its `intent`");
         if (intent_value != .string)
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`intent` must be a string");
+            return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "`intent` must be a string");
         const intent = zts.RepairIntent.fromString(intent_value.string) orelse
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .unknown_intent, "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
+            return try writeSimulateRefusal(json, file_rel, digest, .unknown_intent, "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
         const diagnostic_code_value = o.get("diagnostic_code") orelse
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "a repair must name the exact compiler diagnostic that authorized it");
+            return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "a repair must name the exact compiler diagnostic that authorized it");
         if (diagnostic_code_value != .string or diagnostic_code_value.string.len == 0)
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`diagnostic_code` must be a nonempty string");
+            return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "`diagnostic_code` must be a nonempty string");
 
         // A repair is keyed on a byte span. `line` is the older spelling of the
         // same thing for a whole-line rewrite, and it keeps working: within
@@ -121,42 +79,42 @@ fn parseRepairs(
         var line: u32 = 0;
         if (o.get("span")) |span_value| {
             if (span_value != .object)
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`span` must be an object with `start` and `end`");
+                return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "`span` must be an object with `start` and `end`");
             const start_value = span_value.object.get("start") orelse
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`span` must carry `start`");
+                return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "`span` must carry `start`");
             const end_value = span_value.object.get("end") orelse
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`span` must carry `end`");
+                return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "`span` must carry `end`");
             if (start_value != .integer or start_value.integer < 0 or
                 end_value != .integer or end_value.integer < start_value.integer)
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`span.start` and `span.end` must be byte offsets with start <= end");
+                return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "`span.start` and `span.end` must be byte offsets with start <= end");
             start_offset = @intCast(start_value.integer);
             end_offset = @intCast(end_value.integer);
             if (end_offset > source.len)
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
+                return try writeSimulateRefusal(json, file_rel, digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
             line = canonicalize.offsetLine(source, start_offset);
         } else if (o.get("line")) |line_value| {
             if (line_value != .integer or line_value.integer < 1 or line_value.integer > std.math.maxInt(u32))
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`line` must be a positive integer");
+                return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "`line` must be a positive integer");
             line = @intCast(line_value.integer);
             const span = canonicalize.lineSpan(source, line) orelse
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
+                return try writeSimulateRefusal(json, file_rel, digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
             start_offset = span.start;
             end_offset = span.end;
         } else {
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "a repair must carry the `span` it applies to, or the `line` for a whole-line repair");
+            return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "a repair must carry the `span` it applies to, or the `line` for a whole-line repair");
         }
 
         const replacement_value = o.get("replacement") orelse
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "a repair must carry its `replacement`");
+            return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "a repair must carry its `replacement`");
         if (replacement_value != .string)
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`replacement` must be a string");
+            return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "`replacement` must be a string");
 
         // Required, not optional. An absent snapshot would make the staleness
         // check silently skip, which is the one thing this field exists for.
         const original_value = o.get("original") orelse
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "a repair must carry `original`, the snapshot of the bytes it replaces");
+            return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "a repair must carry `original`, the snapshot of the bytes it replaces");
         if (original_value != .string)
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`original` must be a string");
+            return try writeSimulateRefusal(json, file_rel, digest, .malformed_repair, "`original` must be a string");
 
         try out.append(allocator, .{
             .intent = intent,
@@ -189,6 +147,7 @@ fn parseRepairs(
 pub fn runSimulateEdit(
     allocator: std.mem.Allocator,
     json: *std.json.Stringify,
+    canonical_root: []const u8,
     file: *const CapturedFile,
     identity: Identity,
     input: ?std.json.Value,
@@ -218,6 +177,7 @@ pub fn runSimulateEdit(
         .file = file.absolute_path,
         .content = proposed,
         .before = source,
+        .stop_at_dir = canonical_root,
     });
     defer verdict.deinit(allocator);
 
@@ -401,8 +361,8 @@ test "simulate_edit applies repairs to one captured source" {
     try testing.expectEqualStrings(&expected_digest, payload.get("source_digest").?.string);
     try testing.expect(payload.get("refusal").? == .null);
     const proposed = payload.get("proposed_content").?.string;
-    try testing.expect(std.mem.indexOf(u8, proposed, "const name") != null);
-    try testing.expect(std.mem.indexOf(u8, proposed, "let name") == null);
+    try testing.expect(std.mem.find(u8, proposed, "const name") != null);
+    try testing.expect(std.mem.find(u8, proposed, "let name") == null);
 
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", allocator, .limited(4096));
     defer allocator.free(on_disk);
@@ -466,11 +426,11 @@ test "simulate_edit round-trips a canonicalize candidate" {
     const payload = parsed.value.object.get("payload").?.object;
     try testing.expect(payload.get("ok").?.bool);
     try testing.expectEqual(@as(i64, 0), payload.get("new_count").?.integer);
-    try testing.expect(std.mem.indexOf(u8, payload.get("proposed_content").?.string, "const name") != null);
+    try testing.expect(std.mem.find(u8, payload.get("proposed_content").?.string, "const name") != null);
     // Never writes: the file on disk still carries the `let`.
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
     defer a.free(on_disk);
-    try testing.expect(std.mem.indexOf(u8, on_disk, "let name") != null);
+    try testing.expect(std.mem.find(u8, on_disk, "let name") != null);
 }
 
 test "simulate_edit refuses a repair whose snapshot has moved" {
@@ -495,6 +455,7 @@ test "simulate_edit refuses a repair whose snapshot has moved" {
     defer parsed.deinit();
     const payload = parsed.value.object.get("payload").?.object;
     try testing.expect(!payload.get("ok").?.bool);
+    try testing.expect(payload.get("applied") == null);
     try testing.expectEqualStrings("stale_repair", payload.get("refusal").?.object.get("reason").?.string);
     // The published key set is intact on a refusal: a client reading `ok`
     // must not also have to handle the key being absent.
@@ -522,6 +483,10 @@ test "simulate_edit refuses a repair outside the vocabulary" {
     var parsed = try parse(a, out);
     defer parsed.deinit();
     const payload = parsed.value.object.get("payload").?.object;
+    try testing.expect(!payload.get("ok").?.bool);
+    try testing.expect(payload.get("applied") == null);
+    try testing.expect(payload.get("diagnostics").? == .array);
+    try testing.expect(payload.get("proposed_content").? == .null);
     try testing.expectEqualStrings("unknown_intent", payload.get("refusal").?.object.get("reason").?.string);
 }
 

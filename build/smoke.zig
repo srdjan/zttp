@@ -19,6 +19,12 @@ pub fn add(ctx: Context) void {
     panic_isolation_cmd.has_side_effects = true;
     panic_isolation_cmd.step.dependOn(b.getInstallStep());
 
+    const host_setjmp_header = b.addWriteFiles().add("panic_recovery_host.h", "#include <setjmp.h>\n");
+    const host_setjmp_c = b.addTranslateC(.{
+        .root_source_file = host_setjmp_header,
+        .target = b.graph.host,
+        .optimize = ctx.optimize,
+    }).addModule("setjmp-c");
     const module_scope_panic_probe_mod = b.createModule(.{
         .root_source_file = ctx.runtime_dep.path("src/module_scope_panic_probe.zig"),
         .target = b.graph.host,
@@ -26,7 +32,7 @@ pub fn add(ctx: Context) void {
         .link_libc = true,
     });
     module_scope_panic_probe_mod.addImport("zts", ctx.zts_host_mod);
-    module_scope_panic_probe_mod.addImport("setjmp-c", ctx.runtime_dep.module("setjmp-c"));
+    module_scope_panic_probe_mod.addImport("setjmp-c", host_setjmp_c);
     const module_scope_panic_probe = b.addExecutable(.{
         .name = "module-scope-panic-probe",
         .root_module = module_scope_panic_probe_mod,

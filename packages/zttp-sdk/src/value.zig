@@ -15,6 +15,7 @@ pub const JSValue = packed struct(u64) {
     pub const undefined_val: JSValue = .{ .raw = SPECIAL_PREFIX | 1 };
     pub const true_val: JSValue = .{ .raw = SPECIAL_PREFIX | 2 };
     pub const false_val: JSValue = .{ .raw = SPECIAL_PREFIX | 3 };
+    pub const exception_val: JSValue = .{ .raw = SPECIAL_PREFIX | 4 };
 
     pub inline fn isNull(self: JSValue) bool {
         return self.raw == null_val.raw;
@@ -30,6 +31,10 @@ pub const JSValue = packed struct(u64) {
 
     pub inline fn isFalse(self: JSValue) bool {
         return self.raw == false_val.raw;
+    }
+
+    pub inline fn isException(self: JSValue) bool {
+        return self.raw == exception_val.raw;
     }
 
     pub inline fn isNullish(self: JSValue) bool {
@@ -116,4 +121,14 @@ pub fn numberFromF64(v: f64) JSValue {
         return JSValue.fromInt(@intFromFloat(v));
     }
     return JSValue.fromFloat(v);
+}
+
+test "JSValue.isException matches only exception_val" {
+    try std.testing.expect(JSValue.exception_val.isException());
+    try std.testing.expect(!JSValue.null_val.isException());
+    try std.testing.expect(!JSValue.undefined_val.isException());
+    try std.testing.expect(!JSValue.true_val.isException());
+    try std.testing.expect(!JSValue.false_val.isException());
+    try std.testing.expect(!JSValue.fromInt(0).isException());
+    try std.testing.expect(!JSValue.fromFloat(0.0).isException());
 }

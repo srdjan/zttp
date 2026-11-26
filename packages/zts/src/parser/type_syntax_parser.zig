@@ -186,7 +186,7 @@ pub fn parseTypeValueAndStore(
         },
         else => return err,
     };
-    try store.validateParsed(parsed.child, .{ .start = raw_start, .end = raw_end });
+    try store.validateParsedRange(checkpoint.nodes, checkpoint.params, parsed.child, .{ .start = raw_start, .end = raw_end });
     const value: TypeValue = .{
         .root = parsed.child,
         .node_range = .{
@@ -249,7 +249,7 @@ pub fn parseAdmittedTypeValueOutcome(
         else => return err,
     };
     store.noteRefusal(parser.refusal orelse leftoverRefusal(store.source, parsed.end, input.raw_span.end));
-    try store.validateParsed(parsed.child, input.raw_span);
+    try store.validateParsedRange(checkpoint.nodes, checkpoint.params, parsed.child, input.raw_span);
     const value: TypeValue = .{
         .root = parsed.child,
         .node_range = .{
@@ -800,7 +800,7 @@ pub fn appendProjectedCallFragments(store: *Store, projected_span: Span) !void {
         switch (byte) {
             '<' => angle_depth += 1,
             '>' => {
-                if (angle_depth > 0) angle_depth -= 1;
+                if ((pos == 0 or store.source[pos - 1] != '=') and angle_depth > 0) angle_depth -= 1;
             },
             '{', '[', '(' => bracket_depth += 1,
             '}', ']', ')' => {
@@ -881,7 +881,7 @@ fn appendProjectedGenericParametersFromSpan(store: *Store, body: Span) !void {
         const byte = if (at_end) ',' else store.source[pos];
         switch (byte) {
             '<' => angle_depth += 1,
-            '>' => if (angle_depth > 0) {
+            '>' => if ((pos == 0 or store.source[pos - 1] != '=') and angle_depth > 0) {
                 angle_depth -= 1;
             },
             '{', '[', '(' => bracket_depth += 1,
@@ -1418,6 +1418,7 @@ fn parseDeclarationAndStoreCore(
             // Bound fragments of a generic owner sit before the body, so the
             // body owns only the nodes that its own parse adds.
             const body_node_start = store.nodes.items.len;
+            const body_param_start = store.params.items.len;
             var parser = SyntaxParser.init(store, source, raw_start, raw_end);
             defer parser.deinit();
             const parsed = parser.parse() catch |err| switch (err) {
@@ -1434,7 +1435,7 @@ fn parseDeclarationAndStoreCore(
                 else => return err,
             };
             store.noteRefusal(parser.refusal orelse leftoverRefusal(source, parsed.end, raw_end));
-            try store.validateParsed(parsed.child, .{ .start = raw_start, .end = raw_end });
+            try store.validateParsedRange(body_node_start, body_param_start, parsed.child, .{ .start = raw_start, .end = raw_end });
             body = .{ .present = .{
                 .root = parsed.child,
                 .node_range = .{
@@ -2500,7 +2501,7 @@ test "group metadata retains completed parameter attempts" {
     try std.testing.expectEqual(NodeTag.named_reference, selected.tag);
     try std.testing.expectEqualStrings("first", selected.data.named_reference.text(source));
     try std.testing.expectEqual(@as(u32, @intCast(source.len)), value.raw_span.end);
-    const selected_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ':').?);
+    const selected_end: u32 = @intCast(std.mem.findScalar(u8, source, ':').?);
     try std.testing.expectEqual(selected_end, value.semantic_prefix_end);
     try std.testing.expectEqual(selected_end, store.nodes.items[root].semantic_span.end);
     try store.validateTypeValue(value);
@@ -2508,7 +2509,7 @@ test "group metadata retains completed parameter attempts" {
 
 test "group metadata validation uses the admitted raw interval" {
     const source = "(first: Left, Right) suffix";
-    const raw_end: u32 = @intCast(std.mem.indexOf(u8, source, ") suffix").? + 1);
+    const raw_end: u32 = @intCast(std.mem.find(u8, source, ") suffix").? + 1);
     var store = Store.init(std.testing.allocator, source);
     defer store.deinit();
     const value = try parseAdmittedTypeValue(&store, .{ .start = 0, .end = raw_end });
@@ -2574,7 +2575,7 @@ test "admitted type bounds reject inconsistent trailing bytes atomically" {
 
 test "admitted return preserves spelling and the predicate narrowing root" {
     const source = "value\tis\tstring   {";
-    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
+    const admission_end: u32 = @intCast(std.mem.findScalar(u8, source, '{').?);
     var store = Store.init(std.testing.allocator, source);
     defer store.deinit();
 
@@ -2602,9 +2603,9 @@ test "admitted return preserves spelling and the predicate narrowing root" {
 
 test "admitted return rejects a trimmed spelling without changing prior syntax" {
     const source = "number; value is string   {";
-    const return_start: u32 = @intCast(std.mem.indexOf(u8, source, "value").?);
-    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
-    const raw_end: u32 = @intCast(std.mem.indexOf(u8, source, "   {").?);
+    const return_start: u32 = @intCast(std.mem.find(u8, source, "value").?);
+    const admission_end: u32 = @intCast(std.mem.findScalar(u8, source, '{').?);
+    const raw_end: u32 = @intCast(std.mem.find(u8, source, "   {").?);
     var store = Store.init(std.testing.allocator, source);
     defer store.deinit();
     try seedNumberAnnotation(&store);
@@ -2634,7 +2635,7 @@ test "admitted annotation failure preserves a published seed" {
     const prior = store.checkpoint();
     try std.testing.expect(prior.nodes > 0);
     try std.testing.expect(prior.annotations > 0);
-    const target_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
+    const target_start: u32 = @intCast(std.mem.findScalar(u8, source, '{').?);
     failing.fail_index = failing.alloc_index;
     failing.resize_fail_index = failing.resize_index;
 
@@ -2648,4 +2649,38 @@ test "admitted annotation failure preserves a published seed" {
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
     try validateAfterAllocationFailure(&store);
+}
+
+test "projected generic lists ignore arrow '>' inside nested function types" {
+    const call_source = "<Box<(x: number) => void, string>, boolean>";
+    var call_store = Store.init(std.testing.allocator, call_source);
+    defer call_store.deinit();
+    try appendProjectedCallFragments(&call_store, .{ .start = 0, .end = @intCast(call_source.len) });
+    try std.testing.expectEqual(@as(usize, 2), call_store.semantic_fragments.items.len);
+    try std.testing.expectEqualStrings(
+        "Box<(x: number) => void, string>",
+        call_store.semantic_fragments.items[0].raw_span.text(call_source),
+    );
+    try std.testing.expectEqualStrings(
+        "boolean",
+        call_store.semantic_fragments.items[1].raw_span.text(call_source),
+    );
+
+    const param_source = "T extends Box<(a: number) => string, boolean>, U";
+    var param_store = Store.init(std.testing.allocator, param_source);
+    defer param_store.deinit();
+    try appendProjectedGenericParametersFromSpan(&param_store, .{ .start = 0, .end = @intCast(param_source.len) });
+    try std.testing.expectEqual(@as(usize, 2), param_store.projected_generic_parameters.items.len);
+    try std.testing.expectEqualStrings(
+        "T",
+        param_store.projected_generic_parameters.items[0].name_span.text(param_source),
+    );
+    try std.testing.expectEqualStrings(
+        "Box<(a: number) => string, boolean>",
+        param_store.projected_generic_parameters.items[0].bound_span.?.text(param_source),
+    );
+    try std.testing.expectEqualStrings(
+        "U",
+        param_store.projected_generic_parameters.items[1].name_span.text(param_source),
+    );
 }

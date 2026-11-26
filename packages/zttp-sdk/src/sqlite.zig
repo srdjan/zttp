@@ -20,7 +20,6 @@ pub const sqlite_null: i32 = 5;
 
 pub const SqliteError = capability.ModuleCapabilityError || error{
     SqliteOpenFailed,
-    SqlitePrepareFailed,
     SqliteBindFailed,
 };
 

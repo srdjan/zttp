@@ -104,6 +104,57 @@ test "fillRandom surfaces a clean error when the bridge cannot fill the buffer" 
     try std.testing.expectError(error.MissingModuleCapability, sdk.fillRandom(fake_handle, &buf));
 }
 
+test "denyCapability is observable through sdk.requireCapability" {
+    test_shim.allowAllCapabilities();
+    defer test_shim.allowAllCapabilities();
+
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    try sdk.requireCapability(fake_handle, .crypto);
+
+    test_shim.denyCapability(.crypto);
+    try std.testing.expectError(
+        error.MissingModuleCapability,
+        sdk.requireCapability(fake_handle, .crypto),
+    );
+
+    try sdk.requireCapability(fake_handle, .clock);
+
+    test_shim.allowCapability(.crypto);
+    try sdk.requireCapability(fake_handle, .crypto);
+}
+
+test "allowAllCapabilities clears every prior denial" {
+    test_shim.allowAllCapabilities();
+    defer test_shim.allowAllCapabilities();
+
+    test_shim.denyCapability(.crypto);
+    test_shim.denyCapability(.clock);
+    test_shim.denyCapability(.network);
+
+    test_shim.allowAllCapabilities();
+
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    try sdk.requireCapability(fake_handle, .crypto);
+    try sdk.requireCapability(fake_handle, .clock);
+    try sdk.requireCapability(fake_handle, .network);
+}
+
+test "denials are independent across capabilities" {
+    test_shim.allowAllCapabilities();
+    defer test_shim.allowAllCapabilities();
+
+    test_shim.denyCapability(.clock);
+
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    try std.testing.expectError(
+        error.MissingModuleCapability,
+        sdk.requireCapability(fake_handle, .clock),
+    );
+    try sdk.requireCapability(fake_handle, .crypto);
+    try sdk.requireCapability(fake_handle, .random);
+    try sdk.requireCapability(fake_handle, .stderr);
+}
+
 test "descriptors preserve declaration defaults and explicit empty metadata" {
     const Callback = struct {
         fn call(_: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {

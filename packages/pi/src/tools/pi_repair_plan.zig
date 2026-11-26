@@ -62,12 +62,16 @@ fn decodeJson(
 
     const out = try allocator.alloc([]const u8, 1 + goals_count);
     errdefer allocator.free(out);
+    var initialized: usize = 0;
+    errdefer for (out[0..initialized]) |s| allocator.free(s);
     out[0] = try allocator.dupe(u8, path_val.string);
+    initialized = 1;
 
     if (obj.get("goals")) |g| {
         for (g.array.items, 0..) |item, i| {
             if (item != .string) return error.InvalidToolArgsJson;
             out[i + 1] = try allocator.dupe(u8, item.string);
+            initialized += 1;
         }
     }
     return out;
@@ -632,7 +636,7 @@ test "execute rejects a property the solver does not model" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unknown goal read_only") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "unknown goal read_only") != null);
 }
 
 test "planFromSource plans repairs from an in-memory draft" {
@@ -650,8 +654,8 @@ test "planFromSource plans repairs from an in-memory draft" {
     // The draft accesses result.value without checking result.ok: a failure
     // with a concrete check_result_before_value repair template.
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"plans\":[{") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (!result.ok)") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"plans\":[{") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "if (!result.ok)") != null);
 }
 
 test "planFromSource preserves a local optional binding name in its repair" {
@@ -667,8 +671,8 @@ test "planFromSource preserves a local optional binding name in its repair" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (appName === undefined)") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (value === undefined)") == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "if (appName === undefined)") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "if (value === undefined)") == null);
 }
 
 test "an unreadable path is reported as the caller wrote it, not as an absolute path" {
@@ -691,7 +695,7 @@ test "an unreadable path is reported as the caller wrote it, not as an absolute 
         "pi_repair_plan: failed to read handler.ts: FileNotFound\n",
         result.llm_text,
     );
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, tree.abs_path) == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, tree.abs_path) == null);
 }
 
 test "a repair plan reads the same from two different workspaces" {
@@ -729,15 +733,15 @@ test "a repair plan reads the same from two different workspaces" {
     defer second.deinit(testing.allocator);
 
     // The source reaches the verifier, so the compared output holds a plan.
-    try testing.expect(std.mem.indexOf(u8, first_text, "\"plans\":[{\"id\":\"rp_001\"") != null);
+    try testing.expect(std.mem.find(u8, first_text, "\"plans\":[{\"id\":\"rp_001\"") != null);
     try testing.expectEqualStrings(first_text, second.llm_text);
 }
 
 test "tool description names repair plan authority boundary" {
-    try testing.expect(std.mem.indexOf(u8, tool.description, "does not edit files") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "unchecked Result.value") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "pass it to pi_apply_repair_plan") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "edit_intent.kind manual_edit: follow its summary by hand") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "does not edit files") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "unchecked Result.value") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "pass it to pi_apply_repair_plan") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "edit_intent.kind manual_edit: follow its summary by hand") != null);
 }
 
 test "concreteTemplate uses extracted subject names" {
@@ -753,8 +757,8 @@ test "concreteTemplate uses extracted subject names" {
     ) orelse return error.MissingPlan;
     const template = try concreteTemplate(testing.allocator, plan, "authResult");
     defer testing.allocator.free(template);
-    try testing.expect(std.mem.indexOf(u8, template, "authResult.ok") != null);
-    try testing.expect(std.mem.indexOf(u8, template, "authResult.error") != null);
+    try testing.expect(std.mem.find(u8, template, "authResult.ok") != null);
+    try testing.expect(std.mem.find(u8, template, "authResult.error") != null);
 }
 
 test "planFromSource is not ok while a requested goal is unproven" {
@@ -819,7 +823,7 @@ fn toolVerdictsUnder(policy_text: []const u8) !ToolVerdicts {
     return .{
         .goal_check_ok = goal_check.ok,
         .repair_plan_ok = plan.ok,
-        .narrow_reports_witness = std.mem.indexOf(u8, narrow.llm_text, "\"property\":\"no_secret_leakage\"") != null,
+        .narrow_reports_witness = std.mem.find(u8, narrow.llm_text, "\"property\":\"no_secret_leakage\"") != null,
         .production_proves = unproven.len == 0,
     };
 }
@@ -852,14 +856,14 @@ const plan_head =
 fn expectFirstPlan(source: []const u8, summary: []const u8, template: []const u8) !void {
     var result = try planFromSource(testing.allocator, source, "handler.ts", &.{});
     defer result.deinit(testing.allocator);
-    const plans_at = std.mem.indexOf(u8, result.llm_text, "\"plans\":[") orelse return error.NoPlans;
+    const plans_at = std.mem.find(u8, result.llm_text, "\"plans\":[") orelse return error.NoPlans;
     const plans = result.llm_text[plans_at..];
     const expected = try std.fmt.allocPrint(testing.allocator, "\"summary\":\"{s}\",\"edit_intent\":{{\"kind\":\"insert_guard_before_line\"", .{summary});
     defer testing.allocator.free(expected);
-    try testing.expect(std.mem.indexOf(u8, plans, expected) != null);
+    try testing.expect(std.mem.find(u8, plans, expected) != null);
     const expected_template = try std.fmt.allocPrint(testing.allocator, "\"template\":\"{s}\"", .{template});
     defer testing.allocator.free(expected_template);
-    try testing.expect(std.mem.indexOf(u8, plans, expected_template) != null);
+    try testing.expect(std.mem.find(u8, plans, expected_template) != null);
 }
 
 /// Production stops this source before the verifier, so the tool reports the
@@ -870,16 +874,16 @@ fn expectEarlyStopPlan(source: []const u8, code: []const u8, summary: []const u8
     try testing.expect(!result.ok);
     const expected = try std.fmt.allocPrint(testing.allocator, "\"diagnostics\":[{{\"id\":\"diag_001\",\"code\":\"{s}\"", .{code});
     defer testing.allocator.free(expected);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, expected) != null);
-    const plans_at = std.mem.indexOf(u8, result.llm_text, "\"plans\":[") orelse return error.NoPlans;
+    try testing.expect(std.mem.find(u8, result.llm_text, expected) != null);
+    const plans_at = std.mem.find(u8, result.llm_text, "\"plans\":[") orelse return error.NoPlans;
     const plans = result.llm_text[plans_at..];
     try testing.expect(std.mem.startsWith(u8, plans, "\"plans\":[{\"id\":\"rp_001\",\"kind\":\"check_result_before_value\""));
     const expected_summary = try std.fmt.allocPrint(testing.allocator, "\"summary\":\"{s}\"", .{summary});
     defer testing.allocator.free(expected_summary);
-    try testing.expect(std.mem.indexOf(u8, plans, expected_summary) != null);
+    try testing.expect(std.mem.find(u8, plans, expected_summary) != null);
     const expected_template = try std.fmt.allocPrint(testing.allocator, "\"template\":\"{s}\"", .{shape_guard});
     defer testing.allocator.free(expected_template);
-    try testing.expect(std.mem.indexOf(u8, plans, expected_template) != null);
+    try testing.expect(std.mem.find(u8, plans, expected_template) != null);
 }
 
 test "repair plan: an unguarded value read keeps the guard" {
@@ -1086,9 +1090,9 @@ test "a plan for an optional read with no binding says to bind the value first" 
     try writePlan(text_buf.writer(), testing.allocator, 1, try optionalReadPlan(), "diag", 1, null);
     const text = try text_buf.toOwnedSlice();
     defer testing.allocator.free(text);
-    try testing.expect(std.mem.indexOf(u8, text, "\"summary\":\"Bind the value to a const first, then check it for undefined.\"") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\"template\":\"// bind the value to a const, then check it for undefined before you read it\"") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "if (value === undefined)") == null);
+    try testing.expect(std.mem.find(u8, text, "\"summary\":\"Bind the value to a const first, then check it for undefined.\"") != null);
+    try testing.expect(std.mem.find(u8, text, "\"template\":\"// bind the value to a const, then check it for undefined before you read it\"") != null);
+    try testing.expect(std.mem.find(u8, text, "if (value === undefined)") == null);
 }
 
 test "a plan for an optional read on a named binding keeps the guard line" {
@@ -1097,8 +1101,8 @@ test "a plan for an optional read on a named binding keeps the guard line" {
     try writePlan(text_buf.writer(), testing.allocator, 1, try optionalReadPlan(), "diag", 1, "appName");
     const text = try text_buf.toOwnedSlice();
     defer testing.allocator.free(text);
-    try testing.expect(std.mem.indexOf(u8, text, "\"summary\":\"Narrow the optional value, provide a fallback, or return before using it.\"") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\"template\":\"if (appName === undefined) { return Response.json({ error: \\\"missing value\\\" }, { status: 400 }); }\"") != null);
+    try testing.expect(std.mem.find(u8, text, "\"summary\":\"Narrow the optional value, provide a fallback, or return before using it.\"") != null);
+    try testing.expect(std.mem.find(u8, text, "\"template\":\"if (appName === undefined) { return Response.json({ error: \\\"missing value\\\" }, { status: 400 }); }\"") != null);
 }
 
 test "repair plan: an unguarded read of a possibly undefined value gets ZTS309 and one plan" {
@@ -1113,14 +1117,14 @@ test "repair plan: an unguarded read of a possibly undefined value gets ZTS309 a
     var result = try planFromSource(testing.allocator, source, "handler.ts", &.{});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         result.llm_text,
         "\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS309\",\"kind\":\"unchecked_optional_access\",\"severity\":\"error\",\"line\":4,\"column\":34,",
     ) != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diag_002\"") == null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"plans\":[{\"id\":\"rp_001\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"rp_002\"") == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"diag_002\"") == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"plans\":[{\"id\":\"rp_001\"") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"rp_002\"") == null);
 }
 
 test "repair plan: a type error stops the check and returns the production diagnostic with one help plan" {
@@ -1159,8 +1163,8 @@ test "repair plan: a .js path returns the production ZTS052 diagnostic" {
     var result = try planFromSource(testing.allocator, source, "handler.js", &.{});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS052\",\"severity\":\"error\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diag_002\"") == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS052\",\"severity\":\"error\"") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"diag_002\"") == null);
     try testing.expect(std.mem.endsWith(u8, result.llm_text, "\"witnesses\":[],\"plans\":[{\"id\":\"rp_001\",\"kind\":\"follow_diagnostic_help\",\"target\":{\"line\":1,\"column\":1},\"behavioral_change\":true,\"summary\":\"rename the handler to .ts\",\"edit_intent\":{\"kind\":\"manual_edit\",\"line\":1,\"column\":1,\"template\":\"\"},\"closes\":[\"diag_001\"]}]}\n"));
 }
 
@@ -1181,9 +1185,9 @@ test "repair plan: a compound assignment gets ZTS613 and an apply_repair_intent 
         \\
     );
     defer testing.allocator.free(text);
-    try testing.expect(std.mem.indexOf(u8, text, "\"code\":\"ZTS613\"") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\"plans\":[{\"id\":\"rp_001\",\"kind\":\"apply_repair_intent\"") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\"edit_intent\":{\"kind\":\"replace_compound_assign_with_explicit\",\"line\":3") != null);
+    try testing.expect(std.mem.find(u8, text, "\"code\":\"ZTS613\"") != null);
+    try testing.expect(std.mem.find(u8, text, "\"plans\":[{\"id\":\"rp_001\",\"kind\":\"apply_repair_intent\"") != null);
+    try testing.expect(std.mem.find(u8, text, "\"edit_intent\":{\"kind\":\"replace_compound_assign_with_explicit\",\"line\":3") != null);
 }
 
 test "repair plan: a type mismatch gets one follow_diagnostic_help plan with the help text" {
@@ -1200,7 +1204,7 @@ test "repair plan: a type mismatch gets one follow_diagnostic_help plan with the
         text,
         "\"plans\":[{\"id\":\"rp_001\",\"kind\":\"follow_diagnostic_help\",\"target\":{\"line\":2,\"column\":3},\"behavioral_change\":true,\"summary\":\"Change the value or the declared type so that the two types match.\",\"edit_intent\":{\"kind\":\"manual_edit\",\"line\":2,\"column\":3,\"template\":\"\"},\"closes\":[\"diag_001\"]}]}\n",
     ));
-    try testing.expect(std.mem.indexOf(u8, text, "\"rp_002\"") == null);
+    try testing.expect(std.mem.find(u8, text, "\"rp_002\"") == null);
 }
 
 test "repair plan: a spec failure outside the requested goals is reported with a plan and leaves ok true" {
@@ -1214,9 +1218,9 @@ test "repair plan: a spec failure outside the requested goals is reported with a
     defer testing.allocator.free(text);
     // The requested goals hold; the ZTS500 still gets its plan (Decision 4(a)).
     try testing.expect(std.mem.startsWith(u8, text, "{\"ok\":true,"));
-    try testing.expect(std.mem.indexOf(u8, text, "\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS500\",\"severity\":\"error\",\"line\":1,\"column\":17,") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\"plans\":[{\"id\":\"rp_001\",\"kind\":\"follow_diagnostic_help\",\"target\":{\"line\":1,\"column\":17},\"behavioral_change\":true,\"summary\":\"remove Date.now(), Math.random(), and performance.now() from the response path.\"") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\"closes\":[\"diag_001\"]") != null);
+    try testing.expect(std.mem.find(u8, text, "\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS500\",\"severity\":\"error\",\"line\":1,\"column\":17,") != null);
+    try testing.expect(std.mem.find(u8, text, "\"plans\":[{\"id\":\"rp_001\",\"kind\":\"follow_diagnostic_help\",\"target\":{\"line\":1,\"column\":17},\"behavioral_change\":true,\"summary\":\"remove Date.now(), Math.random(), and performance.now() from the response path.\"") != null);
+    try testing.expect(std.mem.find(u8, text, "\"closes\":[\"diag_001\"]") != null);
 }
 
 test "repair plan: a verifier error with no typed repair gets a help plan" {
@@ -1232,7 +1236,7 @@ test "repair plan: a verifier error with no typed repair gets a help plan" {
     var result = try planFromSource(testing.allocator, source, "handler.ts", &.{});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"code\":\"ZTS310\",\"kind\":\"module_scope_mutation\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"kind\":\"follow_diagnostic_help\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"edit_intent\":{\"kind\":\"manual_edit\",\"line\":4,\"column\":11") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"code\":\"ZTS310\",\"kind\":\"module_scope_mutation\"") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"kind\":\"follow_diagnostic_help\"") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"edit_intent\":{\"kind\":\"manual_edit\",\"line\":4,\"column\":11") != null);
 }

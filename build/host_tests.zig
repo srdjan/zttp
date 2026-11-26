@@ -80,8 +80,6 @@ const host_test_roots = [_]HostTestRoot{
 pub const Result = struct {
     /// The roots selected for aggregate execution, in table order.
     runs: []*std.Build.Step.Run,
-    /// The `test-project-config` root.
-    project_config: *std.Build.Step.Run,
 };
 
 /// Build every root in `host_test_roots` and the MLX gate.
@@ -112,7 +110,6 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
 
     var host_test_runs: [host_test_roots.len]*std.Build.Step.Run = undefined;
     var aggregate_runs: std.ArrayList(*std.Build.Step.Run) = .empty;
-    var project_config_run: ?*std.Build.Step.Run = null;
     for (host_test_roots, 0..) |root, i| {
         const owner_dep = switch (root.owner) {
             .tools => ctx.tools_dep,
@@ -131,8 +128,8 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
         // The acceptance kernel is a leaf and takes no options, so wiring it
         // into every host root costs nothing and keeps the table free of a flag
         // that would need updating each time a file starts naming it.
-        tests.root_module.addImport("zttp_proof_checker", ctx.proofCheckerMod());
-        if (root.project_config) tests.root_module.addImport("project_config", ctx.project_config_mod);
+        tests.root_module.addImport("zttp_proof_checker", ctx.proofCheckerHostMod());
+        if (root.project_config) tests.root_module.addImport("project_config", ctx.project_config_host_mod);
         if (root.pi_modules) {
             tests.root_module.addImport("zts_cli", ctx.pi_zts_cli_host_mod);
         }
@@ -155,9 +152,6 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
         // behavioral evidence compiles and runs. Keep that dependency on the
         // named gate so a broken probe cannot be reported as guard agreement.
         if (root.standin_only) residual_guards_drift_step.dependOn(&host_test_runs[i].step);
-        if (std.mem.eql(u8, root.step, "test-project-config")) {
-            project_config_run = host_test_runs[i];
-        }
     }
 
     // Explicit real-model gate. It is intentionally absent from the aggregate
@@ -176,7 +170,7 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
         },
     });
     mlx_e2e_tests.root_module.addImport("zts", ctx.zts_host_mod);
-    mlx_e2e_tests.root_module.addImport("project_config", ctx.project_config_mod);
+    mlx_e2e_tests.root_module.addImport("project_config", ctx.project_config_host_mod);
     mlx_e2e_tests.root_module.addImport("zts_cli", ctx.pi_zts_cli_host_mod);
     const run_mlx_e2e_tests = ctx.addRunTest(mlx_e2e_tests);
     const mlx_e2e_step = b.step("test-expert-mlx-e2e", "Run the real local MLX expert flow");
@@ -184,6 +178,5 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
 
     return .{
         .runs = aggregate_runs.toOwnedSlice(b.allocator) catch @panic("OOM"),
-        .project_config = project_config_run orelse @panic("host_test_roots has no test-project-config row"),
     };
 }

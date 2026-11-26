@@ -188,7 +188,7 @@ fn appendText(
         .model_text => .{ .model_text = body },
         .system_note => .{ .system_note = body },
     };
-    try tr.entries.append(allocator, entry);
+    try tr.appendOwned(allocator, entry);
 }
 
 const DisplayKind = enum { proof_card, diagnostic_box, verified_change_set };
@@ -205,7 +205,7 @@ fn appendDisplayMessage(
         if (message.ui_payload) |*p| p.deinit(allocator);
     }
 
-    try tr.entries.append(allocator, switch (kind) {
+    try tr.appendOwned(allocator, switch (kind) {
         .proof_card => .{ .proof_card = message },
         .diagnostic_box => .{ .diagnostic_box = message },
         .verified_change_set => .{ .verified_change_set = message },
@@ -227,7 +227,7 @@ fn appendToolUseBatch(
         calls[index] = try ownToolUse(allocator, try batch.at(index));
         initialized += 1;
     }
-    try tr.entries.append(allocator, .{ .assistant_tool_use = calls });
+    try tr.appendOwned(allocator, .{ .assistant_tool_use = calls });
 }
 
 fn ownToolUse(allocator: std.mem.Allocator, tool_use: events.ToolUse) !transcript.OwnedToolCall {
@@ -267,7 +267,7 @@ fn appendToolResult(
         null;
     errdefer if (payload_copy) |*copied_payload| copied_payload.deinit(allocator);
 
-    try tr.entries.append(allocator, .{ .tool_result = .{
+    try tr.appendOwned(allocator, .{ .tool_result = .{
         .tool_use_id = tu_id_copy,
         .tool_name = tool_name_copy,
         .ok = result.ok,
@@ -1043,7 +1043,7 @@ test "reconstructTranscript reports the line number of the first corrupt record"
     try events.appendEntryEvent(allocator, path, 2, .{ .user_text = "two" });
     const raw = try zts.file_io.readFile(allocator, path, 1024 * 1024);
     defer allocator.free(raw);
-    const corrupt_at = std.mem.indexOf(u8, raw, "two") orelse return error.TestExpectedPayload;
+    const corrupt_at = std.mem.find(u8, raw, "two") orelse return error.TestExpectedPayload;
     const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDWR }, 0);

@@ -271,10 +271,7 @@ test "graph admission preserves reads bytecode and complete atoms" {
         .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value = 1; /* unfinished", .reads = 1, .build_error = error.UnterminatedComment },
         .{ .entry = "/*", .reads = 0, .build_error = error.UnterminatedComment },
         .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value: number = 1; /* unfinished\n", .reads = 1, .build_error = error.UnterminatedComment },
-        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "const marker: \"open\n = \"open\"; export const value = 1;\n", .reads = 1, .bytecode = &.{
-            .{ .len = 89, .sha256 = "ecb3ef0fc0786551d6cd77934550dd9c5626190474e4ecfe8cb0e9dcfa9568a9" },
-            .{ .len = 84, .sha256 = "a387c5d27495651f6d7b988fc430052958ce145a8e10175203148d20ceb491e7" },
-        }, .atom_names = &.{ "existing_prefix", "marker", "result" } },
+        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "const marker: \"open\n = \"open\"; export const value = 1;\n", .reads = 1, .build_error = error.UnterminatedString },
         .{ .entry = "const value: number = ;\n", .reads = 0, .parse_error = error.UnexpectedToken },
     };
     const Reader = struct {

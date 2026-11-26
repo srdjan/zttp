@@ -1,15 +1,15 @@
 #!/bin/sh
 # zttp installer - downloads pre-built binaries from GitHub Releases
-# Usage: curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/srdjan/zttp/main/install.sh | sh
 #
 # Environment variables:
-#   ZTTP_VERSION     - pin to a specific version (current: v0.27.1)
+#   ZTTP_VERSION     - pin to a specific version (current: v0.27.2)
 #   ZTTP_CHANNEL     - stable (default; newest non-prerelease), latest, or beta
 #   ZTTP_INSTALL_DIR - installation directory, default: $HOME/.zttp
 
 set -eu
 
-REPO="srdjan/zigttp"
+REPO="srdjan/zttp"
 INSTALL_DIR="${ZTTP_INSTALL_DIR:-$HOME/.zttp}"
 BIN_DIR="${INSTALL_DIR}/bin"
 INSTALL_TMPDIR=""

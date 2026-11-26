@@ -23,9 +23,6 @@ concurrency:
   group: proof-gate-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  ZIG_VERSION: '0.17.1'
-
 jobs:
   proof-gate:
     timeout-minutes: 30
@@ -37,18 +34,16 @@ jobs:
           # Full history so `git show <base>:<path>` can read the before side.
           fetch-depth: 0
 
-      # mlugg/setup-zig@v2
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
-        with:
-          version: ${{ env.ZIG_VERSION }}
-
-      - name: Build zttp
-        run: zig build -Doptimize=fast
+      - name: Install zttp
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/srdjan/zttp/main/install.sh | sh
+          echo "$HOME/.zttp/bin" >> "$GITHUB_PATH"
 
       - name: Run proof gate
         id: gate
         env:
           BASE_REF: ${{ github.base_ref }}
+          ZTTP: zttp
         run: bash scripts/proof-gate.sh "origin/${BASE_REF}" "HEAD"
         continue-on-error: true
 

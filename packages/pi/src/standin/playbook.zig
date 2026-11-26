@@ -177,7 +177,7 @@ fn renderReviewText(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     defer text.deinit();
     const writer = text.writer();
     try writer.writeAll("The deterministic playbook server inspected the supplied handler source. ");
-    if (std.mem.indexOf(u8, source, "function handler(") != null) {
+    if (std.mem.find(u8, source, "function handler(") != null) {
         try writer.writeAll("Visible observation: it contains a `function handler` declaration. ");
     } else {
         try writer.writeAll("Visible observation: it does not contain a `function handler` declaration. ");
@@ -188,7 +188,7 @@ fn renderReviewText(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
             "Visible observation: `result.value` follows `validateJson` with a missing visible `result.ok` guard. " ++
                 "Add a guard before that value read. ",
         );
-    } else if (std.mem.indexOf(u8, source, "if (!result.ok)") != null) {
+    } else if (std.mem.find(u8, source, "if (!result.ok)") != null) {
         try writer.writeAll("Visible observation: the source contains a `result.ok` guard. ");
     } else {
         try writer.writeAll("Visible observation: this limited review found no unchecked `result.value` read after `validateJson`. ");
@@ -545,14 +545,14 @@ pub fn synthesizeEnvFeature(
 ) !EnvTransform {
     const handler_open = findHandlerBodyOpen(source) orelse return .unsupported_handler;
     const env_import = "import { env } from \"zttp:env\";";
-    const has_env_import = std.mem.indexOf(u8, source, env_import) != null;
+    const has_env_import = std.mem.find(u8, source, env_import) != null;
     if (hasConflictingEnvImport(source, env_import)) {
         return .conflicting_env_import;
     }
 
     const read_marker = try allocator.print("env(\"{s}\")", .{variable});
     defer allocator.free(read_marker);
-    if (std.mem.indexOf(u8, source, read_marker) != null) return .existing_read;
+    if (std.mem.find(u8, source, read_marker) != null) return .existing_read;
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -574,17 +574,17 @@ const ViolationTransform = union(enum) {
 
 fn synthesizeViolationFix(allocator: std.mem.Allocator, source: []const u8) !ViolationTransform {
     const result_marker = "const result = validateJson(\"item\", req.body ?? \"\");";
-    const result_start = std.mem.indexOf(u8, source, result_marker) orelse return .unsupported_seed;
+    const result_start = std.mem.find(u8, source, result_marker) orelse return .unsupported_seed;
     const data_marker = "const data = result.value;";
-    const data_start = std.mem.indexOfPos(u8, source, result_start + result_marker.len, data_marker) orelse {
+    const data_start = std.mem.findPos(u8, source, result_start + result_marker.len, data_marker) orelse {
         return .unsupported_seed;
     };
     const guard_marker = "if (!result.ok)";
-    if (std.mem.indexOfPos(u8, source, result_start + result_marker.len, guard_marker)) |guard_start| {
+    if (std.mem.findPos(u8, source, result_start + result_marker.len, guard_marker)) |guard_start| {
         if (guard_start < data_start) return .already_guarded;
     }
 
-    const line_start = std.mem.lastIndexOfScalar(u8, source[0..data_start], '\n') orelse return .unsupported_seed;
+    const line_start = std.mem.findScalarLast(u8, source[0..data_start], '\n') orelse return .unsupported_seed;
     const indentation = source[line_start + 1 .. data_start];
     if (!isIndentation(indentation)) return .unsupported_seed;
 
@@ -643,11 +643,11 @@ fn skipNonCode(source: []const u8, i: usize) ?usize {
         '/' => {
             if (i + 1 >= source.len) return null;
             if (source[i + 1] == '/') {
-                const nl = std.mem.indexOfScalarPos(u8, source, i, '\n') orelse return source.len;
+                const nl = std.mem.findScalarPos(u8, source, i, '\n') orelse return source.len;
                 return nl;
             }
             if (source[i + 1] == '*') {
-                const close = std.mem.indexOfPos(u8, source, i + 2, "*/") orelse return source.len;
+                const close = std.mem.findPos(u8, source, i + 2, "*/") orelse return source.len;
                 return close + 2;
             }
             return null;
@@ -688,7 +688,7 @@ fn matchBrace(source: []const u8, open: usize) ?usize {
 /// whose match is followed by another brace is treated as the annotation and
 /// skipped. Splicing into either produced source that was not valid.
 fn findHandlerBodyOpen(source: []const u8) ?usize {
-    const handler_start = std.mem.indexOf(u8, source, "function handler(") orelse return null;
+    const handler_start = std.mem.find(u8, source, "function handler(") orelse return null;
     const paren_open = handler_start + "function handler".len;
 
     var depth: usize = 0;
@@ -734,11 +734,11 @@ fn findHandlerBodyOpen(source: []const u8) ?usize {
 
 fn hasUncheckedResultValue(source: []const u8) bool {
     const result_marker = "const result = validateJson(";
-    const result_start = std.mem.indexOf(u8, source, result_marker) orelse return false;
+    const result_start = std.mem.find(u8, source, result_marker) orelse return false;
     const data_marker = "const data = result.value;";
-    const data_start = std.mem.indexOfPos(u8, source, result_start + result_marker.len, data_marker) orelse return false;
+    const data_start = std.mem.findPos(u8, source, result_start + result_marker.len, data_marker) orelse return false;
     const guard_marker = "if (!result.ok)";
-    if (std.mem.indexOfPos(u8, source, result_start + result_marker.len, guard_marker)) |guard_start| {
+    if (std.mem.findPos(u8, source, result_start + result_marker.len, guard_marker)) |guard_start| {
         return guard_start > data_start;
     }
     return true;
@@ -749,7 +749,7 @@ fn hasConflictingEnvImport(source: []const u8, allowed_import: []const u8) bool 
     while (lines.next()) |raw_line| {
         const line = std.mem.trim(u8, raw_line, " \t\r");
         if (std.mem.startsWith(u8, line, "import ") and
-            std.mem.indexOf(u8, line, "zttp:env") != null and
+            std.mem.find(u8, line, "zttp:env") != null and
             !std.mem.eql(u8, line, allowed_import))
         {
             return true;
@@ -785,7 +785,7 @@ pub fn parseRouteIntent(allocator: std.mem.Allocator, ask: []const u8) !RouteSpe
 
 pub fn parseRouteSpecArgs(allocator: std.mem.Allocator, args: []const []const u8) !RouteSpec {
     if (args.len == 0) return error.InvalidRouteSpec;
-    if (args.len == 1 and std.mem.indexOfScalar(u8, args[0], '{') != null) {
+    if (args.len == 1 and std.mem.findScalar(u8, args[0], '{') != null) {
         return parseJsonSpec(allocator, args[0]);
     }
     return parseKvSpec(allocator, args);
@@ -842,7 +842,7 @@ fn parseKvSpec(allocator: std.mem.Allocator, args: []const []const u8) !RouteSpe
     var start: usize = 0;
     if (std.mem.eql(u8, args[0], "route")) start = 1;
     for (args[start..]) |arg| {
-        const eq = std.mem.indexOfScalar(u8, arg, '=') orelse return error.InvalidRouteSpec;
+        const eq = std.mem.findScalar(u8, arg, '=') orelse return error.InvalidRouteSpec;
         const key = arg[0..eq];
         const value = arg[eq + 1 ..];
         if (std.mem.eql(u8, key, "file")) {
@@ -942,7 +942,7 @@ fn findPath(ask: []const u8) ?[]const u8 {
 fn findKeyValue(ask: []const u8, key: []const u8) ?[]const u8 {
     var words = std.mem.tokenizeAny(u8, ask, " \t\r\n`\"'(),;");
     while (words.next()) |word| {
-        const eq = std.mem.indexOfScalar(u8, word, '=') orelse continue;
+        const eq = std.mem.findScalar(u8, word, '=') orelse continue;
         if (!std.ascii.eqlIgnoreCase(word[0..eq], key)) continue;
         return std.mem.trimEnd(u8, word[eq + 1 ..], ".!?");
     }
@@ -978,7 +978,7 @@ fn findEnvName(ask: []const u8) ?[]const u8 {
             }
         }
         if (!valid) continue;
-        if (std.mem.indexOfScalar(u8, word, '_') != null) return word;
+        if (std.mem.findScalar(u8, word, '_') != null) return word;
         if (best == null or word.len > best.?.len) best = word;
     }
     return best;
@@ -1030,15 +1030,14 @@ pub fn synthesizeRoute(
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    const has_router = std.mem.indexOf(u8, source, "zttp:router") != null;
-    const has_routes = std.mem.indexOf(u8, source, "const routes = {") != null;
-    const has_guardrails_alias = std.mem.indexOf(u8, source, "type Guardrails<") != null or
-        std.mem.indexOf(u8, source, "type Guardrails<") != null;
+    const has_router = std.mem.find(u8, source, "zttp:router") != null;
+    const has_routes = std.mem.find(u8, source, "const routes = {") != null;
+    const has_guardrails_alias = std.mem.find(u8, source, "type Guardrails<") != null;
 
     if (!has_router) {
         try out.appendSlice(allocator, "import { routerMatch } from \"zttp:router\";\n");
     }
-    if (spec.body_schema != null and std.mem.indexOf(u8, source, "zttp:validate") == null) {
+    if (spec.body_schema != null and std.mem.find(u8, source, "zttp:validate") == null) {
         try out.appendSlice(allocator, "import { validateJson } from \"zttp:validate\";\n");
     }
     if (out.items.len > 0 and source.len > 0) try out.append(allocator, '\n');
@@ -1121,11 +1120,11 @@ fn appendWithRouteEntry(
     handler_name: []const u8,
 ) !void {
     const marker = "const routes = {";
-    const start = std.mem.indexOf(u8, source, marker) orelse {
+    const start = std.mem.find(u8, source, marker) orelse {
         try out.appendSlice(allocator, source);
         return;
     };
-    const close = std.mem.indexOfPos(u8, source, start + marker.len, "};") orelse {
+    const close = std.mem.findPos(u8, source, start + marker.len, "};") orelse {
         try out.appendSlice(allocator, source);
         return;
     };
@@ -1141,7 +1140,7 @@ fn appendWithRouteEntry(
 }
 
 fn stripFunctionHandlerAlloc(allocator: std.mem.Allocator, source: []const u8) !?[]u8 {
-    const start = std.mem.indexOf(u8, source, "function handler(") orelse return null;
+    const start = std.mem.find(u8, source, "function handler(") orelse return null;
     // Shares findHandlerBodyOpen's parameter-list and return-type handling, and
     // matchBrace's literal awareness. Counting raw braces from the first `{`
     // closed early on a handler returning `Response.json({ msg: "}" })`.
@@ -1300,9 +1299,9 @@ test "stand-in add-route steps render a chat completions tool call for propose_c
     };
     const body = try renderResponse(testing.allocator, parsed);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "\"finish_reason\":\"tool_calls\"") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "\"name\":\"propose_change_set\"") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "event:") == null);
+    try testing.expect(std.mem.find(u8, body, "\"finish_reason\":\"tool_calls\"") != null);
+    try testing.expect(std.mem.find(u8, body, "\"name\":\"propose_change_set\"") != null);
+    try testing.expect(std.mem.find(u8, body, "event:") == null);
 }
 
 test "stand-in handler body scan skips destructured parameters and object return types" {

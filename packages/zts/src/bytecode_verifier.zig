@@ -29,6 +29,7 @@ pub const VerifyError = error{
     LocalIndexOutOfBounds,
     UpvalueIndexOutOfBounds,
     CacheIndexOutOfBounds,
+    SlotIndexOutOfBounds,
     EmptyBytecode,
 };
 
@@ -68,6 +69,8 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
     // fixed-size side table, so large bytecode gets the same validation as
     // small bytecode.
 
+    var max_literal_prop_count: u16 = 0;
+
     var pc: usize = 0;
     while (pc < code.len) {
         const raw_op = code[pc];
@@ -98,7 +101,7 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
 
         // Phase 3: validate constant pool indices for relevant opcodes
         switch (op) {
-            .push_const, .make_function => {
+            .push_const, .add_mod, .sub_mod, .mul_mod, .mod_const, .import_module, .import_name => {
                 const idx = readU16(code, pc + 1);
                 if (idx >= constants_len) {
                     return .{
@@ -106,6 +109,35 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
                         .err = VerifyError.ConstantIndexOutOfBounds,
                         .offset = pc,
                         .message = "constant pool index out of bounds",
+                    };
+                }
+            },
+            .make_function => {
+                const idx = readU16(code, pc + 1);
+                if (idx >= constants_len) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.ConstantIndexOutOfBounds,
+                        .offset = pc,
+                        .message = "constant pool index out of bounds in make_function",
+                    };
+                }
+                const child_value = func.constants[idx];
+                if (!child_value.isExternPtr()) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.ConstantIndexOutOfBounds,
+                        .offset = pc,
+                        .message = "make_function constant is not function bytecode",
+                    };
+                }
+                const child = child_value.toExternPtr(FunctionBytecode);
+                if (child.header.magic != bytecode.MAGIC) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.ConstantIndexOutOfBounds,
+                        .offset = pc,
+                        .message = "make_function constant is not function bytecode",
                     };
                 }
             },
@@ -193,6 +225,46 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
                 }
             },
             // Local variable index validation (Phase 5)
+            .get_loc_0, .put_loc_0 => {
+                if (func.local_count < 1) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.LocalIndexOutOfBounds,
+                        .offset = pc,
+                        .message = "local variable index 0 out of bounds",
+                    };
+                }
+            },
+            .get_loc_1, .put_loc_1 => {
+                if (func.local_count < 2) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.LocalIndexOutOfBounds,
+                        .offset = pc,
+                        .message = "local variable index 1 out of bounds",
+                    };
+                }
+            },
+            .get_loc_2, .put_loc_2 => {
+                if (func.local_count < 3) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.LocalIndexOutOfBounds,
+                        .offset = pc,
+                        .message = "local variable index 2 out of bounds",
+                    };
+                }
+            },
+            .get_loc_3, .put_loc_3 => {
+                if (func.local_count < 4) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.LocalIndexOutOfBounds,
+                        .offset = pc,
+                        .message = "local variable index 3 out of bounds",
+                    };
+                }
+            },
             .get_loc, .put_loc => {
                 const local_idx = code[pc + 1];
                 if (local_idx >= func.local_count) {
@@ -261,8 +333,11 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
                     };
                 }
             },
+            .new_object_literal => {
+                max_literal_prop_count = @max(max_literal_prop_count, code[pc + 3]);
+            },
             .set_slot => {
-                // slot_idx validation would need hidden class info, skip
+                // Validated in Phase 2 once all new_object_literal prop counts are known.
             },
             else => {},
         }
@@ -270,13 +345,24 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
         pc += info.size;
     }
 
-    // Phase 2 continued: validate jump targets
+    // Phase 2 continued: validate jump targets and set_slot bounds
     pc = 0;
     while (pc < code.len) {
         const op: Opcode = @fromBackingInt(@intCast(code[pc]));
         const info = bytecode.getOpcodeInfo(op);
 
         switch (op) {
+            .set_slot => {
+                const slot_idx: u16 = code[pc + 1];
+                if (slot_idx >= max_literal_prop_count) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.SlotIndexOutOfBounds,
+                        .offset = pc,
+                        .message = "set_slot index exceeds literal shape slot count",
+                    };
+                }
+            },
             .goto, .if_true, .if_false, .if_false_goto, .drop_goto => {
                 const offset = readI16(code, pc + 1);
                 const target = @as(i64, @intCast(pc)) + @as(i64, info.size) + @as(i64, offset);
@@ -430,6 +516,14 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
                 .message = "stack height exceeds maximum",
             };
         }
+        if (after_op > func.stack_size) {
+            return .{
+                .valid = false,
+                .err = VerifyError.StackOverflow,
+                .offset = pc,
+                .message = "stack height exceeds declared stack_size",
+            };
+        }
 
         const next_pc = pc + info.size;
         const branch_target = switch (op) {
@@ -539,13 +633,20 @@ fn propagateStackHeight(
     }
 
     const previous = stack_heights[target];
-    if (previous == UNREACHED_STACK_HEIGHT or stack_height < previous) {
+    if (previous == UNREACHED_STACK_HEIGHT) {
         stack_heights[target] = stack_height;
         if (!queued[target]) {
             worklist[worklist_len.*] = target;
             worklist_len.* += 1;
             queued[target] = true;
         }
+    } else if (stack_height != previous) {
+        return .{
+            .valid = false,
+            .err = if (stack_height < previous) VerifyError.StackUnderflow else VerifyError.StackOverflow,
+            .offset = source_pc,
+            .message = "inconsistent stack height at control-flow merge",
+        };
     }
 
     return null;
@@ -1192,4 +1293,199 @@ test "verify: valid dup passes" {
     };
     const result = verify(&func);
     try std.testing.expect(result.valid);
+}
+
+test "verify: stack-growing loop rejected" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @backingInt(Opcode.push_0),
+            @backingInt(Opcode.goto),
+            0xfc, 0xff, // -4 -> offset 0
+        },
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.StackOverflow, result.err.?);
+}
+
+test "verify: get_loc_0 with local_count 0 rejected" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @backingInt(Opcode.get_loc_0),
+            @backingInt(Opcode.ret),
+        },
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.LocalIndexOutOfBounds, result.err.?);
+}
+
+test "verify: make_function with non-bytecode constant rejected" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @backingInt(Opcode.make_function),
+            0x00,
+            0x00,
+            @backingInt(Opcode.ret),
+        },
+        .constants = &.{value.JSValue.fromInt(42)},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.ConstantIndexOutOfBounds, result.err.?);
+}
+
+test "verify: make_function with invalid magic rejected" {
+    var bad_child = FunctionBytecode{
+        .header = .{ .magic = 0xDEADBEEF },
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &.{@backingInt(Opcode.ret_undefined)},
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @backingInt(Opcode.make_function),
+            0x00,
+            0x00,
+            @backingInt(Opcode.ret),
+        },
+        .constants = &.{value.JSValue.fromExternPtr(&bad_child)},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.ConstantIndexOutOfBounds, result.err.?);
+}
+
+test "verify: add_mod constant index out of bounds rejected" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @backingInt(Opcode.push_1),
+            @backingInt(Opcode.push_2),
+            @backingInt(Opcode.add_mod),
+            0x05,
+            0x00,
+            @backingInt(Opcode.ret),
+        },
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.ConstantIndexOutOfBounds, result.err.?);
+}
+
+test "verify: set_slot out of literal shape bounds rejected" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @backingInt(Opcode.new_object_literal),
+            0x00,                    0x00,                       0x01, // shape 0, prop_count = 1
+            @backingInt(Opcode.dup), @backingInt(Opcode.push_1), @backingInt(Opcode.set_slot),
+            0x02, // slot 2 >= prop_count 1
+            @backingInt(Opcode.ret),
+        },
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.SlotIndexOutOfBounds, result.err.?);
+}
+
+test "verify: tail_call pushes one result value" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @backingInt(Opcode.push_0),
+            @backingInt(Opcode.tail_call),
+            0x00,
+            @backingInt(Opcode.ret),
+        },
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(result.valid);
+}
+
+test "verify: rejects stack height exceeding declared stack_size" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &.{
+            @backingInt(Opcode.push_0),
+            @backingInt(Opcode.push_1),
+            @backingInt(Opcode.add),
+            @backingInt(Opcode.ret),
+        },
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.StackOverflow, result.err.?);
 }

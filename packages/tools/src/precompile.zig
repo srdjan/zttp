@@ -95,9 +95,6 @@ pub const CompiledHandler = struct {
 
 const readFilePosix = zts.file_io.readFile;
 
-/// Write a file synchronously using posix operations
-pub const writeFilePosix = util.writeFilePosix;
-
 const imports_mod = @import("precompile_imports.zig");
 pub const ImportReader = imports_mod.ImportReader;
 pub const FlowModuleGraph = imports_mod.FlowModuleGraph;
@@ -347,13 +344,11 @@ pub fn compileHandler(
         const bool_diags = resolved.boolDiagnostics();
         if (bool_diags.len > 0 and !builtin.is_test) {
             debugPrint("\n", .{});
-            var bool_output: std.ArrayList(u8) = .empty;
-            defer bool_output.deinit(allocator);
-            var bool_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &bool_output);
+            var bool_aw: std.Io.Writer.Allocating = .init(allocator);
+            defer bool_aw.deinit();
             resolved.formatBoolDiagnostics(diag_view, &bool_aw.writer) catch {};
-            bool_output = bool_aw.toArrayList();
-            if (bool_output.items.len > 0) {
-                debugPrint("{s}", .{bool_output.items});
+            if (bool_aw.written().len > 0) {
+                debugPrint("{s}", .{bool_aw.written()});
             }
             debugPrint("{d} boolean check error(s), {d} warning(s)\n", .{
                 resolved.bool_error_count,
@@ -370,13 +365,11 @@ pub fn compileHandler(
 
     const tc_diags = resolved.typeDiagnostics();
     if (tc_diags.len > 0 and !builtin.is_test) {
-        var tc_output: std.ArrayList(u8) = .empty;
-        defer tc_output.deinit(allocator);
-        var tc_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &tc_output);
+        var tc_aw: std.Io.Writer.Allocating = .init(allocator);
+        defer tc_aw.deinit();
         resolved.formatTypeDiagnostics(diag_view, &tc_aw.writer) catch {};
-        tc_output = tc_aw.toArrayList();
-        if (tc_output.items.len > 0) {
-            debugPrint("{s}", .{tc_output.items});
+        if (tc_aw.written().len > 0) {
+            debugPrint("{s}", .{tc_aw.written()});
         }
     }
     if (resolved.typeErrorCount() > 0) {
@@ -389,13 +382,11 @@ pub fn compileHandler(
     if (resolved.strict_checker != null) {
         const strict_diags = resolved.strictDiagnostics();
         if (strict_diags.len > 0 and !builtin.is_test) {
-            var strict_output: std.ArrayList(u8) = .empty;
-            defer strict_output.deinit(allocator);
-            var strict_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &strict_output);
+            var strict_aw: std.Io.Writer.Allocating = .init(allocator);
+            defer strict_aw.deinit();
             resolved.formatStrictDiagnostics(diag_view, &strict_aw.writer) catch {};
-            strict_output = strict_aw.toArrayList();
-            if (strict_output.items.len > 0) {
-                debugPrint("{s}", .{strict_output.items});
+            if (strict_aw.written().len > 0) {
+                debugPrint("{s}", .{strict_aw.written()});
             }
         }
         if (resolved.strict_error_count > 0) {
@@ -435,13 +426,11 @@ pub fn compileHandler(
 
             if (diags.len > 0 and !builtin.is_test) {
                 debugPrint("\n", .{});
-                var diag_output: std.ArrayList(u8) = .empty;
-                defer diag_output.deinit(allocator);
-                var diag_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &diag_output);
+                var diag_aw: std.Io.Writer.Allocating = .init(allocator);
+                defer diag_aw.deinit();
                 verifier.formatDiagnostics(diag_view, &diag_aw.writer) catch {};
-                diag_output = diag_aw.toArrayList();
-                if (diag_output.items.len > 0) {
-                    debugPrint("{s}", .{diag_output.items});
+                if (diag_aw.written().len > 0) {
+                    debugPrint("{s}", .{diag_aw.written()});
                 }
                 debugPrint("{d} error(s), {d} warning(s)\n", .{
                     error_count,
@@ -451,7 +440,7 @@ pub fn compileHandler(
 
             // Collect violations before deciding to fail so counterexample tests can be
             // generated and returned even when verification fails.
-            zts.property_diagnostics.collectVerifierViolations(allocator, &all_violations, diags, ir_view_check);
+            try zts.property_diagnostics.collectVerifierViolations(allocator, &all_violations, diags, ir_view_check);
 
             if (error_count > 0) {
                 // Run PathGenerator to fill counterexample refs for result_unsafe violations
@@ -464,28 +453,21 @@ pub fn compileHandler(
                 zts.property_diagnostics.fillVerifierCounterexamples(all_violations.items, handler_tests);
 
                 var viol_jsonl_result: ?[]const u8 = null;
+                errdefer if (viol_jsonl_result) |s| allocator.free(s);
                 var viol_summary_result: ?[]const u8 = null;
+                errdefer if (viol_summary_result) |s| allocator.free(s);
                 if (all_violations.items.len > 0) {
-                    var vj_buf: std.ArrayList(u8) = .empty;
-                    var vj_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &vj_buf);
-                    zts.property_diagnostics.writeViolationsJsonl(&vj_aw.writer, allocator, all_violations.items, handler_tests) catch |err| {
-                        vj_aw.deinit();
-                        return err;
-                    };
-                    vj_buf = vj_aw.toArrayList();
-                    if (vj_buf.items.len > 0) {
-                        viol_jsonl_result = try vj_buf.toOwnedSlice(allocator);
-                    } else {
-                        vj_buf.deinit(allocator);
+                    var vj_aw: std.Io.Writer.Allocating = .init(allocator);
+                    defer vj_aw.deinit();
+                    try zts.property_diagnostics.writeViolationsJsonl(&vj_aw.writer, allocator, all_violations.items, handler_tests);
+                    if (vj_aw.written().len > 0) {
+                        viol_jsonl_result = try vj_aw.toOwnedSlice();
                     }
-                    var vs_buf: std.ArrayList(u8) = .empty;
-                    var vs_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &vs_buf);
+                    var vs_aw: std.Io.Writer.Allocating = .init(allocator);
+                    defer vs_aw.deinit();
                     zts.property_diagnostics.formatViolationsSummary(&vs_aw.writer, all_violations.items, filename, null) catch {};
-                    vs_buf = vs_aw.toArrayList();
-                    if (vs_buf.items.len > 0) {
-                        viol_summary_result = try vs_buf.toOwnedSlice(allocator);
-                    } else {
-                        vs_buf.deinit(allocator);
+                    if (vs_aw.written().len > 0) {
+                        viol_summary_result = try vs_aw.toOwnedSlice();
                     }
                 }
 
@@ -605,17 +587,15 @@ pub fn compileHandler(
     if (!builtin.is_test) debugPrint("Collected {d} object literal shapes\n", .{shapes.len});
 
     // Serialize bytecode with atoms AND shapes for complete cache format
-    var buffer: [256 * 1024]u8 = undefined; // 256KB buffer
-    var writer = zts.bytecode_cache.SliceWriter{ .buffer = &buffer };
+    var bytecode_aw = BytecodeAllocWriter.init(allocator);
+    defer bytecode_aw.deinit();
 
-    zts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(&func, &atoms, shapes, &writer, allocator) catch |err| {
+    zts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(&func, &atoms, shapes, &bytecode_aw, allocator) catch |err| {
         debugPrint("Serialization error: {}\n", .{err});
         return err;
     };
 
-    // Copy the serialized data to owned memory
-    const serialized = writer.getWritten();
-    const bytecode_data = try allocator.dupe(u8, serialized);
+    const bytecode_data = try bytecode_aw.toOwnedSlice();
     errdefer allocator.free(bytecode_data);
 
     // Every compiled handler needs its contract for auto-sandboxing.
@@ -660,13 +640,11 @@ pub fn compileHandler(
                 state_write = precompile_check_run_mod.firstWriteCause(ir_view_check, checked.verifierDiagnostics(), unreported, &.{}, null);
                 for (unreported) |site| {
                     if (builtin.is_test) continue;
-                    var output: std.ArrayList(u8) = .empty;
-                    defer output.deinit(allocator);
-                    var output_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+                    var output_writer: std.Io.Writer.Allocating = .init(allocator);
+                    defer output_writer.deinit();
                     const flow_write = [_]zts.VerifierDiagnostic{precompile_check_run_mod.flowWriteDiagnostic(site)};
                     zts.DiagnosticProjection.writeAll(.verifier, diag_view, &flow_write, ir_view_check, &output_writer.writer) catch {};
-                    output = output_writer.toArrayList();
-                    if (output.items.len > 0) debugPrint("{s}", .{output.items});
+                    if (output_writer.written().len > 0) debugPrint("{s}", .{output_writer.written()});
                 }
             }
         }
@@ -715,14 +693,11 @@ pub fn compileHandler(
             const handler_tests = gen.getHandlerTests();
             const test_count = handler_tests.len;
             if (test_count > 0) {
-                var jsonl_buf: std.ArrayList(u8) = .empty;
-                defer jsonl_buf.deinit(allocator);
-                var jsonl_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &jsonl_buf);
-                const jsonl_written = gen.writeJsonl(&jsonl_aw.writer);
-                jsonl_buf = jsonl_aw.toArrayList();
+                var jsonl_aw: std.Io.Writer.Allocating = .init(allocator);
+                defer jsonl_aw.deinit();
                 // An allocating writer fails only when it cannot allocate.
-                jsonl_written catch return error.OutOfMemory;
-                generated_tests_jsonl = try jsonl_buf.toOwnedSlice(allocator);
+                gen.writeJsonl(&jsonl_aw.writer) catch return error.OutOfMemory;
+                generated_tests_jsonl = try jsonl_aw.toOwnedSlice();
             }
 
             var path_analysis: ?PathAnalysis = if (contract != null)
@@ -753,24 +728,20 @@ pub fn compileHandler(
 
             if (fc_report.total_failable > 0) {
                 if (!builtin.is_test) {
-                    var fc_buf: std.ArrayList(u8) = .empty;
-                    var fc_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &fc_buf);
+                    var fc_aw: std.Io.Writer.Allocating = .init(allocator);
+                    defer fc_aw.deinit();
                     fc.formatMatrix(fc_report, &fc_aw.writer) catch {};
-                    fc_buf = fc_aw.toArrayList();
-                    if (fc_buf.items.len > 0) {
-                        debugPrint("{s}", .{fc_buf.items});
+                    if (fc_aw.written().len > 0) {
+                        debugPrint("{s}", .{fc_aw.written()});
                     }
-                    fc_buf.deinit(allocator);
 
                     if (fc_report.warning_count > 0) {
-                        var diag_buf: std.ArrayList(u8) = .empty;
-                        var diag_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &diag_buf);
+                        var diag_aw: std.Io.Writer.Allocating = .init(allocator);
+                        defer diag_aw.deinit();
                         fc.formatDiagnostics(&diag_aw.writer) catch {};
-                        diag_buf = diag_aw.toArrayList();
-                        if (diag_buf.items.len > 0) {
-                            debugPrint("{s}", .{diag_buf.items});
+                        if (diag_aw.written().len > 0) {
+                            debugPrint("{s}", .{diag_aw.written()});
                         }
-                        diag_buf.deinit(allocator);
                     }
                 }
             }
@@ -778,7 +749,7 @@ pub fn compileHandler(
             // Collect fault coverage violations into the unified all_violations list.
             // Flow and verifier violations were already collected earlier.
             if (fc_report.warning_count > 0) {
-                zts.property_diagnostics.collectFaultViolations(
+                try zts.property_diagnostics.collectFaultViolations(
                     allocator,
                     &all_violations,
                     fc_report.diagnostics,
@@ -795,39 +766,30 @@ pub fn compileHandler(
             // Generate JSONL counterexamples and summary from all violations
             // (fault coverage, flow, and verifier combined).
             if (all_violations.items.len > 0) {
-                var viol_buf: std.ArrayList(u8) = .empty;
-                var viol_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &viol_buf);
-                zts.property_diagnostics.writeViolationsJsonl(
+                var viol_aw: std.Io.Writer.Allocating = .init(allocator);
+                defer viol_aw.deinit();
+                try zts.property_diagnostics.writeViolationsJsonl(
                     &viol_aw.writer,
                     allocator,
                     all_violations.items,
                     handler_tests,
-                ) catch |err| {
-                    viol_aw.deinit();
-                    return err;
-                };
-                viol_buf = viol_aw.toArrayList();
-                if (viol_buf.items.len > 0) {
-                    violations_jsonl = try viol_buf.toOwnedSlice(allocator);
-                } else {
-                    viol_buf.deinit(allocator);
+                );
+                if (viol_aw.written().len > 0) {
+                    violations_jsonl = try viol_aw.toOwnedSlice();
                 }
 
                 // Pre-format violations summary for build output. Path is unknown here;
                 // the emit section in main() appends the file path separately.
-                var sum_buf: std.ArrayList(u8) = .empty;
-                var sum_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &sum_buf);
+                var sum_aw: std.Io.Writer.Allocating = .init(allocator);
+                defer sum_aw.deinit();
                 zts.property_diagnostics.formatViolationsSummary(
                     &sum_aw.writer,
                     all_violations.items,
                     filename,
                     null,
                 ) catch {};
-                sum_buf = sum_aw.toArrayList();
-                if (sum_buf.items.len > 0) {
-                    violations_summary = try sum_buf.toOwnedSlice(allocator);
-                } else {
-                    sum_buf.deinit(allocator);
+                if (sum_aw.written().len > 0) {
+                    violations_summary = try sum_aw.toOwnedSlice();
                 }
             }
 
@@ -961,9 +923,10 @@ fn compileMultiModule(
     for (graph.analysis_order) |graph_index| {
         var checks = try checkGraphModule(allocator, &graph, &compile_result, graph_index, atoms, exports, opts, null);
         defer checks.deinit(allocator);
-        if (checks.evidence) |*evidence| {
+        if (checks.evidence) |evidence| {
             const runtime_position = graph.runtimePosition(graph_index) orelse return error.AnalysisPassIncomplete;
-            evidence_by_runtime[runtime_position] = evidence.*;
+            evidence_by_runtime[runtime_position] = evidence;
+            checks.evidence = null;
         }
         if (checks.verify_failed) return .{ .verify_failed = true };
         if (graph.runtimePosition(graph_index)) |runtime_position| {
@@ -1014,21 +977,21 @@ fn compileMultiModule(
     for (graph.execution_order[0 .. mod_count - 1], 0..) |graph_index, i| {
         const position = compile_result.positionOfModule(graph_index) orelse return error.AnalysisPassIncomplete;
         const compiled_mod = &compile_result.modules[position];
-        var buffer: [256 * 1024]u8 = undefined;
-        var writer = zts.bytecode_cache.SliceWriter{ .buffer = &buffer };
+        var dep_aw = BytecodeAllocWriter.init(allocator);
+        defer dep_aw.deinit();
 
         zts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(
             &compiled_mod.func,
             atoms,
             compiled_mod.shapes,
-            &writer,
+            &dep_aw,
             allocator,
         ) catch |err| {
             debugPrint("Dependency serialization error: {}\n", .{err});
             return err;
         };
 
-        dep_bytecodes[i] = try allocator.dupe(u8, writer.getWritten());
+        dep_bytecodes[i] = try dep_aw.toOwnedSlice();
         dep_bytecodes_initialized = i + 1;
     }
 
@@ -1036,21 +999,21 @@ fn compileMultiModule(
     const entry_graph_index = graph.execution_order[mod_count - 1];
     const entry_position = compile_result.positionOfModule(entry_graph_index) orelse return error.AnalysisPassIncomplete;
     const entry_mod = &compile_result.modules[entry_position];
-    var entry_buffer: [256 * 1024]u8 = undefined;
-    var entry_writer = zts.bytecode_cache.SliceWriter{ .buffer = &entry_buffer };
+    var entry_aw = BytecodeAllocWriter.init(allocator);
+    defer entry_aw.deinit();
 
     zts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(
         &entry_mod.func,
         atoms,
         entry_mod.shapes,
-        &entry_writer,
+        &entry_aw,
         allocator,
     ) catch |err| {
         debugPrint("Entry serialization error: {}\n", .{err});
         return err;
     };
 
-    const entry_bytecode = try allocator.dupe(u8, entry_writer.getWritten());
+    const entry_bytecode = try entry_aw.toOwnedSlice();
     errdefer allocator.free(entry_bytecode);
 
     if (!builtin.is_test) debugPrint("Multi-module bundle: {d} dependency modules + entry\n", .{dep_bytecodes.len});
@@ -1075,6 +1038,36 @@ fn compileMultiModule(
     };
 }
 
+/// Dynamic writer adapter for `zts.bytecode_cache`, which requires a writer
+/// whose error set fits `SerializeError` (`error{ NoSpaceLeft, OutOfMemory }`).
+const BytecodeAllocWriter = struct {
+    aw: std.Io.Writer.Allocating,
+
+    fn init(allocator: std.mem.Allocator) BytecodeAllocWriter {
+        return .{ .aw = .init(allocator) };
+    }
+
+    fn deinit(self: *BytecodeAllocWriter) void {
+        self.aw.deinit();
+    }
+
+    fn toOwnedSlice(self: *BytecodeAllocWriter) error{OutOfMemory}![]u8 {
+        return self.aw.toOwnedSlice();
+    }
+
+    pub fn writeAll(self: *BytecodeAllocWriter, bytes: []const u8) error{OutOfMemory}!void {
+        self.aw.writer.writeAll(bytes) catch return error.OutOfMemory;
+    }
+
+    pub fn writeByte(self: *BytecodeAllocWriter, byte: u8) error{OutOfMemory}!void {
+        self.aw.writer.writeByte(byte) catch return error.OutOfMemory;
+    }
+
+    pub fn writeInt(self: *BytecodeAllocWriter, comptime T: type, value: T, endian: std.builtin.Endian) error{OutOfMemory}!void {
+        self.aw.writer.writeInt(T, value, endian) catch return error.OutOfMemory;
+    }
+};
+
 /// What the checks of one graph module leave for the caller. The contract
 /// build folds the two state facts over the whole graph.
 pub const GraphModuleChecks = struct {
@@ -1092,6 +1085,10 @@ pub const GraphModuleChecks = struct {
     pub fn deinit(self: *GraphModuleChecks, allocator: std.mem.Allocator) void {
         allocator.free(self.mutation_nodes);
         self.mutation_nodes = &.{};
+        if (self.evidence) |*evidence| {
+            evidence.deinit();
+            self.evidence = null;
+        }
     }
 };
 
@@ -1101,12 +1098,10 @@ fn printGraphDiagnostics(
     comptime formatFn: anytype,
     view: zts.SourceView,
 ) void {
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(allocator);
-    var writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    defer writer.deinit();
     formatFn(owner, view, &writer.writer) catch {};
-    output = writer.toArrayList();
-    if (output.items.len > 0) debugPrint("{s}", .{output.items});
+    if (writer.written().len > 0) debugPrint("{s}", .{writer.written()});
 }
 
 /// The format of the refusal of a file import that has no type across modules.
@@ -1155,7 +1150,7 @@ pub const GraphSink = struct {
         path: []const u8,
         text: []const u8,
     ) !void {
-        var projected = json_diag.fromCheckerDiagnostic(self.allocator, source, diag, view, path) orelse return;
+        var projected = (try json_diag.fromCheckerDiagnostic(self.allocator, source, diag, view, path)) orelse return;
         errdefer projected.deinit(self.allocator);
         try self.place(&projected, path, text);
         try self.diagnostics.append(self.allocator, projected);
@@ -1386,7 +1381,7 @@ pub fn checkGraphModule(
                     .warning => s.strict_warnings += 1,
                     .advisory => s.strict_advisories += 1,
                 }
-                try s.appendChecker(.strict, diag, view, module.path, module.source);
+                if (s.json_mode) try s.appendChecker(.strict, diag, view, module.path, module.source);
             }
             if (!s.json_mode and strict_diags.len > 0 and !builtin.is_test) {
                 printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatStrictDiagnostics, diag_view);
@@ -1465,19 +1460,21 @@ pub fn checkGraphModule(
         }
     }
 
-    try verifyModuleBytecode(module.path, &compiled.func);
+    if (runtime_position != null) {
+        try verifyModuleBytecode(module.path, &compiled.func);
 
-    if (opts.emit_proof_evidence) {
-        checks.evidence = try moduleProofEvidence(
-            allocator,
-            view,
-            root,
-            &compile_result.recorders[compile_position],
-            if (resolved.strict_checker) |*checker| checker else null,
-            atoms,
-            module.path,
-            is_entry,
-        );
+        if (opts.emit_proof_evidence) {
+            checks.evidence = try moduleProofEvidence(
+                allocator,
+                view,
+                root,
+                &compile_result.recorders[compile_position],
+                if (resolved.strict_checker) |*checker| checker else null,
+                atoms,
+                module.path,
+                is_entry,
+            );
+        }
     }
     return checks;
 }
@@ -3911,10 +3908,10 @@ test "compileHandler emits result_unsafe counterexample when jwtVerify result is
     try std.testing.expect(compiled.verify_failed);
     // violations_jsonl must be populated with a result-unsafe counterexample
     const vj = compiled.violations_jsonl orelse return error.MissingViolationsJsonl;
-    try std.testing.expect(std.mem.indexOf(u8, vj, "result-unsafe") != null);
+    try std.testing.expect(std.mem.find(u8, vj, "result-unsafe") != null);
     // The counterexample io stub must include a {ok:false} failure case for jwtVerify
-    try std.testing.expect(std.mem.indexOf(u8, vj, "jwtVerify") != null);
-    try std.testing.expect(std.mem.indexOf(u8, vj, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.find(u8, vj, "jwtVerify") != null);
+    try std.testing.expect(std.mem.find(u8, vj, "\"ok\":false") != null);
 }
 
 test "compileHandler projects verifier properties only when verification runs" {
@@ -4110,7 +4107,7 @@ const bytecode_golden_cases = [_]struct {
         \\    return Response.text("not found", { status: 404 });
         \\}
         ,
-        .sha256 = "0c6cba6b15e14cdf3d02be205df66039453c474e1eba741285d01faec4aa899a",
+        .sha256 = "7a94102960a0bc9b3e145b6c267d3cfbf04342e8a96a7b26a61ba89b5d78039c",
     },
     .{
         .name = "virtual modules",
@@ -4130,7 +4127,7 @@ const bytecode_golden_cases = [_]struct {
         \\    return Response.json({ hit: false, digest: digest });
         \\}
         ,
-        .sha256 = "b47edaefb4ef8f663a35872a28c823bc7e5982845cacb9381314db971f4030e2",
+        .sha256 = "39dc7b1efb9b34fd70dd251504f20be618b7ee013c8f12f910c4ec5519cf6b3b",
     },
 };
 
@@ -4218,9 +4215,9 @@ test "an incomplete fault analysis writes isCovered false" {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     try writeContractJson(contract, &out.writer);
-    const fault_start = std.mem.indexOf(u8, out.written(), "\"faultCoverage\"") orelse return error.TestUnexpectedResult;
+    const fault_start = std.mem.find(u8, out.written(), "\"faultCoverage\"") orelse return error.TestUnexpectedResult;
     const fault_json = out.written()[fault_start..];
-    try std.testing.expect(std.mem.indexOf(u8, fault_json, "\"isCovered\": false") != null);
+    try std.testing.expect(std.mem.find(u8, fault_json, "\"isCovered\": false") != null);
 
     // Not clean: the analysis is incomplete or it carries warnings.
     try std.testing.expect(!(fc.isCovered() and fc.warnings == 0));
@@ -4242,10 +4239,10 @@ test "a decoded and re-encoded check contract keeps its fault coverage bytes" {
     defer second.deinit();
     try writeContractJson(&decoded, &second.writer);
 
-    const start_first = std.mem.indexOf(u8, first.written(), "\"faultCoverage\"") orelse return error.TestUnexpectedResult;
-    const start_second = std.mem.indexOf(u8, second.written(), "\"faultCoverage\"") orelse return error.TestUnexpectedResult;
-    const end_first = std.mem.indexOfPos(u8, first.written(), start_first, "  },") orelse return error.TestUnexpectedResult;
-    const end_second = std.mem.indexOfPos(u8, second.written(), start_second, "  },") orelse return error.TestUnexpectedResult;
+    const start_first = std.mem.find(u8, first.written(), "\"faultCoverage\"") orelse return error.TestUnexpectedResult;
+    const start_second = std.mem.find(u8, second.written(), "\"faultCoverage\"") orelse return error.TestUnexpectedResult;
+    const end_first = std.mem.findPos(u8, first.written(), start_first, "  },") orelse return error.TestUnexpectedResult;
+    const end_second = std.mem.findPos(u8, second.written(), start_second, "  },") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(first.written()[start_first..end_first], second.written()[start_second..end_second]);
 }
 
@@ -4348,14 +4345,12 @@ test "formatProofCard: the card lists fault_covered and counts the call sites no
     defer result.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 1), result.fault_unseen);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     formatProofCard(&aw.writer, &result, "unseen-text.ts");
-    buf = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "fault_covered") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "failable call sites covered, 1 not on any path") != null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), "fault_covered") != null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), "failable call sites covered, 1 not on any path") != null);
 }
 
 // ---------------------------------------------------------------------------
@@ -4993,4 +4988,30 @@ test "compileHandler graph names the entry branch on a dependency clock as the c
     var compiled = try fixture.compile(graph_verified);
     defer compiled.deinit(allocator);
     try expectBranchCause(&compiled, null, 4, 3);
+}
+
+test "compileHandler emits proof evidence cleanly when importing a type-only module" {
+    const allocator = std.testing.allocator;
+    var fixture = try importFixture(
+        \\import type { Greeting } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Response {
+        \\  const msg: Greeting = { text: "hello" };
+        \\  return Response.text(msg.text);
+        \\}
+        \\
+    ,
+        \\export type Greeting = { text: string };
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(.{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    try std.testing.expect(!compiled.verify_failed);
+    try std.testing.expect(compiled.proof_evidence != null);
+    try std.testing.expect(compiled.bytecode.len > 0);
 }

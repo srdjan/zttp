@@ -6,7 +6,6 @@ const std = @import("std");
 const writeAllFd = @import("posix_util.zig").writeAllFd;
 const builtin = @import("builtin");
 
-const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 const precompile = zts_cli.precompile;
 const shared = @import("cli_shared.zig");

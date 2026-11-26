@@ -21,8 +21,10 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         } else if (std.mem.startsWith(u8, arg, "-")) {
             // Unknown flag (e.g. a typo): reject loudly rather than ignoring it.
             return error.InvalidArgument;
-        } else {
+        } else if (keyword == null) {
             keyword = arg;
+        } else {
+            return error.TooManyArguments;
         }
     }
 
@@ -33,9 +35,8 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     const matches = policy_catalog.search(search_term);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
 
     if (json_mode) {
         try aw.writer.writeAll("[");
@@ -61,9 +62,8 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         }
     }
 
-    buf = aw.toArrayList();
-    if (buf.items.len > 0) {
-        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
+    if (aw.written().len > 0) {
+        try writeAllFd(std.c.STDOUT_FILENO, aw.written());
     }
 }
 

@@ -234,6 +234,6 @@ test "unknown prompt does not inject a note" {
 test "renderSystemNote names required compiler-native tool path" {
     const note = (try renderSystemNote(testing.allocator, classify("fix ZTS303 violation"))) orelse return error.TestExpected;
     defer testing.allocator.free(note);
-    try testing.expect(std.mem.indexOf(u8, note, "pi_repair_plan") != null);
-    try testing.expect(std.mem.indexOf(u8, note, "kind=violation_fix") != null);
+    try testing.expect(std.mem.find(u8, note, "pi_repair_plan") != null);
+    try testing.expect(std.mem.find(u8, note, "kind=violation_fix") != null);
 }

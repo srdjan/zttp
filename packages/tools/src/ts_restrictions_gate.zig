@@ -143,7 +143,7 @@ fn parseCodeCell(a: std.mem.Allocator, cell: []const u8) ![]const Code {
     var parts = std.mem.splitScalar(u8, cell, ',');
     while (parts.next()) |raw| {
         const part = std.mem.trim(u8, raw, " ");
-        const word_end = std.mem.indexOfScalar(u8, part, ' ') orelse part.len;
+        const word_end = std.mem.findScalar(u8, part, ' ') orelse part.len;
         const word = part[0..word_end];
         if (!isCode(word)) return error.BadCodeCell;
         const rest = std.mem.trim(u8, part[word_end..], " ");
@@ -212,8 +212,8 @@ pub fn parseDoc(a: std.mem.Allocator, text: []const u8) !Doc {
             continue;
         }
         if (std.mem.eql(u8, section, "Ambient Names And Effects")) {
-            const is_values = std.mem.indexOf(u8, line, "The closed ambient value namespace is:") != null;
-            const is_types = std.mem.indexOf(u8, line, "The closed ambient type namespace is:") != null;
+            const is_values = std.mem.find(u8, line, "The closed ambient value namespace is:") != null;
+            const is_types = std.mem.find(u8, line, "The closed ambient type namespace is:") != null;
             if (is_values or is_types) {
                 var paragraph: std.ArrayList(u8) = .empty;
                 var j = i;
@@ -222,8 +222,8 @@ pub fn parseDoc(a: std.mem.Allocator, text: []const u8) !Doc {
                     try paragraph.append(a, ' ');
                 }
                 const marker = "namespace is:";
-                const start = (std.mem.indexOf(u8, paragraph.items, marker) orelse return error.BadAmbientList) + marker.len;
-                const stop = std.mem.indexOfPos(u8, paragraph.items, start, ".") orelse return error.BadAmbientList;
+                const start = (std.mem.find(u8, paragraph.items, marker) orelse return error.BadAmbientList) + marker.len;
+                const stop = std.mem.findPos(u8, paragraph.items, start, ".") orelse return error.BadAmbientList;
                 const spans = try codeSpans(a, paragraph.items[start..stop]);
                 if (is_values) ambient = spans else ambient_types = spans;
                 i = j;
@@ -467,6 +467,7 @@ pub fn runGate(gpa: std.mem.Allocator, inputs: Inputs) !Report {
 
 fn checkRefusalRows(report: *Report, doc: Doc, inputs: Inputs, observed: *std.ArrayList([]const u8)) !void {
     const a = report.arena.allocator();
+    if (doc.refusals.len == 0) try report.fail("the document lists no refusal rows", .{});
     for (doc.refusals, 0..) |row, index| {
         report.rows_checked += 1;
         for (doc.refusals[0..index]) |earlier| {
@@ -579,7 +580,7 @@ fn parseAllow(a: std.mem.Allocator, text: []const u8) ![]const AllowRow {
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
-        const space = std.mem.indexOfScalar(u8, line, ' ') orelse line.len;
+        const space = std.mem.findScalar(u8, line, ' ') orelse line.len;
         try rows.append(a, .{ .code = line[0..space], .reason = std.mem.trim(u8, line[space..], " ") });
     }
     return rows.toOwnedSlice(a);
@@ -647,6 +648,7 @@ fn checkMemberReads(report: *Report, doc: Doc, inputs: Inputs) !void {
 }
 
 fn checkAdmitted(report: *Report, doc: Doc, members: []const Member) !void {
+    if (doc.admitted.len == 0) try report.fail("the document lists no admitted member groups", .{});
     for (doc.admitted) |line| {
         for (line.members, 0..) |name, index| {
             if (index != 0 and !std.mem.lessThan(u8, line.members[index - 1], name)) {
@@ -689,6 +691,7 @@ fn checkAmbientTypes(report: *Report, doc: Doc, registry: []const []const u8) !v
 }
 
 fn checkLimits(report: *Report, doc: Doc, registry: []const Limit) !void {
+    if (doc.limits.len == 0) try report.fail("the document lists no limits", .{});
     for (doc.limits) |row| {
         var found = false;
         for (registry) |limit| {
@@ -760,9 +763,9 @@ fn realRegistry(a: std.mem.Allocator, gpa: std.mem.Allocator) !Registry {
     }
 
     // The runtime registry behind the type checker's member tables.
-    var gc_state = try zts.GC.init(a, .{ .nursery_size = 4096 });
+    var gc_state = try zts.GC.init(gpa, .{ .nursery_size = 4096 });
     defer gc_state.deinit();
-    const ctx = try zts.Context.init(a, &gc_state, .{});
+    const ctx = try zts.Context.init(gpa, &gc_state, .{});
     defer ctx.deinit();
     try zts.initBuiltins(ctx);
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
@@ -783,8 +786,8 @@ fn realRegistry(a: std.mem.Allocator, gpa: std.mem.Allocator) !Registry {
     defer out.deinit();
     var json: std.json.Stringify = .{ .writer = &out.writer };
     _ = try meta.writeMetaPayload(&json, .full);
-    const parsed = try std.json.parseFromSlice(std.json.Value, a, out.written(), .{});
-    const payload = parsed.value.object;
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, out.written(), .{ .allocate = .alloc_always });
+    const payload = parsed.object;
 
     var ambient: std.ArrayList([]const u8) = .empty;
     const values = (payload.get("ambient_names") orelse return error.MissingMetaField).object.get("values") orelse return error.MissingMetaField;
@@ -913,7 +916,7 @@ fn fakeCheck(a: std.mem.Allocator, source: Source) anyerror![]const Diag {
     var out: std.ArrayList(Diag) = .empty;
     var words = std.mem.tokenizeScalar(u8, source.text, ' ');
     while (words.next()) |word| {
-        const colon = std.mem.indexOfScalar(u8, word, ':') orelse continue;
+        const colon = std.mem.findScalar(u8, word, ':') orelse continue;
         const label = word[colon + 1 ..];
         const severity: Severity = if (std.mem.eql(u8, label, "error")) .err else if (std.mem.eql(u8, label, "advisory")) .other else .warning;
         try out.append(a, .{ .code = word[0..colon], .severity = severity });
@@ -960,7 +963,7 @@ fn testInputs(doc: []const u8, refusals: []const probes.RefusalRow, registry: Re
 
 fn expectFailure(report: *const Report, fragment: []const u8) !void {
     for (report.failures.items) |failure| {
-        if (std.mem.indexOf(u8, failure, fragment) != null) return;
+        if (std.mem.find(u8, failure, fragment) != null) return;
     }
     std.debug.print("no failure contains: {s}\nfailures:\n", .{fragment});
     for (report.failures.items) |failure| std.debug.print("  {s}\n", .{failure});
@@ -1080,7 +1083,7 @@ test "parseDoc reads cells with an escaped pipe and spans with a backtick" {
 
 /// The fake check, except that a read of `xs.slice` is refused.
 fn refuseSliceRead(a: std.mem.Allocator, source: Source) anyerror![]const Diag {
-    if (std.mem.indexOf(u8, source.text, "xs.slice]") == null) return fakeCheck(a, source);
+    if (std.mem.find(u8, source.text, "xs.slice]") == null) return fakeCheck(a, source);
     const out = try a.alloc(Diag, 1);
     out[0] = .{ .code = "ZTS201", .severity = .err };
     return out;
@@ -1128,4 +1131,40 @@ test "a table headed with the gap columns is refused in any section" {
     defer report.deinit();
     try testing.expectEqual(@as(usize, 1), report.failures.items.len);
     try expectFailure(&report, "the gap table is retired, and a form that the compiler admits is fixed in the compiler");
+}
+
+test "empty refusal, admitted, and limit sections fail their non-zero floors" {
+    const empty_doc =
+        \\## Ambient Names And Effects
+        \\
+        \\The closed ambient value namespace is: `Array`. The `meta` list.
+        \\
+        \\The closed ambient type namespace is: `Bytes`. The `meta` list.
+        \\
+    ;
+    const empty_registry: Registry = .{
+        .kind_codes = &.{},
+        .members = &.{},
+        .ambient = &.{"Array"},
+        .ambient_types = &.{"Bytes"},
+        .limits = &.{},
+    };
+    var report = try runGate(testing.allocator, testInputs(empty_doc, &.{}, empty_registry));
+    defer report.deinit();
+    try testing.expectEqual(@as(usize, 3), report.failures.items.len);
+    try expectFailure(&report, "the document lists no refusal rows");
+    try expectFailure(&report, "the document lists no admitted member groups");
+    try expectFailure(&report, "the document lists no limits");
+}
+
+test "realRegistry owns parsed JSON strings after temporary writer buffer is freed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const registry = try realRegistry(arena.allocator(), testing.allocator);
+    try testing.expect(registry.ambient.len > 0);
+    try testing.expect(registry.ambient_types.len > 0);
+    try testing.expect(registry.members.len > 0);
+    try testing.expect(registry.limits.len > 0);
+    try testing.expect(contains(registry.ambient, "Array"));
+    try testing.expect(contains(registry.ambient_types, "Bytes"));
 }

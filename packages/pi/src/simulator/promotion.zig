@@ -28,15 +28,12 @@ pub fn validateAndPromote(
     var keep_for_inspection = false;
     defer {
         if (keep_for_inspection) {
-            if (validation_workspace.abandon()) |kept_path| {
-                std.debug.print(
-                    "[promotion] validation failed; kept the artifact at {s}\n",
-                    .{kept_path},
-                );
-                allocator.free(kept_path);
-            } else |_| {
-                validation_workspace.deinit() catch {};
-            }
+            const kept_path = validation_workspace.abandon();
+            std.debug.print(
+                "[promotion] validation failed; kept the artifact at {s}\n",
+                .{kept_path},
+            );
+            allocator.free(kept_path);
         } else {
             validation_workspace.deinit() catch {};
         }

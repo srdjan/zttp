@@ -72,16 +72,17 @@ pub const Workspace = struct {
     /// directory on disk and hands its path to the caller, who owns the slice
     /// and the directory. Used when a validation run fails: the artifact it
     /// wrote is the only evidence of why, and `deinit` would delete it.
-    pub fn abandon(self: *Workspace) ![:0]u8 {
+    pub fn abandon(self: *Workspace) [:0]u8 {
+        const abs_path = self.abs_path;
         defer self.* = undefined;
         defer self.parent.close(self.io);
         self.root.close(self.io);
 
         if (self.previous_cwd) |previous_cwd| {
             defer self.allocator.free(previous_cwd);
-            try std.Io.Threaded.chdir(previous_cwd);
+            std.Io.Threaded.chdir(previous_cwd) catch {};
         }
-        return self.abs_path;
+        return abs_path;
     }
 
     /// Makes this workspace current until `deinit` restores the prior directory.
@@ -158,7 +159,7 @@ test "deinit removes the workspace and abandon leaves it for inspection" {
 
     var kept = try Workspace.create(testing.allocator, io);
     try kept.restoreFile("handler.ts", "export default 1;\n");
-    const kept_path = try kept.abandon();
+    const kept_path = kept.abandon();
     defer testing.allocator.free(kept_path);
     // The directory and its contents survive, which is the whole point: a
     // failed validation leaves its evidence behind.

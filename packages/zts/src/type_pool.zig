@@ -1137,6 +1137,34 @@ pub const TypePool = struct {
                 if (new_inner == inner) return idx;
                 return self.addNullable(allocator, new_inner);
             },
+            .t_dict => {
+                const key = self.getDictKey(idx);
+                const val = self.getDictValue(idx);
+                const new_key = self.instantiate(allocator, key, param_names, param_types, depth + 1);
+                const new_val = self.instantiate(allocator, val, param_names, param_types, depth + 1);
+                if (new_key == key and new_val == val) return idx;
+                return self.addDict(allocator, new_key, new_val);
+            },
+            .t_template_literal => {
+                // Copy parts before recursing: `getTemplateParts` borrows from
+                // `self.template_parts`, which nested `instantiate` calls may
+                // reallocate.
+                const live = self.getTemplateParts(idx);
+                const new_parts = allocator.alloc(TemplatePart, live.len) catch {
+                    return self.failIndex(error.OutOfMemory);
+                };
+                defer allocator.free(new_parts);
+                @memcpy(new_parts, live);
+                var changed = false;
+                for (new_parts) |*part| {
+                    if (part.kind != .type_slot) continue;
+                    const old = part.type_idx;
+                    part.type_idx = self.instantiate(allocator, old, param_names, param_types, depth + 1);
+                    if (part.type_idx != old) changed = true;
+                }
+                if (!changed) return idx;
+                return self.addTemplateLiteral(allocator, new_parts);
+            },
             .t_generic_app => {
                 // Copy args before the loop (shared members list may realloc on
                 // a nested instantiate -> addGenericApp/addArray).
@@ -1415,7 +1443,7 @@ pub const TypePool = struct {
                     if (next.kind == .literal) {
                         const next_seg = self.getName(next.name_start, next.name_len);
                         // Find the next literal segment in the remaining string
-                        if (std.mem.indexOf(u8, literal_val[pos..], next_seg)) |found| {
+                        if (std.mem.find(u8, literal_val[pos..], next_seg)) |found| {
                             pos += found;
                         } else {
                             return false;
@@ -1728,6 +1756,15 @@ pub const TypePool = struct {
             return false;
         }
 
+        // `object` is a name with a rule rather than a definition: it means
+        // object-like, and nothing registers it as an alias. Checking it before
+        // the same-tag `.t_ref` branch lets nominal/unresolved refs like
+        // `Request` satisfy `object` at every depth of the walk, not just when
+        // `source` is a structural tag.
+        if (tgt_tag == .t_ref and std.mem.eql(u8, self.getRefName(target), "object")) {
+            return self.isObjectLikeIn(ctx, source, 0);
+        }
+
         // Same primitive tags
         if (src_tag == tgt_tag) {
             return switch (src_tag) {
@@ -1889,18 +1926,6 @@ pub const TypePool = struct {
             return false;
         }
 
-        // `object` is a name with a rule rather than a definition: it means
-        // object-like, and nothing registers it as an alias. `TypeEnv` held
-        // that rule and applied it only at the top of a comparison, so a
-        // record reaching an `object`-typed *field* was refused while the
-        // same record reaching an `object`-typed parameter was admitted. The
-        // rule lives here now, where every depth of the walk passes through
-        // it. Found by declaring `FetchOptions` with an `object`-typed
-        // `headers` field, which then refused every handler that sets one.
-        if (tgt_tag == .t_ref and std.mem.eql(u8, self.getRefName(target), "object")) {
-            return self.isObjectLikeIn(ctx, source, 0);
-        }
-
         // D1 amendment A1 is applied: an unresolved name reaching here is not
         // assignable, whether a `t_ref` or a `t_generic_param` stands on either
         // side. `firstUnresolvedName`
@@ -2040,6 +2065,7 @@ pub const TypePool = struct {
                     // optionality was checked before, which silently accepted
                     // this unsound case (e.g. Partial<T> assigned to T).
                     if (src_f.optional and !tgt_f.optional) return false;
+                    if (src_f.readonly and !tgt_f.readonly) return false;
                     if (!self.assignableIn(ctx, src_f.type_idx, tgt_f.type_idx)) return false;
                     found = true;
                     break;
@@ -3605,11 +3631,7 @@ test "two independently parsed Bytes share a canonical digest" {
     ));
 }
 
-test "a readonly field is not part of record assignability" {
-    // D1 amendment A4, recorded as intentional rather than incidental. Field
-    // variance would reject the Pick/Omit/Partial flows the profile admits,
-    // for no proof it claims. Writing through a readonly field is rejected at
-    // the assignment site instead.
+test "a readonly field cannot be dropped in record assignability" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -3623,7 +3645,7 @@ test "a readonly field is not part of record assignability" {
     });
 
     try std.testing.expect(pool.isAssignableTo(writable, frozen));
-    try std.testing.expect(pool.isAssignableTo(frozen, writable));
+    try std.testing.expect(!pool.isAssignableTo(frozen, writable));
 }
 
 test "the nominal direction is asymmetric and keyed by name" {
@@ -3980,4 +4002,42 @@ test "a readonly tuple keeps its elements and stays readonly through instantiate
     const instantiated = pool.instantiate(allocator, readonly, &.{"T"}, &.{pool.idx_string}, 0);
     try std.testing.expect(pool.isReadonlyTuple(instantiated));
     try std.testing.expectEqual(pool.idx_string, pool.getTupleElements(instantiated)[0]);
+}
+
+test "instantiate substitutes type parameters inside Dict and template literal types" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const k_param = pool.addGenericParam(allocator, "K");
+    const v_param = pool.addGenericParam(allocator, "V");
+    const dict = pool.addDict(allocator, k_param, v_param);
+    const inst_dict = pool.instantiate(allocator, dict, &.{ "K", "V" }, &.{ pool.idx_string, pool.idx_number }, 0);
+    try std.testing.expectEqual(TypeTag.t_dict, pool.getTag(inst_dict).?);
+    try std.testing.expectEqual(pool.idx_string, pool.getDictKey(inst_dict));
+    try std.testing.expectEqual(pool.idx_number, pool.getDictValue(inst_dict));
+
+    const prefix = pool.addName(allocator, "prefix:");
+    const tmpl = pool.addTemplateLiteral(allocator, &.{
+        .{ .kind = .literal, .name_start = prefix.start, .name_len = prefix.len },
+        .{ .kind = .type_slot, .type_idx = k_param },
+    });
+    const inst_tmpl = pool.instantiate(allocator, tmpl, &.{"K"}, &.{pool.idx_string}, 0);
+    try std.testing.expectEqual(TypeTag.t_template_literal, pool.getTag(inst_tmpl).?);
+    const parts = pool.getTemplateParts(inst_tmpl);
+    try std.testing.expectEqual(@as(usize, 2), parts.len);
+    try std.testing.expectEqual(.literal, parts[0].kind);
+    try std.testing.expectEqual(.type_slot, parts[1].kind);
+    try std.testing.expectEqual(pool.idx_string, parts[1].type_idx);
+}
+
+test "readonly record fields cannot be dropped in assignment" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const ro_rec = parseTypeText(&pool, allocator, "{ readonly x: number }");
+    const rw_rec = parseTypeText(&pool, allocator, "{ x: number }");
+    try std.testing.expect(!pool.isAssignableTo(ro_rec, rw_rec));
+    try std.testing.expect(pool.isAssignableTo(rw_rec, ro_rec));
 }

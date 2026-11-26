@@ -15,9 +15,9 @@
 //! through `writeWitnessJsonl` here and hand the bytes to `replay`.
 
 const std = @import("std");
+const zts = @import("zts");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const ui_payload = @import("ui_payload.zig");
-const json_writer = @import("providers/json_writer.zig");
 
 pub const Verdict = struct {
     /// True when the engine ran the witness through to a response.
@@ -45,14 +45,11 @@ pub const Verdict = struct {
         if (!self.ran) return false;
         if (witness.io_stubs.len == 0) return self.actual_status >= 200 and self.actual_status < 300;
 
-        // For the leak family the sentinel lives in the first stub's
-        // result_json. Strip the surrounding JSON quotes when it is a
-        // string literal so a literal sentinel value can be substring-
-        // matched against the response body.
-        const stub_result = witness.io_stubs[0].result_json;
-        const sentinel = unwrapJsonString(stub_result);
-        if (sentinel.len == 0) return self.actual_status >= 200 and self.actual_status < 300;
-        return std.mem.indexOf(u8, self.actual_body, sentinel) != null;
+        for (witness.io_stubs) |stub| {
+            const sentinel = unwrapJsonString(stub.result_json);
+            if (sentinel.len > 0 and std.mem.find(u8, self.actual_body, sentinel) != null) return true;
+        }
+        return false;
     }
 };
 
@@ -98,8 +95,10 @@ pub fn replay(
 /// `zts.counterexample.writeJsonl` produces (minus the optional
 /// `witness` header line, which the trace parser drops anyway).
 pub fn writeWitnessJsonl(w: *std.Io.Writer, body: ui_payload.WitnessBody) !void {
-    try w.print("{{\"type\":\"request\",\"method\":\"{s}\",\"url\":", .{body.request_method});
-    try json_writer.writeString(w, body.request_url);
+    try w.writeAll("{\"type\":\"request\",\"method\":");
+    try zts.writeJsonString(w, body.request_method);
+    try w.writeAll(",\"url\":");
+    try zts.writeJsonString(w, body.request_url);
     if (body.request_has_auth) {
         try w.writeAll(",\"headers\":{\"authorization\":\"Bearer counterexample-token\"}");
     } else {
@@ -107,17 +106,18 @@ pub fn writeWitnessJsonl(w: *std.Io.Writer, body: ui_payload.WitnessBody) !void 
     }
     if (body.request_body) |b| {
         try w.writeAll(",\"body\":");
-        try json_writer.writeString(w, b);
+        try zts.writeJsonString(w, b);
     } else {
         try w.writeAll(",\"body\":null");
     }
     try w.writeAll("}\n");
 
     for (body.io_stubs) |stub| {
-        try w.print(
-            "{{\"type\":\"io\",\"seq\":{d},\"module\":\"{s}\",\"fn\":\"{s}\",\"result\":{s}}}\n",
-            .{ stub.seq, stub.module, stub.func, stub.result_json },
-        );
+        try w.print("{{\"type\":\"io\",\"seq\":{d},\"module\":", .{stub.seq});
+        try zts.writeJsonString(w, stub.module);
+        try w.writeAll(",\"fn\":");
+        try zts.writeJsonString(w, stub.func);
+        try w.print(",\"result\":{s}}}\n", .{stub.result_json});
     }
 }
 
@@ -158,11 +158,11 @@ test "writeWitnessJsonl emits a parseable trace pair" {
     defer buf.deinit();
     try writeWitnessJsonl(buf.writer(), body);
 
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"type\":\"request\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"method\":\"GET\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"type\":\"io\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"fn\":\"env\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"result\":\"sentinel\"") != null);
+    try testing.expect(std.mem.find(u8, buf.written(), "\"type\":\"request\"") != null);
+    try testing.expect(std.mem.find(u8, buf.written(), "\"method\":\"GET\"") != null);
+    try testing.expect(std.mem.find(u8, buf.written(), "\"type\":\"io\"") != null);
+    try testing.expect(std.mem.find(u8, buf.written(), "\"fn\":\"env\"") != null);
+    try testing.expect(std.mem.find(u8, buf.written(), "\"result\":\"sentinel\"") != null);
 }
 
 test "Verdict.reproducedViolation matches sentinel substring" {
@@ -232,4 +232,92 @@ test "replay returns error.WitnessReplayNotConfigured when no fn is registered" 
     replay_fn = null;
 
     try testing.expectError(error.WitnessReplayNotConfigured, replay(allocator, "h.ts", body));
+}
+
+test "writeWitnessJsonl escapes JSON string fields" {
+    const allocator = testing.allocator;
+    const stubs = [_]ui_payload.WitnessStub{
+        .{
+            .seq = 0,
+            .module = @constCast("mod\"a\\b"),
+            .func = @constCast("fn\nname"),
+            .result_json = @constCast("\"ok\""),
+        },
+    };
+    const body = ui_payload.WitnessBody{
+        .key = @constCast(""),
+        .property = @constCast("no_secret_leakage"),
+        .summary = @constCast(""),
+        .origin_line = 1,
+        .origin_column = 1,
+        .sink_line = 1,
+        .sink_column = 1,
+        .request_method = @constCast("G\"E\\T"),
+        .request_url = @constCast("/a?b=\"c\""),
+        .request_has_auth = false,
+        .request_body = null,
+        .io_stubs = @constCast(&stubs),
+    };
+
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try writeWitnessJsonl(buf.writer(), body);
+
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, buf.written(), "\n"), '\n');
+    const req_line = lines.next().?;
+    const io_line = lines.next().?;
+    try testing.expect(lines.next() == null);
+
+    var req_parsed = try std.json.parseFromSlice(std.json.Value, allocator, req_line, .{});
+    defer req_parsed.deinit();
+    try testing.expectEqualStrings("G\"E\\T", req_parsed.value.object.get("method").?.string);
+    try testing.expectEqualStrings("/a?b=\"c\"", req_parsed.value.object.get("url").?.string);
+
+    var io_parsed = try std.json.parseFromSlice(std.json.Value, allocator, io_line, .{});
+    defer io_parsed.deinit();
+    try testing.expectEqualStrings("mod\"a\\b", io_parsed.value.object.get("module").?.string);
+    try testing.expectEqualStrings("fn\nname", io_parsed.value.object.get("fn").?.string);
+}
+
+test "reproducedViolation checks all stub sentinels and rejects non-matching 200 OK" {
+    const stub_first = ui_payload.WitnessStub{
+        .seq = 0,
+        .module = @constCast("zttp:env"),
+        .func = @constCast("env"),
+        .result_json = @constCast("\"\""),
+    };
+    const stub_second = ui_payload.WitnessStub{
+        .seq = 1,
+        .module = @constCast("zttp:env"),
+        .func = @constCast("env"),
+        .result_json = @constCast("\"TOP_SECRET\""),
+    };
+    var stubs = [_]ui_payload.WitnessStub{ stub_first, stub_second };
+    const base_body = ui_payload.WitnessBody{
+        .key = @constCast("k"),
+        .property = @constCast("no_secret_leakage"),
+        .summary = @constCast(""),
+        .origin_line = 1,
+        .origin_column = 1,
+        .sink_line = 1,
+        .sink_column = 1,
+        .request_method = @constCast("GET"),
+        .request_url = @constCast("/"),
+        .request_has_auth = false,
+        .request_body = null,
+        .io_stubs = @constCast(&stubs),
+    };
+
+    const miss: Verdict = .{ .ran = true, .actual_status = 200, .actual_body = @constCast("ok"), .error_text = null };
+    try testing.expect(!miss.reproducedViolation(base_body));
+
+    const hit: Verdict = .{ .ran = true, .actual_status = 200, .actual_body = @constCast("leaked TOP_SECRET"), .error_text = null };
+    try testing.expect(hit.reproducedViolation(base_body));
+
+    var no_stubs_body = base_body;
+    no_stubs_body.io_stubs = &.{};
+    try testing.expect(miss.reproducedViolation(no_stubs_body));
+
+    const not_run: Verdict = .{ .ran = false, .actual_status = 200, .actual_body = @constCast("leaked TOP_SECRET"), .error_text = null };
+    try testing.expect(!not_run.reproducedViolation(base_body));
 }

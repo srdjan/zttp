@@ -132,7 +132,7 @@ pub fn shapeForExport(func: *const mb.FunctionBinding) Shape {
 
 fn declaresOkField(func: *const mb.FunctionBinding) bool {
     const sig = func.signature orelse return false;
-    return std.mem.indexOf(u8, sig.returns, "ok: boolean") != null;
+    return std.mem.find(u8, sig.returns, "ok: boolean") != null;
 }
 
 /// A declared return the path generator has a fork rule for. This reads the
@@ -489,18 +489,18 @@ fn probeSource(
 /// must be a response the replay reads as a failure: an integer `status` of 400
 /// or more, beside the `statusText`, `headers`, and `body` the replay reads. A
 /// `fetch` replay derives `ok` from `status` and ignores a field named `ok`.
-fn failingStubShape(shape: Shape, returns: mb.ReturnKind, json: []const u8) bool {
-    if (shape == .ok_record) return failingResponseStub(json);
+fn failingStubShape(allocator: std.mem.Allocator, shape: Shape, returns: mb.ReturnKind, json: []const u8) bool {
+    if (shape == .ok_record) return failingResponseStub(allocator, json);
     return switch (returns) {
-        .result => std.mem.indexOf(u8, json, "\"ok\":false") != null,
+        .result => std.mem.find(u8, json, "\"ok\":false") != null,
         .optional_string, .optional_object, .optional_number => std.mem.eql(u8, json, "null"),
         .boolean => std.mem.eql(u8, json, "false"),
         .number, .string, .object, .result_list, .result_fn, .undefined, .unknown, .dict, .bytes => false,
     };
 }
 
-fn failingResponseStub(json: []const u8) bool {
-    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, json, .{}) catch return false;
+fn failingResponseStub(allocator: std.mem.Allocator, json: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return false;
     defer parsed.deinit();
     if (parsed.value != .object) return false;
     const fields = parsed.value.object;
@@ -569,7 +569,7 @@ fn observe(
             observed.fork = true;
             for (test_case.io_stubs.items) |stub| {
                 if (stub.call_site != info.call_site) continue;
-                if (failingStubShape(shape, returns, stub.result_json)) observed.stub_fails = true;
+                if (failingStubShape(allocator, shape, returns, stub.result_json)) observed.stub_fails = true;
             }
         }
     }
@@ -926,19 +926,20 @@ test "a probe observes a fork on a Result, an optional, and an ok record" {
 }
 
 test "the failing stub of an ok-record call is a response the replay reads as a failure" {
-    try std.testing.expect(failingResponseStub("{\"status\":503,\"statusText\":\"Service Unavailable\",\"headers\":{},\"body\":\"{}\"}"));
-    try std.testing.expect(failingResponseStub("{\"status\":503,\"statusText\":\"Service Unavailable\",\"ok\":false,\"headers\":{},\"body\":\"{}\"}"));
+    const allocator = std.testing.allocator;
+    try std.testing.expect(failingResponseStub(allocator, "{\"status\":503,\"statusText\":\"Service Unavailable\",\"headers\":{},\"body\":\"{}\"}"));
+    try std.testing.expect(failingResponseStub(allocator, "{\"status\":503,\"statusText\":\"Service Unavailable\",\"ok\":false,\"headers\":{},\"body\":\"{}\"}"));
     // A verbatim replay would read `ok` true as a success.
-    try std.testing.expect(!failingResponseStub("{\"status\":503,\"statusText\":\"Service Unavailable\",\"ok\":true,\"headers\":{},\"body\":\"{}\"}"));
+    try std.testing.expect(!failingResponseStub(allocator, "{\"status\":503,\"statusText\":\"Service Unavailable\",\"ok\":true,\"headers\":{},\"body\":\"{}\"}"));
     // The Result shape is not a fetch response.
-    try std.testing.expect(!failingResponseStub("{\"ok\":false,\"error\":\"test-error\"}"));
+    try std.testing.expect(!failingResponseStub(allocator, "{\"ok\":false,\"error\":\"test-error\"}"));
     // A stub with an `ok` field and no failing status reads as a 200.
-    try std.testing.expect(!failingResponseStub("{\"ok\":false,\"statusText\":\"x\",\"headers\":{},\"body\":\"\"}"));
-    try std.testing.expect(!failingResponseStub("{\"status\":200,\"statusText\":\"OK\",\"headers\":{},\"body\":\"{}\"}"));
+    try std.testing.expect(!failingResponseStub(allocator, "{\"ok\":false,\"statusText\":\"x\",\"headers\":{},\"body\":\"\"}"));
+    try std.testing.expect(!failingResponseStub(allocator, "{\"status\":200,\"statusText\":\"OK\",\"headers\":{},\"body\":\"{}\"}"));
     // Missing fields the replay reads.
-    try std.testing.expect(!failingResponseStub("{\"status\":503}"));
-    try std.testing.expect(!failingResponseStub("null"));
-    try std.testing.expect(!failingResponseStub("not json"));
+    try std.testing.expect(!failingResponseStub(allocator, "{\"status\":503}"));
+    try std.testing.expect(!failingResponseStub(allocator, "null"));
+    try std.testing.expect(!failingResponseStub(allocator, "not json"));
 }
 
 test "exactly the fetch response-record exports are probed as ok records" {
@@ -1023,6 +1024,6 @@ test "a boolean export with a severity is probed with a failing boolean stub" {
         try std.testing.expectEqual(Verdict.ok, classifySeverityProbe(obs));
     }
     // The stub check refuses a true boolean stub.
-    try std.testing.expect(failingStubShape(.boolean_falsy, .boolean, "false"));
-    try std.testing.expect(!failingStubShape(.boolean_falsy, .boolean, "true"));
+    try std.testing.expect(failingStubShape(allocator, .boolean_falsy, .boolean, "false"));
+    try std.testing.expect(!failingStubShape(allocator, .boolean_falsy, .boolean, "true"));
 }

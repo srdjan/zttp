@@ -144,11 +144,7 @@ pub const ModelRequestSnapshot = struct {
         const clamped = std.math.cast(u32, clamped_u64) orelse return error.RequestSizeOverflow;
         if (clamped == self.config.max_output_tokens) return false;
         self.config.max_output_tokens = clamped;
-        self.request_context_sha256 = hashRequestContext(
-            self.config,
-            Sha256Hex.fromRawBytes(self.config.system_prompt),
-            if (self.config.tools_json) |tools| Sha256Hex.fromRawBytes(tools) else null,
-        );
+        self.request_context_sha256 = computeRequestContextSha256(self.config);
         self.budget = null;
         self.wire_request_sha256 = null;
         return true;
@@ -247,12 +243,6 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
         for (owned_tool_args) |args| allocator.free(args);
         allocator.free(owned_tool_args);
     }
-    const system_prompt_sha256 = Sha256Hex.fromBytes("zttp-model-request-system-v1", input.config.system_prompt);
-    const tools_sha256 = if (input.config.tools_json) |tools|
-        Sha256Hex.fromBytes("zttp-model-request-tools-v1", tools)
-    else
-        null;
-
     return .{
         .config = input.config,
         .items = owned_items,
@@ -265,7 +255,7 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
             .history = try historyBytes(owned_items),
             .transient = if (input.extra_user_text) |text| try byteLen(text) else 0,
         },
-        .request_context_sha256 = hashRequestContext(input.config, system_prompt_sha256, tools_sha256),
+        .request_context_sha256 = computeRequestContextSha256(input.config),
         .transcript_sha256 = hashTranscript(owned_items),
         .transient_user_text_sha256 = if (input.extra_user_text) |text|
             Sha256Hex.fromBytes("zttp-model-request-transient-user-v1", text)
@@ -320,6 +310,15 @@ fn addBytes(total: *u64, bytes: []const u8) !void {
 
 fn byteLen(bytes: []const u8) !u64 {
     return std.math.cast(u64, bytes.len) orelse error.RequestSizeOverflow;
+}
+
+fn computeRequestContextSha256(config: Config) Sha256Hex {
+    const system_prompt_sha256 = Sha256Hex.fromBytes("zttp-model-request-system-v1", config.system_prompt);
+    const tools_sha256 = if (config.tools_json) |tools|
+        Sha256Hex.fromBytes("zttp-model-request-tools-v1", tools)
+    else
+        null;
+    return hashRequestContext(config, system_prompt_sha256, tools_sha256);
 }
 
 fn hashRequestContext(config: Config, system_digest: Sha256Hex, tools_digest: ?Sha256Hex) Sha256Hex {
@@ -450,4 +449,11 @@ test "prepared snapshot clamps output to the model capacity left after input" {
     try testing.expect(snapshot.config.max_output_tokens > 0);
     try testing.expect(snapshot.budget == null);
     try testing.expect(!before_hash.eql(snapshot.request_context_sha256));
+
+    var fresh = try createSnapshot(testing.allocator, .{
+        .config = snapshot.config,
+        .transcript = &transcript,
+    });
+    defer fresh.deinit(testing.allocator);
+    try testing.expectEqualStrings(fresh.request_context_sha256.slice(), snapshot.request_context_sha256.slice());
 }

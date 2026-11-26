@@ -390,37 +390,15 @@ pub fn writeJson(result: Union, writer: *std.Io.Writer) !void {
     try writer.writeAll("]}");
 }
 
-fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
-    var args_iter = std.process.Args.Iterator.init(args_vector);
-    defer args_iter.deinit();
-
-    var list: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (list.items) |arg| allocator.free(arg);
-        list.deinit(allocator);
-    }
-    while (args_iter.next()) |arg| {
-        try list.append(allocator, try allocator.dupe(u8, arg));
-    }
-    return list.toOwnedSlice(allocator);
-}
-
-pub fn main(init: std.process.Init.Minimal) !void {
+pub fn main(init: std.process.Init) !void {
     var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    const args = try collectArgs(allocator, init.args);
-    defer {
-        for (args) |arg| allocator.free(arg);
-        allocator.free(args);
-    }
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buffer);
 
     const fail = struct {
         fn print(w: *std.Io.Writer, failure: Failure) noreturn {
@@ -440,6 +418,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         error.NoParsedBlob,
         error.NoTrippedList,
         error.FirstRunWithoutCodes,
+        error.FirstRunWithUnreadableHistory,
         error.SourceTreeSetConflict,
         error.InvalidZeroObservation,
         => |failure| fail(&stderr_writer.interface, failure),

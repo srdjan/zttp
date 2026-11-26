@@ -88,7 +88,6 @@ fn arr_call(comptime span: []const u8, comptime e: []const u8) Refusal {
 }
 
 const box_alias = "type Box<T extends string> = { value: T };\n";
-const boundary_proof = "type Boundary<T> = Proof<T, \"deterministic\" | \"read_only\">;\n";
 
 const dict_round_trip = "import { dictEmpty, dictSet, dictEntries, dictFromEntries } from \"zttp:collections\";\nfunction g(): boolean {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const pairs = dictEntries(d).map((p) => [p[0], p[1] * 2]);\n  const rebuilt = dictFromEntries(pairs);\n  return rebuilt.ok;\n}\n" ++ tail;
 

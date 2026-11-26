@@ -518,7 +518,9 @@ pub fn writeJsonl(writer: anytype, witness: CounterexampleWitness) !void {
     try json_utils.writeJsonString(writer, witness.summary);
     try writer.writeAll("}\n");
 
-    try writer.print("{{\"type\":\"request\",\"method\":\"{s}\",\"url\":", .{witness.request.method});
+    try writer.writeAll("{\"type\":\"request\",\"method\":");
+    try json_utils.writeJsonString(writer, witness.request.method);
+    try writer.writeAll(",\"url\":");
     try json_utils.writeJsonString(writer, witness.request.url);
     if (witness.request.has_auth_header) {
         try writer.writeAll(",\"headers\":{\"authorization\":\"Bearer counterexample-token\"}");
@@ -534,10 +536,11 @@ pub fn writeJsonl(writer: anytype, witness: CounterexampleWitness) !void {
     try writer.writeAll("}\n");
 
     for (witness.io_stubs) |stub| {
-        try writer.print(
-            "{{\"type\":\"io\",\"seq\":{d},\"module\":\"{s}\",\"fn\":\"{s}\",\"result\":{s}}}\n",
-            .{ stub.seq, stub.module, stub.func, stub.result_json },
-        );
+        try writer.print("{{\"type\":\"io\",\"seq\":{d},\"module\":", .{stub.seq});
+        try json_utils.writeJsonString(writer, stub.module);
+        try writer.writeAll(",\"fn\":");
+        try json_utils.writeJsonString(writer, stub.func);
+        try writer.print(",\"result\":{s}}}\n", .{stub.result_json});
     }
 }
 
@@ -777,17 +780,17 @@ test "writeJsonl emits witness + request + io in trace-compatible order" {
     const out = buf.items;
     // Witness header comes first.
     try std.testing.expect(std.mem.startsWith(u8, out, "{\"type\":\"witness\","));
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"property\":\"no_secret_leakage\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"line\":3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"line\":5") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\"property\":\"no_secret_leakage\"") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\"line\":3") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\"line\":5") != null);
     // Request line carries the POST method and /leak url.
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"type\":\"request\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"method\":\"POST\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"url\":\"/leak\"") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\"type\":\"request\"") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\"method\":\"POST\"") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\"url\":\"/leak\"") != null);
     // Single io record with seq 0 and the env stub.
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"type\":\"io\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"seq\":0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"fn\":\"env\"") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\"type\":\"io\"") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\"seq\":0") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\"fn\":\"env\"") != null);
     // Three JSONL lines, newline-terminated.
     var line_count: usize = 0;
     for (out) |c| if (c == '\n') {
@@ -941,8 +944,8 @@ test "writeJsonl emits node_id fields when present" {
     try writeJsonl(&aw.writer, witness);
     buf = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"node_id\":11") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"node_id\":22") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\"node_id\":11") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\"node_id\":22") != null);
 }
 
 test "writeJsonl escapes control characters and quotes in summary" {
@@ -963,10 +966,10 @@ test "writeJsonl escapes control characters and quotes in summary" {
     try writeJsonl(&aw.writer, witness);
     buf = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "quote:\\\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "backslash:\\\\") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "newline:\\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ctrl:\\u0001") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "quote:\\\"") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "backslash:\\\\") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "newline:\\n") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "ctrl:\\u0001") != null);
 }
 
 const fetch_info: StubInfo = .{ .module = "fetch", .func = "fetch", .returns = .object, .call_index = 0, .ok_record = true };
@@ -1081,4 +1084,44 @@ test "negate flips the expectation of a status test" {
     const flipped = negate(test_constraint) orelse return error.NoNegation;
     try std.testing.expect(!flipped.status_is.expect);
     try std.testing.expect(negate(flipped).?.status_is.expect);
+}
+
+test "writeJsonl JSON-escapes method, module, and fn" {
+    const allocator = std.testing.allocator;
+    const stubs = [_]IoStubEntry{.{
+        .seq = 0,
+        .module = "mod\"a",
+        .func = "fn\\b",
+        .result_json = "\"ok\"",
+    }};
+    const witness: CounterexampleWitness = .{
+        .property = .no_secret_leakage,
+        .origin = .{ .line = 1, .column = 1 },
+        .sink = .{ .line = 2, .column = 1 },
+        .summary = "test",
+        .request = .{
+            .method = "PO\"ST\n",
+            .url = "/x",
+            .has_auth_header = false,
+            .body = null,
+        },
+        .io_stubs = &stubs,
+    };
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeJsonl(&aw.writer, witness);
+
+    var lines = std.mem.splitScalar(u8, aw.written(), '\n');
+    _ = lines.next().?; // witness line
+    const req_line = lines.next().?;
+    const io_line = lines.next().?;
+
+    var parsed_req = try std.json.parseFromSlice(std.json.Value, allocator, req_line, .{});
+    defer parsed_req.deinit();
+    try std.testing.expectEqualStrings("PO\"ST\n", parsed_req.value.object.get("method").?.string);
+
+    var parsed_io = try std.json.parseFromSlice(std.json.Value, allocator, io_line, .{});
+    defer parsed_io.deinit();
+    try std.testing.expectEqualStrings("mod\"a", parsed_io.value.object.get("module").?.string);
+    try std.testing.expectEqualStrings("fn\\b", parsed_io.value.object.get("fn").?.string);
 }

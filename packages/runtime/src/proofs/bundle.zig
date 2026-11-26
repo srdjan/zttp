@@ -47,6 +47,11 @@ pub const ComponentVerdict = struct {
     pass: bool,
     expected_sha: [64]u8,
     actual_sha: [64]u8,
+    /// In-memory bytes read during integrity verification for components that
+    /// undergo semantic checks (`contract`, `binary`, `certificate`). Reused
+    /// directly so `verifySemantics` inspects the exact bytes whose SHA-256 was
+    /// verified (no second disk read / TOCTOU window).
+    bytes: ?[]u8 = null,
 };
 
 /// Read one bundle input. A failure names the input and its path on `stderr`
@@ -209,6 +214,22 @@ const ManifestFields = struct {
     replay_basename: ?[]const u8,
 };
 
+fn writeJsonEscapedContent(writer: *std.Io.Writer, text: []const u8) !void {
+    for (text) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0c => try writer.writeAll("\\f"),
+            0x00...0x07, 0x0b, 0x0e...0x1f => try writer.print("\\u{x:0>4}", .{c}),
+            else => try writer.writeByte(c),
+        }
+    }
+}
+
 fn writeManifest(writer: *std.Io.Writer, m: ManifestFields) !void {
     try writer.writeAll("{\n");
     try writer.print("  \"toolVersion\": \"{s}\",\n", .{tool_version});
@@ -225,7 +246,9 @@ fn writeManifest(writer: *std.Io.Writer, m: ManifestFields) !void {
     }
     if (m.replay_sha) |s| {
         try writer.writeAll(",\n");
-        try writer.print("    \"replay\": {{ \"path\": \"replay/{s}\", \"sha256\": \"{s}\" }}", .{ m.replay_basename.?, s });
+        try writer.writeAll("    \"replay\": { \"path\": \"replay/");
+        try writeJsonEscapedContent(writer, m.replay_basename.?);
+        try writer.print("\", \"sha256\": \"{s}\" }}", .{s});
     }
     try writer.writeAll("\n  }\n}\n");
 }
@@ -273,6 +296,7 @@ pub fn verify(
         for (verdicts.items) |v| {
             allocator.free(v.name);
             allocator.free(v.path);
+            if (v.bytes) |b| allocator.free(b);
         }
         verdicts.deinit(allocator);
     }
@@ -287,15 +311,15 @@ pub fn verify(
     }
 
     var any_failed = false;
-    var binary_path: ?[]const u8 = null;
-    var certificate_path: ?[]const u8 = null;
-    var contract_path: ?[]const u8 = null;
+    var binary_bytes: ?[]const u8 = null;
+    var certificate_bytes: ?[]const u8 = null;
+    var contract_bytes: ?[]const u8 = null;
     for (verdicts.items) |v| {
         const label: []const u8 = if (v.pass) "OK  " else "FAIL";
         try stdout.print("  {s}  {s}\n", .{ label, v.name });
-        if (std.mem.eql(u8, v.name, "contract")) contract_path = v.path;
-        if (std.mem.eql(u8, v.name, "binary")) binary_path = v.path;
-        if (std.mem.eql(u8, v.name, "certificate")) certificate_path = v.path;
+        if (std.mem.eql(u8, v.name, "contract")) contract_bytes = v.bytes;
+        if (std.mem.eql(u8, v.name, "binary")) binary_bytes = v.bytes;
+        if (std.mem.eql(u8, v.name, "certificate")) certificate_bytes = v.bytes;
         if (!v.pass) {
             any_failed = true;
             try stdout.print("        expected sha256 {s}\n", .{v.expected_sha});
@@ -312,15 +336,13 @@ pub fn verify(
         .{verdicts.items.len},
     );
 
-    const verified_contract_path = contract_path orelse return error.InvalidManifest;
-    const contract_bytes = try readBundleFile(allocator, io, bundle_dir, verified_contract_path, 256 * 1024 * 1024);
-    defer allocator.free(contract_bytes);
-    try refuseRetiredContract(allocator, contract_bytes, stderr);
+    const verified_contract = contract_bytes orelse return error.InvalidManifest;
+    try refuseRetiredContract(allocator, verified_contract, stderr);
 
     // Integrity is one state. What the artifact does is another, and a bundle
     // that only matched hashes has established nothing about it. Say which one
     // was reached rather than printing a single word that reads as both.
-    if (binary_path == null or certificate_path == null) {
+    if (binary_bytes == null or certificate_bytes == null) {
         try stdout.writeAll(
             "Proof:     not checked - this bundle carries no artifact and certificate to check\n",
         );
@@ -328,7 +350,7 @@ pub fn verify(
         return;
     }
 
-    verifySemantics(allocator, io, bundle_dir, binary_path.?, certificate_path.?, contract_bytes, stdout, stderr) catch |err| switch (err) {
+    verifySemantics(allocator, binary_bytes.?, certificate_bytes.?, verified_contract, stdout, stderr) catch |err| switch (err) {
         // Nothing to check is not the same as checked and refused. A caller
         // that needs the stronger state says so; one that does not gets the
         // line and a zero exit.
@@ -350,20 +372,12 @@ pub fn verify(
 /// differs from the artifact's, is a mismatch and not "not checked".
 fn verifySemantics(
     allocator: std.mem.Allocator,
-    io: std.Io,
-    bundle_dir: std.Io.Dir,
-    bundle_binary_path: []const u8,
-    bundle_certificate_path: []const u8,
+    binary_bytes: []const u8,
+    bundle_certificate: []const u8,
     bundle_contract: []const u8,
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
-    const binary_bytes = readBundleFile(allocator, io, bundle_dir, bundle_binary_path, 256 * 1024 * 1024) catch {
-        try stderr.writeAll("zttp proofs verify: cannot read the bundled artifact\n");
-        return error.InvalidManifest;
-    };
-    defer allocator.free(binary_bytes);
-
     var payload = payloadFromBinary(allocator, binary_bytes) catch |err| switch (err) {
         error.UnsupportedArtifactFormat => {
             try writeRebuildDiagnostic(stderr, "verify");
@@ -382,11 +396,6 @@ fn verifySemantics(
     };
     defer payload.deinit(allocator);
 
-    const bundle_certificate = readBundleFile(allocator, io, bundle_dir, bundle_certificate_path, 256 * 1024 * 1024) catch {
-        try stderr.writeAll("zttp proofs verify: cannot read the bundled certificate\n");
-        return error.InvalidManifest;
-    };
-    defer allocator.free(bundle_certificate);
     const certificate = payload.certificate orelse "";
     if (payload.certificate == null or !std.mem.eql(u8, certificate, bundle_certificate)) {
         try stderr.writeAll("zttp proofs verify: bundle certificate does not match the certificate in the binary\n");
@@ -558,14 +567,20 @@ fn verifyComponents(
         else => return error.InvalidManifest,
     };
     if (components.count() == 0 or components.count() > 4) return error.InvalidManifest;
-    _ = components.get("contract") orelse return error.InvalidManifest;
+    if (components.get("contract") == null) {
+        try stderr.writeAll("zttp proofs verify: bundle manifest is missing required 'contract' component\n");
+        return error.InvalidManifest;
+    }
 
     var paths: [4][]const u8 = undefined;
     var path_count: usize = 0;
     var iterator = components.iterator();
     while (iterator.next()) |component| {
         const name = component.key_ptr.*;
-        if (!isSupportedComponent(name)) return error.InvalidManifest;
+        if (!isSupportedComponent(name)) {
+            try stderr.print("zttp proofs verify: unsupported component '{s}' in manifest\n", .{name});
+            return error.InvalidManifest;
+        }
         const fields = switch (component.value_ptr.*) {
             .object => |object| object,
             else => return error.InvalidManifest,
@@ -582,7 +597,10 @@ fn verifyComponents(
             else => return error.InvalidManifest,
         };
         for (paths[0..path_count]) |seen| {
-            if (std.mem.eql(u8, seen, path)) return error.InvalidManifest;
+            if (std.mem.eql(u8, seen, path)) {
+                try stderr.print("zttp proofs verify: duplicate component path '{s}' in manifest\n", .{path});
+                return error.InvalidManifest;
+            }
         }
         paths[path_count] = path;
         path_count += 1;
@@ -593,27 +611,38 @@ fn verifyComponents(
             try stderr.print("zttp proofs verify: component path '{s}' escapes the bundle directory\n", .{path});
             return error.SuspiciousPath;
         }
-        const actual = hashBundleFile(io, bundle_dir, path, 256 * 1024 * 1024, stderr) catch |err| switch (err) {
+
+        // For components consumed by semantic verification (contract, binary,
+        // certificate), read once into memory and compute SHA-256 directly on
+        // that buffer so verifySemantics checks the exact bytes we verified.
+        const keep_in_memory = !std.mem.eql(u8, name, "replay");
+        var owned_bytes: ?[]u8 = null;
+        errdefer if (owned_bytes) |b| allocator.free(b);
+
+        const actual: [64]u8 = if (keep_in_memory) blk: {
+            const bytes = readBundleFile(allocator, io, bundle_dir, path, 256 * 1024 * 1024, stderr) catch |err| switch (err) {
+                error.SuspiciousPath, error.OutOfMemory => return err,
+                else => return error.MissingComponent,
+            };
+            owned_bytes = bytes;
+            break :blk sha256Hex(bytes);
+        } else hashBundleFile(io, bundle_dir, path, 256 * 1024 * 1024, stderr) catch |err| switch (err) {
             error.SuspiciousPath => return err,
             else => return error.MissingComponent,
         };
 
         const name_dup = try allocator.dupe(u8, name);
-        const path_dup = allocator.dupe(u8, path) catch |err| {
-            allocator.free(name_dup);
-            return err;
-        };
-        out.append(allocator, .{
+        errdefer allocator.free(name_dup);
+        const path_dup = try allocator.dupe(u8, path);
+        errdefer allocator.free(path_dup);
+        try out.append(allocator, .{
             .name = name_dup,
             .path = path_dup,
             .pass = std.mem.eql(u8, &actual, &expected_sha),
             .expected_sha = expected_sha,
             .actual_sha = actual,
-        }) catch |err| {
-            allocator.free(name_dup);
-            allocator.free(path_dup);
-            return err;
-        };
+            .bytes = owned_bytes,
+        });
     }
 }
 
@@ -634,46 +663,16 @@ fn refuseRetiredContract(
     }
 }
 
-/// Read one bundle file, refusing a symlink and a size above the cap.
-///
-/// The path is a fixed name this file chose, never a manifest string, so the
-/// traversal guards `hashBundleFile` needs do not apply here. The symlink check
-/// does: the bundle directory is attacker-supplied even when the names are not.
-fn readBundleFile(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    bundle_dir: std.Io.Dir,
-    name: []const u8,
-    max_bytes: usize,
-) ![]u8 {
-    const stat = bundle_dir.statFile(io, name, .{ .follow_symlinks = false }) catch return error.FileNotFound;
-    if (stat.kind != .file) return error.SuspiciousPath;
-    if (stat.size > max_bytes) return error.FileTooBig;
-    const size = std.math.cast(usize, stat.size) orelse return error.FileTooBig;
-    var file = bundle_dir.openFile(io, name, .{ .follow_symlinks = false }) catch return error.FileNotFound;
-    defer file.close(io);
-    const buffer = try allocator.alloc(u8, size);
-    errdefer allocator.free(buffer);
-    // The reader's own buffer must not also be the read destination.
-    var reader_buffer: [4096]u8 = undefined;
-    var reader = file.reader(io, &reader_buffer);
-    var offset: usize = 0;
-    while (offset < size) {
-        const read = reader.interface.readSliceShort(buffer[offset..]) catch return error.FileReadFailed;
-        if (read == 0) break;
-        offset += read;
-    }
-    if (offset != size) return error.IncompleteRead;
-    return buffer;
-}
-
-fn hashBundleFile(
+/// Open one bundle file by walking every directory component with
+/// `follow_symlinks = false`, refusing traversal, symlinks, non-regular files,
+/// and files exceeding `max_bytes`.
+fn openBundleFileNoSymlinks(
     io: std.Io,
     bundle_dir: std.Io.Dir,
     relative_path: []const u8,
     max_bytes: usize,
     stderr: *std.Io.Writer,
-) ![64]u8 {
+) !struct { file: std.Io.File, size: usize } {
     if (!static_mod.isPathSafe(relative_path)) {
         try stderr.print("zttp proofs verify: component path '{s}' escapes the bundle directory\n", .{relative_path});
         return error.SuspiciousPath;
@@ -719,11 +718,57 @@ fn hashBundleFile(
         },
         else => return err,
     };
-    defer file.close(io);
+    errdefer file.close(io);
 
     const stat = try file.stat(io);
     if (stat.kind != .file) return error.NotFile;
     if (stat.size > max_bytes) return error.FileTooBig;
+    const size = std.math.cast(usize, stat.size) orelse return error.FileTooBig;
+    return .{ .file = file, .size = size };
+}
+
+/// Read one bundle file safely, walking every path component with
+/// `follow_symlinks = false` and enforcing `max_bytes`.
+fn readBundleFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    bundle_dir: std.Io.Dir,
+    relative_path: []const u8,
+    max_bytes: usize,
+    stderr: *std.Io.Writer,
+) ![]u8 {
+    var opened = try openBundleFileNoSymlinks(io, bundle_dir, relative_path, max_bytes, stderr);
+    defer opened.file.close(io);
+
+    const buffer = try allocator.alloc(u8, opened.size);
+    errdefer allocator.free(buffer);
+    // The reader's own buffer must not also be the read destination.
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = opened.file.reader(io, &reader_buffer);
+    var offset: usize = 0;
+    while (offset < opened.size) {
+        const read = reader.interface.readSliceShort(buffer[offset..]) catch return error.FileReadFailed;
+        if (read == 0) break;
+        offset += read;
+    }
+    if (offset != opened.size) return error.IncompleteRead;
+    // Fail closed if the file grew past its stat size while we read it.
+    _ = reader.interface.takeByte() catch |err| switch (err) {
+        error.EndOfStream => return buffer,
+        else => return error.FileReadFailed,
+    };
+    return error.IncompleteRead;
+}
+
+fn hashBundleFile(
+    io: std.Io,
+    bundle_dir: std.Io.Dir,
+    relative_path: []const u8,
+    max_bytes: usize,
+    stderr: *std.Io.Writer,
+) ![64]u8 {
+    var opened = try openBundleFileNoSymlinks(io, bundle_dir, relative_path, max_bytes, stderr);
+    defer opened.file.close(io);
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var total: usize = 0;
@@ -731,7 +776,7 @@ fn hashBundleFile(
     // component past one chunk then copies a slice onto itself.
     var reader_buffer: [4096]u8 = undefined;
     var chunk: [64 * 1024]u8 = undefined;
-    var reader = file.reader(io, &reader_buffer);
+    var reader = opened.file.reader(io, &reader_buffer);
     while (true) {
         const count = reader.interface.readSliceShort(&chunk) catch return error.FileReadFailed;
         if (count == 0) break;
@@ -811,7 +856,7 @@ fn parseSha256(value: []const u8) ?[64]u8 {
 
 fn rejectSuspiciousPath(stderr: *std.Io.Writer, command: []const u8, path: []const u8) !void {
     if (path.len == 0) return;
-    const refused = std.mem.indexOf(u8, path, "..") != null or
+    const refused = std.mem.find(u8, path, "..") != null or
         std.mem.startsWith(u8, path, "/etc/") or std.mem.startsWith(u8, path, "/var/");
     if (!refused) return;
     try stderr.print(
@@ -1025,7 +1070,7 @@ test "bundle refuses a current-format artifact whose payload checksum fails, ins
         &out.writer,
         &err.writer,
     ));
-    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "damaged") != null);
+    try std.testing.expect(std.mem.find(u8, err.writer.buffered(), "damaged") != null);
     try std.testing.expectError(
         error.FileNotFound,
         std.Io.Dir.access(std.Io.Dir.cwd(), std.testing.io, "bundle", .{}),
@@ -1058,7 +1103,7 @@ test "bundle refuses a predecessor artifact before creating output" {
         &out.writer,
         &err.writer,
     ));
-    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "Rebuild") != null);
+    try std.testing.expect(std.mem.find(u8, err.writer.buffered(), "Rebuild") != null);
     try std.testing.expectError(
         error.FileNotFound,
         std.Io.Dir.access(std.Io.Dir.cwd(), std.testing.io, "bundle", .{}),
@@ -1100,8 +1145,8 @@ test "verify refuses a predecessor artifact after integrity succeeds" {
         error.UnsupportedArtifactFormat,
         verify(std.testing.allocator, "bundle", false, &out.writer, &err.writer),
     );
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "Integrity: verified") != null);
-    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "Rebuild") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "Integrity: verified") != null);
+    try std.testing.expect(std.mem.find(u8, err.writer.buffered(), "Rebuild") != null);
 }
 
 test "verify checks the binary at its manifest path" {
@@ -1138,7 +1183,7 @@ test "verify checks the binary at its manifest path" {
         error.UnsupportedArtifactFormat,
         verify(std.testing.allocator, "bundle", false, &out.writer, &err.writer),
     );
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "Integrity: verified") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "Integrity: verified") != null);
 }
 
 test "verify rejects a manifest component path with parent traversal" {
@@ -1166,8 +1211,8 @@ test "verify rejects a manifest component path with parent traversal" {
     var err = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer err.deinit();
     try std.testing.expectError(error.SuspiciousPath, verify(std.testing.allocator, "bundle", false, &out.writer, &err.writer));
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "OK") == null);
-    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "../secret") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "OK") == null);
+    try std.testing.expect(std.mem.find(u8, err.writer.buffered(), "../secret") != null);
 }
 
 test "a bundle from the previous format is refused with a rebuild diagnostic" {
@@ -1194,9 +1239,9 @@ test "a bundle from the previous format is refused with a rebuild diagnostic" {
     );
     // The diagnostic names both formats and says what to do about it.
     const text = err.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, text, "zttp-bundle-2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, tool_version) != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "Rebuild") != null);
+    try std.testing.expect(std.mem.find(u8, text, "zttp-bundle-2") != null);
+    try std.testing.expect(std.mem.find(u8, text, tool_version) != null);
+    try std.testing.expect(std.mem.find(u8, text, "Rebuild") != null);
 }
 
 test "a manifest with no toolVersion is refused" {
@@ -1248,8 +1293,8 @@ test "a hash-only bundle establishes integrity, and says so when proof was requi
     defer err.deinit();
     try verify(std.testing.allocator, "bundle", false, &out.writer, &err.writer);
     const text = out.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, text, "Integrity: verified") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "Proof:     not checked") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Integrity: verified") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Proof:     not checked") != null);
 
     // With one, the same bundle is not enough, and the exit says so.
     var strict_out = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1286,8 +1331,8 @@ test "verify rejects an absolute manifest component path" {
     var err = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer err.deinit();
     try std.testing.expectError(error.SuspiciousPath, verify(std.testing.allocator, "bundle", false, &out.writer, &err.writer));
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "OK") == null);
-    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), abs_secret) != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "OK") == null);
+    try std.testing.expect(std.mem.find(u8, err.writer.buffered(), abs_secret) != null);
 }
 
 test "verify rejects a symlink component without hashing its target" {
@@ -1310,9 +1355,9 @@ test "verify rejects a symlink component without hashing its target" {
     var err = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer err.deinit();
     try std.testing.expectError(error.SuspiciousPath, verify(std.testing.allocator, "bundle", false, &out.writer, &err.writer));
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "OK") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "actual") == null);
-    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "handler.contract.json") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "OK") == null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "actual") == null);
+    try std.testing.expect(std.mem.find(u8, err.writer.buffered(), "handler.contract.json") != null);
 }
 
 test "verify rejects an intermediate directory symlink" {
@@ -1338,8 +1383,8 @@ test "verify rejects an intermediate directory symlink" {
     var err = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer err.deinit();
     try std.testing.expectError(error.SuspiciousPath, verify(std.testing.allocator, "bundle", false, &out.writer, &err.writer));
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "OK") == null);
-    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "replay/trace.jsonl") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "OK") == null);
+    try std.testing.expect(std.mem.find(u8, err.writer.buffered(), "replay/trace.jsonl") != null);
 }
 
 test "verify rejects duplicate component paths" {
@@ -1352,7 +1397,10 @@ test "verify rejects duplicate component paths" {
     try ensureDir(std.testing.allocator, "bundle");
     try zts.file_io.writeFile(std.testing.allocator, "bundle/component", "same-file");
     const sha = sha256Hex("same-file");
-    const manifest = try std.testing.allocator.print("{{\"components\":{{\"contract\":{{\"path\":\"component\",\"sha256\":\"{s}\"}},\"binary\":{{\"path\":\"component\",\"sha256\":\"{s}\"}}}}}}", .{ sha, sha });
+    const manifest = try std.testing.allocator.print(
+        "{{\"toolVersion\":\"" ++ tool_version ++ "\",\"components\":{{\"contract\":{{\"path\":\"component\",\"sha256\":\"{s}\"}},\"binary\":{{\"path\":\"component\",\"sha256\":\"{s}\"}}}}}}",
+        .{ sha, sha },
+    );
     defer std.testing.allocator.free(manifest);
     try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
 
@@ -1361,7 +1409,11 @@ test "verify rejects duplicate component paths" {
     var err = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer err.deinit();
     try std.testing.expectError(error.InvalidManifest, verify(std.testing.allocator, "bundle", false, &out.writer, &err.writer));
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "OK") == null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "OK") == null);
+    try std.testing.expectEqualStrings(
+        "zttp proofs verify: duplicate component path 'component' in manifest\n",
+        err.writer.buffered(),
+    );
 }
 
 test "verify rejects unsupported manifest components" {
@@ -1372,9 +1424,14 @@ test "verify rejects unsupported manifest components" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try ensureDir(std.testing.allocator, "bundle");
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/handler.contract.json", "{}");
     try zts.file_io.writeFile(std.testing.allocator, "bundle/component", "data");
-    const sha = sha256Hex("data");
-    const manifest = try std.testing.allocator.print("{{\"components\":{{\"extra\":{{\"path\":\"component\",\"sha256\":\"{s}\"}}}}}}", .{sha});
+    const contract_sha = sha256Hex("{}");
+    const data_sha = sha256Hex("data");
+    const manifest = try std.testing.allocator.print(
+        "{{\"toolVersion\":\"" ++ tool_version ++ "\",\"components\":{{\"contract\":{{\"path\":\"handler.contract.json\",\"sha256\":\"{s}\"}},\"extra\":{{\"path\":\"component\",\"sha256\":\"{s}\"}}}}}}",
+        .{ contract_sha, data_sha },
+    );
     defer std.testing.allocator.free(manifest);
     try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
 
@@ -1383,6 +1440,10 @@ test "verify rejects unsupported manifest components" {
     var err = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer err.deinit();
     try std.testing.expectError(error.InvalidManifest, verify(std.testing.allocator, "bundle", false, &out.writer, &err.writer));
+    try std.testing.expectEqualStrings(
+        "zttp proofs verify: unsupported component 'extra' in manifest\n",
+        err.writer.buffered(),
+    );
 }
 
 test "verify rejects a supported manifest without a contract" {
@@ -1395,7 +1456,10 @@ test "verify rejects a supported manifest without a contract" {
     try ensureDir(std.testing.allocator, "bundle");
     try zts.file_io.writeFile(std.testing.allocator, "bundle/trace.jsonl", "valid-replay");
     const sha = sha256Hex("valid-replay");
-    const manifest = try std.testing.allocator.print("{{\"components\":{{\"replay\":{{\"path\":\"trace.jsonl\",\"sha256\":\"{s}\"}}}}}}", .{sha});
+    const manifest = try std.testing.allocator.print(
+        "{{\"toolVersion\":\"" ++ tool_version ++ "\",\"components\":{{\"replay\":{{\"path\":\"trace.jsonl\",\"sha256\":\"{s}\"}}}}}}",
+        .{sha},
+    );
     defer std.testing.allocator.free(manifest);
     try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
 
@@ -1404,7 +1468,28 @@ test "verify rejects a supported manifest without a contract" {
     var err = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer err.deinit();
     try std.testing.expectError(error.InvalidManifest, verify(std.testing.allocator, "bundle", false, &out.writer, &err.writer));
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "Integrity: verified") == null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "Integrity: verified") == null);
+    try std.testing.expectEqualStrings(
+        "zttp proofs verify: bundle manifest is missing required 'contract' component\n",
+        err.writer.buffered(),
+    );
+}
+
+test "writeManifest JSON-escapes special characters in replay_basename" {
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const sha = sha256Hex("x");
+    try writeManifest(&out.writer, .{
+        .contract_sha = sha,
+        .binary_sha = null,
+        .certificate_sha = null,
+        .replay_sha = sha,
+        .replay_basename = "odd\"name\\line\n.jsonl",
+    });
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.writer.buffered(), .{});
+    defer parsed.deinit();
+    const replay_path = parsed.value.object.get("components").?.object.get("replay").?.object.get("path").?.string;
+    try std.testing.expectEqualStrings("replay/odd\"name\\line\n.jsonl", replay_path);
 }
 
 test "verify passes a bundle written by writeBundle" {
@@ -1433,12 +1518,12 @@ test "verify passes a bundle written by writeBundle" {
     defer verify_err.deinit();
     try verify(std.testing.allocator, "bundle", false, &verify_out.writer, &verify_err.writer);
     const text = verify_out.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, text, "OK") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "Integrity: verified") != null);
+    try std.testing.expect(std.mem.find(u8, text, "OK") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Integrity: verified") != null);
     // Integrity is reported on its own line, and the absence of anything to
     // check semantically is reported on another. A caller reading one word
     // cannot mistake the first state for the second.
-    try std.testing.expect(std.mem.indexOf(u8, text, "Proof:     not checked") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Proof:     not checked") != null);
 }
 
 test "bundle verification refuses every retired module" {
@@ -1533,7 +1618,7 @@ test "verify hashes a component larger than one read buffer" {
     var verify_err = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer verify_err.deinit();
     try verify(std.testing.allocator, "bundle", false, &verify_out.writer, &verify_err.writer);
-    try std.testing.expect(std.mem.indexOf(u8, verify_out.writer.buffered(), "Integrity: verified") != null);
+    try std.testing.expect(std.mem.find(u8, verify_out.writer.buffered(), "Integrity: verified") != null);
 }
 
 /// A binary whose payload embeds `contract`, written as `handler` in the cwd.
@@ -1591,7 +1676,7 @@ test "bundle refuses a --contract file that differs from the embedded contract" 
         .binary_path = "handler",
         .out_dir = "bundle",
     }, &out.writer, &err.writer));
-    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "'other.json' differs") != null);
+    try std.testing.expect(std.mem.find(u8, err.writer.buffered(), "'other.json' differs") != null);
     try std.testing.expectError(
         error.FileNotFound,
         std.Io.Dir.access(std.Io.Dir.cwd(), std.testing.io, "bundle", .{}),

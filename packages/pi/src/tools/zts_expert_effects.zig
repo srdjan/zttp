@@ -115,9 +115,9 @@ fn writeEnvelope(
     path: []const u8,
     functions: []const zts.FunctionEffect,
 ) !void {
-    try writer.writeAll("{\"path\":\"");
-    try writer.writeAll(path);
-    try writer.writeAll("\",\"functions\":[");
+    try writer.writeAll("{\"path\":");
+    try zts.writeJsonString(writer, path);
+    try writer.writeAll(",\"functions\":[");
     for (functions, 0..) |fe, i| {
         if (i > 0) try writer.writeByte(',');
         try writeFunction(writer, ctx, fe);
@@ -130,9 +130,9 @@ fn writeFunction(
     ctx: WriteContext,
     fe: zts.FunctionEffect,
 ) !void {
-    try writer.writeAll("{\"name\":\"");
-    try writer.writeAll(fe.name);
-    try writer.writeAll("\",\"pure\":");
+    try writer.writeAll("{\"name\":");
+    try zts.writeJsonString(writer, fe.name);
+    try writer.writeAll(",\"pure\":");
     try writer.writeAll(if (fe.row.pure) "true" else "false");
     try writer.writeAll(",\"deterministic\":");
     try writer.writeAll(if (fe.row.deterministic) "true" else "false");
@@ -146,9 +146,7 @@ fn writeFunction(
     while (it.next()) |cap| {
         if (!first) try writer.writeByte(',');
         first = false;
-        try writer.writeByte('"');
-        try writer.writeAll(@tagName(cap));
-        try writer.writeByte('"');
+        try zts.writeJsonString(writer, @tagName(cap));
     }
     // An empty `declared` array means the function carries no `Effects<...>`,
     // unless `declaredUnreadable` is true - then an annotation is present and
@@ -173,9 +171,7 @@ fn writeFunction(
         }
         for (declared.items, 0..) |capname, j| {
             if (j > 0) try writer.writeByte(',');
-            try writer.writeByte('"');
-            try writer.writeAll(capname);
-            try writer.writeByte('"');
+            try zts.writeJsonString(writer, capname);
         }
     }
     try writer.writeAll("],\"declaredUnreadable\":");

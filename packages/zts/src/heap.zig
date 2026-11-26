@@ -395,48 +395,6 @@ pub const Heap = struct {
         header.gc_mark = marked;
     }
 
-    /// Allocate a Float64 box (raw allocation without extra header)
-    pub fn allocFloat64(self: *Heap, val: f64) ?*value.JSValue.Float64Box {
-        // Float64Box has its own header, so allocate raw without additional header
-        const size = @sizeOf(value.JSValue.Float64Box);
-        const size_class = SizeClass.fromSize(size);
-
-        if (size_class == .large) {
-            // Large allocation path - won't happen for Float64Box but handle it anyway
-            return null;
-        }
-
-        const idx = size_class.index();
-        const slot_size = size_class.slotSize();
-
-        if (!self.withinBudget(slot_size)) {
-            return null;
-        }
-
-        // Try free list first
-        if (self.free_lists[idx]) |node| {
-            self.free_lists[idx] = node.next;
-            self.stats.small_alloc_count += 1;
-            self.stats.total_allocated += slot_size;
-
-            const box: *value.JSValue.Float64Box = @ptrCast(@alignCast(node));
-            box.* = .{
-                .header = MemBlockHeader.init(.float64, size),
-                ._pad = 0,
-                .value = val,
-            };
-            return box;
-        }
-
-        // Allocate new page
-        if (!self.allocPage(size_class)) {
-            return null;
-        }
-
-        // Retry
-        return self.allocFloat64(val);
-    }
-
     /// Allocate raw memory without header (for objects with embedded headers)
     pub fn allocRaw(self: *Heap, size: usize) ?*anyopaque {
         const size_class = SizeClass.fromSize(size);
@@ -599,16 +557,6 @@ test "Heap tag retrieval" {
     try std.testing.expectEqual(MemTag.object, heap.getTag(obj_ptr).?);
     try std.testing.expectEqual(MemTag.string, heap.getTag(str_ptr).?);
     try std.testing.expectEqual(MemTag.value_array, heap.getTag(arr_ptr).?);
-}
-
-test "Heap allocFloat64" {
-    const allocator = std.testing.allocator;
-    var heap = Heap.init(allocator, .{});
-    defer heap.deinit();
-
-    const box = heap.allocFloat64(3.14159);
-    try std.testing.expect(box != null);
-    try std.testing.expectEqual(@as(f64, 3.14159), box.?.value);
 }
 
 test "Heap allocRaw" {

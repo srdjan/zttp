@@ -208,7 +208,7 @@ export const lit_bool = {
 // lit_null: value node
 export const lit_null = {
   proof: "value",
-  denote: () => imm,
+  denote: (imm) => imm,
   lower: "imm",
 };
 

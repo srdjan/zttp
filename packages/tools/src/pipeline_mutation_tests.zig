@@ -75,9 +75,10 @@ fn isAllowedError(err: anyerror) bool {
 /// or null when all lie inside. Lines are 1-based. The last line starts after
 /// the final newline. A column is 1-based and may point one past the last byte
 /// of its line.
-fn firstDiagnosticOutside(source: []const u8, diagnostics: []const precompile.json_diag.JsonDiagnostic) ?usize {
+fn firstDiagnosticOutside(path: []const u8, source: []const u8, diagnostics: []const precompile.json_diag.JsonDiagnostic) ?usize {
     const lines = std.mem.count(u8, source, "\n") + 1;
     for (diagnostics, 0..) |diag, index| {
+        if (!std.mem.eql(u8, diag.file, path)) continue;
         if (diag.line < 1 or diag.line > lines) return index;
         if (diag.column < 1) return index;
         var line_start: usize = 0;
@@ -277,7 +278,7 @@ const InputRoot = struct {
 };
 
 const input_roots = [_]InputRoot{
-    .{ .dir = "tests/corpus", .floor = 129 },
+    .{ .dir = "tests/corpus", .floor = 202 },
     // Measured from the retained source tree by the unfiltered Phase 3 run.
     .{ .dir = "examples", .floor = 33 },
 };
@@ -380,7 +381,7 @@ fn runOnce(gpa: std.mem.Allocator, source: []const u8, path: []const u8) !Outcom
     defer result.deinit(gpa);
     return .{ .result = .{
         .bytes = try serialize(gpa, &result),
-        .outside = if (firstDiagnosticOutside(source, result.json_diagnostics.items)) |at| .{
+        .outside = if (firstDiagnosticOutside(path, source, result.json_diagnostics.items)) |at| .{
             .code = result.json_diagnostics.items[at].code,
             .line = result.json_diagnostics.items[at].line,
             .column = result.json_diagnostics.items[at].column,
@@ -549,7 +550,7 @@ fn diagnosticAt(line: u32, column: u32) precompile.json_diag.JsonDiagnostic {
 test "pipeline mutation: the position contract refuses a line or column outside the source" {
     const source = "ab\ncde\n\nf";
     // Lines: "ab" (2), "cde" (3), "" (0), "f" (1). A column may be one past the end.
-    try std.testing.expectEqual(@as(?usize, null), firstDiagnosticOutside(source, &.{
+    try std.testing.expectEqual(@as(?usize, null), firstDiagnosticOutside("probe.ts", source, &.{
         diagnosticAt(1, 1),
         diagnosticAt(1, 3),
         diagnosticAt(2, 4),
@@ -565,12 +566,16 @@ test "pipeline mutation: the position contract refuses a line or column outside 
         diagnosticAt(4, 3),
     };
     for (outside) |diag| {
-        try std.testing.expectEqual(@as(?usize, 0), firstDiagnosticOutside(source, &.{diag}));
+        try std.testing.expectEqual(@as(?usize, 0), firstDiagnosticOutside("probe.ts", source, &.{diag}));
     }
     // The verdict names the first offender, not the first diagnostic.
-    try std.testing.expectEqual(@as(?usize, 1), firstDiagnosticOutside(source, &.{ diagnosticAt(1, 1), diagnosticAt(9, 1) }));
-    try std.testing.expectEqual(@as(?usize, 0), firstDiagnosticOutside("", &.{diagnosticAt(2, 1)}));
-    try std.testing.expectEqual(@as(?usize, null), firstDiagnosticOutside("", &.{diagnosticAt(1, 1)}));
+    try std.testing.expectEqual(@as(?usize, 1), firstDiagnosticOutside("probe.ts", source, &.{ diagnosticAt(1, 1), diagnosticAt(9, 1) }));
+    try std.testing.expectEqual(@as(?usize, 0), firstDiagnosticOutside("probe.ts", "", &.{diagnosticAt(2, 1)}));
+    try std.testing.expectEqual(@as(?usize, null), firstDiagnosticOutside("probe.ts", "", &.{diagnosticAt(1, 1)}));
+    // Diagnostics attributed to another module are not checked against this file's bounds.
+    var imported_diag = diagnosticAt(99, 1);
+    imported_diag.file = "dep.ts";
+    try std.testing.expectEqual(@as(?usize, null), firstDiagnosticOutside("probe.ts", source, &.{imported_diag}));
 }
 
 test "pipeline mutation: the error list is closed" {
@@ -666,8 +671,8 @@ test "pipeline mutation regression: a string continuation does not shift the lin
     switch (outcome) {
         .err => return error.ExpectedResult,
         .result => |r| {
-            try std.testing.expect(std.mem.indexOf(u8, r.bytes, "\"code\":\"ZTS008\"") != null);
-            try std.testing.expect(std.mem.indexOf(u8, r.bytes, "\"line\":5,") != null);
+            try std.testing.expect(std.mem.find(u8, r.bytes, "\"code\":\"ZTS008\"") != null);
+            try std.testing.expect(std.mem.find(u8, r.bytes, "\"line\":5,") != null);
         },
     }
 }

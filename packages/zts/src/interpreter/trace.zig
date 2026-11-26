@@ -14,10 +14,10 @@ const env_cache = @import("env_cache.zig");
 const interpreter = @import("../interpreter.zig");
 const Interpreter = interpreter.Interpreter;
 
-var call_trace_cache: ?bool = null;
-var call_trace_limit_cache: ?usize = null;
-var call_guard_cache: ?usize = null;
-var trace_bc_full_cache: ?bool = null;
+var call_trace_cache: env_cache.BoolCache = .{};
+var call_trace_limit_cache: env_cache.UintCache(usize) = .{};
+var call_guard_cache: env_cache.UintCache(usize) = .{};
+var trace_bc_full_cache: env_cache.BoolCache = .{};
 threadlocal var call_trace_count: usize = 0;
 
 pub inline fn callTraceEnabled() bool {

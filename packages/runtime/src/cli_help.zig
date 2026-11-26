@@ -249,7 +249,7 @@ pub fn printExpertHelp() !void {
 }
 
 fn has(haystack: []const u8, needle: []const u8) bool {
-    return std.mem.indexOf(u8, haystack, needle) != null;
+    return std.mem.find(u8, haystack, needle) != null;
 }
 
 test "default help advertises only the five core commands" {

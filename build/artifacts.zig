@@ -23,12 +23,12 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
         .root_module = b.createModule(.{
             .root_source_file = ctx.tools_dep.path("src/precompile.zig"),
             .target = b.graph.host,
-            .optimize = .fast,
+            .optimize = ctx.optimize,
         }),
     });
     precompile_exe.root_module.addImport("zts", ctx.zts_host_mod);
-    precompile_exe.root_module.addImport("zttp_proof_checker", ctx.proofCheckerMod());
-    precompile_exe.root_module.addImport("project_config", ctx.project_config_mod);
+    precompile_exe.root_module.addImport("zttp_proof_checker", ctx.proofCheckerHostMod());
+    precompile_exe.root_module.addImport("project_config", ctx.project_config_host_mod);
 
     // Runtime template binary — used for self-contained outputs and direct
     // runtime tests. Minimal dependencies:

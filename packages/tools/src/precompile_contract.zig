@@ -119,12 +119,11 @@ pub fn reportCompletedFlow(
     const flow_diags = completed.getDiagnostics();
     if (fresh and flow_diags.len > 0 and !builtin.is_test) {
         debugPrint("\n", .{});
-        var flow_output: std.ArrayList(u8) = .empty;
-        defer flow_output.deinit(allocator);
-        var flow_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &flow_output);
+        var flow_aw: std.Io.Writer.Allocating = .init(allocator);
+        defer flow_aw.deinit();
         completed.formatDiagnostics(zts.SourceView.of(""), &flow_aw.writer) catch {};
-        flow_output = flow_aw.toArrayList();
-        if (flow_output.items.len > 0) debugPrint("{s}", .{flow_output.items});
+        const written = flow_aw.written();
+        if (written.len > 0) debugPrint("{s}", .{written});
         debugPrint("{d} flow error(s), {d} warning(s)\n", .{
             flow_errors,
             flow_diags.len - flow_errors,
@@ -132,7 +131,7 @@ pub fn reportCompletedFlow(
     }
 
     if (violations_out) |vout| {
-        zts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view);
+        try zts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view);
     }
     if (fresh and !builtin.is_test and flow_errors == 0) debugPrint("Flow analysis passed\n", .{});
 }
@@ -770,16 +769,12 @@ fn printFlowWrite(
     var diag_view = zts.SourceView.of(module.source);
     diag_view.name = module.path;
     diag_view.normalize_positions = true;
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(allocator);
-    var output_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    var output_writer: std.Io.Writer.Allocating = .init(allocator);
+    defer output_writer.deinit();
     const single = [_]zts.VerifierDiagnostic{check_run_mod.flowWriteDiagnostic(site)};
-    {
-        errdefer output = output_writer.toArrayList();
-        try zts.DiagnosticProjection.writeAll(.verifier, diag_view, &single, view, &output_writer.writer);
-    }
-    output = output_writer.toArrayList();
-    if (output.items.len > 0) debugPrint("{s}", .{output.items});
+    try zts.DiagnosticProjection.writeAll(.verifier, diag_view, &single, view, &output_writer.writer);
+    const written = output_writer.written();
+    if (written.len > 0) debugPrint("{s}", .{written});
 }
 
 /// Keep, across the dependencies, the structural facts that every one of them holds.
@@ -925,13 +920,12 @@ fn enforcePolicyForContract(
 
     if (!@import("builtin").is_test) {
         debugPrint("\nCapability policy violations in {s}:\n", .{label_path});
-        var output: std.ArrayList(u8) = .empty;
-        defer output.deinit(allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
         handler_policy.formatViolations(&report, &aw.writer) catch {};
-        output = aw.toArrayList();
-        if (output.items.len > 0) {
-            debugPrint("{s}", .{output.items});
+        const written = aw.written();
+        if (written.len > 0) {
+            debugPrint("{s}", .{written});
         }
     }
     return error.PolicyViolation;

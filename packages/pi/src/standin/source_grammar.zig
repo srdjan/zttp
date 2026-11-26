@@ -90,7 +90,6 @@ pub fn renderRouteSource(allocator: std.mem.Allocator, v: RouteVariant) ![]u8 {
     defer buf.deinit();
     const w = buf.writer();
 
-    if (v.has_spec_import) try w.writeAll("");
     if (v.has_router) try w.writeAll("import { routerMatch } from \"zttp:router\";\n");
     if (v.has_spec_import or v.has_router) try w.writeAll("\n");
 

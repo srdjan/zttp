@@ -28,6 +28,10 @@ pub fn pushState(self: *Interpreter) InterpreterError!void {
 }
 
 pub fn popState(self: *Interpreter) void {
+    popStateEx(self, false);
+}
+
+fn popStateEx(self: *Interpreter, preserve_exception: bool) void {
     std.debug.assert(self.state_depth > 0);
     self.state_depth -= 1;
     const state = self.state_stack[self.state_depth];
@@ -38,7 +42,9 @@ pub fn popState(self: *Interpreter) void {
     self.ctx.sp = state.sp;
     self.ctx.fp = state.fp;
     self.ctx.call_depth = state.call_depth;
-    self.ctx.exception = state.exception;
+    if (!preserve_exception or !self.ctx.hasException()) {
+        self.ctx.exception = state.exception;
+    }
 }
 
 /// An upvalue box for a closure that this call creates. Inside a request the
@@ -91,7 +97,9 @@ pub fn captureUpvalue(self: *Interpreter, local_idx: u8) !*object.Upvalue {
 }
 
 pub fn closeUpvaluesAbove(self: *Interpreter, local_idx: u8) void {
-    const threshold = self.ctx.getLocalPtr(local_idx);
+    const slot_index = self.ctx.fp + local_idx;
+    if (slot_index >= self.ctx.stack.len) return;
+    const threshold = &self.ctx.stack[slot_index];
 
     while (self.open_upvalues) |uv| {
         switch (uv.location) {
@@ -145,7 +153,8 @@ pub fn callBytecodeFunction(
     defer trace.traceCall(self, "bc exit", @intCast(args.len), false);
 
     try pushState(self);
-    defer popState(self);
+    var succeeded = false;
+    defer popStateEx(self, !succeeded);
 
     try self.ctx.pushFrame(func_val, this_val, @intFromPtr(self.pc));
     errdefer {
@@ -180,6 +189,7 @@ pub fn callBytecodeFunction(
 
     closeUpvaluesAbove(self, 0);
     _ = self.ctx.popFrame();
+    succeeded = true;
 
     return result;
 }

@@ -638,7 +638,6 @@ test "module facts record a slot binding for a function with extraction rules" {
     try testing.expectEqual(@as(usize, 1), gb.extractions.len);
     try testing.expectEqual(@as(u8, 0), gb.extractions[0].arg_position);
     try testing.expectEqual(module_binding.ContractCategory.env, gb.extractions[0].category);
-    try testing.expect(!gb.extractions[0].flag_only);
 }
 
 test "module facts index a partner import through the registry" {
@@ -822,8 +821,8 @@ test "the whole shared corpus builds an index without error" {
             try testing.expect(rec.module_specifier.len > 0);
             try testing.expect(rec.imported_name.len > 0);
             // Both strings are read out of the case source, so they occur in it.
-            try testing.expect(std.mem.indexOf(u8, case.source, rec.module_specifier) != null);
-            try testing.expect(std.mem.indexOf(u8, case.source, rec.imported_name) != null);
+            try testing.expect(std.mem.find(u8, case.source, rec.module_specifier) != null);
+            try testing.expect(std.mem.find(u8, case.source, rec.imported_name) != null);
         }
     }
 }

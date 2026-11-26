@@ -48,11 +48,11 @@ pub const Route = struct {
 };
 
 /// How aggressively the runtime pool may reuse a warmed handler runtime.
-pub const PoolingPolicy = enum {
+pub const PoolingPolicy = enum(u8) {
     ephemeral, // one runtime per request
     reuse_bounded_by_count, // recycle after N requests
     reuse_bounded_by_ttl, // recycle after wall-clock TTL
-    reuse_unbounded, // pure + deterministic + state-isolated only
+    reuse_unbounded, // read_only + deterministic + state-isolated only
 };
 
 pub const PoolingThresholds = struct {
@@ -81,7 +81,7 @@ pub const PoolingThresholds = struct {
 pub fn derivePoolingPolicy(contract: ?*const ProofCheckedContract) PoolingPolicy {
     const rc = contract orelse return .reuse_bounded_by_count;
     const p = rc.properties;
-    if (p.pure and p.deterministic and p.state_isolated) return .reuse_unbounded;
+    if (p.read_only and p.deterministic and p.state_isolated) return .reuse_unbounded;
     if (p.read_only and p.state_isolated) return .reuse_bounded_by_ttl;
     return .reuse_bounded_by_count;
 }
@@ -215,6 +215,7 @@ pub const RuntimeContract = struct {
     /// URL. Defaults false; an older contract that omits the param lists is
     /// treated as header-independent.
     reads_request_state: bool = false,
+    exhaustive_returns: bool = false,
     properties: Properties,
     /// Null when the embedded contract did not emit a sandbox block (old
     /// contract, or contract parse fell through). A non-null matrix with
@@ -584,9 +585,6 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         cost_envelope = try envelope.dupeOwned(allocator);
     }
 
-    const cost_envelope_out = cost_envelope;
-    cost_envelope = null;
-
     // Take ownership of the three lists one at a time, each with its own
     // errdefer. Doing this inline in the struct literal below leaks: a
     // successful `toOwnedSlice` empties its list, which disarms that list's
@@ -610,12 +608,16 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         for (modules_out) |m| allocator.free(m);
         allocator.free(modules_out);
     }
+    const cost_envelope_out = cost_envelope;
+    cost_envelope = null;
+    const exhaustive_returns = if (hc.verification) |v| v.exhaustive_returns else false;
     return .{ .inner = .{
         .env_vars = env_vars_out,
         .env_dynamic = hc.env.dynamic,
         .routes = routes_out,
         .routes_dynamic = hc.api.routes_dynamic,
         .reads_request_state = reads_request_state,
+        .exhaustive_returns = exhaustive_returns,
         .properties = runtime_properties,
         .capabilities = hc.capabilities,
         .source_identity = hc.source_identity,
@@ -1348,21 +1350,33 @@ test "derivePoolingPolicy: null contract falls back to bounded count" {
     try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(null));
 }
 
-test "derivePoolingPolicy: pure+deterministic+isolated = unbounded" {
+test "derivePoolingPolicy: read_only+deterministic+isolated = unbounded" {
     const contract = RuntimeContract{
         .env_vars = &.{},
         .env_dynamic = false,
         .routes = &.{},
         .routes_dynamic = false,
         .properties = .{
-            .pure = true,
+            .read_only = true,
             .deterministic = true,
             .state_isolated = true,
         },
         .allocator = std.testing.allocator,
     };
     var validated = validatedFromInner(contract);
-    try std.testing.expectEqual(PoolingPolicy.reuse_unbounded, derivePoolingPolicy(&promotedForTest(&validated)));
+    var verdicts: pcc.verdict.PropertyVerdicts = .{};
+    inline for (.{ .read_only, .deterministic, .state_isolated }) |prop| {
+        verdicts.recordGrade(prop, .translation_validated);
+        verdicts.accept(prop, .translation_validated);
+    }
+    const assessment = pcc.Assessment{
+        .outcome = .{ .accepted = .{ .grade = .translation_validated, .development_only = false } },
+        .provenance = .absent,
+        .work_spent = 1,
+        .properties = verdicts,
+    };
+    const checked = promote(&validated, assessment, @as([32]u8, @splat(0))) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PoolingPolicy.reuse_unbounded, derivePoolingPolicy(&checked));
 }
 
 test "derivePoolingPolicy: read_only+isolated = ttl" {

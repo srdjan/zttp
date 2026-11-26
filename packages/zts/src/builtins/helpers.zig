@@ -115,9 +115,17 @@ pub fn valueToStringSimple(allocator: std.mem.Allocator, val: value.JSValue) !*s
     if (val.isString()) {
         return val.toPtr(string.JSString);
     }
+    if (val.isStringSlice()) {
+        return try string.createString(allocator, val.toPtr(string.SliceString).data());
+    }
     if (val.isInt()) {
         var buf: [32]u8 = undefined;
         const slice = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return try string.createString(allocator, "0");
+        return try string.createString(allocator, slice);
+    }
+    if (val.isFloat64()) {
+        var buf: [345]u8 = undefined;
+        const slice = string.formatFloatToBuf(&buf, val.getFloat64());
         return try string.createString(allocator, slice);
     }
     if (val.isNull()) return try string.createString(allocator, "null");
@@ -279,4 +287,20 @@ pub fn addMethodWithId(
     const func_obj = try object.JSObject.createNativeFunctionWithId(allocator, pool, root_class_idx, func, name, arg_count, builtin_id);
     errdefer func_obj.destroyFull(allocator);
     try ctx.setPropertyChecked(obj, name, func_obj.toValue());
+}
+
+test "valueToStringSimple formats floats and SliceString" {
+    const allocator = std.testing.allocator;
+    const parent = try string.createString(allocator, "hello world");
+    defer string.freeString(allocator, parent);
+    const slice_obj = try string.createSlice(allocator, parent, 6, 5);
+    defer allocator.destroy(slice_obj);
+
+    const from_slice = try valueToStringSimple(allocator, value.JSValue.fromPtr(slice_obj));
+    defer string.freeString(allocator, from_slice);
+    try std.testing.expectEqualStrings("world", from_slice.data());
+
+    const from_float = try valueToStringSimple(allocator, value.JSValue.fromFloat(1.5));
+    defer string.freeString(allocator, from_float);
+    try std.testing.expectEqualStrings("1.5", from_float.data());
 }

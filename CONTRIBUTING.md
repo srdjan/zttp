@@ -41,7 +41,7 @@ handler-facing behavior, but you do not need to run it after `zig build test`.
 If you touched the compile-time checkers or the rule registry, also run:
 
 ```bash
-zig build release
+zig build -Doptimize=fast
 ./zig-out/bin/zts describe-rule --hash   # must match policy-hash.txt
 ```
 

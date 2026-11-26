@@ -207,9 +207,9 @@ test "simulator recorder appends metadata-only response diagnostics" {
 
     const bytes = try zts.file_io.readFile(testing.allocator, diagnostics_path, 64 * 1024);
     defer testing.allocator.free(bytes);
-    const first_end = std.mem.indexOfScalar(u8, bytes, '\n') orelse return error.TestUnexpectedResult;
+    const first_end = std.mem.findScalar(u8, bytes, '\n') orelse return error.TestUnexpectedResult;
     const second_start = first_end + 1;
-    const second_end_rel = std.mem.indexOfScalar(u8, bytes[second_start..], '\n') orelse
+    const second_end_rel = std.mem.findScalar(u8, bytes[second_start..], '\n') orelse
         return error.TestUnexpectedResult;
     const second_end = second_start + second_end_rel;
     try testing.expectEqual(bytes.len, second_end + 1);
@@ -232,9 +232,9 @@ test "simulator recorder appends metadata-only response diagnostics" {
     try testing.expect(root.get("field_presence").?.object.get("reasoning").?.bool);
     try testing.expectEqualStrings("content_null", root.get("parser_warnings").?.array.items[0].string);
     try testing.expectEqualStrings("EmptyResponse", root.get("error_name").?.string);
-    try testing.expect(std.mem.indexOf(u8, bytes[second_start..second_end], "\"attempt_index\":1") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes[second_start..second_end], "\"http_status\":429") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes[second_start..second_end], "\"transport_failed\"") != null);
+    try testing.expect(std.mem.find(u8, bytes[second_start..second_end], "\"attempt_index\":1") != null);
+    try testing.expect(std.mem.find(u8, bytes[second_start..second_end], "\"http_status\":429") != null);
+    try testing.expect(std.mem.find(u8, bytes[second_start..second_end], "\"transport_failed\"") != null);
     try testing.expectEqual(@as(usize, 2), probe.events.items.len);
     switch (probe.events.items[0]) {
         .model_call_failed => |failed| {
@@ -309,16 +309,16 @@ test "local client failure records diagnostics through the flow recorder" {
 
     const bytes = try zts.file_io.readFile(testing.allocator, diagnostics_path, 64 * 1024);
     defer testing.allocator.free(bytes);
-    try testing.expect(std.mem.indexOf(u8, bytes, "private user source") == null);
-    try testing.expect(std.mem.indexOf(u8, bytes, "private system prompt") == null);
-    try testing.expect(std.mem.indexOf(u8, bytes, "private chain") == null);
-    try testing.expect(std.mem.indexOf(u8, bytes, "\"latency_ms\":") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes, "\"finish_reason\":\"stop\"") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes, "\"completion_tokens\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes, "\"content\":true") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes, "\"reasoning\":true") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes, "\"assistant_output_missing\"") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes, "\"error_name\":\"EmptyResponse\"") != null);
+    try testing.expect(std.mem.find(u8, bytes, "private user source") == null);
+    try testing.expect(std.mem.find(u8, bytes, "private system prompt") == null);
+    try testing.expect(std.mem.find(u8, bytes, "private chain") == null);
+    try testing.expect(std.mem.find(u8, bytes, "\"latency_ms\":") != null);
+    try testing.expect(std.mem.find(u8, bytes, "\"finish_reason\":\"stop\"") != null);
+    try testing.expect(std.mem.find(u8, bytes, "\"completion_tokens\":0") != null);
+    try testing.expect(std.mem.find(u8, bytes, "\"content\":true") != null);
+    try testing.expect(std.mem.find(u8, bytes, "\"reasoning\":true") != null);
+    try testing.expect(std.mem.find(u8, bytes, "\"assistant_output_missing\"") != null);
+    try testing.expect(std.mem.find(u8, bytes, "\"error_name\":\"EmptyResponse\"") != null);
 }
 
 const CapturingClient = struct {
@@ -561,7 +561,7 @@ test "simulator recorder skips agent scratch but still refuses undeclared source
     try testing.expectEqual(@as(usize, 1), recorder.initial_workspace.items.len);
     try testing.expectEqualStrings("handler.ts", recorder.initial_workspace.items[0].path);
     for (recorder.fixtures.items) |fixture| {
-        try testing.expect(std.mem.indexOf(u8, fixture.path, ".zttp") == null);
+        try testing.expect(std.mem.find(u8, fixture.path, ".zttp") == null);
     }
 
     // A sibling source file the case did not declare is still refused, so the

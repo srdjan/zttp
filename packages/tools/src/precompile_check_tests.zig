@@ -98,13 +98,13 @@ test "shared check reports an unmapped analyzer failure as ZTS000" {
         try std.testing.expectEqualStrings("ZTS000", diagnostic.code);
         try std.testing.expectEqualStrings("error", diagnostic.severity);
         try std.testing.expectEqualStrings("handler.ts", diagnostic.file);
-        try std.testing.expect(std.mem.indexOf(u8, diagnostic.message, "FileNotFound") != null);
+        try std.testing.expect(std.mem.find(u8, diagnostic.message, "FileNotFound") != null);
         if (!json_mode) {
             var writer: std.Io.Writer.Allocating = .init(allocator);
             defer writer.deinit();
             formatProofCard(&writer.writer, &result, "handler.ts");
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, writer.written(), "ZTS000"));
-            try std.testing.expect(std.mem.indexOf(u8, writer.written(), "FileNotFound") != null);
+            try std.testing.expect(std.mem.find(u8, writer.written(), "FileNotFound") != null);
         }
     }
 }
@@ -128,6 +128,20 @@ test "runCheckOnly propagates path analysis allocation failure" {
             failing.allocator(),
             source,
             "path-analysis-entrypoint-oom.ts",
+            .{},
+        ),
+    );
+    var init_failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        runCheckOnlyFromSourceWithPathAllocator(
+            init_failing.allocator(),
+            std.testing.allocator,
+            source,
+            "strip-init-oom.ts",
             .{},
         ),
     );
@@ -462,20 +476,19 @@ test "formatProofCard: a parse failure marks the stages that did not run as skip
     defer result.deinit(allocator);
     try std.testing.expect(result.parse_errors > 0);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     formatProofCard(&aw.writer, &result, "bad.ts");
-    buf = aw.toArrayList();
+    const out = aw.written();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Parse ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "FAIL (") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Parse ") != null);
+    try std.testing.expect(std.mem.find(u8, out, "FAIL (") != null);
     for ([_][]const u8{ "Types ", "Sound mode ", "Strict ZigTS " }) |stage| {
-        const at = std.mem.indexOf(u8, buf.items, stage) orelse return error.TestExpectedStageLine;
-        const line_end = std.mem.indexOfScalarPos(u8, buf.items, at, '\n') orelse buf.items.len;
-        try std.testing.expect(std.mem.endsWith(u8, buf.items[at..line_end], "SKIPPED (parse failed)"));
+        const at = std.mem.find(u8, out, stage) orelse return error.TestExpectedStageLine;
+        const line_end = std.mem.findScalarPos(u8, out, at, '\n') orelse out.len;
+        try std.testing.expect(std.mem.endsWith(u8, out[at..line_end], "SKIPPED (parse failed)"));
     }
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "OK") == null);
+    try std.testing.expect(std.mem.find(u8, out, "OK") == null);
 }
 
 test "formatProofCard: canonical public helper diagnostics are visible in text mode" {
@@ -502,16 +515,15 @@ test "formatProofCard: canonical public helper diagnostics are visible in text m
     defer result.deinit(allocator);
     try std.testing.expect(result.canonical_errors > 0);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     formatProofCard(&aw.writer, &result, "one-way-effects-text.ts");
-    buf = aw.toArrayList();
+    const out = aw.written();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Canonical diagnostics") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ZTS610") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "one-way-effects-text.ts") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Effects<...>") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Canonical diagnostics") != null);
+    try std.testing.expect(std.mem.find(u8, out, "ZTS610") != null);
+    try std.testing.expect(std.mem.find(u8, out, "one-way-effects-text.ts") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Effects<...>") != null);
 }
 
 test "formatProofCard: capability policy diagnostics are visible in text mode" {
@@ -533,16 +545,15 @@ test "formatProofCard: capability policy diagnostics are visible in text mode" {
     defer result.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 1), result.policy_errors);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     formatProofCard(&aw.writer, &result, "policy-text.ts");
-    buf = aw.toArrayList();
+    const out = aw.written();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Capability policy diagnostics") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "POL001") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "OTHER_NAME") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "add it to the policy file") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Capability policy diagnostics") != null);
+    try std.testing.expect(std.mem.find(u8, out, "POL001") != null);
+    try std.testing.expect(std.mem.find(u8, out, "OTHER_NAME") != null);
+    try std.testing.expect(std.mem.find(u8, out, "add it to the policy file") != null);
 }
 
 test "runCheckOnlyWithOptions: json mode emits ZTS000 for an unreadable handler" {
@@ -562,8 +573,8 @@ test "runCheckOnlyWithOptions: json mode emits ZTS000 for an unreadable handler"
     const diagnostic = result.json_diagnostics.items[0];
     try std.testing.expectEqualStrings("ZTS000", diagnostic.code);
     try std.testing.expectEqualStrings("error", diagnostic.severity);
-    try std.testing.expect(std.mem.indexOf(u8, diagnostic.message, "cannot read handler file") != null);
-    try std.testing.expect(std.mem.indexOf(u8, diagnostic.file, "zttp-cli2-missing.ts") != null);
+    try std.testing.expect(std.mem.find(u8, diagnostic.message, "cannot read handler file") != null);
+    try std.testing.expect(std.mem.find(u8, diagnostic.file, "zttp-cli2-missing.ts") != null);
     try std.testing.expect(result.contract == null);
     try std.testing.expect(result.properties == null);
     try std.testing.expect(result.proof_trace_json == null);
@@ -603,19 +614,18 @@ test "formatProofCard: spec-less handler renders ZTS500 lines matching the foote
     // handler (no other error category fires), so the printed lines must match.
     try std.testing.expectEqual(@as(u32, @intCast(spec_err_count)), result.totalErrors());
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     formatProofCard(&aw.writer, &result, "spec-less-text.ts");
-    buf = aw.toArrayList();
+    const out = aw.written();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Spec diagnostics") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ZTS500") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Spec diagnostics") != null);
+    try std.testing.expect(std.mem.find(u8, out, "ZTS500") != null);
 
     // Count printed error-severity spec lines: each renders as "    ZTSxxx (error) ".
     var printed: usize = 0;
     var search_from: usize = 0;
-    while (std.mem.indexOfPos(u8, buf.items, search_from, " (error) ")) |pos| {
+    while (std.mem.findPos(u8, out, search_from, " (error) ")) |pos| {
         printed += 1;
         search_from = pos + " (error) ".len;
     }
@@ -632,14 +642,13 @@ test "formatFailureSections: lists the spec errors without the stage rows" {
     var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "sections-text.ts", .{});
     defer result.deinit(allocator);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     check_mod.formatFailureSections(&aw.writer, &result, "sections-text.ts");
-    buf = aw.toArrayList();
+    const out = aw.written();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ZTS500") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Parse ...") == null);
+    try std.testing.expect(std.mem.find(u8, out, "ZTS500") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Parse ...") == null);
 }
 
 test "formatProofCard: the card names the demotion site --json already carried" {
@@ -666,14 +675,13 @@ test "formatProofCard: the card names the demotion site --json already carried" 
     // a card that renders nothing at all.
     try std.testing.expect(caused > 0);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     formatProofCard(&aw.writer, &result, "demoted-text.ts");
-    buf = aw.toArrayList();
+    const out = aw.written();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "demoted at line") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Date.now()") != null);
+    try std.testing.expect(std.mem.find(u8, out, "demoted at line") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Date.now()") != null);
 }
 
 test "formatFailureSections: the card names the file of a cause in an imported file" {
@@ -700,15 +708,13 @@ test "formatFailureSections: the card names the file of a cause in an imported f
         .file = try allocator.dupe(u8, "dep.ts"),
     };
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     check_mod.formatFailureSections(&aw.writer, &result, "dep-cause-text.ts");
-    buf = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(
+    try std.testing.expect(std.mem.find(
         u8,
-        buf.items,
+        aw.written(),
         "declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at dep.ts:4:12 by `a write to module state`)\n",
     ) != null);
 }
@@ -725,15 +731,13 @@ test "formatFailureSections: a cause with no file keeps the line-only suffix" {
     var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "site-cause-text.ts", .{});
     defer result.deinit(allocator);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     check_mod.formatFailureSections(&aw.writer, &result, "site-cause-text.ts");
-    buf = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(
+    try std.testing.expect(std.mem.find(
         u8,
-        buf.items,
+        aw.written(),
         "declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at line 3:9 by `a write to module state`)\n",
     ) != null);
 }
@@ -837,15 +841,14 @@ test "formatProofCard: strict canonical diagnostics are visible in text mode" {
     try std.testing.expectEqual(@as(u32, 0), result.canonical_errors);
     try std.testing.expect(result.strict_errors > 0);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     formatProofCard(&aw.writer, &result, "one-way-arrow-text.ts");
-    buf = aw.toArrayList();
+    const out = aw.written();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Canonical diagnostics") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ZTS604") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "one-way-arrow-text.ts") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Canonical diagnostics") != null);
+    try std.testing.expect(std.mem.find(u8, out, "ZTS604") != null);
+    try std.testing.expect(std.mem.find(u8, out, "one-way-arrow-text.ts") != null);
 }
 
 test "runCheckOnlyFromSource: composed Spec and Effects preserves handler budget diagnostics" {
@@ -1033,8 +1036,8 @@ test "holes: each site reports the properties its own function has not discharge
         // for the HUD and useless to a consumer that wants to match on names.
         try std.testing.expect(h.undischarged.items.len > 0);
         for (h.undischarged.items) |name| {
-            try std.testing.expect(std.mem.indexOfScalar(u8, name, ',') == null);
-            try std.testing.expect(std.mem.indexOfScalar(u8, name, ' ') == null);
+            try std.testing.expect(std.mem.findScalar(u8, name, ',') == null);
+            try std.testing.expect(std.mem.findScalar(u8, name, ' ') == null);
         }
 
         if (std.mem.eql(u8, h.function, "mint")) {
@@ -1331,8 +1334,8 @@ test "runCheckOnlyFromSource: ZTS202 arg-count message survives json capture wit
         saw_202 = true;
         // The message must be intact, not freed-memory garbage.
         try std.testing.expect(std.unicode.utf8ValidateSlice(d.message));
-        try std.testing.expect(std.mem.indexOfScalar(u8, d.message, 0xaa) == null);
-        try std.testing.expect(std.mem.indexOf(u8, d.message, "wrong number of arguments") != null);
+        try std.testing.expect(std.mem.findScalar(u8, d.message, 0xaa) == null);
+        try std.testing.expect(std.mem.find(u8, d.message, "wrong number of arguments") != null);
     }
     try std.testing.expect(saw_202);
 }
@@ -1402,7 +1405,7 @@ test "an unreached exported helper with a nonempty row reports ZTS610" {
     }
     const found = repair orelse return error.MissingZTS610;
     // The repair is computed from the inferred row, not a fixed string.
-    try std.testing.expect(std.mem.indexOf(u8, found, "env") != null);
+    try std.testing.expect(std.mem.find(u8, found, "env") != null);
 }
 
 test "zts check --types path rejects exported handler local mismatch" {
@@ -1913,7 +1916,7 @@ test "runCheckOnlyFromSource reports ZTS061 for a raw exported boundary" {
     for (result.json_diagnostics.items) |diagnostic| {
         if (!std.mem.eql(u8, diagnostic.code, "ZTS061")) continue;
         zts061_count += 1;
-        try std.testing.expect(std.mem.indexOf(u8, diagnostic.message, "type `string` exposes raw `string`") != null);
+        try std.testing.expect(std.mem.find(u8, diagnostic.message, "type `string` exposes raw `string`") != null);
     }
     try std.testing.expectEqual(@as(usize, 2), zts061_count);
     try std.testing.expectEqual(@as(u32, 2), result.strict_errors);
@@ -2485,11 +2488,11 @@ test "generic intersection fixture carries the members it claims" {
     // The floor. Both assertions below are about the seventeenth member, and a
     // fixture that lost a member, or lost `Box<`, satisfies them over a shape
     // that cannot reproduce the defect at all.
-    try std.testing.expect(std.mem.indexOf(u8, wide_intersection_members, "Box<string>") != null);
+    try std.testing.expect(std.mem.find(u8, wide_intersection_members, "Box<string>") != null);
     try std.testing.expectEqual(@as(usize, 16), std.mem.count(u8, wide_intersection_members, ": string }"));
-    try std.testing.expect(std.mem.indexOf(u8, wide_intersection_members, "{ last: string }") != null);
-    try std.testing.expect(std.mem.indexOf(u8, wide_intersection_violated, "last:") == null);
-    try std.testing.expect(std.mem.indexOf(u8, wide_intersection_satisfied, "last: \"v\"") != null);
+    try std.testing.expect(std.mem.find(u8, wide_intersection_members, "{ last: string }") != null);
+    try std.testing.expect(std.mem.find(u8, wide_intersection_violated, "last:") == null);
+    try std.testing.expect(std.mem.find(u8, wide_intersection_satisfied, "last: \"v\"") != null);
 }
 
 test "zts check rejects a value that violates only the seventeenth intersection member" {
@@ -3682,7 +3685,7 @@ test "CHECK reports incomplete effects for an imported callback invocation" {
     try std.testing.expect(!properties.retry_safe);
     try std.testing.expect(properties.has_egress);
     try std.testing.expect(!contract.effect_analysis_complete);
-    try std.testing.expect(std.mem.indexOf(
+    try std.testing.expect(std.mem.find(
         u8,
         result.proof_trace_json orelse return error.TestUnexpectedResult,
         "Effect analysis is incomplete",
@@ -4119,8 +4122,8 @@ test "an imported helper that logs its secret parameter refuses the call that pa
     try std.testing.expectEqual(@as(u32, 5), diag.line);
     const dependency_path = try std.fs.path.resolve(std.testing.allocator, &.{ std.fs.path.dirname(fixture.handler_path).?, "dep.ts" });
     defer std.testing.allocator.free(dependency_path);
-    try std.testing.expect(std.mem.indexOf(u8, diag.suggestion orelse "", dependency_path) != null);
-    try std.testing.expect(std.mem.indexOf(u8, diag.suggestion orelse "", ":3:") != null);
+    try std.testing.expect(std.mem.find(u8, diag.suggestion orelse "", dependency_path) != null);
+    try std.testing.expect(std.mem.find(u8, diag.suggestion orelse "", ":3:") != null);
 }
 
 test "an imported helper called with a clean literal keeps no_secret_leakage" {
@@ -4554,7 +4557,7 @@ test "a sibling helper with an unchecked fetch blocks fault_covered" {
     try std.testing.expectEqual(@as(u32, 2), cause.line);
     try std.testing.expectEqualStrings("fetch in ./dep.ts", cause.snippet);
     // The proof trace prints the same text.
-    try std.testing.expect(std.mem.indexOf(u8, result.proof_trace_json orelse "", "The first is `fetch in ./dep.ts`.") != null);
+    try std.testing.expect(std.mem.find(u8, result.proof_trace_json orelse "", "The first is `fetch in ./dep.ts`.") != null);
 }
 
 test "a sibling helper with only pure code keeps fault_covered" {
@@ -5024,6 +5027,7 @@ test "CHECK refuses an imported file with an unterminated string, under the path
 
     const expected_paths = [_][]const u8{
         "/virtual/lib.ts",
+        "/virtual/lib.ts",
     };
     try std.testing.expectEqual(expected_paths.len, tracing_reader.paths.items.len);
     for (expected_paths, tracing_reader.paths.items) |expected, actual| {
@@ -5222,11 +5226,9 @@ test "text mode counts a dependency type error and prints its Types line" {
     try std.testing.expectEqual(@as(u32, 1), result.type_errors);
     try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     formatProofCard(&aw.writer, &result, "handler.ts");
-    buf = aw.toArrayList();
     try std.testing.expectEqualStrings(
         "\ncheck: handler.ts\n\n" ++
             "  Parse .................. OK (5 lines)\n" ++
@@ -5234,7 +5236,7 @@ test "text mode counts a dependency type error and prints its Types line" {
             "  Sound mode ............. OK\n" ++
             "  Strict ZigTS ........... OK\n" ++
             "\n\n  1 errors, 0 warnings\n",
-        buf.items,
+        aw.written(),
     );
 }
 
@@ -5251,11 +5253,9 @@ test "text mode counts a missing import as a link error and prints a Module grap
     try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
     try std.testing.expectEqualStrings("ZTS063", result.json_diagnostics.items[0].code);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     formatProofCard(&aw.writer, &result, "handler.ts");
-    buf = aw.toArrayList();
     try std.testing.expectEqualStrings(
         "\ncheck: handler.ts\n\n" ++
             "  Parse .................. OK (5 lines)\n" ++
@@ -5264,7 +5264,7 @@ test "text mode counts a missing import as a link error and prints a Module grap
             "  Strict ZigTS ........... OK\n" ++
             "  Module graph ........... FAIL (1 errors)\n" ++
             "\n\n  1 errors, 0 warnings\n",
-        buf.items,
+        aw.written(),
     );
 }
 
@@ -5578,6 +5578,7 @@ test "CHECK preserves compound root admission parse diagnostics" {
             .message = "const declarations must have an initializer",
             .line = 2,
             .column = 14,
+            .suggestion = "Give the declaration an initializer, such as `const x = value;`.",
         },
         .{
             .code = "ZTS047",
@@ -5649,6 +5650,7 @@ test "CHECK preserves compound unclosed syntax diagnostics" {
         .message = "const declarations must have an initializer",
         .line = 5,
         .column = 1,
+        .suggestion = "Give the declaration an initializer, such as `const x = value;`.",
     };
     const unterminated = CompoundDiagnostic{
         .code = "ZTS047",
@@ -5732,12 +5734,12 @@ test "CHECK preserves preparation diagnostics and recovery boundaries" {
             }},
         },
         .{
-            .annotation = "number many",
+            .annotation = "number any",
             .diagnostics = &.{.{
                 .code = "ZTS041",
                 .message = "'any' type is not supported",
                 .line = 2,
-                .column = 24,
+                .column = 23,
                 .suggestion = any_suggestion,
             }},
         },
@@ -6147,20 +6149,16 @@ test "CHECK preserves source preparation allocation failure projection" {
         std.testing.allocator,
         .{ .fail_index = 0 },
     );
-    var result = try runCheckOnlyFromSourceWithOptions(
-        failing.allocator(),
-        source,
-        "allocation.ts",
-        .{ .json_mode = true },
+    try std.testing.expectError(
+        error.OutOfMemory,
+        runCheckOnlyFromSourceWithOptions(
+            failing.allocator(),
+            source,
+            "allocation.ts",
+            .{ .json_mode = true },
+        ),
     );
-    defer result.deinit(failing.allocator());
-
     try std.testing.expect(failing.has_induced_failure);
-    try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
-    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
-    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
-    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
-    try std.testing.expect(result.contract == null);
 }
 
 test "CHECK preserves validation allocation failure projection" {
@@ -6208,20 +6206,16 @@ test "CHECK preserves validation allocation failure projection" {
         .fail_index = validation_alloc_index,
         .resize_fail_index = validation_resize_index,
     });
-    var result = try runCheckOnlyFromSourceWithOptions(
-        failing.allocator(),
-        source.items,
-        "validation-allocation.ts",
-        .{ .json_mode = true },
+    try std.testing.expectError(
+        error.OutOfMemory,
+        runCheckOnlyFromSourceWithOptions(
+            failing.allocator(),
+            source.items,
+            "validation-allocation.ts",
+            .{ .json_mode = true },
+        ),
     );
-    defer result.deinit(failing.allocator());
-
     try std.testing.expect(failing.has_induced_failure);
-    try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
-    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
-    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
-    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
-    try std.testing.expect(result.contract == null);
 }
 
 test "CHECK reports absent compound analysis failures as ZTS000" {
@@ -6860,7 +6854,7 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "comparison_unsigned_shift_control", .source = "const a = 1;\nconst b = 2;\nconst c = 1;\nconst value = a < b >>> c;\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "bitwise operators are not supported", .line = 4, .column = 21, .suggestion = "use arithmetic or a comparison" }} },
         .{ .name = "triple_closer", .source = "type Box<T> = { value: T };\nconst probe: Box<Box<Box<string>>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: { value: { value: string } } }'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "application_missing_comma", .source = "type Box<T> = { value: T };\nconst probe: Box<string number> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 25, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
-        .{ .name = "application_missing_close", .source = "type Box<T> = { value: T };\nconst probe: Box<string = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{ .{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 25, .suggestion = "write an admitted type from section 5.7 of the specification" }, .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 6, .column = 1, .suggestion = null }, .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 7, .suggestion = null } } },
+        .{ .name = "application_missing_close", .source = "type Box<T> = { value: T };\nconst probe: Box<string = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{ .{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 25, .suggestion = "write an admitted type from section 5.7 of the specification" }, .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 6, .column = 1, .suggestion = "Give the declaration an initializer, such as `const x = value;`." }, .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 7, .suggestion = null } } },
         .{ .name = "call_missing_comma", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<string number>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 2, .column = 33, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
         .{ .name = "call_missing_close", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<string(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'boolean' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "user_alias_too_few", .source = "type Duo<A,B> = { first: A; second: B };\nconst probe: Duo<string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Duo<string>'", .line = 2, .column = 1, .suggestion = null }} },
@@ -7009,27 +7003,18 @@ test "CHECK preserves a caught generic string diagnostic" {
     });
 }
 
-test "CHECK preserves the any suffix refusal in a generic alias name" {
+test "CHECK admits a generic alias whose name ends in any without ZTS041" {
     const source =
         "type Many<A,B,C,D,E,F,G,H> = H;\n" ++
-        "const value: Many<string,string,string,string,string,string,string,number> = undefined;\n";
+        "const value: Many<string,string,string,string,string,string,string,number> = 1;\n" ++
+        "function handler(req: Request): Response { return Response.text(String(value)); }\n";
     var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
         .json_mode = true,
     });
     defer result.deinit(std.testing.allocator);
-    try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
-    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
     try std.testing.expectEqual(@as(u32, 0), result.type_errors);
-    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
-    try std.testing.expect(result.contract == null);
-    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-    try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
-        .code = "ZTS041",
-        .message = "'any' type is not supported",
-        .line = 2,
-        .column = 15,
-        .suggestion = "use specific types (string, number, a record type) or union types instead",
-    });
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
 }
 
 test "CHECK refuses type parameters on an arrow at the angle bracket" {
@@ -7774,7 +7759,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "const x: /* closed */ any = 1;\n",
             .parser_stage = true,
             .diagnostics = &.{
-                .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 1, .column = 8 },
+                .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 1, .column = 8, .suggestion = "Give the declaration an initializer, such as `const x = value;`." },
                 .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 7 },
             },
         },
@@ -8325,7 +8310,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = true,
             .diagnostics = &.{
                 .{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 1, .column = 17, .suggestion = "write an admitted type from section 5.7 of the specification" },
-                .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 1, .column = 20 },
+                .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 1, .column = 20, .suggestion = "Give the declaration an initializer, such as `const x = value;`." },
                 .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 7 },
             },
         },
@@ -8758,7 +8743,7 @@ const TerminationProbe = struct {
 
 fn hasFailingSpecTotal(result: *const CheckResult) bool {
     for (result.json_diagnostics.items) |d| {
-        if (std.mem.indexOf(u8, d.message, "failing spec: total") != null) return true;
+        if (std.mem.find(u8, d.message, "failing spec: total") != null) return true;
     }
     return false;
 }
@@ -10109,8 +10094,8 @@ test "contract: an unknown status is written as null" {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     try zts.handler_contract.writeContractJson(&contract, &out.writer);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"status\": null,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"status\": 200,") == null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "\"status\": null,") != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "\"status\": 200,") == null);
 }
 
 test "diff: a strict self-diff of an unknown status is breaking and a same-program diff is equivalent" {
@@ -14496,18 +14481,17 @@ test "formatProofCard: a helper ZTS500 line names the helper's declaration line"
     var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "helper-card.ts", .{});
     defer result.deinit(allocator);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     check_mod.formatFailureSections(&aw.writer, &result, "helper-card.ts");
-    buf = aw.toArrayList();
+    const out = aw.written();
 
-    const start = std.mem.indexOf(u8, buf.items, "\n  Spec diagnostics:\n") orelse return error.TestUnexpectedResult;
+    const start = std.mem.find(u8, out, "\n  Spec diagnostics:\n") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(
         "\n  Spec diagnostics:\n" ++
             "    ZTS500 (error) helper-card.ts:1:1  helper's declared Proof capsule does not hold (failing spec: pure)\n" ++
             "      help: remove module calls and clock or RNG reads so the helper stays pure.\n",
-        buf.items[start..],
+        out[start..],
     );
 }
 
@@ -15921,7 +15905,7 @@ test "the proof trace names the file of a branch in a dependency that selects th
     defer allocator.free(expected);
     const trace = result.proof_trace_json orelse return error.TestUnexpectedResult;
     errdefer std.debug.print("proof trace: {s}\n", .{trace});
-    try std.testing.expect(std.mem.indexOf(u8, trace, expected) != null);
+    try std.testing.expect(std.mem.find(u8, trace, expected) != null);
 }
 
 // Control: a branch in the checked file keeps a location with no file.
@@ -15931,7 +15915,7 @@ test "the proof trace gives a branch in the checked file a location with no file
     defer result.deinit(allocator);
     const trace = result.proof_trace_json orelse return error.TestUnexpectedResult;
     errdefer std.debug.print("proof trace: {s}\n", .{trace});
-    try std.testing.expect(std.mem.indexOf(u8, trace, "\"deterministic\":{\"holds\":false,\"kind\":\"structural\",\"summary\":\"The response is reached through a branch on a value that varies between requests: two runs of the same request can differ.\",\"counterexample\":{\"kind\":\"offending-node\",\"location\":{\"line\":3,\"column\":3},\"snippet\":\"a branch on a value that varies between requests\",") != null);
+    try std.testing.expect(std.mem.find(u8, trace, "\"deterministic\":{\"holds\":false,\"kind\":\"structural\",\"summary\":\"The response is reached through a branch on a value that varies between requests: two runs of the same request can differ.\",\"counterexample\":{\"kind\":\"offending-node\",\"location\":{\"line\":3,\"column\":3},\"snippet\":\"a branch on a value that varies between requests\",") != null);
 }
 
 // The resisted evidence of `check --json` gives the guard and the sink as "at L<line>". A line
@@ -15977,7 +15961,7 @@ test "the resisted evidence names the file of a guard and a sink in a dependency
     defer allocator.free(expected);
     const trace = result.proof_trace_json orelse return error.TestUnexpectedResult;
     errdefer std.debug.print("proof trace: {s}\n", .{trace});
-    try std.testing.expect(std.mem.indexOf(u8, trace, expected) != null);
+    try std.testing.expect(std.mem.find(u8, trace, expected) != null);
 }
 
 // A guard in a dependency and a sink in the checked file: only the guard names a file.
@@ -16007,7 +15991,7 @@ test "the resisted evidence names the file of a guard in a dependency and gives 
     defer allocator.free(expected);
     const trace = result.proof_trace_json orelse return error.TestUnexpectedResult;
     errdefer std.debug.print("proof trace: {s}\n", .{trace});
-    try std.testing.expect(std.mem.indexOf(u8, trace, expected) != null);
+    try std.testing.expect(std.mem.find(u8, trace, expected) != null);
 }
 
 // Control: a guard and a sink in the checked file keep a line with no file.
@@ -16026,7 +16010,7 @@ test "the resisted evidence gives a guard and a sink in the checked file a line 
     defer result.deinit(allocator);
     const trace = result.proof_trace_json orelse return error.TestUnexpectedResult;
     errdefer std.debug.print("proof trace: {s}\n", .{trace});
-    try std.testing.expect(std.mem.indexOf(u8, trace, "\"chain\":[\"user input enters the handler\",\"validated by escapeHtml() at L4\",\"reaches Response.html at L5, already cleared\"]") != null);
+    try std.testing.expect(std.mem.find(u8, trace, "\"chain\":[\"user input enters the handler\",\"validated by escapeHtml() at L4\",\"reaches Response.html at L5, already cleared\"]") != null);
 }
 
 test "CHECK names the branch in the entry when the condition comes from a dependency clock" {

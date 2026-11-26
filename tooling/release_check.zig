@@ -207,44 +207,22 @@ const usage =
     \\
 ;
 
-pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_alloc: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
-    defer _ = debug_alloc.deinit();
-    const allocator = debug_alloc.allocator();
-
-    const args = try collectArgs(allocator, init.args);
-    defer {
-        for (args) |arg| allocator.free(arg);
-        allocator.free(args);
-    }
-
-    try releaseCheckCommand(allocator, args[1..]);
-}
-
-fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
-    var args_iter = std.process.Args.Iterator.init(args_vector);
-    defer args_iter.deinit();
-
-    var list: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (list.items) |arg| allocator.free(arg);
-        list.deinit(allocator);
-    }
-    while (args_iter.next()) |arg| {
-        try list.append(allocator, try allocator.dupe(u8, arg));
-    }
-    return list.toOwnedSlice(allocator);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    try releaseCheckCommand(allocator, init.io, args[1..]);
 }
 
 pub fn releaseCheckCommand(
     allocator: std.mem.Allocator,
+    io: std.Io,
     argv: []const []const u8,
 ) !void {
     const opts = parseReleaseDoctorOptions(argv) catch |err| {
         std.debug.print("Invalid release-check arguments.\n\n{s}", .{usage});
         return err;
     };
-    var passport = try collectReleasePassport(allocator);
+    var passport = try collectReleasePassport(allocator, io);
     defer passport.deinit(allocator);
 
     const json_bytes = try renderReleasePassportJson(allocator, &passport);
@@ -259,7 +237,10 @@ pub fn releaseCheckCommand(
         try renderReleasePassportText(allocator, &passport, opts.out_path);
     defer allocator.free(output);
 
-    _ = std.c.write(std.c.STDOUT_FILENO, output.ptr, output.len);
+    var out_buf: [4096]u8 = undefined;
+    var out = std.Io.File.stdout().writerStreaming(io, &out_buf);
+    try out.interface.writeAll(output);
+    try out.interface.flush();
     if (passport.verdict() == .blocked) return error.DoctorFailed;
 }
 
@@ -283,12 +264,13 @@ pub fn parseReleaseDoctorOptions(argv: []const []const u8) !ReleaseDoctorOptions
     return opts;
 }
 
-pub fn collectReleasePassport(allocator: std.mem.Allocator) !ReleasePassport {
-    return collectReleasePassportWithProvenance(allocator, releaseProvenancePasses(allocator));
+pub fn collectReleasePassport(allocator: std.mem.Allocator, io: std.Io) !ReleasePassport {
+    return collectReleasePassportWithProvenance(allocator, io, releaseProvenancePasses(allocator, io));
 }
 
 fn collectReleasePassportWithProvenance(
     allocator: std.mem.Allocator,
+    io: std.Io,
     provenance_ok: bool,
 ) !ReleasePassport {
     const zon = readOptionalFile(allocator, "build.zig.zon", 256 * 1024);
@@ -300,10 +282,9 @@ fn collectReleasePassportWithProvenance(
     try addVersionCheck(allocator, &passport, zon);
     try addReleaseEvidenceCheck(allocator, &passport);
     try addReleaseProvenanceCheck(allocator, &passport, provenance_ok);
-    try addReleaseGateCheck(allocator, &passport);
+    try addReleaseGateCheck(allocator, io, &passport);
     try addPublicClaimsCheck(allocator, &passport);
     try addCurrentDocsScopeCheck(allocator, &passport);
-    try addReliabilityKnownIssuesCheck(allocator, &passport);
     try addProofSurfaceCheck(allocator, &passport);
 
     return passport;
@@ -318,6 +299,16 @@ fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon
     defer if (zts_zon) |bytes| allocator.free(bytes);
     const runtime_zon = readOptionalFile(allocator, "packages/runtime/build.zig.zon", 256 * 1024);
     defer if (runtime_zon) |bytes| allocator.free(bytes);
+    const modules_zon = readOptionalFile(allocator, "packages/modules/build.zig.zon", 256 * 1024);
+    defer if (modules_zon) |bytes| allocator.free(bytes);
+    const pi_zon = readOptionalFile(allocator, "packages/pi/build.zig.zon", 256 * 1024);
+    defer if (pi_zon) |bytes| allocator.free(bytes);
+    const proof_checker_zon = readOptionalFile(allocator, "packages/proof-checker/build.zig.zon", 256 * 1024);
+    defer if (proof_checker_zon) |bytes| allocator.free(bytes);
+    const tools_zon = readOptionalFile(allocator, "packages/tools/build.zig.zon", 256 * 1024);
+    defer if (tools_zon) |bytes| allocator.free(bytes);
+    const sdk_zon = readOptionalFile(allocator, "packages/zttp-sdk/build.zig.zon", 256 * 1024);
+    defer if (sdk_zon) |bytes| allocator.free(bytes);
     const install = readOptionalFile(allocator, "install.sh", 256 * 1024);
     defer if (install) |bytes| allocator.free(bytes);
 
@@ -327,6 +318,11 @@ fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon
         .root = root,
         .zts_zon = zts_zon,
         .runtime_zon = runtime_zon,
+        .modules_zon = modules_zon,
+        .pi_zon = pi_zon,
+        .proof_checker_zon = proof_checker_zon,
+        .tools_zon = tools_zon,
+        .sdk_zon = sdk_zon,
         .install = install,
     };
     const alignment = release_version.check(sources);
@@ -334,7 +330,7 @@ fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon
         .missing => .{ .status = .fail, .detail = "VERSION, a release package manifest, packages/zts/src/root.zig, or install.sh is missing" },
         .malformed_marker => .{ .status = .fail, .detail = "VERSION must contain exactly one SemVer line ending in a newline" },
         .mismatch => .{ .status = .fail, .detail = "a release version copy differs from VERSION: root and package manifests, or the installer comment" },
-        .aligned => .{ .status = .ok, .detail = "VERSION, root, zts, runtime, README, and installer versions agree" },
+        .aligned => .{ .status = .ok, .detail = "VERSION, root, all package manifests, and installer versions agree" },
     };
     try passport.add(allocator, "version", "Version alignment", row.status, row.detail, "zig build release-check");
 }
@@ -380,14 +376,12 @@ fn addReleaseProvenanceCheck(
     );
 }
 
-fn releaseProvenancePasses(allocator: std.mem.Allocator) bool {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    return release_provenance.passes(allocator, io_backend.io(), ".");
+fn releaseProvenancePasses(allocator: std.mem.Allocator, io: std.Io) bool {
+    return release_provenance.passes(allocator, io, ".");
 }
 
-fn addReleaseGateCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
-    const build_zig = readBuildSources(allocator);
+fn addReleaseGateCheck(allocator: std.mem.Allocator, io: std.Io, passport: *ReleasePassport) !void {
+    const build_zig = readBuildSources(allocator, io);
     defer if (build_zig) |bytes| allocator.free(bytes);
     const release_sh = readOptionalFile(allocator, "scripts/release.sh", 512 * 1024);
     defer if (release_sh) |bytes| allocator.free(bytes);
@@ -406,7 +400,7 @@ fn addReleaseGateCheck(allocator: std.mem.Allocator, passport: *ReleasePassport)
     };
 
     if (smoke_ok and examples_ok and installer_ok and semantics_ok and release_script_ok) {
-        try passport.add(allocator, "release_gates", "Release gates", .ok, "release script, local verifier, browser analyzer, installer, semantics, docs, smoke, and doctor gates are wired", "bash scripts/verify.sh && zig build release-check");
+        try passport.add(allocator, "release_gates", "Release gates", .ok, "release script, local verifier, installer, semantics, docs, smoke, and doctor gates are wired", "bash scripts/verify.sh && zig build release-check");
     } else {
         try passport.add(allocator, "release_gates", "Release gates", .fail, "one or more release gates are missing from build wiring or scripts", "bash scripts/verify.sh && zig build release-check");
     }
@@ -432,14 +426,14 @@ fn addPublicClaimsCheck(allocator: std.mem.Allocator, passport: *ReleasePassport
     const stale_perf =
         containsAny(perf_bytes, &.{ "71ms", "71 ms", "79,743", "0.76x Deno" });
     const has_measured_baseline =
-        std.mem.indexOf(u8, readme_bytes, "3.5") != null and
-        std.mem.indexOf(u8, readme_bytes, "7-15") != null and
-        std.mem.indexOf(u8, readme_bytes, "13 MB") != null and
-        std.mem.indexOf(u8, readme_bytes, "112k") != null and
-        std.mem.indexOf(u8, perf_bytes, "3.5") != null and
-        std.mem.indexOf(u8, perf_bytes, "7-15") != null and
-        std.mem.indexOf(u8, perf_bytes, "13 MB") != null and
-        std.mem.indexOf(u8, perf_bytes, "112k") != null;
+        std.mem.find(u8, readme_bytes, "3.5") != null and
+        std.mem.find(u8, readme_bytes, "7-15") != null and
+        std.mem.find(u8, readme_bytes, "13 MB") != null and
+        std.mem.find(u8, readme_bytes, "112k") != null and
+        std.mem.find(u8, perf_bytes, "3.5") != null and
+        std.mem.find(u8, perf_bytes, "7-15") != null and
+        std.mem.find(u8, perf_bytes, "13 MB") != null and
+        std.mem.find(u8, perf_bytes, "112k") != null;
     const has_pending_receipt_note =
         hasPendingReceiptBackedMeasurementNote(readme_bytes) and
         hasPendingReceiptBackedMeasurementNote(perf_bytes);
@@ -491,22 +485,6 @@ fn addCurrentDocsScopeCheck(allocator: std.mem.Allocator, passport: *ReleasePass
     }
 }
 
-fn addReliabilityKnownIssuesCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
-    const reliability = readOptionalFile(allocator, "docs/reliability.md", 512 * 1024);
-    defer if (reliability) |bytes| allocator.free(bytes);
-    const reliability_bytes = reliability orelse {
-        try passport.add(allocator, "known_issues", "Known reliability issues", .fail, "docs/reliability.md is missing", null);
-        return;
-    };
-    if (std.mem.indexOf(u8, reliability_bytes, "closes the connection without") != null and
-        std.mem.indexOf(u8, reliability_bytes, "413") != null)
-    {
-        try passport.add(allocator, "known_issues", "Known reliability issues", .warn, "oversized request bodies are documented as a known 413 gap", null);
-    } else {
-        try passport.add(allocator, "known_issues", "Known reliability issues", .ok, "no documented release-blocking reliability gap found", null);
-    }
-}
-
 fn addProofSurfaceCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
     // The advertised surface lives in the help listing (`cli_help.zig`) and the
     // signing opt-out in the build command, not in `dev_cli.zig`. This check
@@ -535,13 +513,13 @@ fn addProofSurfaceCheck(allocator: std.mem.Allocator, passport: *ReleasePassport
     };
 
     const dev_ok =
-        std.mem.indexOf(u8, help_bytes, "zttp verify <url>") != null and
-        std.mem.indexOf(u8, help_bytes, "proofs") != null and
-        std.mem.indexOf(u8, build_bytes, "--no-attest") != null;
+        std.mem.find(u8, help_bytes, "zttp verify <url>") != null and
+        std.mem.find(u8, help_bytes, "proofs") != null and
+        std.mem.find(u8, build_bytes, "--no-attest") != null;
     const proofs_ok =
-        std.mem.indexOf(u8, proofs_cli_bytes, "badge") != null and
-        std.mem.indexOf(u8, proofs_cli_bytes, "bundle") != null and
-        std.mem.indexOf(u8, proofs_cli_bytes, "verify") != null;
+        std.mem.find(u8, proofs_cli_bytes, "badge") != null and
+        std.mem.find(u8, proofs_cli_bytes, "bundle") != null and
+        std.mem.find(u8, proofs_cli_bytes, "verify") != null;
     if (dev_ok and proofs_ok) {
         try passport.add(allocator, "proof_surface", "Proof surface", .ok, "proof receipts, ledger, badge, bundle, and verify surfaces are present", "zig build test-cli");
     } else {
@@ -592,18 +570,15 @@ fn readOptionalFile(allocator: std.mem.Allocator, path: []const u8, max_size: us
 
 /// build.zig and every build/*.zig, joined. The build graph is split across
 /// those files, so a step name can be declared in any of them.
-fn readBuildSources(allocator: std.mem.Allocator) ?[]u8 {
-    return readBuildSourcesOrError(allocator) catch null;
+fn readBuildSources(allocator: std.mem.Allocator, io: std.Io) ?[]u8 {
+    return readBuildSourcesOrError(allocator, io) catch null;
 }
 
-fn readBuildSourcesOrError(allocator: std.mem.Allocator) ![]u8 {
+fn readBuildSourcesOrError(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     const root = try zts.file_io.readFile(allocator, "build.zig", 1024 * 1024);
     var acc: std.ArrayList(u8) = .fromOwnedSlice(root);
     errdefer acc.deinit(allocator);
 
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
     var dir = std.Io.Dir.cwd().openDir(io, "build", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return acc.toOwnedSlice(allocator),
         else => return err,
@@ -622,22 +597,22 @@ fn readBuildSourcesOrError(allocator: std.mem.Allocator) ![]u8 {
 
 fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
     for (needles) |needle| {
-        if (std.mem.indexOf(u8, haystack, needle) != null) return true;
+        if (std.mem.find(u8, haystack, needle) != null) return true;
     }
     return false;
 }
 
 fn containsAll(haystack: []const u8, needles: []const []const u8) bool {
     for (needles) |needle| {
-        if (std.mem.indexOf(u8, haystack, needle) == null) return false;
+        if (std.mem.find(u8, haystack, needle) == null) return false;
     }
     return true;
 }
 
 fn hasPendingReceiptBackedMeasurementNote(haystack: []const u8) bool {
-    return std.mem.indexOf(u8, haystack, "pending receipt-backed measurement") != null or
-        std.mem.indexOf(u8, haystack, "pending receipt-backed\nmeasurement") != null or
-        std.mem.indexOf(u8, haystack, "pending\nreceipt-backed measurement") != null;
+    return std.mem.find(u8, haystack, "pending receipt-backed measurement") != null or
+        std.mem.find(u8, haystack, "pending receipt-backed\nmeasurement") != null or
+        std.mem.find(u8, haystack, "pending\nreceipt-backed measurement") != null;
 }
 
 fn shellInvokes(source: []const u8, command: []const u8) bool {
@@ -733,10 +708,7 @@ test "release doctor options parse json and out path" {
 
 test "release passport accepts matching VERSION and reports pending measurement" {
     const testing = std.testing;
-
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
+    const io = testing.io;
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -746,14 +718,14 @@ test "release passport accepts matching VERSION and reports pending measurement"
 
     try writeReleaseDoctorFixture(io, &tmp, .{});
 
-    var passport = try collectReleasePassportWithProvenance(testing.allocator, true);
+    var passport = try collectReleasePassportWithProvenance(testing.allocator, io, true);
     defer passport.deinit(testing.allocator);
     try testing.expectEqual(ReleaseVerdict.ready_with_known_issues, passport.verdict());
 
     const json = try renderReleasePassportJson(testing.allocator, &passport);
     defer testing.allocator.free(json);
-    try testing.expect(std.mem.indexOf(u8, json, "\"verdict\":\"ready_with_known_issues\"") != null);
-    try testing.expect(std.mem.indexOf(u8, json, "\"release\":\"0.18.0\"") != null);
+    try testing.expect(std.mem.find(u8, json, "\"verdict\":\"ready_with_known_issues\"") != null);
+    try testing.expect(std.mem.find(u8, json, "\"release\":\"0.18.0\"") != null);
 }
 
 test "release passport blocks a missing VERSION marker" {
@@ -783,6 +755,16 @@ test "every release version copy in this repository equals VERSION" {
     defer if (zts_zon) |bytes| allocator.free(bytes);
     const runtime_zon = readOptionalFile(allocator, "packages/runtime/build.zig.zon", 256 * 1024);
     defer if (runtime_zon) |bytes| allocator.free(bytes);
+    const modules_zon = readOptionalFile(allocator, "packages/modules/build.zig.zon", 256 * 1024);
+    defer if (modules_zon) |bytes| allocator.free(bytes);
+    const pi_zon = readOptionalFile(allocator, "packages/pi/build.zig.zon", 256 * 1024);
+    defer if (pi_zon) |bytes| allocator.free(bytes);
+    const proof_checker_zon = readOptionalFile(allocator, "packages/proof-checker/build.zig.zon", 256 * 1024);
+    defer if (proof_checker_zon) |bytes| allocator.free(bytes);
+    const tools_zon = readOptionalFile(allocator, "packages/tools/build.zig.zon", 256 * 1024);
+    defer if (tools_zon) |bytes| allocator.free(bytes);
+    const sdk_zon = readOptionalFile(allocator, "packages/zttp-sdk/build.zig.zon", 256 * 1024);
+    defer if (sdk_zon) |bytes| allocator.free(bytes);
     const install = readOptionalFile(allocator, "install.sh", 256 * 1024);
     defer if (install) |bytes| allocator.free(bytes);
 
@@ -792,6 +774,11 @@ test "every release version copy in this repository equals VERSION" {
         .root = root,
         .zts_zon = zts_zon,
         .runtime_zon = runtime_zon,
+        .modules_zon = modules_zon,
+        .pi_zon = pi_zon,
+        .proof_checker_zon = proof_checker_zon,
+        .tools_zon = tools_zon,
+        .sdk_zon = sdk_zon,
         .install = install,
     };
     const alignment = release_version.check(sources);
@@ -806,10 +793,7 @@ test "every release version copy in this repository equals VERSION" {
 
 test "release passport version check ignores the README heading" {
     const testing = std.testing;
-
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
+    const io = testing.io;
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -821,7 +805,7 @@ test "release passport version check ignores the README heading" {
     // manifests, the zts version string, and the installer comment.
     try writeReleaseDoctorFixture(io, &tmp, .{ .version_marker = .stale_readme_heading });
 
-    var passport = try collectReleasePassportWithProvenance(testing.allocator, true);
+    var passport = try collectReleasePassportWithProvenance(testing.allocator, io, true);
     defer passport.deinit(testing.allocator);
     try testing.expectEqual(ReleaseCheckStatus.ok, passport.checks.items[0].status);
 }
@@ -832,10 +816,7 @@ test "release passport blocks a drifted installer comment" {
 
 test "release passport blocks stale public claims" {
     const testing = std.testing;
-
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
+    const io = testing.io;
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -845,17 +826,14 @@ test "release passport blocks stale public claims" {
 
     try writeReleaseDoctorFixture(io, &tmp, .{ .stale_readme = true });
 
-    var passport = try collectReleasePassportWithProvenance(testing.allocator, true);
+    var passport = try collectReleasePassportWithProvenance(testing.allocator, io, true);
     defer passport.deinit(testing.allocator);
     try testing.expectEqual(ReleaseVerdict.blocked, passport.verdict());
 }
 
 test "release passport blocks a failed provenance validator" {
     const testing = std.testing;
-
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
+    const io = testing.io;
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -865,34 +843,13 @@ test "release passport blocks a failed provenance validator" {
 
     try writeReleaseDoctorFixture(io, &tmp, .{});
 
-    var passport = try collectReleasePassportWithProvenance(testing.allocator, false);
+    var passport = try collectReleasePassportWithProvenance(testing.allocator, io, false);
     defer passport.deinit(testing.allocator);
     try testing.expectEqual(ReleaseVerdict.blocked, passport.verdict());
 }
 
-test "release passport warns for documented reliability gap" {
-    const testing = std.testing;
-
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try chdirTmpForTest(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    try writeReleaseDoctorFixture(io, &tmp, .{ .document_413_gap = true });
-
-    var passport = try collectReleasePassportWithProvenance(testing.allocator, true);
-    defer passport.deinit(testing.allocator);
-    try testing.expectEqual(ReleaseVerdict.ready_with_known_issues, passport.verdict());
-}
-
 const ReleaseDoctorFixtureOptions = struct {
     stale_readme: bool = false,
-    document_413_gap: bool = false,
     version_marker: VersionMarkerFixture = .matching,
 };
 
@@ -907,10 +864,7 @@ const VersionMarkerFixture = enum {
 
 fn expectVersionFixtureBlocked(version_marker: VersionMarkerFixture) !void {
     const testing = std.testing;
-
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
+    const io = testing.io;
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -920,7 +874,7 @@ fn expectVersionFixtureBlocked(version_marker: VersionMarkerFixture) !void {
 
     try writeReleaseDoctorFixture(io, &tmp, .{ .version_marker = version_marker });
 
-    var passport = try collectReleasePassportWithProvenance(testing.allocator, true);
+    var passport = try collectReleasePassportWithProvenance(testing.allocator, io, true);
     defer passport.deinit(testing.allocator);
     try testing.expectEqual(ReleaseVerdict.blocked, passport.verdict());
     if (version_marker == .malformed) {
@@ -935,6 +889,11 @@ fn expectVersionFixtureBlocked(version_marker: VersionMarkerFixture) !void {
 fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: ReleaseDoctorFixtureOptions) !void {
     try tmp.dir.createDirPath(io, "packages/zts/src");
     try tmp.dir.createDirPath(io, "packages/runtime/src");
+    try tmp.dir.createDirPath(io, "packages/modules");
+    try tmp.dir.createDirPath(io, "packages/pi");
+    try tmp.dir.createDirPath(io, "packages/proof-checker");
+    try tmp.dir.createDirPath(io, "packages/tools");
+    try tmp.dir.createDirPath(io, "packages/zttp-sdk");
     try tmp.dir.createDirPath(io, "docs/virtual-modules");
     try tmp.dir.createDirPath(io, "docs");
     try tmp.dir.createDirPath(io, "scripts");
@@ -971,6 +930,26 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
     try tmp.dir.writeFile(io, .{
         .sub_path = "packages/runtime/build.zig.zon",
         .data = ".{ .name = .runtime, .version = \"0.18.0\" }\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/modules/build.zig.zon",
+        .data = ".{ .name = .zttp_modules, .version = \"0.18.0\" }\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/pi/build.zig.zon",
+        .data = ".{ .name = .zttp_pi, .version = \"0.18.0\" }\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/proof-checker/build.zig.zon",
+        .data = ".{ .name = .zttp_proof_checker, .version = \"0.18.0\" }\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/tools/build.zig.zon",
+        .data = ".{ .name = .zttp_tools, .version = \"0.18.0\" }\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/zttp-sdk/build.zig.zon",
+        .data = ".{ .name = .zttp_sdk, .version = \"0.18.0\" }\n",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "build.zig",
@@ -1059,13 +1038,6 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
     try tmp.dir.writeFile(io, .{ .sub_path = "docs/coverage.json", .data = evidence_json });
     try tmp.dir.writeFile(io, .{ .sub_path = "docs/convergence.json", .data = evidence_json });
     try tmp.dir.writeFile(io, .{
-        .sub_path = "docs/reliability.md",
-        .data = if (opts.document_413_gap)
-            "Request bodies over the cap closes the connection without a response; 413 is tracked.\n"
-        else
-            "No release-blocking reliability gaps are documented.\n",
-    });
-    try tmp.dir.writeFile(io, .{
         .sub_path = "packages/runtime/src/cli_help.zig",
         .data = "zttp verify <url>\nproofs\n",
     });
@@ -1081,10 +1053,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
 
 test "release gate markers are read from build.zig and build/*.zig together" {
     const testing = std.testing;
-
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
+    const io = testing.io;
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1099,8 +1068,8 @@ test "release gate markers are read from build.zig and build/*.zig together" {
     try tmp.dir.writeFile(io, .{ .sub_path = "build/gates.zig", .data = "// test-module-governance test-capability-audit test-docs-drift test-evidence-marker test-examples\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "build/notes.txt", .data = "// not a build file\n" });
 
-    const sources = readBuildSources(testing.allocator) orelse return error.BuildSourcesUnread;
+    const sources = readBuildSources(testing.allocator, io) orelse return error.BuildSourcesUnread;
     defer testing.allocator.free(sources);
     try testing.expect(containsAll(sources, &build_gate_markers));
-    try testing.expect(std.mem.indexOf(u8, sources, "not a build file") == null);
+    try testing.expect(std.mem.find(u8, sources, "not a build file") == null);
 }

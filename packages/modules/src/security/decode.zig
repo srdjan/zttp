@@ -143,7 +143,7 @@ fn parseFormObject(handle: *sdk.ModuleHandle, raw: []const u8) !sdk.JSValue {
     while (parts.next()) |part| {
         if (part.len == 0) continue;
 
-        const eq_idx = std.mem.indexOfScalar(u8, part, '=') orelse part.len;
+        const eq_idx = std.mem.findScalar(u8, part, '=') orelse part.len;
         const key_raw = part[0..eq_idx];
         if (key_raw.len == 0) continue;
         const val_raw = if (eq_idx < part.len) part[eq_idx + 1 ..] else "";
@@ -241,7 +241,7 @@ fn parseBoundary(content_type: []const u8) ?[]const u8 {
     // and a substring scan would latch onto that and misparse the real boundary
     // (a differential-parsing surface vs RFC 7231-compliant intermediaries).
     // The media-type itself cannot contain ';', so parameters start after the first one.
-    const params_start = (std.mem.indexOfScalar(u8, content_type, ';') orelse return null) + 1;
+    const params_start = (std.mem.findScalar(u8, content_type, ';') orelse return null) + 1;
     return parseDispositionParam(content_type[params_start..], "boundary");
 }
 
@@ -257,6 +257,7 @@ fn parseMultipartObject(handle: *sdk.ModuleHandle, body: []const u8, boundary: [
     // form (rather than the bare "--<boundary>" substring) prevents a part's
     // content that happens to contain the boundary token from splitting the
     // part mid-value.
+    if (boundary.len == 0) return error.MalformedMultipart;
     if (boundary.len > 70) return error.BoundaryTooLong;
     var delim_buf: [74]u8 = undefined;
     delim_buf[0] = '\r';
@@ -269,22 +270,26 @@ fn parseMultipartObject(handle: *sdk.ModuleHandle, body: []const u8, boundary: [
 
     // Find the opening dash-boundary, then split the remainder on the
     // CRLF-anchored delimiter so in-content boundary substrings are ignored.
-    const first = std.mem.indexOf(u8, body, dash_boundary) orelse return error.MalformedMultipart;
+    const first = std.mem.find(u8, body, dash_boundary) orelse return error.MalformedMultipart;
     const after_first = body[first + dash_boundary.len ..];
 
     var it = std.mem.splitSequence(u8, after_first, crlf_delim);
+    var saw_closing = false;
 
     while (it.next()) |raw_part| {
         // "--<boundary>--" is the closing delimiter; the part after the opening
         // dash-boundary (or after a CRLF-anchored delimiter) starts with "--"
         // for the terminator.
-        if (std.mem.startsWith(u8, raw_part, "--")) break;
+        if (std.mem.startsWith(u8, raw_part, "--")) {
+            saw_closing = true;
+            break;
+        }
 
         // Each part starts with CRLF after the delimiter line.
         const part = if (std.mem.startsWith(u8, raw_part, "\r\n")) raw_part[2..] else raw_part;
 
         // Separate headers from body: blank line (CRLF CRLF).
-        const header_end = std.mem.indexOf(u8, part, "\r\n\r\n") orelse return error.MalformedMultipart;
+        const header_end = std.mem.find(u8, part, "\r\n\r\n") orelse return error.MalformedMultipart;
         const headers_raw = part[0..header_end];
         // The split delimiter is the CRLF-anchored "\r\n--<boundary>", so the
         // separator CRLF that precedes the next delimiter was already consumed by
@@ -321,6 +326,7 @@ fn parseMultipartObject(handle: *sdk.ModuleHandle, body: []const u8, boundary: [
         }
     }
 
+    if (!saw_closing) return error.MalformedMultipart;
     return obj;
 }
 
@@ -329,7 +335,7 @@ fn parseMultipartObject(handle: *sdk.ModuleHandle, body: []const u8, boundary: [
 fn findHeader(headers: []const u8, name: []const u8) ?[]const u8 {
     var lines = std.mem.splitSequence(u8, headers, "\r\n");
     while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const colon = std.mem.findScalar(u8, line, ':') orelse continue;
         const key = std.mem.trim(u8, line[0..colon], " \t");
         if (std.ascii.eqlIgnoreCase(key, name)) {
             return std.mem.trim(u8, line[colon + 1 ..], " \t");
@@ -361,9 +367,9 @@ fn parseDispositionParam(header_value: []const u8, param: []const u8) ?[]const u
         const segment = std.mem.trim(u8, header_value[segment_start..start], " \t");
         if (start < header_value.len and header_value[start] == ';') start += 1;
 
-        const eq = std.mem.indexOfScalar(u8, segment, '=') orelse continue;
+        const eq = std.mem.findScalar(u8, segment, '=') orelse continue;
         const key = std.mem.trim(u8, segment[0..eq], " \t");
-        if (!std.mem.eql(u8, key, param)) continue;
+        if (!std.ascii.eqlIgnoreCase(key, param)) continue;
 
         var value = std.mem.trim(u8, segment[eq + 1 ..], " \t");
         if (value.len > 0 and value[0] == '"') {
@@ -379,6 +385,7 @@ fn parseDispositionParam(header_value: []const u8, param: []const u8) ?[]const u
                 }
                 if (value[end] == '"') break;
             }
+            if (end == value.len) return null;
             return value[0..end];
         }
         var end: usize = 0;
@@ -459,4 +466,38 @@ test "findHeader is case-insensitive" {
     try std.testing.expect(findHeader(headers, "Content-Disposition") != null);
     try std.testing.expect(findHeader(headers, "CONTENT-TYPE") != null);
     try std.testing.expect(findHeader(headers, "x-missing") == null);
+}
+
+test "parseDispositionParam matches parameter names case-insensitively" {
+    const disp = "form-data; NAME=\"username\"; FileName=\"file.txt\"";
+    try std.testing.expectEqualStrings("username", parseDispositionParam(disp, "name").?);
+    try std.testing.expectEqualStrings("file.txt", parseDispositionParam(disp, "filename").?);
+    try std.testing.expectEqualStrings("abc123", parseBoundary("multipart/form-data; BOUNDARY=abc123").?);
+}
+
+test "parseDispositionParam returns null on unclosed quoted parameter" {
+    try std.testing.expect(parseDispositionParam("form-data; name=\"unclosed", "name") == null);
+    try std.testing.expect(parseDispositionParam("form-data; name=\"", "name") == null);
+    try std.testing.expect(parseDispositionParam("form-data; name=\"escaped\\\"", "name") == null);
+    try std.testing.expectEqualStrings("", parseDispositionParam("form-data; name=\"\"", "name").?);
+}
+
+test "parseMultipartObject rejects empty boundary and missing closing delimiter" {
+    const test_shim = @import("zttp-sdk-test-shim");
+    defer test_shim.resetStrings();
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+
+    try std.testing.expectError(
+        error.MalformedMultipart,
+        parseMultipartObject(fake_handle, "--\r\n--", ""),
+    );
+
+    const truncated = "--abc\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nhello";
+    try std.testing.expectError(
+        error.MalformedMultipart,
+        parseMultipartObject(fake_handle, truncated, "abc"),
+    );
+
+    const closed = "--abc\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nhello\r\n--abc--";
+    _ = try parseMultipartObject(fake_handle, closed, "abc");
 }

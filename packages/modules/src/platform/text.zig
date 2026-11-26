@@ -43,7 +43,7 @@ pub const binding = sdk.ModuleBinding{
 fn escapeHtmlImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
     const input = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
-    if (std.mem.indexOfAny(u8, input, "&<>\"'") == null) {
+    if (std.mem.findAny(u8, input, "&<>\"'") == null) {
         return sdk.createString(handle, input) catch sdk.JSValue.undefined_val;
     }
 
@@ -66,7 +66,7 @@ fn escapeHtmlImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.J
 fn unescapeHtmlImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
     const input = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
-    if (std.mem.indexOfScalar(u8, input, '&') == null) {
+    if (std.mem.findScalar(u8, input, '&') == null) {
         return sdk.createString(handle, input) catch sdk.JSValue.undefined_val;
     }
 
@@ -164,9 +164,13 @@ fn visibleBytes(bound: ?i32) usize {
 }
 
 fn maskInto(buf: []u8, input: []const u8, visible: usize) void {
-    const mask_count = if (input.len > visible) input.len - visible else input.len;
+    var mask_count = if (input.len > visible) input.len - visible else input.len;
+    // Advance past UTF-8 continuation bytes (0b10xxxxxx) so the revealed suffix
+    // starts on a codepoint boundary without ever revealing more than `visible`
+    // bytes.
+    while (mask_count < input.len and (input[mask_count] & 0xC0) == 0x80) : (mask_count += 1) {}
     @memset(buf[0..mask_count], '*');
-    if (input.len > visible) {
+    if (mask_count < input.len) {
         @memcpy(buf[mask_count..], input[mask_count..]);
     }
 }
@@ -207,4 +211,24 @@ test "mask reveals exactly mask_visible_max trailing bytes for an omitted, non-i
     maskInto(&buf, input, visibleBytes(2));
     try std.testing.expectEqualStrings("***************pq", &buf);
     try std.testing.expectEqual(@as(usize, mask_visible_max), visibleBytes(null));
+}
+
+test "maskInto backs off to a UTF-8 codepoint boundary without revealing more than visible bytes" {
+    // "secret" (6 bytes) + "é" (2 bytes: 0xC3 0xA9) = 8 bytes.
+    const two_byte = "secret\xc3\xa9";
+    var buf1: [two_byte.len]u8 = undefined;
+    maskInto(&buf1, two_byte, 1);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(&buf1));
+    try std.testing.expectEqualStrings("********", &buf1);
+
+    maskInto(&buf1, two_byte, 2);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(&buf1));
+    try std.testing.expectEqualStrings("******\xc3\xa9", &buf1);
+
+    // "ab" (2 bytes) + "😀" (4 bytes: F0 9F 98 80) + "cd" (2 bytes) = 8 bytes.
+    const four_byte = "ab\xf0\x9f\x98\x80cd";
+    var buf2: [four_byte.len]u8 = undefined;
+    maskInto(&buf2, four_byte, 4);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(&buf2));
+    try std.testing.expectEqualStrings("******cd", &buf2);
 }

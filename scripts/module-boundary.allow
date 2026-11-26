@@ -16,7 +16,7 @@
 # expected to once `zts` became a re-export-only umbrella: consumers still
 # reach one module, so the compiler enforces direction INSIDE the package
 # while this file keeps gating what leaves it. The two checks are
-# complementary, not redundant - scripts/check-zts-layering.sh pins tier
+# complementary, not redundant - `zig build test-zts-layering` pins tier
 # direction, this pins consumer surface.
 #
 # A row closes when every symbol behind it has a curated name. Measured after

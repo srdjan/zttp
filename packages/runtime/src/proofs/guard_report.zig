@@ -21,7 +21,7 @@ pub const GuardVerdicts = pcc.verdict.GuardVerdicts;
 pub const max_kinds_bytes: usize = blk: {
     var total: usize = 0;
     for (@typeInfo(pcc.residual.GuardKind).@"enum".field_names) |field| {
-        total += field.len + 1;
+        total += field.len + 2;
     }
     break :blk total;
 };
@@ -71,6 +71,14 @@ test "kinds are named in catalog order and none is invented" {
     );
     // A bit outside the alphabet names nothing rather than printing a number.
     try testing.expectEqualStrings("", try kindsString(&buffer, 0b1000_0000));
+}
+
+test "max_kinds_bytes fits all five guard kinds joined with comma-space" {
+    var buffer: [max_kinds_bytes]u8 = undefined;
+    try testing.expectEqualStrings(
+        "env_key, egress_endpoint, cache_namespace, sql_read, sql_write",
+        try kindsString(&buffer, 0b0001_1111),
+    );
 }
 
 test "a summary says none rather than zero of zero" {

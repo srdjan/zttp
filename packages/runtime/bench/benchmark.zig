@@ -562,7 +562,7 @@ fn runRequestPath(options: Options) !void {
     defer pool.deinit();
 
     // The section reports the default policy, so refuse a drifted default.
-    if (pool.pooling_policy != .reuse_bounded_by_count) requestPathFail("pooling policy is not reuse_bounded_by_count", .{});
+    if (pool.getPoolingPolicy() != .reuse_bounded_by_count) requestPathFail("pooling policy is not reuse_bounded_by_count", .{});
     const max_requests = pool.pooling_thresholds.max_requests;
     if (max_requests != 64) requestPathFail("default max_requests is {d}, expected 64", .{max_requests});
 

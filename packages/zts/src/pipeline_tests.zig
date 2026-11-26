@@ -361,7 +361,7 @@ test "partial contract facts do not suppress imported export type diagnostics" {
     try testing.expectEqual(@as(u32, 1), resolved.typeErrorCount());
     const diagnostic = resolved.type_checker.?.getDiagnostics()[0];
     try testing.expectEqual(type_checker_mod.DiagnosticKind.arg_count_mismatch, diagnostic.kind);
-    try testing.expect(std.mem.indexOf(u8, diagnostic.message, "expected 1, got 2") != null);
+    try testing.expect(std.mem.find(u8, diagnostic.message, "expected 1, got 2") != null);
 }
 
 test "ModuleAnalysisSession caches unavailable path effects after one attempt" {
@@ -583,8 +583,8 @@ test "ModuleAnalysisSession publishes owned exports for both extraction profiles
         var contract = try analysis.extractContract("exports.ts");
         const contract_json = try serializeContractForTest(allocator, &contract);
         defer allocator.free(contract_json);
-        try testing.expect(std.mem.indexOf(u8, contract_json, "effectAnalysisComplete") == null);
-        try testing.expect(std.mem.indexOf(u8, contract_json, "effect_analysis_complete") == null);
+        try testing.expect(std.mem.find(u8, contract_json, "effectAnalysisComplete") == null);
+        try testing.expect(std.mem.find(u8, contract_json, "effect_analysis_complete") == null);
         contract.deinit(allocator);
         var effects = analysis.takeExportEffects() orelse return error.ExportEffectsMissing;
         analysis.deinit();
@@ -4243,7 +4243,7 @@ test "public merged contracts omit flow claims for both clean and leaking import
         try testing.expect(contract.properties == null);
         const json = try serializeContractForTest(allocator, &contract);
         defer allocator.free(json);
-        try testing.expect(std.mem.indexOf(u8, json, "\"properties\": null") != null);
+        try testing.expect(std.mem.find(u8, json, "\"properties\": null") != null);
     }
 }
 

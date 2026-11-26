@@ -30,8 +30,11 @@ inside Apple's `container` CLI.
 ## Prepare And Tag
 
 - [ ] Confirm `VERSION` holds the intended release. It is the authority.
-- [ ] Confirm `build.zig.zon`, `packages/zts/build.zig.zon`, and
-      `packages/runtime/build.zig.zon` `.version` equal `VERSION`.
+- [ ] Confirm `build.zig.zon`, `packages/zts/build.zig.zon`,
+      `packages/runtime/build.zig.zon`, `packages/modules/build.zig.zon`,
+      `packages/pi/build.zig.zon`, `packages/proof-checker/build.zig.zon`,
+      `packages/tools/build.zig.zon`, and `packages/zttp-sdk/build.zig.zon`
+      `.version` equal `VERSION`.
 - [ ] Confirm `packages/zts/src/root.zig` `version.string` and the `install.sh`
       "current:" comment equal `VERSION`.
       `zig build test` fails on any difference.

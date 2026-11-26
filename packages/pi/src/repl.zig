@@ -26,6 +26,7 @@ const skills_catalog = @import("skills/catalog.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const prompts_catalog = @import("prompts/catalog.zig");
 const models_registry = @import("providers/models.zig");
+const fd_io = @import("fd_io.zig");
 
 pub const Registry = registry_mod.Registry;
 const ToolResult = registry_mod.ToolResult;
@@ -38,7 +39,6 @@ pub const DispatchOutcome = union(enum) {
     result: ToolResult,
     session_resume,
     session_new,
-    session_compact,
     session_fork,
 };
 
@@ -52,7 +52,6 @@ pub const SubmitOutcome = union(enum) {
     tool_result: ToolResult,
     session_resume,
     session_new,
-    session_compact,
     session_fork,
 };
 
@@ -186,7 +185,6 @@ pub fn processSubmit(
         .result => |r| .{ .tool_result = r },
         .session_resume => .session_resume,
         .session_new => .session_new,
-        .session_compact => .session_compact,
         .session_fork => .session_fork,
     };
 }
@@ -217,7 +215,6 @@ pub fn dispatchLine(
     }
     if (commands.isSessionResume(argv[0])) return .session_resume;
     if (commands.isSessionNew(argv[0])) return .session_new;
-    if (commands.isCompact(argv[0])) return .session_compact;
     if (commands.isSessionFork(argv[0])) return .session_fork;
     if (commands.isSessionTree(argv[0])) return .{ .result = try renderTree(allocator, null) };
     if (commands.isViewLedger(argv[0])) return .{ .result = try renderLedgerGuidance(allocator, .{}) };
@@ -671,6 +668,11 @@ fn buildSessionTreeNodes(
 
     var flat: std.ArrayList(SessionTreeNode) = .empty;
     defer flat.deinit(allocator);
+    errdefer for (flat.items) |*node| node.deinit(allocator);
+
+    const visited = try allocator.alloc(bool, entries.len);
+    defer allocator.free(visited);
+    @memset(visited, false);
 
     for (roots.items) |root_index| {
         try appendSessionTreePreorder(
@@ -679,10 +681,26 @@ fn buildSessionTreeNodes(
             entries,
             child_lists,
             orphan_roots,
+            visited,
             root_index,
             0,
             current_session_id,
         );
+    }
+    for (0..entries.len) |index| {
+        if (!visited[index]) {
+            try appendSessionTreePreorder(
+                allocator,
+                &flat,
+                entries,
+                child_lists,
+                orphan_roots,
+                visited,
+                index,
+                0,
+                current_session_id,
+            );
+        }
     }
 
     return try flat.toOwnedSlice(allocator);
@@ -694,22 +712,32 @@ fn appendSessionTreePreorder(
     entries: []const session_paths.SessionEntry,
     child_lists: []const std.ArrayListUnmanaged(usize),
     orphan_roots: []const bool,
+    visited: []bool,
     index: usize,
     depth: usize,
     current_session_id: ?[]const u8,
 ) !void {
+    if (visited[index]) return;
+    visited[index] = true;
+
     const entry = entries[index];
-    try flat.append(allocator, .{
-        .session_id = try allocator.dupe(u8, entry.session_id),
-        .parent_id = if (entry.parent_id) |parent_id|
+    {
+        const sid_copy = try allocator.dupe(u8, entry.session_id);
+        errdefer allocator.free(sid_copy);
+        const parent_copy = if (entry.parent_id) |parent_id|
             try allocator.dupe(u8, parent_id)
         else
-            null,
-        .created_at_unix_ms = entry.created_at_unix_ms,
-        .depth = depth,
-        .is_current = if (current_session_id) |sid| std.mem.eql(u8, sid, entry.session_id) else false,
-        .is_orphan_root = orphan_roots[index],
-    });
+            null;
+        errdefer if (parent_copy) |p| allocator.free(p);
+        try flat.append(allocator, .{
+            .session_id = sid_copy,
+            .parent_id = parent_copy,
+            .created_at_unix_ms = entry.created_at_unix_ms,
+            .depth = depth,
+            .is_current = if (current_session_id) |sid| std.mem.eql(u8, sid, entry.session_id) else false,
+            .is_orphan_root = orphan_roots[index],
+        });
+    }
 
     for (child_lists[index].items) |child_index| {
         try appendSessionTreePreorder(
@@ -718,6 +746,7 @@ fn appendSessionTreePreorder(
             entries,
             child_lists,
             orphan_roots,
+            visited,
             child_index,
             depth + 1,
             current_session_id,
@@ -760,7 +789,7 @@ pub fn baseSessionConfig(flags: ExpertFlags, overrides: agent.SessionConfig) age
 fn reportSessionSwitchFailure(err: anyerror) void {
     if (err == error.CrossProviderResume) {
         const message = "Cannot resume a session from another provider in this process. Restart with --provider and optional --model.\n";
-        _ = std.c.write(std.c.STDERR_FILENO, message.ptr, message.len);
+        writeStderr(message);
         return;
     }
     loop.writeTurnErrorToStderr(err);
@@ -828,8 +857,7 @@ pub fn run(
     var line_buf: [64 * 1024]u8 = undefined;
     while (true) {
         if (is_tty) {
-            const prompt = "expert> ";
-            _ = std.c.write(std.c.STDOUT_FILENO, prompt.ptr, prompt.len);
+            writeStdout("expert> ");
         }
 
         const maybe_line = readLine(&line_buf) catch |err| switch (err) {
@@ -876,10 +904,10 @@ pub fn run(
                 // When the entries were streamed live, the last one is already
                 // on screen; printing `rendered` again would duplicate it.
                 if (!stream_ctx.streamed) {
-                    _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+                    writeStdout(rendered);
                 }
                 if (noChangeNotice(metrics_before, session.metrics)) |notice| {
-                    _ = std.c.write(std.c.STDOUT_FILENO, notice.ptr, notice.len);
+                    writeStdout(notice);
                 }
                 if (is_tty) {
                     const tok = session.token_totals;
@@ -894,15 +922,15 @@ pub fn run(
                             tok.output_tokens,
                         },
                     ) catch "";
-                    _ = std.c.write(std.c.STDOUT_FILENO, token_line.ptr, token_line.len);
+                    writeStdout(token_line);
                 }
             },
             .tool_result => |*result| {
                 defer result.deinit(allocator);
                 if (result.llm_text.len > 0) {
-                    _ = std.c.write(std.c.STDOUT_FILENO, result.llm_text.ptr, result.llm_text.len);
+                    writeStdout(result.llm_text);
                     if (result.llm_text[result.llm_text.len - 1] != '\n') {
-                        _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+                        writeStdout("\n");
                     }
                 }
             },
@@ -911,14 +939,9 @@ pub fn run(
                 .provider = session.activeProvider(),
                 .model = session.currentModel(),
             })) catch |err| reportSessionSwitchFailure(err),
-            .session_compact => {
-                const msg = try agent_compaction.compact(allocator, &session);
-                defer allocator.free(msg);
-                _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
-            },
             .session_fork => if (agent_fork.fork(allocator, &session)) |msg| {
                 defer allocator.free(msg);
-                _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
+                writeStdout(msg);
             } else |err| reportSessionSwitchFailure(err),
         }
     }
@@ -950,7 +973,7 @@ fn writeDestination(allocator: std.mem.Allocator, session: *const agent.AgentSes
         .deepseek => |url| allocator.print("\nSource the model reads is sent to DeepSeek at {s}. Files are sent only when\nthe model reads them; nothing is uploaded up front.\n", .{url}) catch return,
     };
     defer allocator.free(line);
-    _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+    writeStdout(line);
 }
 
 const expert_banner_tail =
@@ -961,11 +984,11 @@ const expert_no_workspace_hint =
     "\nNo handler found here. Run 'zttp init <name>' to scaffold a project first.\n";
 
 fn writeBanner(allocator: std.mem.Allocator, session: *const agent.AgentSession) void {
-    _ = std.c.write(std.c.STDOUT_FILENO, expert_banner.ptr, expert_banner.len);
+    writeStdout(expert_banner);
     writeDestination(allocator, session);
-    _ = std.c.write(std.c.STDOUT_FILENO, expert_banner_tail.ptr, expert_banner_tail.len);
+    writeStdout(expert_banner_tail);
     if (!workspaceHasHandler(allocator)) {
-        _ = std.c.write(std.c.STDOUT_FILENO, expert_no_workspace_hint.ptr, expert_no_workspace_hint.len);
+        writeStdout(expert_no_workspace_hint);
     }
 }
 
@@ -1004,7 +1027,7 @@ const InteractiveStreamCtx = struct {
             // Clear the elapsed-time tick before the first entry prints so they
             // never collide on the same line.
             stopWorkingTicker();
-            _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+            writeStdout(rendered);
         }
         self.streamed = true;
     }
@@ -1030,7 +1053,7 @@ const InteractiveCompactionCtx = struct {
             "[context compacted ({s}): {d} -> {d} estimated input tokens]\n",
             .{ @tagName(reason), details.tokens_before, details.estimated_tokens_after },
         ) catch return;
-        _ = std.c.write(std.c.STDOUT_FILENO, notice.ptr, notice.len);
+        writeStdout(notice);
     }
 };
 
@@ -1057,8 +1080,7 @@ const WorkingTicker = struct {
             // Without the thread, fall back to a static one-shot notice so the
             // user still sees that work started.
             active = null;
-            const msg = "working...\n";
-            _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
+            writeStdout("working...\n");
             return;
         };
     }
@@ -1071,8 +1093,7 @@ const WorkingTicker = struct {
             t.join();
             self.thread = null;
             // Clear the elapsed-time line so the entry text starts clean.
-            const clear = "\r\x1b[K";
-            _ = std.c.write(std.c.STDOUT_FILENO, clear.ptr, clear.len);
+            writeStdout("\r\x1b[K");
         }
     }
 
@@ -1081,7 +1102,7 @@ const WorkingTicker = struct {
         while (!self.stop.load(.seq_cst)) {
             var buf: [64]u8 = undefined;
             const line = std.fmt.bufPrint(&buf, "\rworking... {d}s", .{seconds}) catch "\rworking...";
-            _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+            writeStdout(line);
             // Sleep in short slices so stop is observed within ~50ms of finish().
             var slept: u64 = 0;
             while (slept < std.time.ns_per_s) : (slept += 50 * std.time.ns_per_ms) {
@@ -1112,7 +1133,7 @@ fn writeResumeDisclosure(session: *const agent.AgentSession, forked: bool) void 
         "{s} session {s}: {d} entries restored\n",
         .{ verb, id, session.transcript.len() },
     ) catch "session restored\n";
-    _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+    writeStdout(line);
 
     if (session.identity_override_disclosed) {
         const provider = if (session.activeProvider()) |value| value.publicName() else "none";
@@ -1122,7 +1143,7 @@ fn writeResumeDisclosure(session: *const agent.AgentSession, forked: bool) void 
             "launch override applied and persisted: provider={s} model={s}\n",
             .{ provider, model },
         ) catch "launch identity override applied and persisted\n";
-        _ = std.c.write(std.c.STDOUT_FILENO, override_line.ptr, override_line.len);
+        writeStdout(override_line);
     }
 }
 
@@ -1195,12 +1216,11 @@ fn approvalCardText(allocator: std.mem.Allocator, preview: loop.ChangeSetApprova
 /// Write the result card to stdout.
 fn writeApprovalCard(preview: loop.ChangeSetApprovalPreview) void {
     const text = approvalCardText(std.heap.smp_allocator, preview) catch {
-        const message = "Result card: not shown, out of memory\n";
-        _ = std.c.write(std.c.STDOUT_FILENO, message.ptr, message.len);
+        writeStdout("Result card: not shown, out of memory\n");
         return;
     };
     defer std.heap.smp_allocator.free(text);
-    _ = std.c.write(std.c.STDOUT_FILENO, text.ptr, text.len);
+    writeStdout(text);
 }
 
 /// The line that ends a model turn with no verified change set, or null when
@@ -1219,7 +1239,7 @@ fn approveEdit(preview: loop.ChangeSetApprovalPreview) !bool {
         "\nVerified change set: {d} source file{s}  proof={s}\n",
         .{ preview.changes.len, if (preview.changes.len == 1) "" else "s", preview.proof_id },
     ) catch "\nVerified change set\n";
-    _ = std.c.write(std.c.STDOUT_FILENO, header.ptr, header.len);
+    writeStdout(header);
     writeApprovalCard(preview);
     for (preview.changes) |change| {
         const change_header = std.fmt.bufPrint(
@@ -1227,14 +1247,13 @@ fn approveEdit(preview: loop.ChangeSetApprovalPreview) !bool {
             "\n{s}  ({d} -> {d} lines)\n",
             .{ change.file, lineCount(change.before orelse ""), lineCount(change.after) },
         ) catch "\nsource change\n";
-        _ = std.c.write(std.c.STDOUT_FILENO, change_header.ptr, change_header.len);
+        writeStdout(change_header);
         if (change.rewrite_trace.len > 0) writeRewriteTrace(change.rewrite_trace);
         writeEditDiff(change.before, change.after);
     }
 
     while (true) {
-        const prompt = "Apply this change set? [y/N, d=show files] ";
-        _ = std.c.write(std.c.STDOUT_FILENO, prompt.ptr, prompt.len);
+        writeStdout("Apply this change set? [y/N, d=show files] ");
 
         var line_buf: [256]u8 = undefined;
         const maybe_line = readLine(&line_buf) catch |err| switch (err) {
@@ -1250,9 +1269,9 @@ fn approveEdit(preview: loop.ChangeSetApprovalPreview) !bool {
         switch (trimmed[0]) {
             'd', 'D' => {
                 for (preview.changes) |change| {
-                    _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
-                    _ = std.c.write(std.c.STDOUT_FILENO, change.file.ptr, change.file.len);
-                    _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+                    writeStdout("\n");
+                    writeStdout(change.file);
+                    writeStdout("\n");
                     writeMaybeTruncated(change.after);
                 }
                 continue;
@@ -1270,9 +1289,9 @@ const diff_truncate_lines: usize = 100;
 fn writeMaybeTruncated(content: []const u8) void {
     const n = lineCount(content);
     if (n <= diff_truncate_lines) {
-        _ = std.c.write(std.c.STDOUT_FILENO, content.ptr, content.len);
+        writeStdout(content);
         if (content.len == 0 or content[content.len - 1] != '\n') {
-            _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+            writeStdout("\n");
         }
         return;
     }
@@ -1306,18 +1325,18 @@ fn writeMaybeTruncated(content: []const u8) void {
             }
         }
     }
-    _ = std.c.write(std.c.STDOUT_FILENO, content.ptr, head_end);
+    writeStdout(content[0..head_end]);
     var trunc_buf: [128]u8 = undefined;
     const trunc_msg = std.fmt.bufPrint(
         &trunc_buf,
         "... [{d} lines truncated] ...\n",
         .{omitted},
     ) catch "... [lines truncated] ...\n";
-    _ = std.c.write(std.c.STDOUT_FILENO, trunc_msg.ptr, trunc_msg.len);
+    writeStdout(trunc_msg);
     if (tail_start < content.len) {
-        _ = std.c.write(std.c.STDOUT_FILENO, content[tail_start..].ptr, content.len - tail_start);
+        writeStdout(content[tail_start..]);
         if (content[content.len - 1] != '\n') {
-            _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+            writeStdout("\n");
         }
     }
 }
@@ -1328,7 +1347,7 @@ const diff_context_lines: usize = 3;
 /// Byte offset just past the line that starts at `i` (the index after its '\n',
 /// or `s.len` for a final line that has no terminator).
 fn lineEndIncl(s: []const u8, i: usize) usize {
-    const nl = std.mem.indexOfScalarPos(u8, s, i, '\n') orelse return s.len;
+    const nl = std.mem.findScalarPos(u8, s, i, '\n') orelse return s.len;
     return nl + 1;
 }
 
@@ -1505,7 +1524,7 @@ fn writeEditDiff(before: ?[]const u8, after: []const u8) void {
     var w = std.Io.Writer.fixed(&buf);
     renderEditDiff(&w, before, after) catch return writeMaybeTruncated(after);
     const out = w.buffered();
-    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
+    writeStdout(out);
 }
 
 /// Rough logical line count for the approval change-size hint.
@@ -1532,7 +1551,7 @@ fn writeRewriteTrace(trace: []const []u8) void {
     }
     w.writeByte('\n') catch {};
     const out = w.buffered();
-    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
+    writeStdout(out);
 }
 
 /// Read one line from stdin. A line that does not fit in `buf` is consumed to
@@ -1571,11 +1590,11 @@ fn isContractCommand(trimmed: []const u8) bool {
 const contract_usage = "usage: /contract  or  /contract drop <name>\n";
 
 fn writeStdout(text: []const u8) void {
-    _ = std.c.write(std.c.STDOUT_FILENO, text.ptr, text.len);
+    fd_io.writeAll(std.c.STDOUT_FILENO, text);
 }
 
 fn writeStderr(text: []const u8) void {
-    _ = std.c.write(std.c.STDERR_FILENO, text.ptr, text.len);
+    fd_io.writeAll(std.c.STDERR_FILENO, text);
 }
 
 /// Handle `/contract` and `/contract drop <name>`. The command reads and
@@ -1584,7 +1603,7 @@ fn runContractCommand(allocator: std.mem.Allocator, trimmed: []const u8) void {
     const rest = std.mem.trim(u8, trimmed["/contract".len..], " \t");
     const result = if (rest.len == 0)
         contractCard(allocator)
-    else if (std.mem.startsWith(u8, rest, "drop ") and std.mem.indexOfAny(u8, std.mem.trim(u8, rest["drop ".len..], " \t"), " \t") == null)
+    else if (std.mem.startsWith(u8, rest, "drop ") and std.mem.findAny(u8, std.mem.trim(u8, rest["drop ".len..], " \t"), " \t") == null)
         contractDrop(allocator, std.mem.trim(u8, rest["drop ".len..], " \t"))
     else
         writeStdout(contract_usage);
@@ -1750,7 +1769,7 @@ fn expectResult(outcome: *DispatchOutcome, allocator: std.mem.Allocator, needle:
         .result => |*r| {
             defer r.deinit(allocator);
             try testing.expectEqual(want_ok, r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, needle) != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, needle) != null);
         },
         else => return error.TestFailed,
     }
@@ -1765,17 +1784,17 @@ test "help renders local command guidance" {
         .result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "/verify") != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "/status") != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.session_commands[0]) != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.session_commands[1]) != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.view_commands[0]) != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.ledger_commands[0]) != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "/specs <handler.ts>") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "/verify") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "/status") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, commands.session_commands[0]) != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, commands.session_commands[1]) != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, commands.view_commands[0]) != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, commands.ledger_commands[0]) != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "/specs <handler.ts>") != null);
             // Leads with how-to guidance and gates the tool dump behind --tools.
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "How to use zttp expert") != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "help --tools") != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "Registered tools") == null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "How to use zttp expert") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "help --tools") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "Registered tools") == null);
         },
         else => return error.TestFailed,
     }
@@ -1790,9 +1809,9 @@ test "help --tools lists the registered tool names" {
         .result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "Registered tools") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "Registered tools") != null);
             // Still leads with the how-to block.
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "How to use zttp expert") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "How to use zttp expert") != null);
         },
         else => return error.TestFailed,
     }
@@ -1896,13 +1915,13 @@ test "EXP-5: hotkeys help no longer claims Ctrl-C interrupts a blocked turn" {
     var result = try renderHotkeys(testing.allocator);
     defer result.deinit(testing.allocator);
     // No SIGINT handler exists, so the hotkeys text must not claim "interrupt / cancel".
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "interrupt") == null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "Ctrl-C         stop the session") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "interrupt") == null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "Ctrl-C         stop the session") != null);
 }
 
 test "interactive banner points to resolved session identity" {
-    try testing.expect(std.mem.indexOf(u8, expert_banner, "resolved model provider") != null);
-    try testing.expect(std.mem.indexOf(u8, expert_banner, "/status") != null);
+    try testing.expect(std.mem.find(u8, expert_banner, "resolved model provider") != null);
+    try testing.expect(std.mem.find(u8, expert_banner, "/status") != null);
 }
 
 test "EXP-8: post-turn token line is labelled cumulative for the whole session" {
@@ -1915,7 +1934,7 @@ test "EXP-8: post-turn token line is labelled cumulative for the whole session" 
         "[session tokens (cumulative): in={d} cache_r={d} cache_w={d} out={d}]\n",
         .{ @as(u64, 1), @as(u64, 2), @as(u64, 3), @as(u64, 4) },
     ) catch unreachable;
-    try testing.expect(std.mem.indexOf(u8, line, "cumulative") != null);
+    try testing.expect(std.mem.find(u8, line, "cumulative") != null);
 }
 
 test "InteractiveStreamCtx skips user_text and marks streamed for model entries" {
@@ -1946,8 +1965,8 @@ test "processSubmit: /settings reports compile-time defaults without themes" {
         .tool_result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "max_tokens") != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "Theme") == null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "max_tokens") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "Theme") == null);
         },
         else => return error.TestFailed,
     }
@@ -1989,9 +2008,9 @@ test "processSubmit: /model lists only the active provider and marks current" {
         .tool_result => |*result| {
             defer result.deinit(testing.allocator);
             try testing.expect(result.ok);
-            try testing.expect(std.mem.indexOf(u8, result.llm_text, "deepseek-v4-flash") != null);
-            try testing.expect(std.mem.indexOf(u8, result.llm_text, "[current]") != null);
-            try testing.expect(std.mem.indexOf(u8, result.llm_text, "LiquidAI/") == null);
+            try testing.expect(std.mem.find(u8, result.llm_text, "deepseek-v4-flash") != null);
+            try testing.expect(std.mem.find(u8, result.llm_text, "[current]") != null);
+            try testing.expect(std.mem.find(u8, result.llm_text, "LiquidAI/") == null);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -2008,9 +2027,9 @@ test "processSubmit: /model exposes no choices without an active provider" {
         .tool_result => |*result| {
             defer result.deinit(testing.allocator);
             try testing.expect(result.ok);
-            try testing.expect(std.mem.indexOf(u8, result.llm_text, "(no active model provider)") != null);
-            try testing.expect(std.mem.indexOf(u8, result.llm_text, "deepseek-v4-flash") == null);
-            try testing.expect(std.mem.indexOf(u8, result.llm_text, "LiquidAI/") == null);
+            try testing.expect(std.mem.find(u8, result.llm_text, "(no active model provider)") != null);
+            try testing.expect(std.mem.find(u8, result.llm_text, "deepseek-v4-flash") == null);
+            try testing.expect(std.mem.find(u8, result.llm_text, "LiquidAI/") == null);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -2038,7 +2057,7 @@ test "processSubmit: cross-provider model rejection preserves session config" {
         .tool_result => |*result| {
             defer result.deinit(testing.allocator);
             try testing.expect(!result.ok);
-            try testing.expect(std.mem.indexOf(u8, result.llm_text, "active deepseek provider") != null);
+            try testing.expect(std.mem.find(u8, result.llm_text, "active deepseek provider") != null);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -2058,9 +2077,9 @@ test "processSubmit: /status reports provider auth and persistence state" {
         .tool_result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "provider:      stub") != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "auth:          stub") != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "persistence:   disabled") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "provider:      stub") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "auth:          stub") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "persistence:   disabled") != null);
         },
         else => return error.TestFailed,
     }
@@ -2083,9 +2102,9 @@ test "processSubmit: local settings status and model list agree" {
             .tool_result => |*result| {
                 defer result.deinit(testing.allocator);
                 try testing.expect(result.ok);
-                try testing.expect(std.mem.indexOf(u8, result.llm_text, "local") != null or
-                    std.mem.indexOf(u8, result.llm_text, "LiquidAI/LFM2.5-2.6B-MLX-8bit") != null);
-                try testing.expect(std.mem.indexOf(u8, result.llm_text, "deepseek-v4-") == null);
+                try testing.expect(std.mem.find(u8, result.llm_text, "local") != null or
+                    std.mem.find(u8, result.llm_text, "LiquidAI/LFM2.5-2.6B-MLX-8bit") != null);
+                try testing.expect(std.mem.find(u8, result.llm_text, "deepseek-v4-") == null);
             },
             else => return error.TestFailed,
         }
@@ -2103,7 +2122,7 @@ test "processSubmit: /ledger and /chat switch views" {
         .tool_result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "zttp ledger export --session") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "zttp ledger export --session") != null);
         },
         else => return error.TestFailed,
     }
@@ -2113,7 +2132,7 @@ test "processSubmit: /ledger and /chat switch views" {
         .tool_result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "CLI REPL chat") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "CLI REPL chat") != null);
         },
         else => return error.TestFailed,
     }
@@ -2130,7 +2149,7 @@ test "processSubmit: /ledger export requires a persisted session" {
         .tool_result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(!r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "persisted session") != null);
+            try testing.expect(std.mem.find(u8, r.llm_text, "persisted session") != null);
         },
         else => return error.TestFailed,
     }
@@ -2279,7 +2298,7 @@ test "writeSessionTree: indents per depth, marks current with '*'" {
     // Root: no indent, dash marker, id.
     try testing.expect(std.mem.startsWith(u8, out, "- root"));
     // Current child: indented two spaces, star marker, id.
-    try testing.expect(std.mem.indexOf(u8, out, "\n  * child") != null);
+    try testing.expect(std.mem.find(u8, out, "\n  * child") != null);
 }
 
 test "writeSessionTree: orphan root gets orphaned-from annotation" {
@@ -2304,7 +2323,7 @@ test "writeSessionTree: orphan root gets orphaned-from annotation" {
     try writeSessionTree(&aw.writer, &nodes);
 
     const out = aw.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, out, "orphaned-from=missing") != null);
+    try testing.expect(std.mem.find(u8, out, "orphaned-from=missing") != null);
 }
 
 test "writeSessionTree: empty nodes writes nothing" {
@@ -2322,10 +2341,10 @@ test "renderStatus: stub session shows 'stub' provider + 'ephemeral' session" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "provider:      stub") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "auth:          stub") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "session:       ephemeral") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "persistence:   disabled") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "provider:      stub") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "auth:          stub") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "session:       ephemeral") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "persistence:   disabled") != null);
 }
 
 test "renderStatus: enumerates every token total" {
@@ -2341,10 +2360,10 @@ test "renderStatus: enumerates every token total" {
     var result = try renderStatus(testing.allocator, &session);
     defer result.deinit(testing.allocator);
 
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.in:     11") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.out:    22") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.cache_r:33") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.cache_w:44") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "tokens.in:     11") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "tokens.out:    22") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "tokens.cache_r:33") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "tokens.cache_w:44") != null);
 }
 
 fn renderDiffToBuf(buf: []u8, before: ?[]const u8, after: []const u8) []const u8 {
@@ -2376,7 +2395,7 @@ test "renderEditDiff: CRLF line endings do not leak a carriage return" {
     var buf: [256]u8 = undefined;
     const out = renderDiffToBuf(&buf, "x\r\ny\r\n", "x\r\nz\r\n");
     try testing.expectEqualStrings("  x\n- y\n+ z\n", out);
-    try testing.expect(std.mem.indexOfScalar(u8, out, '\r') == null);
+    try testing.expect(std.mem.findScalar(u8, out, '\r') == null);
 }
 
 test "renderEditDiff: a trailing-newline-only change is legible via the no-newline note" {
@@ -2407,7 +2426,7 @@ test "renderEditDiff: a change spanning more than the cap falls back to the file
     aw.writeAll("b\n") catch unreachable;
     var obuf: [8192]u8 = undefined;
     const out = renderDiffToBuf(&obuf, bw.buffered(), aw.buffered());
-    try testing.expect(std.mem.indexOf(u8, out, "large change") != null);
+    try testing.expect(std.mem.find(u8, out, "large change") != null);
 }
 
 test "renderLedgerGuidance shows live session metrics when turns exist" {
@@ -2427,21 +2446,21 @@ test "renderLedgerGuidance shows live session metrics when turns exist" {
         .tool_call_count = 4,
     });
     defer res.deinit(testing.allocator);
-    try testing.expect(std.mem.indexOf(u8, res.llm_text, "This session so far:") != null);
-    try testing.expect(std.mem.indexOf(u8, res.llm_text, "round-trips to first green proof: 5") != null);
-    try testing.expect(std.mem.indexOf(u8, res.llm_text, "12/16 guarantees") != null);
-    try testing.expect(std.mem.indexOf(u8, res.llm_text, "workflow hints:    2 (1 high-confidence)") != null);
-    try testing.expect(std.mem.indexOf(u8, res.llm_text, "veto retries:      3") != null);
-    try testing.expect(std.mem.indexOf(u8, res.llm_text, "tool calls:        4") != null);
+    try testing.expect(std.mem.find(u8, res.llm_text, "This session so far:") != null);
+    try testing.expect(std.mem.find(u8, res.llm_text, "round-trips to first green proof: 5") != null);
+    try testing.expect(std.mem.find(u8, res.llm_text, "12/16 guarantees") != null);
+    try testing.expect(std.mem.find(u8, res.llm_text, "workflow hints:    2 (1 high-confidence)") != null);
+    try testing.expect(std.mem.find(u8, res.llm_text, "veto retries:      3") != null);
+    try testing.expect(std.mem.find(u8, res.llm_text, "tool calls:        4") != null);
     // CLI guidance is still appended.
-    try testing.expect(std.mem.indexOf(u8, res.llm_text, "zttp ledger export") != null);
+    try testing.expect(std.mem.find(u8, res.llm_text, "zttp ledger export") != null);
 }
 
 test "renderLedgerGuidance omits the metrics block for a fresh session" {
     var res = try renderLedgerGuidance(testing.allocator, .{});
     defer res.deinit(testing.allocator);
-    try testing.expect(std.mem.indexOf(u8, res.llm_text, "This session so far:") == null);
-    try testing.expect(std.mem.indexOf(u8, res.llm_text, "zttp ledger export") != null);
+    try testing.expect(std.mem.find(u8, res.llm_text, "This session so far:") == null);
+    try testing.expect(std.mem.find(u8, res.llm_text, "zttp ledger export") != null);
 }
 
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
@@ -2464,7 +2483,7 @@ const ReplStdio = struct {
         if (std.c.pipe(&in_pipe) != 0) return error.PipeFailed;
         if (std.c.pipe(&out_pipe) != 0) return error.PipeFailed;
         if (std.c.pipe(&err_pipe) != 0) return error.PipeFailed;
-        _ = std.c.write(in_pipe[1], input.ptr, input.len);
+        fd_io.writeAll(in_pipe[1], input);
         _ = std.c.close(in_pipe[1]);
         const self: ReplStdio = .{
             .saved_in = std.c.dup(std.c.STDIN_FILENO),
@@ -3687,4 +3706,26 @@ test "/contract then y keeps a required property that is not proven" {
             "    \"injection_safe\",\n    \"canonical\",\n    \"cost_bounded\"\n  ]\n}\n",
         after,
     );
+}
+
+test "buildSessionTreeNodes terminates on cyclic parent_id references without leaking" {
+    const entries = [_]session_paths.SessionEntry{
+        .{
+            .session_id = @constCast("sess-a"),
+            .parent_id = @constCast("sess-b"),
+            .dir_path = @constCast("/tmp/a"),
+            .created_at_unix_ms = 1,
+        },
+        .{
+            .session_id = @constCast("sess-b"),
+            .parent_id = @constCast("sess-a"),
+            .dir_path = @constCast("/tmp/b"),
+            .created_at_unix_ms = 2,
+        },
+    };
+    const nodes = try buildSessionTreeNodes(testing.allocator, &entries, "sess-a");
+    defer freeSessionTreeNodes(testing.allocator, nodes);
+    try testing.expectEqual(@as(usize, 2), nodes.len);
+    try testing.expectEqualStrings("sess-a", nodes[0].session_id);
+    try testing.expectEqualStrings("sess-b", nodes[1].session_id);
 }

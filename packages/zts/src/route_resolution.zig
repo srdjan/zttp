@@ -28,7 +28,7 @@ pub const FunctionSet = struct {
     }
 
     fn appendUnique(self: *FunctionSet, allocator: std.mem.Allocator, function: NodeIndex) !void {
-        if (std.mem.indexOfScalar(NodeIndex, self.functions.items, function) != null) return;
+        if (std.mem.findScalar(NodeIndex, self.functions.items, function) != null) return;
         try self.functions.append(allocator, function);
     }
 };

@@ -270,7 +270,13 @@ fn splitBoundary(
     turn_start: usize,
     threshold: usize,
 ) ?usize {
-    var i = @max(turn_start + 1, threshold);
+    var turn_head_end = turn_start + 1;
+    if (entries[turn_start] == .user_text) {
+        while (turn_head_end < entries.len and entries[turn_head_end] == .system_note) {
+            turn_head_end += 1;
+        }
+    }
+    var i = @max(turn_head_end, threshold);
     while (i < entries.len) : (i += 1) {
         if (isAssistantBoundary(entries[i])) return i;
     }
@@ -279,9 +285,10 @@ fn splitBoundary(
     // that assistant boundary would retain the mandatory provider reasoning
     // verbatim and defeat compaction. The exclusive tail boundary is safe once
     // validateToolPairs has proved that no tool call is unresolved. Keep an
-    // oversized standalone user request verbatim rather than summarizing away
-    // the only authoritative statement of the task.
-    if (entries.len > turn_start + 1 or entries[turn_start] != .user_text) {
+    // oversized standalone user request (and any attached workflow system note)
+    // verbatim rather than summarizing away the only authoritative statement of
+    // the task.
+    if (entries.len > turn_head_end or entries[turn_start] != .user_text) {
         return entries.len;
     }
     return null;
@@ -576,7 +583,7 @@ pub fn buildRegularPrompt(
 
 fn summaryNarrative(summary: []const u8) []const u8 {
     const marker = "\n\n<read-files>\n";
-    const marker_start = std.mem.lastIndexOf(u8, summary, marker) orelse return summary;
+    const marker_start = std.mem.findLast(u8, summary, marker) orelse return summary;
     return summary[0..marker_start];
 }
 
@@ -624,8 +631,8 @@ const prefix_headings = [_][]const u8{
 };
 
 pub fn validateRegularSummary(summary: []const u8) !void {
-    if (std.mem.indexOf(u8, summary, "<read-files>") != null or
-        std.mem.indexOf(u8, summary, "<modified-files>") != null)
+    if (std.mem.find(u8, summary, "<read-files>") != null or
+        std.mem.find(u8, summary, "<modified-files>") != null)
     {
         return error.SummaryInventedFileFacts;
     }
@@ -683,7 +690,7 @@ fn validateHeadings(
 
 fn findHeading(text: []const u8, heading: []const u8, start: usize) ?usize {
     var cursor = start;
-    while (std.mem.indexOfPos(u8, text, cursor, heading)) |position| {
+    while (std.mem.findPos(u8, text, cursor, heading)) |position| {
         const before_ok = position == 0 or text[position - 1] == '\n';
         const after = position + heading.len;
         const after_ok = after == text.len or text[after] == '\n' or text[after] == '\r';
@@ -823,6 +830,10 @@ test "prepare protects unresolved pairs and an oversized single user ask" {
     try addText(&oversized, .user, &@as([1000:0]u8, @splat('x')));
     const user_result = try prepare(testing.allocator, &oversized, 1);
     try testing.expectEqual(NotCompactableReason.oversized_current_user, user_result.not_compactable);
+
+    try oversized.append(testing.allocator, .{ .system_note = "workflow hint attached to current turn" });
+    const with_note_result = try prepare(testing.allocator, &oversized, 1);
+    try testing.expectEqual(NotCompactableReason.oversized_current_user, with_note_result.not_compactable);
 }
 
 test "prepare counts opaque tool reasoning when selecting the retained suffix" {
@@ -945,10 +956,10 @@ test "serializeSpan uses explicit labels exact args and a UTF-8-safe 2000-byte t
     } });
     const serialized = try serializeSpan(testing.allocator, &tr, 0, tr.len());
     defer testing.allocator.free(serialized);
-    try testing.expect(std.mem.indexOf(u8, serialized, "[User]:\ninspect") != null);
-    try testing.expect(std.mem.indexOf(u8, serialized, "args={\"path\":\"a.ts\",\"range\":{\"start\":1}}") != null);
-    try testing.expect(std.mem.indexOf(u8, serialized, "[Tool result]: id=call_1") != null);
-    try testing.expect(std.mem.indexOf(u8, serialized, "...[truncated ") != null);
+    try testing.expect(std.mem.find(u8, serialized, "[User]:\ninspect") != null);
+    try testing.expect(std.mem.find(u8, serialized, "args={\"path\":\"a.ts\",\"range\":{\"start\":1}}") != null);
+    try testing.expect(std.mem.find(u8, serialized, "[Tool result]: id=call_1") != null);
+    try testing.expect(std.mem.find(u8, serialized, "...[truncated ") != null);
     try testing.expect(std.unicode.utf8ValidateSlice(serialized));
 }
 
@@ -971,10 +982,10 @@ test "serializeSpan hides host propose_change_set baseline from the summarizer" 
         .assistant_tool_use => |raw_calls| try testing.expectEqualStrings(raw_args, raw_calls[0].args_json),
         else => return error.TestExpectedRawToolUse,
     }
-    try testing.expect(std.mem.indexOf(u8, serialized, "args={\"changes\":[{\"file\":\"handler.ts\",\"content\":\"new\"}]}") != null);
-    try testing.expect(std.mem.indexOf(u8, serialized, "baseline_state") == null);
-    try testing.expect(std.mem.indexOf(u8, serialized, "baseline_sha256") == null);
-    try testing.expect(std.mem.indexOf(u8, serialized, "\"before\"") == null);
+    try testing.expect(std.mem.find(u8, serialized, "args={\"changes\":[{\"file\":\"handler.ts\",\"content\":\"new\"}]}") != null);
+    try testing.expect(std.mem.find(u8, serialized, "baseline_state") == null);
+    try testing.expect(std.mem.find(u8, serialized, "baseline_sha256") == null);
+    try testing.expect(std.mem.find(u8, serialized, "\"before\"") == null);
 }
 
 test "extractFileOps is cumulative unique and deterministic" {
@@ -1027,7 +1038,7 @@ test "extractFileOps is cumulative unique and deterministic" {
     errdefer testing.allocator.free(receipt_text);
     var receipt_payload = try receipt_source.clone(testing.allocator);
     errdefer receipt_payload.deinit(testing.allocator);
-    try tr.entries.append(testing.allocator, .{ .verified_change_set = .{
+    try tr.appendOwned(testing.allocator, .{ .verified_change_set = .{
         .llm_text = receipt_text,
         .ui_payload = receipt_payload,
     } });
@@ -1084,10 +1095,10 @@ test "summary validators reject empty malformed and model-authored file facts" {
 test "regular prompt contains previous summary new span focus and fixed contract" {
     const prompt = try buildRegularPrompt(testing.allocator, valid_regular, "[User]:\nnew", "focus on blocked work");
     defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "<previous-summary>") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "[User]:\nnew") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "focus on blocked work") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "## Critical Context") != null);
+    try testing.expect(std.mem.find(u8, prompt, "<previous-summary>") != null);
+    try testing.expect(std.mem.find(u8, prompt, "[User]:\nnew") != null);
+    try testing.expect(std.mem.find(u8, prompt, "focus on blocked work") != null);
+    try testing.expect(std.mem.find(u8, prompt, "## Critical Context") != null);
 }
 
 test "repeated compaction does not feed host file facts back to the summarizer" {
@@ -1097,7 +1108,7 @@ test "repeated compaction does not feed host file facts back to the summarizer" 
     const prompt = try buildRegularPrompt(testing.allocator, previous, "[User]:\ncontinue", null);
     defer testing.allocator.free(prompt);
 
-    try testing.expect(std.mem.indexOf(u8, prompt, valid_regular) != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "<read-files>") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "<modified-files>") == null);
+    try testing.expect(std.mem.find(u8, prompt, valid_regular) != null);
+    try testing.expect(std.mem.find(u8, prompt, "<read-files>") == null);
+    try testing.expect(std.mem.find(u8, prompt, "<modified-files>") == null);
 }

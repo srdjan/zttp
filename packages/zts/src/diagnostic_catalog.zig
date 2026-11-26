@@ -34,7 +34,6 @@ pub const Producer = enum {
     strict_checker,
     spec_discharge,
     capability_policy,
-    property_analysis,
     semantics_conformance,
 };
 

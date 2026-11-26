@@ -2134,8 +2134,10 @@ pub const HandlerVerifier = struct {
 
         if (callee_tag == .identifier) {
             const binding = self.ir_view.getBinding(call.callee) orelse return null;
-            for (self.optional_function_slots.items) |opt_fn| {
-                if (opt_fn.slot == binding.slot) return opt_fn.kind;
+            if (binding.kind == .global or binding.kind == .undeclared_global) {
+                for (self.optional_function_slots.items) |opt_fn| {
+                    if (opt_fn.slot == binding.slot) return opt_fn.kind;
+                }
             }
         }
 
@@ -2737,7 +2739,7 @@ test "diagnostic formatting" {
     try verifier.formatDiagnostics(SourceView.of(source), &aw.writer);
     output_buf = aw.toArrayList();
     try std.testing.expect(output_buf.items.len > 0);
-    try std.testing.expect(std.mem.indexOf(u8, output_buf.items, "verify error[ZTS302]") != null);
+    try std.testing.expect(std.mem.find(u8, output_buf.items, "verify error[ZTS302]") != null);
 }
 
 test "HandlerVerifier fails closed when a diagnostic cannot allocate" {
@@ -3527,8 +3529,8 @@ test "ZTS309 offers optional chaining only where it is a repair" {
         "env(\"HOME\")",
         &help_buffer,
     ) orelse return error.TestExpectedDiagnostic;
-    try std.testing.expect(std.mem.indexOf(u8, string_help, "?.") == null);
-    try std.testing.expect(std.mem.indexOf(u8, string_help, "no such property") != null);
+    try std.testing.expect(std.mem.find(u8, string_help, "?.") == null);
+    try std.testing.expect(std.mem.find(u8, string_help, "no such property") != null);
 
     const object_help = try optionalAccessHelp(
         allocator,
@@ -3536,7 +3538,7 @@ test "ZTS309 offers optional chaining only where it is a repair" {
         "sqlOne(\"q\")",
         &help_buffer,
     ) orelse return error.TestExpectedDiagnostic;
-    try std.testing.expect(std.mem.indexOf(u8, object_help, "val?.prop") != null);
+    try std.testing.expect(std.mem.find(u8, object_help, "val?.prop") != null);
 }
 
 test "ZTS309 stays silent once the optional is narrowed" {
@@ -3913,8 +3915,6 @@ test "ZTS303 closure walks keep the precision of the checks outside them" {
     );
     try std.testing.expectEqual(@as(u32, 0), restored.unchecked_result);
 }
-
-const import_corpus = @import("tests/import_corpus.zig");
 
 /// Parse `source` and answer `functionAlwaysReturns` for the first node
 /// carrying `tag`. Used to reach a body shape by tag rather than by position,

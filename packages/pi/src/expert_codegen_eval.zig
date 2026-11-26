@@ -400,17 +400,25 @@ pub fn summarize(results: []const CaseResult) CodegenSummary {
 /// Median of the per-case round-trip counts. Sorts a fixed-size copy so the
 /// caller's slice is untouched and no allocation is needed; a corpus larger
 /// than the buffer falls back to reporting 0 rather than a wrong median.
+pub fn lowerMiddleMedianSorted(sorted: []const u8) u8 {
+    if (sorted.len == 0) return 0;
+    return sorted[(sorted.len - 1) / 2];
+}
+
 fn medianRoundtrips(results: []const CaseResult) u8 {
-    var buf: [64]u8 = undefined;
-    if (results.len == 0 or results.len > buf.len) return 0;
-    for (results, 0..) |r, i| buf[i] = r.roundtrips;
-    const sample = buf[0..results.len];
-    std.mem.sort(u8, sample, {}, std.sort.asc(u8));
-    const mid = sample.len / 2;
-    if (sample.len % 2 == 1) return sample[mid];
-    // Even count: the lower of the two middles, so the reported figure is
-    // always a round-trip count some case actually took.
-    return sample[mid - 1];
+    if (results.len == 0) return 0;
+    var counts: [256]usize = @splat(0);
+    for (results) |r| counts[r.roundtrips] += 1;
+    // Pick the lower of the two middles on even counts so the reported
+    // figure is always a round-trip count some case actually took.
+    const target_rank = (results.len - 1) / 2;
+    var seen: usize = 0;
+    for (counts, 0..) |count, value| {
+        if (count == 0) continue;
+        seen += count;
+        if (seen > target_rank) return @intCast(value);
+    }
+    return 0;
 }
 
 test "median roundtrips reports a value a case actually took" {
@@ -455,6 +463,27 @@ test "intent rate is measured over checked cases, not the whole corpus" {
     try std.testing.expectEqual(@as(usize, 1), s.intent_passes);
     // 1 of 2 checked, not 1 of 4 total.
     try std.testing.expectEqual(@as(usize, 50), s.intentPassPercent());
+}
+
+test "medianRoundtrips handles >64 cases and shares lower-middle rule" {
+    var many: [70]CaseResult = undefined;
+    for (&many, 0..) |*slot, i| {
+        slot.* = .{
+            .name = "x",
+            .routed = true,
+            .draft_quality = .raw_veto_pass,
+            .applied = true,
+            .passed_criterion = true,
+            .roundtrips = if (i < 35) 2 else 5,
+            .tool_calls = 0,
+            .proven_guarantees = 0,
+            .intent = .not_checked,
+        };
+    }
+    try std.testing.expectEqual(@as(u8, 2), medianRoundtrips(&many));
+    try std.testing.expectEqual(@as(u8, 2), lowerMiddleMedianSorted(&.{ 1, 2, 3, 9 }));
+    try std.testing.expectEqual(@as(u8, 2), lowerMiddleMedianSorted(&.{ 1, 2, 9 }));
+    try std.testing.expectEqual(@as(u8, 0), lowerMiddleMedianSorted(&.{}));
 }
 
 /// How many failing cases reported a given leading ZTS code. This is the gap
@@ -514,7 +543,7 @@ pub fn collectCodes(
         }
 
         var i: usize = 0;
-        while (std.mem.indexOfPos(u8, text, i, "ZTS")) |pos| {
+        while (std.mem.findPos(u8, text, i, "ZTS")) |pos| {
             var end = pos + 3;
             while (end < text.len and std.ascii.isDigit(text[end])) end += 1;
             i = pos + 3;
@@ -523,8 +552,11 @@ pub fn collectCodes(
             // ZTS000 is the synthesized "no violations" marker, not a rule.
             if (std.mem.eql(u8, code, "ZTS000")) continue;
             if (zts.PolicyCatalog.findByCode(code) != null) continue;
-            const gop = try off_registry.getOrPut(allocator, code);
-            if (!gop.found_existing) gop.key_ptr.* = try allocator.dupe(u8, code);
+            if (!off_registry.contains(code)) {
+                const owned = try allocator.dupe(u8, code);
+                errdefer allocator.free(owned);
+                try off_registry.put(allocator, owned, {});
+            }
         }
     }
 }
@@ -585,7 +617,7 @@ fn calibrateCodeCollectorWith(allocator: std.mem.Allocator, collector: CodeColle
 /// tripped by a diagnostic for a different one.
 fn containsCodeToken(text: []const u8, code: []const u8) bool {
     var i: usize = 0;
-    while (std.mem.indexOfPos(u8, text, i, code)) |pos| {
+    while (std.mem.findPos(u8, text, i, code)) |pos| {
         i = pos + code.len;
         const opens = pos == 0 or !std.ascii.isAlphanumeric(text[pos - 1]);
         const closes = i >= text.len or !std.ascii.isAlphanumeric(text[i]);
@@ -619,7 +651,7 @@ fn isDiagnosticResult(result: transcript_mod.OwnedToolResult) bool {
 
 fn findZts(text: []const u8) ?[]const u8 {
     var i: usize = 0;
-    while (std.mem.indexOfPos(u8, text, i, "ZTS")) |pos| {
+    while (std.mem.findPos(u8, text, i, "ZTS")) |pos| {
         var end = pos + 3;
         while (end < text.len and std.ascii.isDigit(text[end])) end += 1;
         // ZTS000 is the synthesized "no violations" / envelope marker, not a

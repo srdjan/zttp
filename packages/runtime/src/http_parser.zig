@@ -91,9 +91,16 @@ fn isKnownMethod(method: []const u8) bool {
 }
 
 pub fn parseRequestLineBorrowed(request_line: []const u8, max_url_length: usize) !RequestLine {
+    for (request_line) |c| {
+        if (c < 0x20 or c == 0x7F) return error.InvalidRequest;
+    }
+
     var parts = std.mem.splitScalar(u8, request_line, ' ');
     const method = parts.next() orelse return error.InvalidRequest;
     const url = parts.next() orelse return error.InvalidRequest;
+    const version = parts.next() orelse return error.InvalidRequest;
+    if (parts.next() != null) return error.InvalidRequest;
+    if (url.len == 0) return error.InvalidRequest;
 
     // The method was taken verbatim and checked against nothing, which is why
     // seven body bytes that had bled in from a mis-framed previous request
@@ -105,10 +112,14 @@ pub fn parseRequestLineBorrowed(request_line: []const u8, max_url_length: usize)
 
     if (url.len > max_url_length) return error.UriTooLong;
 
-    const version = parts.next() orelse "";
-    const is_http_10 = std.mem.eql(u8, version, "HTTP/1.0");
+    const is_http_10 = if (std.mem.eql(u8, version, "HTTP/1.0"))
+        true
+    else if (std.mem.eql(u8, version, "HTTP/1.1"))
+        false
+    else
+        return error.InvalidRequest;
 
-    const query_start = std.mem.indexOf(u8, url, "?");
+    const query_start = std.mem.find(u8, url, "?");
     const path = if (query_start) |idx| url[0..idx] else url;
     const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
 
@@ -215,7 +226,7 @@ pub fn parseQueryString(
     var qp_idx: usize = 0;
     var pairs = std.mem.splitScalar(u8, query_string, '&');
     while (pairs.next()) |pair| {
-        if (std.mem.indexOf(u8, pair, "=")) |eq_idx| {
+        if (std.mem.find(u8, pair, "=")) |eq_idx| {
             const raw_key = pair[0..eq_idx];
             const raw_val = pair[eq_idx + 1 ..];
 
@@ -257,11 +268,8 @@ fn processHeaderLineBorrowed(
     allocator: std.mem.Allocator,
     fast_slots: *FastHeaderSlots,
 ) !void {
-    // A line with no colon at all is not a header and never was; keep
-    // skipping it. A line WITH a colon whose field-name is not a token is a
-    // malformed message, and skipping it is what let a mis-parsed
-    // Content-Length desynchronise the connection. Reject instead.
-    const header = splitHeaderLine(line) orelse return;
+    if (line.len > 0 and (line[0] == ' ' or line[0] == '\t')) return error.InvalidHeaderName;
+    const header = splitHeaderLine(line) orelse return error.InvalidHeaderName;
     if (!isValidHeaderName(header.key)) return error.InvalidHeaderName;
     const key = header.key;
     const value = header.value;
@@ -325,7 +333,7 @@ pub fn isValidHeaderName(name: []const u8) bool {
 /// pipelined request's request-line - where `parseRequestLineBorrowed` accepted
 /// the seven injected bytes as a method and dispatched it 200.
 pub fn splitHeaderLine(line: []const u8) ?struct { key: []const u8, value: []const u8 } {
-    const idx = std.mem.indexOfScalar(u8, line, ':') orelse return null;
+    const idx = std.mem.findScalar(u8, line, ':') orelse return null;
     const key = line[0..idx];
     const value = std.mem.trimStart(u8, line[idx + 1 ..], " \t");
     return .{ .key = key, .value = value };
@@ -346,7 +354,9 @@ pub fn parseContentLength(header_section: []const u8) !?usize {
     var found: ?usize = null;
     while (lines.next()) |line| {
         if (line.len == 0) break;
-        const header = splitHeaderLine(line) orelse continue;
+        if (line[0] == ' ' or line[0] == '\t') return error.InvalidHeaderName;
+        const header = splitHeaderLine(line) orelse return error.InvalidHeaderName;
+        if (!isValidHeaderName(header.key)) return error.InvalidHeaderName;
         if (std.ascii.eqlIgnoreCase(header.key, "content-length")) {
             const parsed = try parseContentLengthValue(header.value);
             if (found) |existing| {
@@ -368,7 +378,9 @@ pub fn parseTransferEncoding(header_section: []const u8) !TransferEncoding {
     _ = lines.next() orelse return .none; // skip request line
     while (lines.next()) |line| {
         if (line.len == 0) break;
-        const header = splitHeaderLine(line) orelse continue;
+        if (line[0] == ' ' or line[0] == '\t') return error.InvalidHeaderName;
+        const header = splitHeaderLine(line) orelse return error.InvalidHeaderName;
+        if (!isValidHeaderName(header.key)) return error.InvalidHeaderName;
         if (std.ascii.eqlIgnoreCase(header.key, "transfer-encoding")) {
             if (result != .none) return error.UnsupportedTransferEncoding;
             result = try parseTransferEncodingValue(header.value);
@@ -501,7 +513,7 @@ pub fn decodeChunkedBody(
 
     var pos: usize = 0;
     while (true) {
-        const line_rel = std.mem.indexOf(u8, body[pos..], "\r\n") orelse return error.IncompleteBody;
+        const line_rel = std.mem.find(u8, body[pos..], "\r\n") orelse return error.IncompleteBody;
         const line_end = pos + line_rel;
         const size = try parseChunkSizeLine(body[pos..line_end]);
         pos = line_end + 2;
@@ -515,7 +527,7 @@ pub fn decodeChunkedBody(
 }
 
 fn parseChunkSizeLine(line: []const u8) !usize {
-    const size_part_raw = if (std.mem.indexOfScalar(u8, line, ';')) |idx| line[0..idx] else line;
+    const size_part_raw = if (std.mem.findScalar(u8, line, ';')) |idx| line[0..idx] else line;
     const size_part = std.mem.trim(u8, size_part_raw, " \t");
     if (size_part.len == 0) return error.InvalidChunkedEncoding;
 
@@ -532,7 +544,7 @@ fn parseChunkSizeLine(line: []const u8) !usize {
 }
 
 fn findCrlfWithin(input: []const u8, max_line_bytes: usize) !?usize {
-    if (std.mem.indexOf(u8, input, "\r\n")) |idx| {
+    if (std.mem.find(u8, input, "\r\n")) |idx| {
         if (idx > max_line_bytes) return error.InvalidChunkedEncoding;
         return idx;
     }
@@ -571,7 +583,7 @@ test "findHeaderEnd: SIMD path locates terminator" {
     // 32+ bytes forces at least one SIMD iteration.
     const buf = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\nbody after";
     // Compute expected offset: position of \r\n\r\n.
-    const expected = std.mem.indexOf(u8, buf, "\r\n\r\n").?;
+    const expected = std.mem.find(u8, buf, "\r\n\r\n").?;
     try testing.expectEqual(@as(?usize, expected), findHeaderEnd(buf));
 }
 
@@ -700,14 +712,40 @@ test "a header line with a non-token name is rejected, not skipped" {
     try testing.expectEqual(@as(?usize, null), slots.content_length);
 }
 
-test "a line with no colon is still skipped" {
-    // The control. A line with no colon was never a header, and turning that
-    // into a rejection would refuse messages this server has always accepted.
+test "header lines without a colon or with obs-fold whitespace are rejected" {
     var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
     defer headers.deinit(testing.allocator);
     var slots: FastHeaderSlots = .{};
-    try processHeaderLineBorrowed("not a header", &headers, testing.allocator, &slots);
+    try testing.expectError(
+        error.InvalidHeaderName,
+        processHeaderLineBorrowed("not a header", &headers, testing.allocator, &slots),
+    );
+    try testing.expectError(
+        error.InvalidHeaderName,
+        processHeaderLineBorrowed(" folded: value", &headers, testing.allocator, &slots),
+    );
+    try testing.expectError(
+        error.InvalidHeaderName,
+        processHeaderLineBorrowed("\tfolded: value", &headers, testing.allocator, &slots),
+    );
     try testing.expectEqual(@as(usize, 0), headers.items.len);
+
+    try testing.expectError(
+        error.InvalidHeaderName,
+        parseContentLength("POST / HTTP/1.1\r\nContent-Length : 5\r\n\r\n"),
+    );
+    try testing.expectError(
+        error.InvalidHeaderName,
+        parseContentLength("POST / HTTP/1.1\r\nbad header\r\n\r\n"),
+    );
+    try testing.expectError(
+        error.InvalidHeaderName,
+        parseTransferEncoding("POST / HTTP/1.1\r\nTransfer-Encoding : chunked\r\n\r\n"),
+    );
+    try testing.expectError(
+        error.InvalidHeaderName,
+        parseTransferEncoding("POST / HTTP/1.1\r\nbad header\r\n\r\n"),
+    );
 }
 
 test "the request line refuses a method nothing checked before" {
@@ -1162,7 +1200,7 @@ test "fuzz: parseContentLength tolerates malformed header sections" {
         if (parseContentLength(input)) |_| {
             // success or null — both fine
         } else |err| switch (err) {
-            error.InvalidContentLength, error.DuplicateContentLength => {},
+            error.InvalidHeaderName, error.InvalidContentLength, error.DuplicateContentLength => {},
         }
     }
 }
@@ -1188,19 +1226,18 @@ test "fuzz: findHeaderEnd reports only in-range offsets" {
 // Specific known-bad inputs that have historically tripped HTTP parsers.
 // These are regression pins, not fuzz iterations.
 test "parser rejects classic malformed request-line shapes" {
-    // A line with no method or no url must error.
+    // A line with no method, no url, missing/unsupported version, or extra tokens must error.
     try testing.expectError(error.InvalidRequest, parseRequestLineBorrowed("", DEFAULT_MAX_URL_LENGTH));
     try testing.expectError(error.InvalidRequest, parseRequestLineBorrowed("GET", DEFAULT_MAX_URL_LENGTH));
+    try testing.expectError(error.InvalidRequest, parseRequestLineBorrowed("GET /", DEFAULT_MAX_URL_LENGTH));
+    try testing.expectError(error.InvalidRequest, parseRequestLineBorrowed("GET / HTTP/2.0", DEFAULT_MAX_URL_LENGTH));
+    try testing.expectError(error.InvalidRequest, parseRequestLineBorrowed("GET /a /b HTTP/1.1", DEFAULT_MAX_URL_LENGTH));
+    try testing.expectError(error.InvalidRequest, parseRequestLineBorrowed("GET  HTTP/1.1", DEFAULT_MAX_URL_LENGTH));
 }
 
-test "parser preserves CR/LF embedded in the request line verbatim" {
-    // The request line is one logical line; embedded CR/LF could be a
-    // smuggling attempt. The current parser does NOT strip them — they
-    // end up inside `url` and downstream consumers see them. Pin that
-    // current behavior so any future "strip CR/LF" change is a
-    // conscious decision (and updates this test).
-    const line = try parseRequestLineBorrowed("GET /a\r\nInjected: header HTTP/1.1", DEFAULT_MAX_URL_LENGTH);
-    try testing.expect(std.mem.indexOf(u8, line.url, "\r") != null);
+test "parser rejects CR/LF and DEL control bytes in request line" {
+    try testing.expectError(error.InvalidRequest, parseRequestLineBorrowed("GET /a\r\nInjected: header HTTP/1.1", DEFAULT_MAX_URL_LENGTH));
+    try testing.expectError(error.InvalidRequest, parseRequestLineBorrowed("GET /a\x7fb HTTP/1.1", DEFAULT_MAX_URL_LENGTH));
 }
 
 test "parser preserves path traversal sequences in the URL slice verbatim" {

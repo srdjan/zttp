@@ -70,9 +70,8 @@ pub fn runMeta(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 
     const info = expert_meta.compute();
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     const w = &aw.writer;
 
     if (json_mode) {
@@ -81,8 +80,7 @@ pub fn runMeta(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         try expert_meta.writeText(w, &info);
     }
 
-    buf = aw.toArrayList();
-    try writeOwnedToStdout(buf.items);
+    try writeOwnedToStdout(aw.written());
 }
 
 pub fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -110,9 +108,8 @@ pub fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !v
         std.process.exit(1);
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     const w = &aw.writer;
 
     var has_errors = false;
@@ -153,8 +150,7 @@ pub fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !v
         }
     }
 
-    buf = aw.toArrayList();
-    try writeOwnedToStdout(buf.items);
+    try writeOwnedToStdout(aw.written());
 
     if (has_errors) std.process.exit(1);
 }
@@ -185,9 +181,8 @@ pub fn runVerifyModules(allocator: std.mem.Allocator, argv: []const []const u8) 
     };
     defer result.deinit(allocator);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
     const w = &aw.writer;
 
     if (parsed.json_mode) {
@@ -211,8 +206,7 @@ pub fn runVerifyModules(allocator: std.mem.Allocator, argv: []const []const u8) 
         }
     }
 
-    buf = aw.toArrayList();
-    try writeOwnedToStdout(buf.items);
+    try writeOwnedToStdout(aw.written());
 
     if (result.hasErrors()) std.process.exit(1);
 }

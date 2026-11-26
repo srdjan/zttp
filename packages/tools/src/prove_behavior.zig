@@ -17,24 +17,13 @@
 const std = @import("std");
 const writeAllFd = @import("precompile_util.zig").writeAllFd;
 const zts = @import("zts");
-const edit_simulate = @import("edit_simulate.zig");
+const project_config_mod = @import("project_config");
 const precompile = @import("precompile.zig");
 
 const contract_diff = zts.contract_diff;
 const file_io = zts.file_io;
 
 const max_source_bytes = 4 * 1024 * 1024;
-
-/// The verdict, decoupled from how it is rendered or signed. `laws_fired`
-/// and the strings borrow the diff/arena; valid until the caller frees them.
-pub const Verdict = struct {
-    classification: []const u8,
-    claim_scope: []const u8,
-    preserved: u32,
-    response_changed: u32,
-    added: u32,
-    removed: u32,
-};
 
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
@@ -84,13 +73,18 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         std.process.exit(2);
     };
 
-    const discovered_schema = if (explicit_sql_schema_path == null)
-        edit_simulate.discoverProjectSqlSchemaPath(allocator, after) orelse
-            edit_simulate.discoverProjectSqlSchemaPath(allocator, before)
-    else
-        null;
-    defer if (discovered_schema) |path| allocator.free(path);
-    const sql_schema_path = explicit_sql_schema_path orelse discovered_schema;
+    var ctx = blk: {
+        var after_ctx = try project_config_mod.discoverAnalysisContext(allocator, after, null);
+        if (after_ctx.found) break :blk after_ctx;
+        after_ctx.deinit(allocator);
+        break :blk try project_config_mod.discoverAnalysisContext(allocator, before, null);
+    };
+    defer ctx.deinit(allocator);
+
+    const policy_source = try ctx.readPolicySource(allocator);
+    defer if (policy_source) |src| allocator.free(src);
+
+    const sql_schema_path = explicit_sql_schema_path orelse ctx.sqlite;
 
     const before_src = file_io.readFile(allocator, before, max_source_bytes) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ before, err });
@@ -106,6 +100,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     var before_result = precompile.runCheckOnlyFromSourceWithOptions(allocator, before_src, before, .{
         .sql_schema_path = sql_schema_path,
+        .policy_source = policy_source,
         .json_mode = true,
     }) catch |err| switch (err) {
         error.MissingSqlSchema => std.process.exit(2),
@@ -114,6 +109,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     defer before_result.deinit(allocator);
     var after_result = precompile.runCheckOnlyFromSourceWithOptions(allocator, after_src, after, .{
         .sql_schema_path = sql_schema_path,
+        .policy_source = policy_source,
         .json_mode = true,
     }) catch |err| switch (err) {
         error.MissingSqlSchema => std.process.exit(2),

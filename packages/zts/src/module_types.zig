@@ -165,16 +165,6 @@ fn optionalField(pool: *TypePool, allocator: std.mem.Allocator, name: []const u8
     };
 }
 
-fn addParam(pool: *TypePool, allocator: std.mem.Allocator, name: []const u8, type_idx: TypeIndex) FuncParam {
-    const n = pool.addName(allocator, name);
-    return .{
-        .name_start = n.start,
-        .name_len = n.len,
-        .type_idx = type_idx,
-        .optional = false,
-    };
-}
-
 fn addField(pool: *TypePool, allocator: std.mem.Allocator, name: []const u8, type_idx: TypeIndex) type_pool_mod.RecordField {
     const n = pool.addName(allocator, name);
     return .{

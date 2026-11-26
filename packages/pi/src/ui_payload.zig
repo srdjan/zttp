@@ -1706,7 +1706,7 @@ test "repair candidate payload round-trips" {
             try testing.expectEqualStrings("insert_guard_before_line", candidate.intent_kind);
             try testing.expect(candidate.verification_ok);
             try testing.expectEqual(@as(u32, 0), candidate.stats.new);
-            try testing.expect(std.mem.indexOf(u8, candidate.proposed_content, "Response.json") != null);
+            try testing.expect(std.mem.find(u8, candidate.proposed_content, "Response.json") != null);
         },
         else => return error.TestFailed,
     }
@@ -1737,7 +1737,7 @@ test "protocol repair payload round-trips exact binding" {
             try testing.expectEqualStrings("zts-model-1", repair.profile_id);
             try testing.expectEqualStrings("policy", repair.policy_hash);
             try testing.expectEqualStrings("graph", repair.module_graph_hash);
-            try testing.expect(std.mem.indexOf(u8, repair.repairs_json, "replace_let_with_const") != null);
+            try testing.expect(std.mem.find(u8, repair.repairs_json, "replace_let_with_const") != null);
         },
         else => return error.TestFailed,
     }

@@ -182,9 +182,8 @@ pub fn getHeaderValueCaseInsensitive(
 }
 
 pub fn validateHeaderPair(name: []const u8, value: []const u8) bool {
-    if (name.len == 0) return false;
-    if (std.mem.indexOfAny(u8, name, "\r\n") != null) return false;
-    if (std.mem.indexOfAny(u8, value, "\r\n") != null) return false;
+    if (!http_parser.isValidHeaderName(name)) return false;
+    if (std.mem.findAny(u8, value, "\r\n\x00") != null) return false;
     return true;
 }
 
@@ -242,7 +241,7 @@ pub fn splitPathAndQuery(url: []const u8) struct {
     path: []const u8,
     query_string: []const u8,
 } {
-    if (std.mem.indexOfScalar(u8, url, '?')) |idx| {
+    if (std.mem.findScalar(u8, url, '?')) |idx| {
         return .{
             .path = url[0..idx],
             .query_string = url[idx + 1 ..],
@@ -330,4 +329,14 @@ test "parseRequestTarget with no query yields the full path and empty params" {
     defer t.deinit(allocator);
     try std.testing.expectEqualStrings("/health", t.path);
     try std.testing.expectEqual(@as(usize, 0), t.params.len);
+}
+
+test "validateHeaderPair enforces RFC token names and rejects CRLF/NUL values" {
+    try std.testing.expect(validateHeaderPair("X-Custom-Header", "value-123"));
+    try std.testing.expect(!validateHeaderPair("", "ok"));
+    try std.testing.expect(!validateHeaderPair("Bad Name", "ok"));
+    try std.testing.expect(!validateHeaderPair("Bad:Name", "ok"));
+    try std.testing.expect(!validateHeaderPair("Bad\r\nName", "ok"));
+    try std.testing.expect(!validateHeaderPair("X-Ok", "bad\r\nvalue"));
+    try std.testing.expect(!validateHeaderPair("X-Ok", "bad\x00value"));
 }

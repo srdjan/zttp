@@ -119,15 +119,25 @@ $dirty"
   head_commit="$(git rev-parse HEAD)"
   [ "$head_commit" = "$tag_commit" ] || fail "HEAD $head_commit is not tag $tag ($tag_commit); move the tag or check out the tagged commit"
 
-  local package_version zts_version runtime_version binary_version
+  local package_version zts_version runtime_version modules_version pi_version proof_checker_version tools_version sdk_version binary_version
   package_version="$(zon_version build.zig.zon)"
   zts_version="$(zon_version packages/zts/build.zig.zon)"
   runtime_version="$(zon_version packages/runtime/build.zig.zon)"
+  modules_version="$(zon_version packages/modules/build.zig.zon)"
+  pi_version="$(zon_version packages/pi/build.zig.zon)"
+  proof_checker_version="$(zon_version packages/proof-checker/build.zig.zon)"
+  tools_version="$(zon_version packages/tools/build.zig.zon)"
+  sdk_version="$(zon_version packages/zttp-sdk/build.zig.zon)"
   binary_version="$(awk -F'"' '/^[[:space:]]*pub const string = "/ { print $2; exit }' packages/zts/src/root.zig)"
   [ "$version" = "$package_version" ] || fail "release tag $tag does not match build.zig.zon version $package_version"
   [ "$version" = "$binary_version" ] || fail "release tag $tag does not match binary version $binary_version"
   [ "$version" = "$zts_version" ] || fail "release tag $tag does not match zts package version $zts_version"
   [ "$version" = "$runtime_version" ] || fail "release tag $tag does not match runtime package version $runtime_version"
+  [ "$version" = "$modules_version" ] || fail "release tag $tag does not match modules package version $modules_version"
+  [ "$version" = "$pi_version" ] || fail "release tag $tag does not match pi package version $pi_version"
+  [ "$version" = "$proof_checker_version" ] || fail "release tag $tag does not match proof-checker package version $proof_checker_version"
+  [ "$version" = "$tools_version" ] || fail "release tag $tag does not match tools package version $tools_version"
+  [ "$version" = "$sdk_version" ] || fail "release tag $tag does not match zttp-sdk package version $sdk_version"
 
   local zig_pin zig_have
   zig_pin="$(awk -F'"' '/^[[:space:]]*\.minimum_zig_version =/ { print $2; exit }' build.zig.zon)"

@@ -150,8 +150,8 @@ pub fn runStepScript(step: *std.Build.Step) ?[]const u8 {
 }
 
 /// A script route is an executable argv in the covered graph or the driver.
-/// The shell wrapper receives this census; source comments are never scanned.
-pub fn attachScriptCensus(b: *std.Build, test_step: *std.Build.Step, run: *std.Build.Step.Run, repo_gate: *std.Build.Step.Compile) void {
+/// Source comments are never scanned.
+pub fn attachScriptCensus(b: *std.Build, test_step: *std.Build.Step, run: *std.Build.Step.Run) void {
     var covered = StepSet.init(b.allocator);
     collectReachable(test_step, &covered);
     for (routes.routes) |route| {
@@ -172,6 +172,6 @@ pub fn attachScriptCensus(b: *std.Build, test_step: *std.Build.Step, run: *std.B
         census.append(b.allocator, 0) catch @panic("OOM");
     }
     const generated = b.addWriteFiles();
-    run.addArtifactArg(repo_gate);
     run.addFileArg(generated.add("script-execution-routes.txt", census.items));
+    run.addArg("scripts/manual-scripts.allow");
 }

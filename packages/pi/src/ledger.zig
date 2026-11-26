@@ -12,6 +12,7 @@ const session_paths = @import("session/paths.zig");
 const reconstructor = @import("session/reconstructor.zig");
 const json_writer = @import("providers/json_writer.zig");
 const tools_common = @import("tools/common.zig");
+const fd_io = @import("fd_io.zig");
 
 pub const export_schema_version: u32 = 2;
 
@@ -135,21 +136,12 @@ pub fn collectSessionLedger(
     }
 
     const target_index = by_id.get(session_id) orelse return error.SessionNotFound;
-    var chain = std.ArrayList(usize).empty;
-    defer chain.deinit(allocator);
-
-    var cursor_index: ?usize = target_index;
-    while (cursor_index) |index| {
-        try chain.append(allocator, index);
-        cursor_index = if (entries[index].parent_id) |parent_id|
-            by_id.get(parent_id)
-        else
-            null;
-    }
-    std.mem.reverse(usize, chain.items);
+    const chain = try collectSessionChain(allocator, entries, target_index, &by_id);
+    defer allocator.free(chain);
 
     var change_sets: std.ArrayList(LedgerChangeSet) = .empty;
     defer change_sets.deinit(allocator);
+    errdefer for (change_sets.items) |*item| item.deinit(allocator);
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer {
         var it = seen.iterator();
@@ -157,7 +149,7 @@ pub fn collectSessionLedger(
         seen.deinit(allocator);
     }
 
-    for (chain.items) |index| {
+    for (chain) |index| {
         const events_path = try std.fs.path.join(allocator, &.{ entries[index].dir_path, "events.jsonl" });
         defer allocator.free(events_path);
         var transcript = reconstructor.reconstructTranscript(allocator, events_path, null) catch |err| switch (err) {
@@ -179,31 +171,77 @@ pub fn collectSessionLedger(
 
                     const fingerprint = receipt_payload.transaction_id;
                     if (seen.contains(fingerprint)) continue;
-                    try seen.put(allocator, try allocator.dupe(u8, fingerprint), {});
+                    {
+                        const key = try allocator.dupe(u8, fingerprint);
+                        errdefer allocator.free(key);
+                        try seen.put(allocator, key, {});
+                    }
 
-                    try change_sets.append(allocator, .{
-                        .session_id = try allocator.dupe(u8, entries[index].session_id),
-                        .summary = try allocator.dupe(u8, message.llm_text),
-                        .payload = try receipt_payload.clone(allocator),
-                    });
+                    {
+                        const sid = try allocator.dupe(u8, entries[index].session_id);
+                        errdefer allocator.free(sid);
+                        const summary_copy = try allocator.dupe(u8, message.llm_text);
+                        errdefer allocator.free(summary_copy);
+                        var cloned_payload = try receipt_payload.clone(allocator);
+                        errdefer cloned_payload.deinit(allocator);
+                        try change_sets.append(allocator, .{
+                            .session_id = sid,
+                            .summary = summary_copy,
+                            .payload = cloned_payload,
+                        });
+                    }
                 },
                 else => {},
             }
         }
     }
 
+    const workspace_hash = try allocator.dupe(u8, hash[0..]);
+    errdefer allocator.free(workspace_hash);
+    const meta_session_id = try allocator.dupe(u8, entries[target_index].session_id);
+    errdefer allocator.free(meta_session_id);
+    const parent_session_id = if (entries[target_index].parent_id) |parent|
+        try allocator.dupe(u8, parent)
+    else
+        null;
+    errdefer if (parent_session_id) |parent| allocator.free(parent);
+    const owned_change_sets = try change_sets.toOwnedSlice(allocator);
+
     return .{
         .meta = .{
-            .workspace_hash = try allocator.dupe(u8, hash[0..]),
-            .session_id = try allocator.dupe(u8, entries[target_index].session_id),
-            .parent_session_id = if (entries[target_index].parent_id) |parent|
-                try allocator.dupe(u8, parent)
-            else
-                null,
+            .workspace_hash = workspace_hash,
+            .session_id = meta_session_id,
+            .parent_session_id = parent_session_id,
             .exported_at_unix_ms = nowUnixMs(),
         },
-        .change_sets = try change_sets.toOwnedSlice(allocator),
+        .change_sets = owned_change_sets,
     };
+}
+
+fn collectSessionChain(
+    allocator: std.mem.Allocator,
+    entries: []const session_paths.SessionEntry,
+    target_index: usize,
+    by_id: *const std.StringHashMapUnmanaged(usize),
+) ![]usize {
+    var chain = std.ArrayList(usize).empty;
+    errdefer chain.deinit(allocator);
+    const visited = try allocator.alloc(bool, entries.len);
+    defer allocator.free(visited);
+    @memset(visited, false);
+
+    var cursor_index: ?usize = target_index;
+    while (cursor_index) |index| {
+        if (visited[index]) break;
+        visited[index] = true;
+        try chain.append(allocator, index);
+        cursor_index = if (entries[index].parent_id) |parent_id|
+            by_id.get(parent_id)
+        else
+            null;
+    }
+    std.mem.reverse(usize, chain.items);
+    return try chain.toOwnedSlice(allocator);
 }
 
 pub fn readLedgerFile(
@@ -305,11 +343,14 @@ pub fn replayBundleInWorkspace(
         try workspace.markReceipted(&proof.proof_id);
     }
 
+    const file = try allocator.dupe(u8, "");
+    errdefer allocator.free(file);
+    const detail = try allocator.print("replayed {d} change set(s)", .{bundle.change_sets.len});
     return .{
         .kind = .success,
         .change_set_index = bundle.change_sets.len,
-        .file = try allocator.dupe(u8, ""),
-        .detail = try allocator.print("replayed {d} change set(s)", .{bundle.change_sets.len}),
+        .file = file,
+        .detail = detail,
     };
 }
 
@@ -320,11 +361,14 @@ fn replayFailure(
     file: []const u8,
     detail: []const u8,
 ) !ReplayResult {
+    const file_copy = try allocator.dupe(u8, file);
+    errdefer allocator.free(file_copy);
+    const detail_copy = try allocator.dupe(u8, detail);
     return .{
         .kind = kind,
         .change_set_index = index,
-        .file = try allocator.dupe(u8, file),
-        .detail = try allocator.dupe(u8, detail),
+        .file = file_copy,
+        .detail = detail_copy,
     };
 }
 
@@ -480,7 +524,7 @@ const SummaryStat = struct {
 
 fn summaryU32(obj: std.json.ObjectMap, key: []const u8) u32 {
     if (obj.get(key)) |v| {
-        if (v == .integer and v.integer >= 0) return @intCast(v.integer);
+        if (v == .integer) return std.math.cast(u32, v.integer) orelse 0;
     }
     return 0;
 }
@@ -496,7 +540,7 @@ fn readLastSessionSummary(allocator: std.mem.Allocator, events_path: []const u8)
     while (reader.next() catch return found) |record_json| {
         defer allocator.free(record_json);
         // Cheap pre-filter before the JSON parse.
-        if (std.mem.indexOf(u8, record_json, "\"session_summary\"") == null) continue;
+        if (std.mem.find(u8, record_json, "\"session_summary\"") == null) continue;
         var parsed = std.json.parseFromSlice(std.json.Value, allocator, record_json, .{}) catch continue;
         defer parsed.deinit();
         if (parsed.value != .object) continue;
@@ -587,7 +631,7 @@ fn runStats(allocator: std.mem.Allocator) !void {
         }
     }
     const bytes = buf.written();
-    _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
+    fd_io.writeAll(std.c.STDOUT_FILENO, bytes);
 }
 
 fn writeMetaLine(writer: *std.Io.Writer, meta: ExportMeta) !void {
@@ -719,7 +763,7 @@ fn printReplayResult(result: ReplayResult) void {
         result.detail,
     }) catch return;
     defer std.heap.smp_allocator.free(line);
-    _ = std.c.write(std.c.STDERR_FILENO, line.ptr, line.len);
+    fd_io.writeAll(std.c.STDERR_FILENO, line);
 }
 
 fn printHelp() void {
@@ -736,7 +780,7 @@ fn printHelp() void {
         \\first green proof, and median proven-path ratio.
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    fd_io.writeAll(std.c.STDOUT_FILENO, help);
 }
 
 const testing = std.testing;
@@ -1035,4 +1079,45 @@ test "readLastSessionSummary returns null when a session wrote no summary" {
     defer testing.allocator.free(events_path);
     try session_events.appendEntryEvent(testing.allocator, events_path, 1, .{ .user_text = "hello" });
     try testing.expect((try readLastSessionSummary(testing.allocator, events_path)) == null);
+}
+
+test "collectSessionChain terminates on cyclic parent_id references" {
+    const entries = [_]session_paths.SessionEntry{
+        .{
+            .session_id = @constCast("sess-a"),
+            .parent_id = @constCast("sess-b"),
+            .dir_path = @constCast("/tmp/a"),
+            .created_at_unix_ms = 1,
+        },
+        .{
+            .session_id = @constCast("sess-b"),
+            .parent_id = @constCast("sess-a"),
+            .dir_path = @constCast("/tmp/b"),
+            .created_at_unix_ms = 2,
+        },
+    };
+    var by_id: std.StringHashMapUnmanaged(usize) = .empty;
+    defer by_id.deinit(testing.allocator);
+    try by_id.put(testing.allocator, entries[0].session_id, 0);
+    try by_id.put(testing.allocator, entries[1].session_id, 1);
+
+    const chain = try collectSessionChain(testing.allocator, &entries, 0, &by_id);
+    defer testing.allocator.free(chain);
+    try testing.expectEqual(@as(usize, 2), chain.len);
+    try testing.expectEqual(@as(usize, 1), chain[0]);
+    try testing.expectEqual(@as(usize, 0), chain[1]);
+}
+
+test "summaryU32 returns 0 for negative and out-of-range integers" {
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        testing.allocator,
+        "{\"neg\":-1,\"huge\":5000000000,\"ok\":42}",
+        .{},
+    );
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqual(@as(u32, 0), summaryU32(obj, "neg"));
+    try testing.expectEqual(@as(u32, 0), summaryU32(obj, "huge"));
+    try testing.expectEqual(@as(u32, 42), summaryU32(obj, "ok"));
 }

@@ -81,34 +81,34 @@ test "findByName returns a hit for every entry and null for unknowns" {
 test "every skill body is non-empty and every description fits on one line" {
     for (&catalog) |*skill| {
         try testing.expect(skill.body.len > 0);
-        try testing.expect(std.mem.indexOfScalar(u8, skill.description, '\n') == null);
+        try testing.expect(std.mem.findScalar(u8, skill.description, '\n') == null);
     }
 }
 
 test "handler-scaffold body preserves the conventions list verbatim" {
     const skill = findByName("handler-scaffold") orelse return error.TestExpected;
-    try testing.expect(std.mem.indexOf(u8, skill.body, "zttp:decode") != null);
-    try testing.expect(std.mem.indexOf(u8, skill.body, "No classes, no async/await") != null);
+    try testing.expect(std.mem.find(u8, skill.body, "zttp:decode") != null);
+    try testing.expect(std.mem.find(u8, skill.body, "No classes, no async/await") != null);
 }
 
 test "skills steer coding tasks through compiler-native expert tools" {
     const fix = findByName("fix-violations") orelse return error.TestExpected;
-    try testing.expect(std.mem.indexOf(u8, fix.body, "zts_expert_verify_paths") != null);
-    try testing.expect(std.mem.indexOf(u8, fix.body, "pi_goal_candidate") != null);
-    try testing.expect(std.mem.indexOf(u8, fix.body, "/check") == null);
+    try testing.expect(std.mem.find(u8, fix.body, "zts_expert_verify_paths") != null);
+    try testing.expect(std.mem.find(u8, fix.body, "pi_goal_candidate") != null);
+    try testing.expect(std.mem.find(u8, fix.body, "/check") == null);
 
     const route = findByName("route-table") orelse return error.TestExpected;
-    try testing.expect(std.mem.indexOf(u8, route.body, "Author the COMPLETE file content yourself") != null);
-    try testing.expect(std.mem.indexOf(u8, route.body, "pi_apply_feature_plan") == null);
-    try testing.expect(std.mem.indexOf(u8, route.body, "one `propose_change_set` call") != null);
+    try testing.expect(std.mem.find(u8, route.body, "Author the COMPLETE file content yourself") != null);
+    try testing.expect(std.mem.find(u8, route.body, "pi_apply_feature_plan") == null);
+    try testing.expect(std.mem.find(u8, route.body, "one `propose_change_set` call") != null);
 
     const auth = findByName("auth-jwt") orelse return error.TestExpected;
-    try testing.expect(std.mem.indexOf(u8, auth.body, "no_credential_leakage") != null);
-    try testing.expect(std.mem.indexOf(u8, auth.body, "fallback secret") != null);
+    try testing.expect(std.mem.find(u8, auth.body, "no_credential_leakage") != null);
+    try testing.expect(std.mem.find(u8, auth.body, "fallback secret") != null);
 
     const sql = findByName("sql-query") orelse return error.TestExpected;
-    try testing.expect(std.mem.indexOf(u8, sql.body, "named SQL parameters") != null);
-    try testing.expect(std.mem.indexOf(u8, sql.body, "WHERE id = ?") == null);
+    try testing.expect(std.mem.find(u8, sql.body, "named SQL parameters") != null);
+    try testing.expect(std.mem.find(u8, sql.body, "WHERE id = ?") == null);
 }
 
 /// Census of the TypeScript in the skill files, which the model copies. Every
@@ -205,9 +205,9 @@ test "skill ts blocks pass the real check with no error and no warning" {
     for (&catalog) |*skill| {
         var block_index: usize = 0;
         var cursor: usize = 0;
-        while (std.mem.indexOfPos(u8, skill.body, cursor, "```ts\n")) |open| {
+        while (std.mem.findPos(u8, skill.body, cursor, "```ts\n")) |open| {
             const start = open + "```ts\n".len;
-            const close = std.mem.indexOfPos(u8, skill.body, start, "```") orelse return error.TestUnexpectedResult;
+            const close = std.mem.findPos(u8, skill.body, start, "```") orelse return error.TestUnexpectedResult;
             cursor = close + 3;
             const label = try std.fmt.allocPrint(arena, "{s}-{d}", .{ skill.name, block_index });
             const codes = try censusCodes(arena, label, censusSource(skill.body[start..close]));

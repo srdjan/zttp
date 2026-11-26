@@ -76,11 +76,6 @@ fn readConfiguredPolicySource(
     return try zts.file_io.readFile(allocator, path, 1024 * 1024);
 }
 
-fn shouldSkipContract(config: *const LiveReloadConfig) bool {
-    _ = config;
-    return false;
-}
-
 pub const LiveReloadState = struct {
     allocator: std.mem.Allocator,
     server: *Server,
@@ -155,7 +150,7 @@ pub const LiveReloadState = struct {
     /// Run analysis on pre-read source, cleaning up CheckResult. Runs with
     /// `json_mode = true` so structured diagnostics carry their fields; the
     /// terminal HUD reformats them itself via `printDiagnosticLines`.
-    fn runAnalysisFromSource(self: *LiveReloadState, source: []const u8, skip_contract: bool) ?AnalysisResult {
+    fn runAnalysisFromSource(self: *LiveReloadState, source: []const u8) ?AnalysisResult {
         const policy_source = readConfiguredPolicySource(self.allocator, self.config.policy_path) catch |err| {
             printReload("Failed to read configured capability policy: {}. Keeping previous handler.\n", .{err});
             return null;
@@ -169,7 +164,7 @@ pub const LiveReloadState = struct {
             .{
                 .sql_schema_path = self.config.sql_schema_path,
                 .json_mode = true,
-                .skip_contract = skip_contract,
+                .skip_contract = false,
                 .policy_source = policy_source,
             },
         ) catch return null;
@@ -267,18 +262,14 @@ pub const LiveReloadState = struct {
 
         var timer = compat.Timer.start() catch null;
 
-        var analysis = self.runAnalysisFromSource(new_code.?, shouldSkipContract(&self.config)) orelse {
+        var analysis = self.runAnalysisFromSource(new_code.?) orelse {
             printReload("Recompilation failed. Keeping previous handler.\n", .{});
             return;
         };
         defer if (analysis.contract != null) analysis.deinitContract(self.allocator);
         defer analysis.deinitDiagnostics(self.allocator);
         defer analysis.deinitConfiguredPolicy(self.allocator);
-
-        // Adopt the freshest proof trace; the HUD reads it on every repaint.
-        if (self.proof_trace_json) |old| self.allocator.free(old);
-        self.proof_trace_json = analysis.proof_trace_json;
-        analysis.proof_trace_json = null;
+        defer if (analysis.proof_trace_json) |ptj| self.allocator.free(ptj);
 
         const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
 
@@ -292,6 +283,11 @@ pub const LiveReloadState = struct {
             printReload("Next: fix the {s} diagnostic above; the previous handler is still serving.\n", .{analysis.failure_stage});
             return;
         }
+
+        // Adopt the freshest proof trace only after compilation succeeded cleanly.
+        if (self.proof_trace_json) |old| self.allocator.free(old);
+        self.proof_trace_json = analysis.proof_trace_json;
+        analysis.proof_trace_json = null;
 
         printReload("Change detected in {s} ({d}ms recompile)\n", .{
             std.fs.path.basename(self.handler_path),
@@ -323,12 +319,8 @@ pub const LiveReloadState = struct {
                 }
 
                 var diff = self.diffAgainstCurrent(old_contract, &new_contract, source_copy) catch |err| {
-                    printProve("Contract diff failed: {}. Reloading without proof comparison.\n", .{err});
-                    if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
-                        self.updateCurrentContract(new_contract, source_copy);
-                    } else {
-                        new_contract.deinit(self.allocator);
-                    }
+                    printProve("Contract diff failed: {}. Swap blocked (fail-closed in --prove mode).\n", .{err});
+                    new_contract.deinit(self.allocator);
                     return;
                 };
                 defer diff.deinit(self.allocator);
@@ -340,12 +332,8 @@ pub const LiveReloadState = struct {
                     &diff,
                     classification,
                 ) catch |err| {
-                    printProve("Upgrade analysis failed: {}. Reloading without proof comparison.\n", .{err});
-                    if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
-                        self.updateCurrentContract(new_contract, source_copy);
-                    } else {
-                        new_contract.deinit(self.allocator);
-                    }
+                    printProve("Upgrade analysis failed: {}. Swap blocked (fail-closed in --prove mode).\n", .{err});
+                    new_contract.deinit(self.allocator);
                     return;
                 };
                 defer manifest.deinit(self.allocator);
@@ -400,18 +388,14 @@ pub const LiveReloadState = struct {
         defer self.allocator.free(source);
 
         var timer = compat.Timer.start() catch null;
-        var analysis = self.runAnalysisFromSource(source, false) orelse {
+        var analysis = self.runAnalysisFromSource(source) orelse {
             printProve("Initial proof analysis failed.\n", .{});
             return;
         };
         defer if (analysis.contract != null) analysis.deinitContract(self.allocator);
         defer analysis.deinitDiagnostics(self.allocator);
         defer analysis.deinitConfiguredPolicy(self.allocator);
-
-        // Adopt the freshest proof trace; the HUD reads it on every repaint.
-        if (self.proof_trace_json) |old| self.allocator.free(old);
-        self.proof_trace_json = analysis.proof_trace_json;
-        analysis.proof_trace_json = null;
+        defer if (analysis.proof_trace_json) |ptj| self.allocator.free(ptj);
 
         const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
         if (analysis.errors > 0) {
@@ -420,6 +404,11 @@ pub const LiveReloadState = struct {
             printProve("Next: fix the {s} diagnostic above, then save again.\n", .{analysis.failure_stage});
             return;
         }
+
+        // Adopt the freshest proof trace only after compilation succeeded cleanly.
+        if (self.proof_trace_json) |old| self.allocator.free(old);
+        self.proof_trace_json = analysis.proof_trace_json;
+        analysis.proof_trace_json = null;
 
         var contract = analysis.contract orelse {
             printProve("Initial proof skipped: no contract extracted.\n", .{});
@@ -566,7 +555,6 @@ pub const LiveReloadState = struct {
         const card = review_facts_mod.ProofCard{
             .handler_path = self.handler_path,
             .service_name = "dev",
-            .region = "local",
             .current = &new_facts,
             .baseline = baseline_ptr,
             .delta = &delta,
@@ -776,9 +764,9 @@ fn printBlockedDetails(
 }
 
 fn mentionsAiRelevantProof(proof_unlocked: []const u8) bool {
-    return std.mem.indexOf(u8, proof_unlocked, "deterministic") != null or
-        std.mem.indexOf(u8, proof_unlocked, "Result") != null or
-        std.mem.indexOf(u8, proof_unlocked, "replayable") != null;
+    return std.mem.find(u8, proof_unlocked, "deterministic") != null or
+        std.mem.find(u8, proof_unlocked, "Result") != null or
+        std.mem.find(u8, proof_unlocked, "replayable") != null;
 }
 
 /// Render compile errors to stderr. Restriction-class diagnostics (ZTS001) get
@@ -867,14 +855,23 @@ fn ownDiagnostics(allocator: std.mem.Allocator, source: []const json_diag.JsonDi
     }
     while (filled < source.len) : (filled += 1) {
         const src = source[filled];
+        const code = try allocator.dupe(u8, src.code);
+        errdefer allocator.free(code);
+        const severity = try allocator.dupe(u8, src.severity);
+        errdefer allocator.free(severity);
+        const file = try allocator.dupe(u8, src.file);
+        errdefer allocator.free(file);
+        const message = try allocator.dupe(u8, src.message);
+        errdefer allocator.free(message);
+        const suggestion = if (src.suggestion) |s| try allocator.dupe(u8, s) else null;
         owned[filled] = .{
-            .code = try allocator.dupe(u8, src.code),
-            .severity = try allocator.dupe(u8, src.severity),
-            .file = try allocator.dupe(u8, src.file),
+            .code = code,
+            .severity = severity,
+            .file = file,
             .line = src.line,
             .column = src.column,
-            .message = try allocator.dupe(u8, src.message),
-            .suggestion = if (src.suggestion) |s| try allocator.dupe(u8, s) else null,
+            .message = message,
+            .suggestion = suggestion,
         };
     }
     return owned;
@@ -912,7 +909,6 @@ test "LiveReloadConfig defaults" {
     try std.testing.expect(!config.force_swap);
     try std.testing.expectEqual(@as(i64, 250), config.poll_interval_ms);
     try std.testing.expect(config.policy_path == null);
-    try std.testing.expect(!shouldSkipContract(&config));
 }
 
 test "retired contract obligations cannot reach the live reload pool" {
@@ -932,12 +928,24 @@ test "retired contract obligations cannot reach the live reload pool" {
     }
 }
 
-test "live reload builds a contract in every mode" {
-    var config = LiveReloadConfig{ .policy_path = "policy.json" };
-    try std.testing.expect(!shouldSkipContract(&config));
-
-    config = .{ .prove = true };
-    try std.testing.expect(!shouldSkipContract(&config));
+test "ownDiagnostics unwinds partial per-field allocations on OOM" {
+    const sample = [_]json_diag.JsonDiagnostic{
+        .{
+            .code = "ZTS001",
+            .severity = "error",
+            .file = "handler.ts",
+            .line = 1,
+            .column = 1,
+            .message = "unsupported feature",
+            .suggestion = "use alternative",
+        },
+    };
+    // Probe each allocation failure point inside ownDiagnostics; std.testing.allocator
+    // fails the test immediately if any prior field dupe leaks on OOM.
+    for (0..6) |fail_at| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at });
+        try std.testing.expectError(error.OutOfMemory, ownDiagnostics(failing.allocator(), &sample));
+    }
 }
 
 test "live reload reads the configured policy for every analysis" {
@@ -955,7 +963,7 @@ test "live reload reads the configured policy for every analysis" {
     const first = (try readConfiguredPolicySource(allocator, path)) orelse
         return error.TestExpectedPolicy;
     defer allocator.free(first);
-    try std.testing.expect(std.mem.indexOf(u8, first, "FIRST") != null);
+    try std.testing.expect(std.mem.find(u8, first, "FIRST") != null);
 
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "policy.json",
@@ -964,8 +972,8 @@ test "live reload reads the configured policy for every analysis" {
     const second = (try readConfiguredPolicySource(allocator, path)) orelse
         return error.TestExpectedPolicy;
     defer allocator.free(second);
-    try std.testing.expect(std.mem.indexOf(u8, second, "SECOND") != null);
-    try std.testing.expect(std.mem.indexOf(u8, second, "FIRST") == null);
+    try std.testing.expect(std.mem.find(u8, second, "SECOND") != null);
+    try std.testing.expect(std.mem.find(u8, second, "FIRST") == null);
 }
 
 test "writeDiagnosticLines: ZTS001 renders framed restriction rationale" {
@@ -994,12 +1002,12 @@ test "writeDiagnosticLines: ZTS001 renders framed restriction rationale" {
 
     try writeDiagnosticLines(&aw.writer, &diagnostics, source, "handler.ts", false);
     const out = aw.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "restriction try/catch") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "handler.ts:2:5") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "2 |     try {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "why    exceptions are an invisible second return channel") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "buys   removing this unlocks: Result narrowing") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "try    use Result types and check .ok") != null);
+    try std.testing.expect(std.mem.find(u8, out, "restriction try/catch") != null);
+    try std.testing.expect(std.mem.find(u8, out, "handler.ts:2:5") != null);
+    try std.testing.expect(std.mem.find(u8, out, "2 |     try {") != null);
+    try std.testing.expect(std.mem.find(u8, out, "why    exceptions are an invisible second return channel") != null);
+    try std.testing.expect(std.mem.find(u8, out, "buys   removing this unlocks: Result narrowing") != null);
+    try std.testing.expect(std.mem.find(u8, out, "try    use Result types and check .ok") != null);
 }
 
 test "writeDiagnosticLines: unknown ZTS001 falls back to suggestion" {
@@ -1019,10 +1027,10 @@ test "writeDiagnosticLines: unknown ZTS001 falls back to suggestion" {
 
     try writeDiagnosticLines(&aw.writer, &diagnostics, null, "handler.ts", false);
     const out = aw.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "restriction future syntax") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "try    rewrite it explicitly") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "why    ") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "buys   ") == null);
+    try std.testing.expect(std.mem.find(u8, out, "restriction future syntax") != null);
+    try std.testing.expect(std.mem.find(u8, out, "try    rewrite it explicitly") != null);
+    try std.testing.expect(std.mem.find(u8, out, "why    ") == null);
+    try std.testing.expect(std.mem.find(u8, out, "buys   ") == null);
 }
 
 test "writeDiagnosticLines: a ZTS001 row in another file prints no handler source line" {
@@ -1047,8 +1055,8 @@ test "writeDiagnosticLines: a ZTS001 row in another file prints no handler sourc
 
     try writeDiagnosticLines(&aw.writer, &diagnostics, handler_source, "handler.ts", false);
     const out = aw.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "dep.ts:2:5") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "handler line two") == null);
+    try std.testing.expect(std.mem.find(u8, out, "dep.ts:2:5") != null);
+    try std.testing.expect(std.mem.find(u8, out, "handler line two") == null);
 }
 
 test "writeDiagnosticLines: non-ZTS001 keeps compact diagnostic form" {

@@ -110,11 +110,12 @@ Common `dev` and `serve` flags:
 anyway) instead.
 
 Without `--lifecycle`, only properties promoted from an accepted deployed
-certificate can relax the pool's recycling policy: `reuse` requires pure,
-deterministic, and state-isolated; `ttl` requires read-only and state-isolated;
+certificate can relax the pool's recycling policy: `reuse` requires `read_only`,
+`deterministic`, and `state_isolated`; `ttl` requires `read_only` and `state_isolated`;
 otherwise the pool is `bounded`. The shipped production policy does not accept
 those lifecycle properties, so deployed, development, and hot-swap execution
-all stay bounded unless the operator supplies an override. `bounded` recycles
+all stay bounded unless the operator supplies `--lifecycle reuse` (which is still
+refused when the handler does not prove `state_isolated`). `bounded` recycles
 a runtime after 64 requests, `ttl` after 30 seconds, and `ephemeral` gives each
 request a fresh runtime.
 

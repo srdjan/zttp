@@ -206,9 +206,9 @@ pub const Snapshot = struct {
         defer tmp_dir.close(io);
         const name = try createScratchDir(allocator, io, tmp_dir, @intCast(now.sec), @intCast(now.nsec));
         errdefer allocator.free(name);
+        errdefer tmp_dir.deleteTree(io, name) catch {};
         const root = try std.fs.path.resolve(allocator, &.{ "/tmp", name });
         errdefer allocator.free(root);
-        errdefer tmp_dir.deleteTree(io, name) catch {};
 
         for (self.entries) |entry| {
             const bytes = entry.state.bytes() orelse continue;

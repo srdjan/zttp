@@ -1023,7 +1023,7 @@ fn projectFunctions(
 /// contract but not for schema text and descriptions. The scanner already
 /// validated the string, so decoding it again with `std.json` is exact.
 fn decodeWireString(allocator: std.mem.Allocator, wire: WireString) ![]const u8 {
-    if (std.mem.indexOfScalar(u8, wire.bytes, '\\') == null) return allocator.dupe(u8, wire.bytes);
+    if (std.mem.findScalar(u8, wire.bytes, '\\') == null) return allocator.dupe(u8, wire.bytes);
     const quoted = try std.mem.concat(allocator, u8, &.{ "\"", wire.bytes, "\"" });
     defer allocator.free(quoted);
     const decoded = std.json.parseFromSlice([]const u8, allocator, quoted, .{}) catch |err| switch (err) {

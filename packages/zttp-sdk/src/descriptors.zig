@@ -6,10 +6,6 @@ pub const EffectClass = enum {
     read,
     write,
     none,
-
-    pub fn toString(self: EffectClass) []const u8 {
-        return @tagName(self);
-    }
 };
 
 pub const ReturnKind = enum {
@@ -182,7 +178,6 @@ pub const ContractExtraction = struct {
     arg_position: u8 = 0,
     category: ContractCategory,
     transform: ?ContractTransform = null,
-    flag_only: bool = false,
     extension_category: ?[]const u8 = null,
 };
 
@@ -318,7 +313,7 @@ fn describeFunctions(comptime bindings: anytype) [bindings.len]FunctionDescripto
 
 pub fn describeModule(comptime binding: anytype) ModuleDescriptor {
     @setEvalBranchQuota(200_000);
-    comptime requireCoverage(@TypeOf(binding), ModuleDescriptor, &.{ "state_init", "state_deinit" });
+    comptime requireCoverage(@TypeOf(binding), ModuleDescriptor, &.{});
     const exports = comptime describeFunctions(binding.exports);
     var result: ModuleDescriptor = undefined;
     inline for (@typeInfo(ModuleDescriptor).@"struct".field_names) |field| {
@@ -384,7 +379,5 @@ test "descriptor records carry metadata without runtime callbacks" {
     inline for (.{ FunctionDescriptor, ModuleDescriptor, ExportDescriptor }) |T| {
         try std.testing.expect(!@hasField(T, "func"));
         try std.testing.expect(!@hasField(T, "module_func"));
-        try std.testing.expect(!@hasField(T, "state_init"));
-        try std.testing.expect(!@hasField(T, "state_deinit"));
     }
 }

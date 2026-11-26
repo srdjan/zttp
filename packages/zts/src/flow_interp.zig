@@ -8030,8 +8030,8 @@ fn censusRuntimePrototypes(source: []const u8, rows: []const OperationRow) !usiz
             "Headers.prototype"
         else
             continue;
-        const start = (std.mem.indexOfScalar(u8, line, '"') orelse return error.MissingMethodName) + 1;
-        const end = std.mem.indexOfScalarPos(u8, line, start, '"') orelse return error.MissingMethodName;
+        const start = (std.mem.findScalar(u8, line, '"') orelse return error.MissingMethodName) + 1;
+        const end = std.mem.findScalarPos(u8, line, start, '"') orelse return error.MissingMethodName;
         const at = rowIndex(rows, scope, line[start..end]) orelse return error.PrototypeWithoutRow;
         if (seen[at]) return error.DuplicatePrototypeMethod;
         seen[at] = true;
@@ -8999,8 +8999,8 @@ test "real fetchSync global observes egress and returns an upstream response" {
     try testing.expect(found);
     const source = try engine.file_io.readFile(testing.allocator, "packages/runtime/src/handler_instance.zig", 1 << 20);
     defer testing.allocator.free(source);
-    try testing.expect(std.mem.indexOf(u8, source, "intern(\"fetchSync\")") != null);
-    try testing.expect(std.mem.indexOf(u8, source, "makeReplayStub(\"http\", \"fetchSync\")") != null);
+    try testing.expect(std.mem.find(u8, source, "intern(\"fetchSync\")") != null);
+    try testing.expect(std.mem.find(u8, source, "makeReplayStub(\"http\", \"fetchSync\")") != null);
     try testing.expectEqual(@as(usize, 1), runtime_global_rows.len);
 }
 

@@ -865,10 +865,10 @@ test "writeJson emits a path-enumeration trace with facts" {
     try writeJson(&aw.writer, &traces);
     buf = aw.toArrayList();
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"fault_covered\":{") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"kind\":\"path-enumeration\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"pathsEnumerated\":5") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"coveredSites\":3") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"fault_covered\":{") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"kind\":\"path-enumeration\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"pathsEnumerated\":5") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"coveredSites\":3") != null);
 }
 
 test "writeJson maps result_safe to results_safe UI key" {
@@ -884,8 +884,8 @@ test "writeJson maps result_safe to results_safe UI key" {
     try writeJson(&aw.writer, &traces);
     buf = aw.toArrayList();
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"results_safe\":{") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"result_safe\":{") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"results_safe\":{") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"result_safe\":{") == null);
 }
 
 test "an incomplete fault analysis is named even when the enumerated paths are exhaustive" {
@@ -918,8 +918,8 @@ test "an incomplete fault analysis is named even when the enumerated paths are e
         if (std.mem.eql(u8, trace.property, "fault_covered")) summary = trace.summary;
     }
     const text = summary orelse return error.TestUnexpectedResult;
-    try testing.expect(std.mem.indexOf(u8, text, "fault analysis is not complete") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "route dispatch did not resolve") != null);
+    try testing.expect(std.mem.find(u8, text, "fault analysis is not complete") != null);
+    try testing.expect(std.mem.find(u8, text, "route dispatch did not resolve") != null);
 }
 
 test "a handler with no failable site says the property holds because there is none" {
@@ -950,8 +950,8 @@ test "a handler with no failable site says the property holds because there is n
         if (std.mem.eql(u8, trace.property, "fault_covered")) summary = trace.summary;
     }
     const text = summary orelse return error.TestUnexpectedResult;
-    try testing.expect(std.mem.indexOf(u8, text, "has no failable I/O site") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "All 0") == null);
+    try testing.expect(std.mem.find(u8, text, "has no failable I/O site") != null);
+    try testing.expect(std.mem.find(u8, text, "All 0") == null);
 }
 
 test "incomplete effect analysis does not claim observed or absent calls" {
@@ -976,10 +976,10 @@ test "incomplete effect analysis does not claim observed or absent calls" {
         if (std.mem.eql(u8, trace.property, "has_egress")) egress_summary = trace.summary;
     }
     const summary = egress_summary orelse return error.TestUnexpectedResult;
-    try testing.expect(std.mem.indexOf(u8, summary, "incomplete") != null);
-    try testing.expect(std.mem.indexOf(u8, summary, "observed outbound call") != null);
-    try testing.expect(std.mem.indexOf(u8, summary, "makes outbound") == null);
-    try testing.expect(std.mem.indexOf(u8, summary, "no outbound") == null);
+    try testing.expect(std.mem.find(u8, summary, "incomplete") != null);
+    try testing.expect(std.mem.find(u8, summary, "observed outbound call") != null);
+    try testing.expect(std.mem.find(u8, summary, "makes outbound") == null);
+    try testing.expect(std.mem.find(u8, summary, "no outbound") == null);
 }
 
 test "unbounded cost trace carries loop counterexample and lever" {
@@ -1021,12 +1021,12 @@ test "unbounded cost trace carries loop counterexample and lever" {
     try writeJson(&aw.writer, traces);
     buf = aw.toArrayList();
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"cost_bounded\":{") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"kind\":\"offending-node\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"line\":17") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "for...of over `ids`") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "LIMIT") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "maxItems") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"cost_bounded\":{") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"kind\":\"offending-node\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"line\":17") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "for...of over `ids`") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "LIMIT") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "maxItems") != null);
 }
 
 test "writeJson emits an offending-node counterexample" {
@@ -1049,9 +1049,9 @@ test "writeJson emits an offending-node counterexample" {
     try writeJson(&aw.writer, &traces);
     buf = aw.toArrayList();
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"kind\":\"offending-node\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"line\":14") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"snippet\":\"Date.now()\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"kind\":\"offending-node\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"line\":14") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"snippet\":\"Date.now()\"") != null);
 }
 
 test "writeJson emits a resisted counterexample for a passing flow property" {
@@ -1077,12 +1077,12 @@ test "writeJson emits a resisted counterexample for a passing flow property" {
     try writeJson(&aw.writer, &traces);
     buf = aw.toArrayList();
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"resisted\":{") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"attackInput\":\"1; DROP TABLE users--\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"validated by schemaCompile() at L7\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"conclusion\":") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"resisted\":{") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"attackInput\":\"1; DROP TABLE users--\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"validated by schemaCompile() at L7\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"conclusion\":") != null);
     // holds==true, so no failing counterexample is present.
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"counterexample\"") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"counterexample\"") == null);
 }
 
 test "writeJson emits a flow-chain counterexample" {
@@ -1109,10 +1109,10 @@ test "writeJson emits a flow-chain counterexample" {
     try writeJson(&aw.writer, &traces);
     buf = aw.toArrayList();
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"kind\":\"flow-chain\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"flow\":[\"env() call\",\"the response body\"]") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"method\":\"POST\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"hasAuthHeader\":false") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"kind\":\"flow-chain\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"flow\":[\"env() call\",\"the response body\"]") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"method\":\"POST\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"hasAuthHeader\":false") != null);
 }
 
 test "the verifier registry covers every contract property" {
@@ -1150,14 +1150,14 @@ test "writeJson reports upstream fallback sites inside the facts, and only when 
     var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
     try writeJson(&aw.writer, &with_fallback);
     buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"coveredSites\":1,\"upstreamFallbackSites\":1}") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"coveredSites\":1,\"upstreamFallbackSites\":1}") != null);
 
     buf.clearRetainingCapacity();
     var aw2: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
     try writeJson(&aw2.writer, &without_fallback);
     buf = aw2.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "upstreamFallbackSites") == null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"coveredSites\":1}") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "upstreamFallbackSites") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"coveredSites\":1}") != null);
 }
 
 fn checkPublicFlowTrace(source: []const u8, tag: counterexample.PropertyTag, constructive: bool, auth: bool) !void {
@@ -1220,8 +1220,8 @@ test "contained request evidence names only the property governed sinks" {
     defer arena.deinit();
     for ([_]counterexample.PropertyTag{ .input_validated, .pii_contained, .injection_safe }) |tag| {
         const resisted = (try resistedFor(arena.allocator(), .{ .property = tag, .safe_form = .never_reached }, tag)).?;
-        try testing.expect(std.mem.indexOf(u8, resisted.chain[1], "external egress") != null);
-        try testing.expect(std.mem.indexOf(u8, resisted.chain[1], "never reaches a response, log") == null);
+        try testing.expect(std.mem.find(u8, resisted.chain[1], "external egress") != null);
+        try testing.expect(std.mem.find(u8, resisted.chain[1], "never reaches a response, log") == null);
     }
     try testing.expect((try resistedFor(arena.allocator(), .{ .property = .injection_safe, .safe_form = .validated }, .injection_safe)) == null);
 }

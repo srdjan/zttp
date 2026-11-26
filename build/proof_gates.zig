@@ -54,12 +54,13 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     const proof_checker_purity_step = ctx.b.step("test-proof-checker-purity", "Check the acceptance kernel is a leaf with a non-empty suite");
     proof_checker_purity_step.dependOn(&proof_checker_purity.step);
 
-    // Every script in scripts/ must be invoked by something or say why not. A
-    // gate nothing runs reports nothing, which reads the same as a gate that
-    // found nothing - and scripts/test-zruntime.sh sat in the tree invoking a
-    // root file that had been deleted, called by nobody.
-    const script_reachability = ctx.addGate(&.{ "bash", "scripts/check-script-reachability.sh" }, "test-script-reachability", "Check every script in scripts/ is invoked or declared manual");
-    script_reachability.run.has_side_effects = true;
+    // Check every script in scripts/ is invoked by something or declared manual.
+    const script_reachability = b.addRunArtifact(tools.repo_gate_exe);
+    script_reachability.addArgs(&.{ "script-reachability", "--git-scripts" });
+    script_reachability.setCwd(b.path("."));
+    script_reachability.has_side_effects = true;
+    const script_reachability_step = b.step("test-script-reachability", "Check every script in scripts/ is invoked or declared manual");
+    script_reachability_step.dependOn(&script_reachability.step);
 
     // Every advertised diagnostic variant must have a construction site. The
     // rule-coverage gate in packages/pi keys on `rule.code`, so a dead variant
@@ -91,6 +92,34 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
         .optimize = optimize,
     }));
     const residual_extract = b.addExecutable(.{ .name = "residual-guard-extract", .root_module = residual_extract_mod });
+    const residual_extract_tests = ctx.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("scripts/residual_guard_extract.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .imports = &.{
+                .{
+                    .name = "residual",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("packages/proof-checker/src/residual.zig"),
+                        .target = b.graph.host,
+                        .optimize = optimize,
+                    }),
+                },
+                .{
+                    .name = "guard_catalog",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("packages/zts/src/guard_catalog.zig"),
+                        .target = b.graph.host,
+                        .optimize = optimize,
+                    }),
+                },
+            },
+        }),
+    });
+    const run_residual_extract_tests = ctx.addRunTest(residual_extract_tests);
+    residual_guards_drift.run.step.dependOn(&run_residual_extract_tests.step);
     residual_guards_drift.run.addArtifactArg(residual_extract);
     residual_guards_drift.run.has_side_effects = true;
 
@@ -118,7 +147,7 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
 
     return .{
         .proof_checker_purity = proof_checker_purity,
-        .script_reachability = script_reachability.run,
+        .script_reachability = script_reachability,
         .diagnostic_producers = diagnostic_producers.run,
         .proof_ratchet_drift = proof_ratchet_drift.run,
         .residual_guards_drift = residual_guards_drift.run,

@@ -1406,10 +1406,10 @@ test "appendEntryEvent frames a v4 user_text event with stable identity" {
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"v\":4") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"entry_id\":1") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"user_text\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"hello world\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"v\":4") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"entry_id\":1") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"k\":\"user_text\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"hello world\"") != null);
 }
 
 test "model_text JSON projection uses the documented v4 envelope" {
@@ -1448,8 +1448,8 @@ test "appendEvent serializes tool_result with llm_text and ui_payload and no bod
     defer allocator.free(raw);
     const line =
         "{\"v\":4,\"entry_id\":1,\"k\":\"tool_result\",\"d\":{\"tool_use_id\":\"toolu_1\",\"tool_name\":\"zts_expert_verify_paths\",\"ok\":false,\"llm_text\":\"{\\\"ok\\\":false}\",\"ui_payload\":{\"kind\":\"plain_text\",\"text\":\"fallback\"}}}";
-    try testing.expect(std.mem.indexOf(u8, raw, line) != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"body\"") == null);
+    try testing.expect(std.mem.find(u8, raw, line) != null);
+    try testing.expect(std.mem.find(u8, raw, "\"body\"") == null);
 }
 
 test "a journal line that holds the old body field still loads" {
@@ -1478,8 +1478,8 @@ test "appendEvent serializes proof_card as a display object" {
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"proof_card\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"llm_text\":\"{\\\"summary\\\":{\\\"total\\\":0}}\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"k\":\"proof_card\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"llm_text\":\"{\\\"summary\\\":{\\\"total\\\":0}}\"") != null);
 }
 
 test "writeMeta/readMeta round-trip current schema" {
@@ -1566,12 +1566,12 @@ test "appendEvent serializes autoloop_outcome with goals and final hash" {
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"autoloop_outcome\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"verdict\":\"achieved\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"iterations\":3") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"retry_safe\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"goals_unmet\":[]") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"final_change_set_hash\":\"000102") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"k\":\"autoloop_outcome\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"verdict\":\"achieved\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"iterations\":3") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"retry_safe\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"goals_unmet\":[]") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"final_change_set_hash\":\"000102") != null);
 }
 
 test "appendEvent omits final_change_set_hash when null" {
@@ -1591,8 +1591,8 @@ test "appendEvent omits final_change_set_hash when null" {
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"verdict\":\"exhausted_iters\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "final_change_set_hash") == null);
+    try testing.expect(std.mem.find(u8, raw, "\"verdict\":\"exhausted_iters\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "final_change_set_hash") == null);
 }
 
 test "readMeta rejects older metadata schema versions after the protocol cutover" {
@@ -1625,8 +1625,8 @@ test "appendEvent serializes turn_end with reason" {
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"turn_end\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"reason\":\"budget_roundtrips\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"k\":\"turn_end\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"reason\":\"budget_roundtrips\"") != null);
 }
 
 test "appendEvent serializes a wall-clock timeout end reason distinctly" {
@@ -1641,9 +1641,9 @@ test "appendEvent serializes a wall-clock timeout end reason distinctly" {
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"reason\":\"budget_timeout\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"reason\":\"budget_timeout\"") != null);
     // Must not collapse into the round-trip bucket the scorecard reads.
-    try testing.expect(std.mem.indexOf(u8, raw, "budget_roundtrips") == null);
+    try testing.expect(std.mem.find(u8, raw, "budget_roundtrips") == null);
 }
 
 test "appendEvent removes an incomplete crash tail before the next frame" {
@@ -1668,8 +1668,8 @@ test "appendEvent removes an incomplete crash tail before the next frame" {
     const second = (try reader.next()) orelse return error.TestExpectedSecondFrame;
     defer allocator.free(second);
     try testing.expect((try reader.next()) == null);
-    try testing.expect(std.mem.indexOf(u8, first, "\"approved\"") != null);
-    try testing.expect(std.mem.indexOf(u8, second, "\"budget_timeout\"") != null);
+    try testing.expect(std.mem.find(u8, first, "\"approved\"") != null);
+    try testing.expect(std.mem.find(u8, second, "\"budget_timeout\"") != null);
 }
 
 test "appendEvent rolls back a partially written payload before appending" {
@@ -1698,8 +1698,8 @@ test "appendEvent rolls back a partially written payload before appending" {
     const second = (try reader.next()) orelse return error.TestExpectedSecondFrame;
     defer allocator.free(second);
     try testing.expect((try reader.next()) == null);
-    try testing.expect(std.mem.indexOf(u8, first, "\"approved\"") != null);
-    try testing.expect(std.mem.indexOf(u8, second, "\"budget_timeout\"") != null);
+    try testing.expect(std.mem.find(u8, first, "\"approved\"") != null);
+    try testing.expect(std.mem.find(u8, second, "\"budget_timeout\"") != null);
 }
 
 test "appendEvent rejects a complete checksum-corrupt predecessor" {
@@ -1712,7 +1712,7 @@ test "appendEvent rejects a complete checksum-corrupt predecessor" {
     try appendEvent(allocator, path, .{ .turn_end = .{ .reason = .approved } });
     const original = try readWhole(allocator, path);
     defer allocator.free(original);
-    const corrupt_at = std.mem.indexOf(u8, original, "approved") orelse return error.TestExpectedPayload;
+    const corrupt_at = std.mem.find(u8, original, "approved") orelse return error.TestExpectedPayload;
     const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     {
@@ -1821,7 +1821,7 @@ test "appendEvent rejects corruption in a complete non-final frame" {
     try appendEvent(allocator, path, .{ .turn_end = .{ .reason = .budget_timeout } });
     const original = try readWhole(allocator, path);
     defer allocator.free(original);
-    const corrupt_at = std.mem.indexOf(u8, original, "approved") orelse return error.TestExpectedPayload;
+    const corrupt_at = std.mem.find(u8, original, "approved") orelse return error.TestExpectedPayload;
     const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     {
@@ -1848,7 +1848,7 @@ test "appendEvent rejects a checksummed malformed envelope" {
     defer allocator.free(original);
     const payload_len = std.mem.readInt(u64, original[frame_magic.len .. frame_magic.len + @sizeOf(u64)], .big);
     const payload = original[frame_header_len .. frame_header_len + @as(usize, @intCast(payload_len))];
-    const kind_at = std.mem.indexOf(u8, payload, "turn_end") orelse return error.TestExpectedPayload;
+    const kind_at = std.mem.find(u8, payload, "turn_end") orelse return error.TestExpectedPayload;
     var malformed = try allocator.dupe(u8, original);
     defer allocator.free(malformed);
     @memcpy(malformed[frame_header_len + kind_at ..][0..8], "nonsense");
@@ -1894,21 +1894,21 @@ test "appendEvent serializes session_summary with metrics" {
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"session_summary\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"turn_count\":2") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"verified_change_set_count\":1") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"reached_proof\":true") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"round_trips_to_first_green\":4") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"proven_path_ratio\":0.750") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"workflow_hint_count\":2") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"raw_first_draft_veto_pass_count\":1") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"first_attempt_green_count\":2") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"veto_retry_count\":3") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"tool_call_count\":5") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"compiler_authored_apply_count\":2") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"last_workflow_kind\":\"route_add\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"last_workflow_confidence\":\"high\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"final_outcome\":\"approved\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"k\":\"session_summary\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"turn_count\":2") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"verified_change_set_count\":1") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"reached_proof\":true") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"round_trips_to_first_green\":4") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"proven_path_ratio\":0.750") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"workflow_hint_count\":2") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"raw_first_draft_veto_pass_count\":1") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"first_attempt_green_count\":2") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"veto_retry_count\":3") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"tool_call_count\":5") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"compiler_authored_apply_count\":2") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"last_workflow_kind\":\"route_add\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"last_workflow_confidence\":\"high\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"final_outcome\":\"approved\"") != null);
 }
 
 test "SessionSummary.provenPathRatio is zero with no tracked properties" {

@@ -580,7 +580,7 @@ const fetch_io_200 =
 ;
 
 fn expectFetchIo(jsonl: []const u8, expected: []const u8) !void {
-    if (std.mem.indexOf(u8, jsonl, expected) == null) {
+    if (std.mem.find(u8, jsonl, expected) == null) {
         std.debug.print("\nexpected the witness to contain:\n{s}\ngot:\n{s}\n", .{ expected, jsonl });
         return error.TestExpectedEqual;
     }
@@ -2517,7 +2517,7 @@ test "FlowChecker reports a secret logged inside a called helper, call-sensitive
     try std.testing.expectEqual(@as(usize, 1), routed_report.count);
     try std.testing.expect(!routed_report.properties.no_secret_leakage);
     try std.testing.expect(std.mem.startsWith(u8, routed_report.help, "env values are secret unless the policy lists the name in env.public; do not log them"));
-    try std.testing.expect(std.mem.indexOf(u8, routed_report.help, "line 7") != null);
+    try std.testing.expect(std.mem.find(u8, routed_report.help, "line 7") != null);
 
     // The same helper called with a clean literal reports nothing.
     const clean =
@@ -3910,15 +3910,9 @@ test "FlowChecker isolates route witness IO from other roots" {
     checker.scopes = &parser.scopes;
     defer checker.deinit();
     _ = try checker.check(handler_fn);
-    var found = false;
     for (checker.getDiagnostics()) |diag| {
-        if (diag.kind != .secret_in_response) continue;
-        found = true;
-        const witness = diag.witness orelse return error.MissingWitness;
-        try std.testing.expectEqual(@as(usize, 1), witness.io_calls.len);
-        try std.testing.expectEqualStrings("env", witness.io_calls[0].func);
+        try std.testing.expect(diag.kind != .secret_in_response);
     }
-    try std.testing.expect(!found);
     try std.testing.expect(checker.getProperties().no_secret_leakage);
     const dispatched =
         \\import { routerMatch } from "zttp:router";
@@ -4098,9 +4092,10 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
     const cases = [_][]const u8{
         // A replaced type predicate can mutate the table passed to it.
         \\import { routerMatch } from "zttp:router";
+        \\import { env } from "zttp:env";
         \\function clean(req) { return Response.json({ ok: true }); }
-        \\function changed(req) { return Response.html("changed"); }
-        \\function replacement(table) { table["GET /probe"] = changed; return false; }
+        \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
+        \\function replacement(table) { table["GET /probe"] = leak; return false; }
         \\const routes = { "GET /probe": clean };
         \\function setup() { Array.isArray = replacement; return Array.isArray(routes); }
         \\const ready = setup();
@@ -4112,11 +4107,12 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         ,
         // Selecting the table from an aggregate retains a mutable alias.
         \\import { routerMatch } from "zttp:router";
+        \\import { env } from "zttp:env";
         \\function clean(req) { return Response.json({ ok: true }); }
-        \\function changed(req) { return Response.html("changed"); }
+        \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
         \\const routes = { "GET /probe": clean };
         \\const alias = [routes][0];
-        \\function install() { alias["GET /probe"] = changed; return 0; }
+        \\function install() { alias["GET /probe"] = leak; return 0; }
         \\const installed = install();
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
@@ -4126,14 +4122,15 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         ,
         // The same aggregate selector can change the selected handler.
         \\import { routerMatch } from "zttp:router";
+        \\import { env } from "zttp:env";
         \\function clean(req) { return Response.json({ ok: true }); }
-        \\function changed(req) { return Response.html("changed"); }
+        \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
         \\const routes = { "GET /probe": clean };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
         \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  const selected = [found][0];
-        \\  selected.handler = changed;
+        \\  selected.handler = leak;
         \\  return found.handler(req);
         \\}
         ,
@@ -4268,7 +4265,8 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
     };
     for (cases, 0..) |source, case_index| {
         const properties = try runFlowProperties(std.testing.allocator, source);
-        const leaks = case_index == 3 or case_index == 4 or case_index == 5 or
+        const leaks = case_index == 0 or case_index == 1 or case_index == 2 or
+            case_index == 3 or case_index == 4 or case_index == 5 or
             case_index == 7 or case_index == 8 or case_index == 9 or case_index == 10;
         inline for (std.meta.tags(FlowProperty)) |property| {
             const expected = !(leaks and property == .no_secret_leakage);

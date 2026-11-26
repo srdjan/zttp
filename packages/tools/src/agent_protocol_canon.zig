@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
+const project_config_mod = @import("project_config");
 const agent_identity = @import("agent_identity.zig");
 const module_graph_record = @import("module_graph_record.zig");
 const canonicalize = @import("canonicalize.zig");
@@ -48,6 +49,7 @@ pub fn boolField(input: std.json.Value, name: []const u8) bool {
 pub fn runCanonicalize(
     allocator: std.mem.Allocator,
     json: *std.json.Stringify,
+    canonical_root: []const u8,
     file: *const CapturedFile,
     identity: Identity,
     input: std.json.Value,
@@ -55,7 +57,15 @@ pub fn runCanonicalize(
     const source = file.effective_source;
     const digest = file.source_digest;
 
-    var result = try canonicalize.collectFromSource(allocator, source, file.absolute_path);
+    var analysis_ctx = try project_config_mod.discoverAnalysisContext(allocator, file.absolute_path, canonical_root);
+    defer analysis_ctx.deinit(allocator);
+    const policy_source = try analysis_ctx.readPolicySource(allocator);
+    defer if (policy_source) |src| allocator.free(src);
+
+    var result = try canonicalize.collectFromSourceWithOptions(allocator, source, file.absolute_path, .{
+        .sql_schema_path = analysis_ctx.sqlite,
+        .policy_source = policy_source,
+    });
     defer result.deinit(allocator);
 
     try json.beginObject();
@@ -159,17 +169,24 @@ pub fn runCanonicalize(
 pub fn runNormalize(
     allocator: std.mem.Allocator,
     json: *std.json.Stringify,
+    canonical_root: []const u8,
     file: *const CapturedFile,
 ) !bool {
     const source = file.effective_source;
     const digest = file.source_digest;
+
+    var analysis_ctx = try project_config_mod.discoverAnalysisContext(allocator, file.absolute_path, canonical_root);
+    defer analysis_ctx.deinit(allocator);
+    const policy_source = try analysis_ctx.readPolicySource(allocator);
+    defer if (policy_source) |src| allocator.free(src);
 
     var result = try canonicalize.normalizeSourceWithOptions(
         allocator,
         source,
         file.absolute_path,
         .{
-            .sql_schema_path = null,
+            .sql_schema_path = analysis_ctx.sqlite,
+            .policy_source = policy_source,
             .layout = true,
         },
     );
@@ -326,8 +343,8 @@ test "normalize derives canonical source from one captured source" {
     const expected_digest = agent_identity.sourceDigest(let_handler);
     try testing.expectEqualStrings(&expected_digest, payload.get("source_digest").?.string);
     const canonical_source = payload.get("canonical_source").?.string;
-    try testing.expect(std.mem.indexOf(u8, canonical_source, "const name") != null);
-    try testing.expect(std.mem.indexOf(u8, canonical_source, "let name") == null);
+    try testing.expect(std.mem.find(u8, canonical_source, "const name") != null);
+    try testing.expect(std.mem.find(u8, canonical_source, "let name") == null);
 
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", allocator, .limited(4096));
     defer allocator.free(on_disk);
@@ -476,8 +493,8 @@ test "normalize reaches a fixed point and writes nothing to disk" {
     // One `let` takes one rewrite pass.
     try testing.expectEqual(@as(i64, 1), payload.get("iterations").?.integer);
     const canonical = payload.get("canonical_source").?.string;
-    try testing.expect(std.mem.indexOf(u8, canonical, "const name") != null);
-    try testing.expect(std.mem.indexOf(u8, canonical, "let name") == null);
+    try testing.expect(std.mem.find(u8, canonical, "const name") != null);
+    try testing.expect(std.mem.find(u8, canonical, "let name") == null);
     // The rewrite happened in memory only.
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .unlimited);
     defer a.free(on_disk);
@@ -506,7 +523,7 @@ test "normalize with write true is refused, not silently ignored" {
     const err = parsed.value.object.get("error").?.object;
     try testing.expectEqualStrings("operation_not_implemented", err.get("code").?.string);
     try testing.expectEqualStrings("input.write", err.get("field").?.string);
-    try testing.expect(std.mem.indexOf(u8, err.get("message").?.string, "propose_change_set") != null);
+    try testing.expect(std.mem.find(u8, err.get("message").?.string, "propose_change_set") != null);
 
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .unlimited);
     defer a.free(on_disk);

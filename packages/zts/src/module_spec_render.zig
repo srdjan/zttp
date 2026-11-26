@@ -15,8 +15,8 @@
 //! arrays inline as `[]`, and a trailing newline.
 //!
 //! The JSON is a deliberately LOSSY projection of the binding. `arg_count`,
-//! `required_arg_count`, `traceable`, `replay_pure`, `contract_flags`,
-//! `return_labels`, and `ContractExtraction.flag_only` all exist in Zig and
+//! `required_arg_count`, `traceable`, `replay_pure`, `contract_flags`, and
+//! `return_labels` all exist in Zig and
 //! appear in no spec file. Widening the projection is a separate decision with
 //! its own diff; do not add a field here just because the binding has one.
 //!
@@ -552,34 +552,26 @@ test "renders the four optional export fields only when present" {
     // binding has them, so check a module that had none in JSON and does in Zig.
     const env = try renderBySpecifier(a, "zttp:env");
     defer a.free(env);
-    try testing.expect(std.mem.indexOf(u8, env, "\"params\": [") != null);
+    try testing.expect(std.mem.find(u8, env, "\"params\": [") != null);
 
     // laws, both shapes: crypto has "pure" and inverseOf, auth has absorbing.
     const crypto = try renderBySpecifier(a, "zttp:crypto");
     defer a.free(crypto);
-    try testing.expect(std.mem.indexOf(u8, crypto, "\"pure\"") != null);
-    try testing.expect(std.mem.indexOf(u8, crypto, "\"inverseOf\": \"base64Decode\"") != null);
+    try testing.expect(std.mem.find(u8, crypto, "\"pure\"") != null);
+    try testing.expect(std.mem.find(u8, crypto, "\"inverseOf\": \"base64Decode\"") != null);
 
     const auth = try renderBySpecifier(a, "zttp:auth");
     defer a.free(auth);
-    try testing.expect(std.mem.indexOf(u8, auth, "\"absorbing\": {") != null);
-    try testing.expect(std.mem.indexOf(u8, auth, "\"argumentShape\": \"empty_string_literal\"") != null);
-    try testing.expect(std.mem.indexOf(u8, auth, "\"failureSeverity\": \"critical\"") != null);
-
-    // flag_only is never projected, whatever the binding says.
-    for (builtin_modules.builtins, builtin_modules.builtin_governance_entries) |binding, gov| {
-        const out = try renderModuleSpec(a, binding, gov.module_path);
-        defer a.free(out);
-        try testing.expect(std.mem.indexOf(u8, out, "flagOnly") == null);
-        try testing.expect(std.mem.indexOf(u8, out, "flag_only") == null);
-    }
+    try testing.expect(std.mem.find(u8, auth, "\"absorbing\": {") != null);
+    try testing.expect(std.mem.find(u8, auth, "\"argumentShape\": \"empty_string_literal\"") != null);
+    try testing.expect(std.mem.find(u8, auth, "\"failureSeverity\": \"critical\"") != null);
 }
 
 test "empty required capabilities render inline" {
     const a = testing.allocator;
     const validate = try renderBySpecifier(a, "zttp:validate");
     defer a.free(validate);
-    try testing.expect(std.mem.indexOf(u8, validate, "\"requiredCapabilities\": [],") != null);
+    try testing.expect(std.mem.find(u8, validate, "\"requiredCapabilities\": [],") != null);
 }
 
 test "core spec and catalog classify authoring exports without runtime functions" {
@@ -598,7 +590,7 @@ test "core spec and catalog classify authoring exports without runtime functions
     const spec = parsed.value;
     try testing.expectEqual(@as(usize, 1), spec.typeDeclarations.len);
     try testing.expectEqualStrings("Nominal", spec.typeDeclarations[0].name);
-    try testing.expect(std.mem.indexOf(u8, spec.typeDeclarations[0].typescript, "type Nominal") != null);
+    try testing.expect(std.mem.find(u8, spec.typeDeclarations[0].typescript, "type Nominal") != null);
     const intrinsics = spec.intrinsicExports;
     try testing.expectEqual(@as(usize, 4), intrinsics.len);
     try testing.expectEqualStrings("nominal", intrinsics[0].name);
@@ -612,6 +604,6 @@ test "core spec and catalog classify authoring exports without runtime functions
     try testing.expectEqual(@as(usize, 0), spec.exports.len);
     const catalog = try renderModuleCatalogTable(a, &builtin_modules.builtins);
     defer a.free(catalog);
-    try testing.expect(std.mem.indexOf(u8, catalog, "| `zttp:core` | `Nominal` | `nominal`, `match`, `assert`, `P` | none | none |\n") != null);
-    try testing.expect(std.mem.indexOf(u8, catalog, "| `zttp:env` | none | none | `env` | `env`, `policy_check` |\n") != null);
+    try testing.expect(std.mem.find(u8, catalog, "| `zttp:core` | `Nominal` | `nominal`, `match`, `assert`, `P` | none | none |\n") != null);
+    try testing.expect(std.mem.find(u8, catalog, "| `zttp:env` | none | none | `env` | `env`, `policy_check` |\n") != null);
 }

@@ -315,8 +315,9 @@ pub const GraphCheck = struct {
                 return err;
             };
             defer checks.deinit(allocator);
-            if (checks.evidence) |*evidence| {
-                evidence_by_module[graph_index] = evidence.*;
+            if (checks.evidence) |evidence| {
+                evidence_by_module[graph_index] = evidence;
+                checks.evidence = null;
             }
             if (checks.verify_failed) return .refused;
             if (self.graph.runtimePosition(graph_index)) |runtime_position| {
@@ -379,13 +380,12 @@ pub const GraphCheck = struct {
             var diag_view = zts.SourceView.of(module.source);
             diag_view.name = module.path;
             diag_view.normalize_positions = true;
-            var output: std.ArrayList(u8) = .empty;
-            defer output.deinit(self.allocator);
-            var output_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &output);
+            var output_writer: std.Io.Writer.Allocating = .init(self.allocator);
+            defer output_writer.deinit();
             const single = [_]zts.VerifierDiagnostic{diagnostic};
             zts.DiagnosticProjection.writeAll(.verifier, diag_view, &single, view, &output_writer.writer) catch {};
-            output = output_writer.toArrayList();
-            if (output.items.len > 0) debugPrint("{s}", .{output.items});
+            const written = output_writer.written();
+            if (written.len > 0) debugPrint("{s}", .{written});
         }
     }
 

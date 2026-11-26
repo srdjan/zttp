@@ -1531,6 +1531,18 @@ pub const IrView = struct {
                 const arm = self.getMatchArm(root) orelse return false;
                 return self.subtreeContains(arm.pattern, target) or self.subtreeContains(arm.body, target);
             },
+            .export_decl => {
+                const decl = self.getExportDecl(root) orelse return false;
+                if (self.subtreeContains(decl.declaration, target)) return true;
+                for (0..decl.specifiers_count) |i| {
+                    if (self.subtreeContains(self.getListIndex(decl.specifiers_start, @intCast(i)), target)) return true;
+                }
+            },
+            .pattern_element => {
+                const elem = self.getPatternElem(root) orelse return false;
+                return self.subtreeContains(elem.key, target) or
+                    self.subtreeContains(elem.default_value, target);
+            },
             // exhaustive: falling through reaches `return false` - the target was
             // not found in this subtree. The arms above cover every node with
             // children to search; the rest are leaves that can only be the
@@ -2829,4 +2841,44 @@ test "subtreeContains finds a node inside an assert condition" {
     try std.testing.expect(assert_node != null_node);
     const stmt = view.getAssertStmt(assert_node).?;
     try std.testing.expect(view.subtreeContains(assert_node, stmt.condition));
+}
+
+test "subtreeContains descends through export_decl and pattern_element" {
+    const allocator = std.testing.allocator;
+    var store = IRStore.init(allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(allocator);
+    defer constants.deinit();
+    const loc: SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+
+    const lit = try store.addInt(loc, 7);
+    const var_decl = try store.addVarDecl(.var_decl, loc, .{
+        .kind = .@"const",
+        .binding = .{ .scope_id = 0, .slot = 0, .name_atom = 1, .kind = .global },
+        .init = lit,
+    });
+    const export_node = try store.addExportDecl(.export_decl, loc, .{
+        .kind = .named,
+        .declaration = var_decl,
+        .specifiers_start = null_node,
+        .specifiers_count = 0,
+        .from_module_idx = 0,
+    });
+
+    const default_expr = try store.addInt(loc, 9);
+    const nested_key = try store.addInt(loc, 11);
+    const pat_node = try store.addPatternElem(.pattern_element, loc, .{
+        .kind = .simple,
+        .binding = .{ .scope_id = 0, .slot = 1, .name_atom = 2, .kind = .local },
+        .key = nested_key,
+        .key_atom = 0,
+        .default_value = default_expr,
+    });
+
+    const view = IrView.fromIRStore(&store, &constants);
+    try std.testing.expect(view.subtreeContains(export_node, var_decl));
+    try std.testing.expect(view.subtreeContains(export_node, lit));
+    try std.testing.expect(view.subtreeContains(pat_node, default_expr));
+    try std.testing.expect(view.subtreeContains(pat_node, nested_key));
+    try std.testing.expect(!view.subtreeContains(pat_node, lit));
 }

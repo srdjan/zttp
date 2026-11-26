@@ -188,7 +188,10 @@ fn buildInternal(
     }
 
     const entry_owned = try agent_identity.canonicalRelPath(allocator, io, canonical_root, entry_rel);
-    try queue.append(allocator, entry_owned);
+    {
+        errdefer allocator.free(entry_owned);
+        try queue.append(allocator, entry_owned);
+    }
     try seen.put(entry_owned, {});
 
     var head: usize = 0;
@@ -221,14 +224,35 @@ fn buildInternal(
 
         try collectImports(allocator, io, canonical_root, rel, abs, source, &imports, &rejected, &queue, &seen);
 
+        const path_copy = try allocator.dupe(u8, rel);
+        errdefer allocator.free(path_copy);
+        const owned_imports = try imports.toOwnedSlice(allocator);
+        errdefer {
+            for (owned_imports) |imp| {
+                allocator.free(imp.specifier);
+                allocator.free(imp.target);
+            }
+            allocator.free(owned_imports);
+        }
         try modules.append(allocator, .{
-            .path = try allocator.dupe(u8, rel),
+            .path = path_copy,
             .source_digest = agent_identity.sourceDigest(source),
-            .imports = try imports.toOwnedSlice(allocator),
+            .imports = owned_imports,
         });
     }
 
     const module_slice = try modules.toOwnedSlice(allocator);
+    errdefer {
+        for (module_slice) |m| {
+            allocator.free(m.path);
+            for (m.imports) |imp| {
+                allocator.free(imp.specifier);
+                allocator.free(imp.target);
+            }
+            allocator.free(m.imports);
+        }
+        allocator.free(module_slice);
+    }
     std.mem.sort(ModuleRecord, module_slice, {}, lessModule);
     const rejected_slice = try rejected.toOwnedSlice(allocator);
     std.mem.sort(Rejection, rejected_slice, {}, lessRejection);
@@ -242,20 +266,48 @@ fn buildInternal(
     };
 }
 
+fn appendImportRecord(
+    allocator: std.mem.Allocator,
+    imports: *std.ArrayList(ImportRecord),
+    specifier: []const u8,
+    kind: ImportKind,
+    target: []const u8,
+) !void {
+    const owned_spec = try allocator.dupe(u8, specifier);
+    errdefer allocator.free(owned_spec);
+    const owned_target = try allocator.dupe(u8, target);
+    errdefer allocator.free(owned_target);
+    try imports.append(allocator, .{
+        .specifier = owned_spec,
+        .kind = kind,
+        .target = owned_target,
+    });
+}
+
+fn appendRejectionRecord(
+    allocator: std.mem.Allocator,
+    rejected: *std.ArrayList(Rejection),
+    specifier: []const u8,
+    importer_rel: []const u8,
+    reason: []const u8,
+) !void {
+    const owned_spec = try allocator.dupe(u8, specifier);
+    errdefer allocator.free(owned_spec);
+    const owned_importer = try allocator.dupe(u8, importer_rel);
+    errdefer allocator.free(owned_importer);
+    try rejected.append(allocator, .{
+        .specifier = owned_spec,
+        .importer = owned_importer,
+        .reason = reason,
+    });
+}
+
 fn recordParseFailure(
     allocator: std.mem.Allocator,
     rejected: *std.ArrayList(Rejection),
     importer_rel: []const u8,
 ) !void {
-    const specifier = try allocator.dupe(u8, "");
-    errdefer allocator.free(specifier);
-    const importer = try allocator.dupe(u8, importer_rel);
-    errdefer allocator.free(importer);
-    try rejected.append(allocator, .{
-        .specifier = specifier,
-        .importer = importer,
-        .reason = rejection_parse_failed,
-    });
+    try appendRejectionRecord(allocator, rejected, "", importer_rel, rejection_parse_failed);
 }
 
 fn collectImports(
@@ -309,80 +361,60 @@ fn collectImports(
     for (pending.items) |found| {
         const specifier = found.specifier;
         switch (resolver.resolve(specifier)) {
-            .virtual => try imports.append(allocator, .{
-                .specifier = try allocator.dupe(u8, specifier),
-                .kind = .builtin,
-                .target = try allocator.dupe(u8, specifier),
-            }),
+            .virtual => try appendImportRecord(allocator, imports, specifier, .builtin, specifier),
             .unknown => {
                 const is_ext = std.mem.startsWith(u8, specifier, "zttp-ext:");
-                try rejected.append(allocator, .{
-                    .specifier = try allocator.dupe(u8, specifier),
-                    .importer = try allocator.dupe(u8, importer_rel),
-                    // Phase 1 authenticates no extension manifests, so an
-                    // extension specifier is recorded as unavailable rather
-                    // than silently treated as resolved.
-                    .reason = if (is_ext) rejection_extension_unavailable else rejection_unknown_specifier,
-                });
-                try imports.append(allocator, .{
-                    .specifier = try allocator.dupe(u8, specifier),
-                    .kind = if (is_ext) .extension else .unresolved,
-                    .target = try allocator.dupe(u8, ""),
-                });
+                // Phase 1 authenticates no extension manifests, so an
+                // extension specifier is recorded as unavailable rather
+                // than silently treated as resolved.
+                try appendRejectionRecord(
+                    allocator,
+                    rejected,
+                    specifier,
+                    importer_rel,
+                    if (is_ext) rejection_extension_unavailable else rejection_unknown_specifier,
+                );
+                try appendImportRecord(
+                    allocator,
+                    imports,
+                    specifier,
+                    if (is_ext) .extension else .unresolved,
+                    "",
+                );
             },
             .file => |spec| {
                 const importing_dir = file_resolver.dirName(importer_abs);
                 const target_abs = file_resolver.resolve(allocator, spec, importing_dir, probeExists) catch {
-                    try rejected.append(allocator, .{
-                        .specifier = try allocator.dupe(u8, specifier),
-                        .importer = try allocator.dupe(u8, importer_rel),
-                        .reason = rejection_file_unreadable,
-                    });
-                    try imports.append(allocator, .{
-                        .specifier = try allocator.dupe(u8, specifier),
-                        .kind = .relative,
-                        .target = try allocator.dupe(u8, ""),
-                    });
+                    try appendRejectionRecord(allocator, rejected, specifier, importer_rel, rejection_file_unreadable);
+                    try appendImportRecord(allocator, imports, specifier, .relative, "");
                     continue;
                 };
                 defer allocator.free(target_abs);
 
                 const target_rel = agent_identity.canonicalRelPath(allocator, io, canonical_root, target_abs) catch {
-                    try rejected.append(allocator, .{
-                        .specifier = try allocator.dupe(u8, specifier),
-                        .importer = try allocator.dupe(u8, importer_rel),
-                        .reason = rejection_path_outside_root,
-                    });
-                    try imports.append(allocator, .{
-                        .specifier = try allocator.dupe(u8, specifier),
-                        .kind = .relative,
-                        .target = try allocator.dupe(u8, ""),
-                    });
+                    try appendRejectionRecord(allocator, rejected, specifier, importer_rel, rejection_path_outside_root);
+                    try appendImportRecord(allocator, imports, specifier, .relative, "");
                     continue;
                 };
-                errdefer allocator.free(target_rel);
+                var target_rel_owned = true;
+                errdefer if (target_rel_owned) allocator.free(target_rel);
 
-                try imports.append(allocator, .{
-                    .specifier = try allocator.dupe(u8, specifier),
-                    .kind = .relative,
-                    .target = try allocator.dupe(u8, target_rel),
-                });
+                try appendImportRecord(allocator, imports, specifier, .relative, target_rel);
 
                 if (!zts.file_io.fileExists(allocator, target_abs)) {
-                    try rejected.append(allocator, .{
-                        .specifier = try allocator.dupe(u8, specifier),
-                        .importer = try allocator.dupe(u8, importer_rel),
-                        .reason = rejection_file_unreadable,
-                    });
+                    try appendRejectionRecord(allocator, rejected, specifier, importer_rel, rejection_file_unreadable);
                     allocator.free(target_rel);
+                    target_rel_owned = false;
                     continue;
                 }
 
                 if (seen.contains(target_rel)) {
                     allocator.free(target_rel);
+                    target_rel_owned = false;
                     continue;
                 }
                 try queue.append(allocator, target_rel);
+                target_rel_owned = false;
                 try seen.put(target_rel, {});
             },
         }

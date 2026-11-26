@@ -101,12 +101,16 @@ fn decodeJson(
 
     const out = try allocator.alloc([]const u8, 1 + goals_count);
     errdefer allocator.free(out);
+    var initialized: usize = 0;
+    errdefer for (out[0..initialized]) |s| allocator.free(s);
     out[0] = try allocator.dupe(u8, path_val.string);
+    initialized = 1;
 
     if (obj.get("goals")) |g| {
         for (g.array.items, 0..) |item, i| {
             if (item != .string) return error.InvalidToolArgsJson;
             out[i + 1] = try allocator.dupe(u8, item.string);
+            initialized += 1;
         }
     }
     return out;
@@ -326,25 +330,27 @@ fn writeWitnesses(observed: *Observed, view: zts_cli.precompile.CheckedView) !vo
         // individual witnesses through `counterexample.writeJsonl`.
         try w.writeAll("{\"key\":\"");
         try witness.stableKey(w);
+        try w.writeAll("\",\"property\":");
+        try writeJsonString(w, tag.asString());
         try w.print(
-            "\",\"property\":\"{s}\",\"origin\":{{\"line\":{d},\"column\":{d}}},\"sink\":{{\"line\":{d},\"column\":{d}}},\"summary\":",
-            .{ tag.asString(), span.line, span.column, span.line, span.column },
+            ",\"origin\":{{\"line\":{d},\"column\":{d}}},\"sink\":{{\"line\":{d},\"column\":{d}}},\"summary\":",
+            .{ span.line, span.column, span.line, span.column },
         );
         try writeJsonString(w, diag.message);
-        try w.print(
-            ",\"request\":{{\"method\":\"{s}\",\"url\":",
-            .{witness.request.method},
-        );
+        try w.writeAll(",\"request\":{\"method\":");
+        try writeJsonString(w, witness.request.method);
+        try w.writeAll(",\"url\":");
         try writeJsonString(w, witness.request.url);
         try w.writeAll(",\"has_auth_header\":");
         try w.writeAll(if (witness.request.has_auth_header) "true" else "false");
         try w.writeAll("},\"io_stubs\":[");
         for (witness.io_stubs, 0..) |stub, si| {
             if (si > 0) try w.writeByte(',');
-            try w.print(
-                "{{\"seq\":{d},\"module\":\"{s}\",\"fn\":\"{s}\",\"result\":{s}}}",
-                .{ stub.seq, stub.module, stub.func, stub.result_json },
-            );
+            try w.print("{{\"seq\":{d},\"module\":", .{stub.seq});
+            try writeJsonString(w, stub.module);
+            try w.writeAll(",\"fn\":");
+            try writeJsonString(w, stub.func);
+            try w.print(",\"result\":{s}}}", .{stub.result_json});
         }
         try w.writeAll("]}");
     }
@@ -434,39 +440,43 @@ test "execute rejects a property the solver does not model" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unknown goal deterministic") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "unknown goal deterministic") != null);
 }
 
 test "tool description names every currently supported goal" {
-    try testing.expect(std.mem.indexOf(u8, tool.description, "no_secret_leakage") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "no_credential_leakage") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "injection_safe") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "input_validated") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "pii_contained") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "close the concrete path") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "no_secret_leakage") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "no_credential_leakage") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "injection_safe") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "input_validated") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "pii_contained") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "close the concrete path") != null);
 }
 
 test "execute emits witness JSON for the secret-leak fixture" {
-    // The fixture lives under the repo's examples/ directory. When the
-    // test runs from the project root (the default `zig build test`), the
-    // relative path resolves. When run outside the workspace the tool
-    // returns a PathOutsideWorkspace error and we skip.
-    const result = execute(testing.allocator, &.{"examples/handler/secret-leak.ts"}) catch |e| switch (e) {
-        error.PathOutsideWorkspace, error.FileNotFound => return,
-        else => return e,
-    };
-    var mut = result;
+    var mut = try goalCheckIn(testing.allocator, "goal-secret-leak", &.{.{
+        "secret-leak.ts",
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Response {
+        \\  const secret = env("SECRET_KEY");
+        \\  if (secret !== undefined) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+        \\
+    }}, "{\"path\":\"secret-leak.ts\"}");
     defer mut.deinit(testing.allocator);
 
     // Secret leak present -> tool reports not-ok with at least one witness.
     try testing.expect(!mut.ok);
-    try testing.expect(std.mem.indexOf(u8, mut.llm_text, "\"ok\":false") != null);
-    try testing.expect(std.mem.indexOf(u8, mut.llm_text, "\"property\":\"no_secret_leakage\"") != null);
+    try testing.expect(std.mem.find(u8, mut.llm_text, "\"ok\":false") != null);
+    try testing.expect(std.mem.find(u8, mut.llm_text, "\"property\":\"no_secret_leakage\"") != null);
     // The witness request is GET / with no body, and carries an env stub
     // in the io_stubs list.
-    try testing.expect(std.mem.indexOf(u8, mut.llm_text, "\"method\":\"GET\"") != null);
-    try testing.expect(std.mem.indexOf(u8, mut.llm_text, "\"fn\":\"env\"") != null);
-    try testing.expect(std.mem.indexOf(u8, mut.llm_text, "\"module\":\"env\"") != null);
+    try testing.expect(std.mem.find(u8, mut.llm_text, "\"method\":\"GET\"") != null);
+    try testing.expect(std.mem.find(u8, mut.llm_text, "\"fn\":\"env\"") != null);
+    try testing.expect(std.mem.find(u8, mut.llm_text, "\"module\":\"env\"") != null);
 }
 
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
@@ -506,8 +516,8 @@ test "execute fails pii_contained when user input reaches fetchSync" {
     }}, "{\"path\":\"handler.ts\",\"goals\":[\"pii_contained\"]}");
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"ok\":false") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"unproven\":[\"pii_contained\"]") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"ok\":false") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"unproven\":[\"pii_contained\"]") != null);
 }
 
 test "execute passes a clean goal through a resolvable sibling import" {
@@ -534,7 +544,7 @@ test "execute passes a clean goal through a resolvable sibling import" {
     }, "{\"path\":\"handler.ts\",\"goals\":[\"no_secret_leakage\"]}");
     defer result.deinit(testing.allocator);
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"ok\":true") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"ok\":true") != null);
 }
 
 test "execute fails a goal when an import does not resolve" {
@@ -549,7 +559,7 @@ test "execute fails a goal when an import does not resolve" {
     }}, "{\"path\":\"handler.ts\",\"goals\":[\"no_secret_leakage\"]}");
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"ok\":false") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"ok\":false") != null);
 }
 
 const import_leak_files: []const [2][]const u8 = &.{
@@ -582,7 +592,7 @@ test "a goal check reads a secret leak that passes through a relative import" {
     var result = try goalCheckIn(testing.allocator, "goal-import-leak", import_leak_files, "{\"path\":\"handler.ts\",\"goals\":[\"no_secret_leakage\"]}");
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"ok\":false") != null);
+    try testing.expect(std.mem.find(u8, result.llm_text, "\"ok\":false") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.llm_text, "\"property\":\"no_secret_leakage\""));
 }
 
@@ -612,5 +622,5 @@ test "a goal check stops at a type error and returns the production diagnostic" 
 }
 
 test "tool description names the early-stop diagnostics key" {
-    try testing.expect(std.mem.indexOf(u8, tool.description, "the refusals in a diagnostics list") != null);
+    try testing.expect(std.mem.find(u8, tool.description, "the refusals in a diagnostics list") != null);
 }

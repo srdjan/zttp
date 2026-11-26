@@ -128,10 +128,26 @@ pub const BytecodeOptimizer = struct {
 
             // Check if this is a jump instruction
             switch (op) {
-                .goto, .if_true, .if_false, .if_false_goto, .loop, .for_of_next, .for_of_next_put_loc => {
+                .goto, .if_true, .if_false, .if_false_goto, .drop_goto, .for_of_next => {
                     // Read the i16 offset
                     const offset = self.readI16(code, pos + 1);
                     // Calculate absolute target position
+                    const target_pos: i32 = @as(i32, @intCast(pos)) + info.size + offset;
+                    if (target_pos >= 0 and target_pos < @as(i32, @intCast(code.len))) {
+                        targets[@intCast(target_pos)] = true;
+                    }
+                },
+                .loop => {
+                    // .loop jumps backwards: target = pos + size - offset (matches interpreter & verifier)
+                    const offset = self.readI16(code, pos + 1);
+                    const target_pos: i32 = @as(i32, @intCast(pos)) + info.size - @as(i32, offset);
+                    if (target_pos >= 0 and target_pos < @as(i32, @intCast(code.len))) {
+                        targets[@intCast(target_pos)] = true;
+                    }
+                },
+                .for_of_next_put_loc => {
+                    // Offset is at position +2 (after local_idx byte)
+                    const offset = self.readI16(code, pos + 2);
                     const target_pos: i32 = @as(i32, @intCast(pos)) + info.size + offset;
                     if (target_pos >= 0 and target_pos < @as(i32, @intCast(code.len))) {
                         targets[@intCast(target_pos)] = true;
@@ -188,38 +204,7 @@ pub const BytecodeOptimizer = struct {
         const op2: Opcode = @fromBackingInt(@intCast(code[next_pos]));
         const info2 = bytecode.getOpcodeInfo(op2);
 
-        // Special case: if_false + goto fusion
-        // Handle this BEFORE the generic jump target check because if_false targeting
-        // the immediately following goto creates a "jump target" that we're consuming anyway
-        if (op1 == .if_false and op2 == .goto) {
-            const if_false_offset = self.readI16(code, pos + 1);
-            const if_false_target: i32 = @as(i32, @intCast(pos)) + info1.size + if_false_offset;
-
-            // Check if if_false jumps exactly to this goto instruction
-            if (if_false_target == @as(i32, @intCast(next_pos))) {
-                // The if_false targets the goto immediately following it
-                // This is safe to fuse even though goto is technically a jump target,
-                // because the only jump to it is from the if_false we're consuming
-                const goto_offset = self.readI16(code, next_pos + 1);
-                const goto_target: i32 = @as(i32, @intCast(next_pos)) + info2.size + goto_offset;
-                const fused_size: i32 = bytecode.getOpcodeInfo(.if_false_goto).size;
-                const combined_offset: i16 = @intCast(goto_target - @as(i32, @intCast(pos)) - fused_size);
-
-                code[pos] = @backingInt(Opcode.if_false_goto);
-                self.writeU16(code, pos + 1, @bitCast(combined_offset));
-                code[pos + 3] = @backingInt(Opcode.nop);
-                code[pos + 4] = @backingInt(Opcode.nop);
-                code[pos + 5] = @backingInt(Opcode.nop);
-
-                stats.if_false_goto_count += 1;
-                stats.dispatches_saved += 1;
-                stats.bytes_saved += 3;
-                self.noteRewrite(.if_false_goto, pos, @intCast(info1.size + info2.size), 3);
-                return 3;
-            }
-        }
-
-        // Don't fuse if next instruction is a jump target (for other patterns)
+        // Don't fuse if next instruction is a jump target
         if (self.isJumpTarget(next_pos)) return 0;
 
         // Pattern: get_loc N + add -> get_loc_add N
@@ -335,7 +320,7 @@ pub const BytecodeOptimizer = struct {
             const goto_offset = self.readI16(code, next_pos + 1);
             const goto_target: i32 = @as(i32, @intCast(next_pos)) + info2.size + goto_offset;
             const fused_size: i32 = bytecode.getOpcodeInfo(.drop_goto).size;
-            const combined_offset: i16 = @intCast(goto_target - @as(i32, @intCast(pos)) - fused_size);
+            const combined_offset = std.math.cast(i16, goto_target - @as(i32, @intCast(pos)) - fused_size) orelse return 0;
 
             code[pos] = @backingInt(Opcode.drop_goto);
             self.writeU16(code, pos + 1, @bitCast(combined_offset));
@@ -413,14 +398,26 @@ pub const BytecodeOptimizer = struct {
             const info = bytecode.getOpcodeInfo(op);
 
             switch (op) {
-                .goto, .if_true, .if_false, .if_false_goto, .loop, .for_of_next, .drop_goto => {
+                .goto, .if_true, .if_false, .if_false_goto, .for_of_next, .drop_goto => {
                     const old_offset = self.readI16(code, read_pos + 1);
                     const old_target: i32 = @as(i32, @intCast(read_pos)) + info.size + old_offset;
 
                     if (old_target >= 0) {
                         const new_source = offset_map.get(read_pos) orelse read_pos;
                         const new_target = offset_map.get(@intCast(old_target)) orelse @as(u32, @intCast(old_target));
-                        const new_offset: i16 = @intCast(@as(i32, @intCast(new_target)) - @as(i32, @intCast(new_source)) - info.size);
+                        const new_offset = std.math.cast(i16, @as(i32, @intCast(new_target)) - @as(i32, @intCast(new_source)) - info.size) orelse return error.JumpTooFar;
+                        self.writeU16(code, read_pos + 1, @bitCast(new_offset));
+                    }
+                },
+                .loop => {
+                    // .loop jumps backwards: target = pos + size - offset
+                    const old_offset = self.readI16(code, read_pos + 1);
+                    const old_target: i32 = @as(i32, @intCast(read_pos)) + info.size - @as(i32, old_offset);
+
+                    if (old_target >= 0) {
+                        const new_source = offset_map.get(read_pos) orelse read_pos;
+                        const new_target = offset_map.get(@intCast(old_target)) orelse @as(u32, @intCast(old_target));
+                        const new_offset = std.math.cast(i16, @as(i32, @intCast(new_source)) + info.size - @as(i32, @intCast(new_target))) orelse return error.JumpTooFar;
                         self.writeU16(code, read_pos + 1, @bitCast(new_offset));
                     }
                 },
@@ -432,7 +429,7 @@ pub const BytecodeOptimizer = struct {
                     if (old_target >= 0) {
                         const new_source = offset_map.get(read_pos) orelse read_pos;
                         const new_target = offset_map.get(@intCast(old_target)) orelse @as(u32, @intCast(old_target));
-                        const new_offset: i16 = @intCast(@as(i32, @intCast(new_target)) - @as(i32, @intCast(new_source)) - info.size);
+                        const new_offset = std.math.cast(i16, @as(i32, @intCast(new_target)) - @as(i32, @intCast(new_source)) - info.size) orelse return error.JumpTooFar;
                         self.writeU16(code, read_pos + 2, @bitCast(new_offset));
                     }
                 },
@@ -527,10 +524,10 @@ test "OptStats JSON writer includes stable fields" {
     try stats.writeJson(&aw.writer);
     output = aw.toArrayList();
 
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"get_loc_add_count\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"push_const_call_count\":2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"dispatches_saved\":4") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"total_fusions\":3") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"get_loc_add_count\":1") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"push_const_call_count\":2") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"dispatches_saved\":4") != null);
+    try std.testing.expect(std.mem.find(u8, output.items, "\"total_fusions\":3") != null);
 }
 
 // ============================================================================
@@ -815,26 +812,19 @@ test "BytecodeOptimizer: get_loc_3 + add fusion" {
     try std.testing.expectEqual(@backingInt(Opcode.ret), code[2]);
 }
 
-test "BytecodeOptimizer: if_false + goto fusion" {
+test "BytecodeOptimizer: if_false +0 + goto is not fused" {
     const allocator = std.testing.allocator;
 
-    // Simulates: condition, if_false +0 (to goto), goto +5, true_branch..., target
-    // After fusion: condition, if_false_goto +5, NOP NOP NOP, true_branch..., target
-    //
-    // Layout:
-    // 0: push_true (condition, 1 byte)
-    // 1-3: if_false +0 (offset 0 means jump to position 1+3+0=4, which is the goto)
-    // 4-6: goto +5 (jump to position 4+3+5=12)
-    // 7: push_1 (true branch)
-    // 8: ret
-    // ... (padding to ensure valid jump target)
+    // if_false +0 followed by goto L jumps to L unconditionally (whether true or false).
+    // Fusing into if_false_goto L would fall through on true and miscompile
+    // `if (outer) { if (inner) {} } else { ... }`.
     var code = [_]u8{
         @backingInt(Opcode.push_true), // 0: condition
         @backingInt(Opcode.if_false), 0x00, 0x00, // 1-3: if_false +0 -> pos 4
         @backingInt(Opcode.goto), 0x02, 0x00, // 4-6: goto +2 -> pos 9
-        @backingInt(Opcode.push_1), // 7: true branch
+        @backingInt(Opcode.push_1), // 7: else branch
         @backingInt(Opcode.ret), // 8: return
-        @backingInt(Opcode.push_0), // 9: false branch target
+        @backingInt(Opcode.push_0), // 9: join target
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -842,20 +832,89 @@ test "BytecodeOptimizer: if_false + goto fusion" {
 
     const stats = try optimizer.optimize(&code);
 
-    try std.testing.expectEqual(@as(u32, 1), stats.if_false_goto_count);
-    try std.testing.expectEqual(@as(u32, 1), stats.dispatches_saved);
-    try std.testing.expectEqual(@as(u32, 3), stats.bytes_saved);
+    try std.testing.expectEqual(@as(u32, 0), stats.if_false_goto_count);
+    try std.testing.expectEqual(@backingInt(Opcode.if_false), code[1]);
+    try std.testing.expectEqual(@backingInt(Opcode.goto), code[4]);
+}
 
-    // Verify bytecode was modified
-    try std.testing.expectEqual(@backingInt(Opcode.if_false_goto), code[1]);
-    // The combined offset should jump from pos 1 to pos 9 (false target)
-    // Offset = 9 - 1 - 3 (size of if_false_goto) = 5
-    const fused_offset: i16 = @bitCast(@as(u16, code[2]) | (@as(u16, code[3]) << 8));
-    try std.testing.expectEqual(@as(i16, 5), fused_offset);
-    // NOPs where goto was
-    try std.testing.expectEqual(@backingInt(Opcode.nop), code[4]);
-    try std.testing.expectEqual(@backingInt(Opcode.nop), code[5]);
-    try std.testing.expectEqual(@backingInt(Opcode.nop), code[6]);
+test "BytecodeOptimizer: for_of_next_put_loc target at pos+2 prevents fusion" {
+    const allocator = std.testing.allocator;
+
+    // 0-3: for_of_next_put_loc local=0, offset=+2 -> target pos 6 (the add)
+    // 4-5: get_loc 5
+    // 6:   add (must NOT fuse with get_loc 5 because it is the jump target)
+    // 7:   ret
+    var code = [_]u8{
+        @backingInt(Opcode.for_of_next_put_loc), 0, 0x02,                    0x00,
+        @backingInt(Opcode.get_loc),             5, @backingInt(Opcode.add), @backingInt(Opcode.ret),
+    };
+
+    var optimizer = BytecodeOptimizer.init(allocator);
+    defer optimizer.deinit();
+
+    const stats = try optimizer.optimize(&code);
+    try std.testing.expectEqual(@as(u32, 0), stats.get_loc_add_count);
+    try std.testing.expectEqual(@backingInt(Opcode.get_loc), code[4]);
+    try std.testing.expectEqual(@backingInt(Opcode.add), code[6]);
+}
+
+test "BytecodeOptimizer: loop backward target prevents fusion and compacts offset" {
+    const allocator = std.testing.allocator;
+
+    // 0-1: get_loc 5 (target of loop at pos 4: 4 + 3 - 7 = 0)
+    // 2:   add
+    // 3:   nop (removed by compact)
+    // 4-6: loop +7 -> pos 0
+    // 7:   ret
+    var code = [_]u8{
+        @backingInt(Opcode.get_loc), 5,
+        @backingInt(Opcode.add),     @backingInt(Opcode.nop),
+        @backingInt(Opcode.loop),    0x07,
+        0x00,                        @backingInt(Opcode.ret),
+    };
+
+    var optimizer = BytecodeOptimizer.init(allocator);
+    defer optimizer.deinit();
+
+    const stats = try optimizer.optimize(&code);
+    try std.testing.expectEqual(@as(u32, 0), stats.get_loc_add_count);
+    try std.testing.expectEqual(@backingInt(Opcode.get_loc), code[0]);
+
+    const new_len = try optimizer.compact(&code);
+    try std.testing.expectEqual(@as(usize, 7), new_len);
+    // After removing nop at pos 3, loop moves to pos 3 (size 3), targeting pos 0:
+    // new_offset = 3 + 3 - 0 = 6.
+    try std.testing.expectEqual(@backingInt(Opcode.loop), code[3]);
+    const new_offset: i16 = @bitCast(@as(u16, code[4]) | (@as(u16, code[5]) << 8));
+    try std.testing.expectEqual(@as(i16, 6), new_offset);
+}
+
+test "BytecodeOptimizer: drop_goto target prevents fusion" {
+    const allocator = std.testing.allocator;
+
+    // 0:   push_1
+    // 1-3: drop_goto +2 -> pos 6 (the add)
+    // 4-5: get_loc 5
+    // 6:   add (jump target; must not fuse with get_loc 5)
+    // 7:   ret
+    var code = [_]u8{
+        @backingInt(Opcode.push_1),
+        @backingInt(Opcode.drop_goto),
+        0x02,
+        0x00,
+        @backingInt(Opcode.get_loc),
+        5,
+        @backingInt(Opcode.add),
+        @backingInt(Opcode.ret),
+    };
+
+    var optimizer = BytecodeOptimizer.init(allocator);
+    defer optimizer.deinit();
+
+    const stats = try optimizer.optimize(&code);
+    try std.testing.expectEqual(@as(u32, 0), stats.get_loc_add_count);
+    try std.testing.expectEqual(@backingInt(Opcode.get_loc), code[4]);
+    try std.testing.expectEqual(@backingInt(Opcode.add), code[6]);
 }
 
 test "BytecodeOptimizer: drop + goto fusion" {

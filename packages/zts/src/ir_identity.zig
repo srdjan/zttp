@@ -378,6 +378,9 @@ const Comparer = struct {
             .match_arm => {
                 const av = self.left.getMatchArm(a) orelse return payloadMissing();
                 const bv = self.right.getMatchArm(b) orelse return payloadMissing();
+                if (av.kind != bv.kind) {
+                    return .{ .differs = "two match arms use different kinds" };
+                }
                 return self.all(&.{
                     .{ av.pattern, bv.pattern },
                     .{ av.body, bv.body },

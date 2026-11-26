@@ -65,7 +65,7 @@ pub fn parse(src: []const u8) ParseError!Document {
     if (!std.mem.startsWith(u8, src, fence)) return error.MissingOpeningFence;
 
     const after_open = fence.len;
-    const close_rel = std.mem.indexOf(u8, src[after_open..], fence) orelse
+    const close_rel = std.mem.find(u8, src[after_open..], fence) orelse
         return error.MissingClosingFence;
     const close_abs = after_open + close_rel;
     const body_start = close_abs + fence.len;
@@ -78,12 +78,12 @@ pub fn parse(src: []const u8) ParseError!Document {
 
     var cursor: usize = after_open;
     while (cursor < close_abs) {
-        const nl = std.mem.indexOfScalarPos(u8, src, cursor, '\n') orelse close_abs;
+        const nl = std.mem.findScalarPos(u8, src, cursor, '\n') orelse close_abs;
         const line = src[cursor..nl];
         cursor = nl + 1;
         if (line.len == 0) continue;
 
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.MissingColon;
+        const colon = std.mem.findScalar(u8, line, ':') orelse return error.MissingColon;
         const key = std.mem.trim(u8, line[0..colon], " \t");
         const raw_value = std.mem.trim(u8, line[colon + 1 ..], " \t\r");
         // Quoted values let authors write descriptions containing colons

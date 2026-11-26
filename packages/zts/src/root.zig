@@ -55,7 +55,7 @@
 // This file names all four and nothing names this file, so the umbrella adds
 // no edge to that graph. A tier reaching another tier by relative path would
 // compile a second copy of the file into itself;
-// scripts/check-zts-layering.sh fails on that, and so does zig.
+// `zig build test-zts-layering` fails on that, and so does zig.
 const base = @import("zts-base");
 const contracts = @import("zts-contracts");
 const engine = @import("zts-engine");
@@ -1033,7 +1033,7 @@ test "stable RepairPolicy exposes validator catalog and discharge" {
 
 /// Version information
 pub const version = struct {
-    pub const string = "0.27.1";
+    pub const string = "0.27.2";
 };
 
 /// Create a new standalone context (not pooled)
@@ -1041,13 +1041,15 @@ pub fn createContext(allocator: std.mem.Allocator, gc_config: GCConfig) !*Contex
     const gc_state = try allocator.create(GC);
     errdefer allocator.destroy(gc_state);
 
-    gc_state.* = try GC.init(allocator, gc_config);
-    errdefer gc_state.deinit();
-
-    // Initialize heap for size-class allocation and wire up to GC
+    // Initialize heap before GC so errdefer tears down GC (which frees tenured
+    // blocks via heap_ptr) before heap_state.deinit() destroys the backing heap.
     const heap_state = try allocator.create(heap.Heap);
     errdefer allocator.destroy(heap_state);
     heap_state.* = heap.Heap.init(allocator, .{});
+    errdefer heap_state.deinit();
+
+    gc_state.* = try GC.init(allocator, gc_config);
+    errdefer gc_state.deinit();
     gc_state.setHeap(heap_state);
 
     return try Context.init(allocator, gc_state, .{});

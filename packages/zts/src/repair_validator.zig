@@ -549,7 +549,7 @@ fn splitBoundTernary(original: []const u8, replacement: []const u8, splice_start
     var body = replacement;
     var imported_alias: ?[]const u8 = null;
     if (std.mem.startsWith(u8, replacement, import_start)) {
-        const alias_end = std.mem.indexOfPos(u8, replacement, import_start.len, import_end) orelse
+        const alias_end = std.mem.findPos(u8, replacement, import_start.len, import_end) orelse
             return .{ .refused = shape };
         const alias = replacement[import_start.len..alias_end];
         if (!isIdentifier(alias)) return .{ .refused = shape };
@@ -576,14 +576,14 @@ fn splitBoundTernary(original: []const u8, replacement: []const u8, splice_start
     const target_replacement = body[prefix_len..];
     const declaration = "const ";
     if (!std.mem.startsWith(u8, target_replacement, declaration)) return .{ .refused = shape };
-    const name_end = std.mem.indexOfPos(u8, target_replacement, declaration.len, " = ") orelse return .{ .refused = shape };
+    const name_end = std.mem.findPos(u8, target_replacement, declaration.len, " = ") orelse return .{ .refused = shape };
     const name = target_replacement[declaration.len..name_end];
     if (!isIdentifier(name)) return .{ .refused = shape };
     const initializer_start = name_end + " = ".len;
     // The binding ends at the first `;`, and a space or a line break follows it.
     // A `;` inside the condition's own text can end it early; the initializer
     // then fails to parse and the repair is refused, never accepted.
-    const initializer_end = std.mem.indexOfScalarPos(u8, target_replacement, initializer_start, ';') orelse
+    const initializer_end = std.mem.findScalarPos(u8, target_replacement, initializer_start, ';') orelse
         return .{ .refused = shape };
     const after_semicolon = initializer_end + 1;
     if (after_semicolon >= target_replacement.len or
@@ -595,8 +595,8 @@ fn splitBoundTernary(original: []const u8, replacement: []const u8, splice_start
     const statement_raw = target_replacement[after_semicolon..];
     const statement = std.mem.trimStart(u8, statement_raw, " \t\n");
     const marker = ").with(true, () => ";
-    const marker_at = std.mem.indexOf(u8, statement, marker) orelse return .{ .refused = shape };
-    const open_paren = std.mem.lastIndexOfScalar(u8, statement[0..marker_at], '(') orelse return .{ .refused = shape };
+    const marker_at = std.mem.find(u8, statement, marker) orelse return .{ .refused = shape };
+    const open_paren = std.mem.findScalarLast(u8, statement[0..marker_at], '(') orelse return .{ .refused = shape };
     if (!std.mem.eql(u8, statement[open_paren + 1 .. marker_at], name)) return .{ .refused = shape };
     var alias_start = open_paren;
     while (alias_start > 0 and isIdentContinue(statement[alias_start - 1])) alias_start -= 1;
@@ -613,7 +613,7 @@ fn splitBoundTernary(original: []const u8, replacement: []const u8, splice_start
     const body_offset = replacement.len - body.len;
     const target_offset = body_offset + prefix_len;
     const statement_offset = target_offset + after_semicolon + (statement.ptr - statement_raw.ptr);
-    const otherwise_at = std.mem.indexOfPos(u8, statement, marker_at + marker.len, ".otherwise(") orelse
+    const otherwise_at = std.mem.findPos(u8, statement, marker_at + marker.len, ".otherwise(") orelse
         return .{ .refused = shape };
     return .{ .split = .{
         .binding = .{ .name = name, .initializer = initializer },
@@ -695,7 +695,7 @@ fn bindableHead(head: []const u8) bool {
     const middle = rest[0 .. rest.len - 1];
     if (middle.len == 0) return true;
     if (middle[0] != ':') return false;
-    return std.mem.indexOfAny(u8, middle, "=;\n") == null;
+    return std.mem.findAny(u8, middle, "=;\n") == null;
 }
 
 fn isIdentifier(text: []const u8) bool {
@@ -840,7 +840,7 @@ fn lawDropBoolCompare(before: []const u8, buf: []u8) ?[]const u8 {
 /// one function: the two are separate intents, and accepting either here would
 /// let a misclassified diagnostic discharge against the wrong law.
 fn lawLetToConst(before: []const u8, buf: []u8) ?[]const u8 {
-    if (std.mem.indexOf(u8, before, "for (let ") != null) return null;
+    if (std.mem.find(u8, before, "for (let ") != null) return null;
     const indent_len = leadingBlankLen(before);
     const rest = before[indent_len..];
     if (!std.mem.startsWith(u8, rest, "let ")) return null;
@@ -853,7 +853,7 @@ fn lawLetToConst(before: []const u8, buf: []u8) ?[]const u8 {
 /// `for (let x of xs)` -> `for (const x of xs)`.
 fn lawForOfLetToConst(before: []const u8, buf: []u8) ?[]const u8 {
     const needle = "for (let ";
-    const at = std.mem.indexOf(u8, before, needle) orelse return null;
+    const at = std.mem.find(u8, before, needle) orelse return null;
     return std.fmt.bufPrint(buf, "{s}for (const {s}", .{
         before[0..at],
         before[at + needle.len ..],
@@ -892,8 +892,8 @@ fn lawCompoundAssign(before: []const u8, buf: []u8) ?[]const u8 {
         if (expr.len == 0) return null;
         // An interior `;` or a comment defeats the textual split, so the law
         // does not describe this line.
-        if (std.mem.indexOfScalar(u8, expr, ';') != null) return null;
-        if (std.mem.indexOf(u8, expr, "//") != null or std.mem.indexOf(u8, expr, "/*") != null) return null;
+        if (std.mem.findScalar(u8, expr, ';') != null) return null;
+        if (std.mem.find(u8, expr, "//") != null or std.mem.find(u8, expr, "/*") != null) return null;
 
         if (isAtomicRhs(expr)) {
             return std.fmt.bufPrint(buf, "{s}{s} = {s} {c} {s}{s}", .{
@@ -1574,7 +1574,7 @@ fn validateTernaryReplacement(
     code: []const u8,
 ) !Discharge {
     const allocator = std.testing.allocator;
-    const start = std.mem.indexOf(u8, original, snapshot).?;
+    const start = std.mem.find(u8, original, snapshot).?;
     const repaired = try std.mem.concat(allocator, u8, &.{
         original[0..start],
         replacement,
@@ -1600,7 +1600,7 @@ test "M3 without source context keeps an exact chained ternary splice undecided"
     const snapshot = "const x = ready ? 1 : fallback ? 2 : 3";
     const replacement = "const cond = !!(ready);\nconst x = match (cond) { when true: 1, default: fallback ? 2 : 3 }";
     const repaired = "const cond = !!(ready);\nconst x = match (cond) { when true: 1, default: fallback ? 2 : 3 };\n";
-    const start = std.mem.indexOf(u8, original, snapshot).?;
+    const start = std.mem.find(u8, original, snapshot).?;
     const undecided = try validateSpanApplication(
         std.testing.allocator,
         .replace_chained_ternary_with_match,
@@ -1700,7 +1700,7 @@ test "M3 does not advertise spread moves while object order is observable" {
     const snapshot = "{ a: 1, ...{ b: 2 } }";
     const replacement = "{ ...{ b: 2 }, a: 1 }";
     const repaired = "const x = { ...{ b: 2 }, a: 1 };\n";
-    const start = std.mem.indexOf(u8, original, snapshot).?;
+    const start = std.mem.find(u8, original, snapshot).?;
     try std.testing.expectEqual(
         Discharge.no_validator,
         try validateSpanApplication(
@@ -1721,7 +1721,7 @@ test "M3 does not advertise spread moves while object order is observable" {
     const collision_snapshot = "{ a: 1, ...{ a: 2 } }";
     const collision_replacement = "{ ...{ a: 2 }, a: 1 }";
     const collision_repaired = "const x = { ...{ a: 2 }, a: 1 };\n";
-    const collision_start = std.mem.indexOf(u8, collision_original, collision_snapshot).?;
+    const collision_start = std.mem.find(u8, collision_original, collision_snapshot).?;
     const refused = try validateSpanApplication(
         std.testing.allocator,
         .lead_with_spread,

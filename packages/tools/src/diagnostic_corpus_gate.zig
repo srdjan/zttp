@@ -62,7 +62,7 @@ const zts = @import("zts");
 /// it, so deleting a case fails. Raise it in the commit that adds cases, to
 /// the count the gate prints. Never lower it to make a deletion pass.
 // The unfiltered Phase 3 run measured 182 retained cases.
-pub const minimum_cases: usize = 202;
+pub const minimum_cases: usize = 206;
 
 const corpus_root = "tests/corpus";
 const max_file_bytes = 1024 * 1024;
@@ -541,12 +541,30 @@ fn parseAllow(a: std.mem.Allocator, text: []const u8) ![]AllowRow {
     return rows.toOwnedSlice(a);
 }
 
+fn isWordChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
+fn containsWholeWordIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    var start: usize = 0;
+    while (start + needle.len <= haystack.len) {
+        const rel = std.ascii.findIgnoreCase(haystack[start..], needle) orelse return false;
+        const pos = start + rel;
+        const left_ok = pos == 0 or !isWordChar(haystack[pos - 1]);
+        const end = pos + needle.len;
+        const right_ok = end == haystack.len or !isWordChar(haystack[end]);
+        if (left_ok and right_ok) return true;
+        start = pos + 1;
+    }
+    return false;
+}
+
 /// A reason names a mechanism, so a short or placeholder reason is refused.
 fn isWeakReason(reason: []const u8) bool {
     if (reason.len < 12) return true;
     const placeholders = [_][]const u8{ "not written", "todo", "tbd", "later", "wip" };
     for (placeholders) |needle| {
-        if (std.ascii.findIgnoreCase(reason, needle) != null) return true;
+        if (containsWholeWordIgnoreCase(reason, needle)) return true;
     }
     return false;
 }
@@ -718,7 +736,7 @@ fn costGreater(_: void, lhs: Cost, rhs: Cost) bool {
 /// The cost lines. The summary names the source, the largest case count, and
 /// the budget, so a regression shows in a CI log. `--report-costs` adds one
 /// line per case, most expensive first.
-fn printCosts(report: *const Report, options: Options) void {
+fn printCosts(allocator: std.mem.Allocator, report: *const Report, options: Options) void {
     const source = report.meter_source orelse return;
     const costs = report.costs.items;
     var max_count: u64 = 0;
@@ -743,15 +761,15 @@ fn printCosts(report: *const Report, options: Options) void {
         );
     }
     if (!options.report_costs) return;
-    const sorted = std.heap.page_allocator.dupe(Cost, costs) catch return;
-    defer std.heap.page_allocator.free(sorted);
+    const sorted = allocator.dupe(Cost, costs) catch return;
+    defer allocator.free(sorted);
     std.mem.sort(Cost, sorted, {}, costGreater);
     for (sorted) |cost| {
         std.debug.print("cost {d} {s}\n", .{ cost.count, cost.path });
     }
 }
 
-fn printReport(report: *const Report, options: Options) void {
+fn printReport(allocator: std.mem.Allocator, report: *const Report, options: Options) void {
     for (report.failures.items) |failure| {
         std.debug.print("FAIL [{s}] {s}: {s}\n", .{ @tagName(failure.kind), failure.path, failure.detail });
     }
@@ -765,7 +783,7 @@ fn printReport(report: *const Report, options: Options) void {
             .{ report.universe_size, report.codes_covered, report.codes_allowlisted, report.codes_defect, report.codes_uncovered, options.ratchet.?.universe_floor },
         );
     }
-    printCosts(report, options);
+    printCosts(allocator, report, options);
     if (options.filter) |text| {
         std.debug.print("diagnostic corpus: FILTERED run for \"{s}\": {d} of {d} case(s), not a verdict on the corpus\n", .{ text, report.cases_run, report.cases_found });
     }
@@ -846,7 +864,7 @@ fn run(init: std.process.Init) !void {
 
     var report = try runCorpus(gpa, io, root, options);
     defer report.deinit();
-    printReport(&report, options);
+    printReport(gpa, &report, options);
     if (report.failures.items.len != 0) return error.CorpusFailed;
 }
 
@@ -1367,4 +1385,12 @@ test "the real counter measures every scratch case with a nonzero cost" {
     if (counter.source.countsInstructions()) {
         for (report.costs.items) |cost| try testing.expect(cost.count > 0);
     }
+}
+
+test "isWeakReason matches placeholder words only on word boundaries" {
+    try testing.expect(!isWeakReason("collateral diagnostic prevents isolated triggering"));
+    try testing.expect(!isWeakReason("swiping an unrelated token fails earlier"));
+    try testing.expect(isWeakReason("will implement later in follow-up"));
+    try testing.expect(isWeakReason("TODO: wire up a real probe for this"));
+    try testing.expect(isWeakReason("short"));
 }

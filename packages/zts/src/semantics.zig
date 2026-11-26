@@ -653,13 +653,8 @@ fn hashLowering(hasher: *std.crypto.hash.sha2.Sha256, lower: Lowering) void {
     }
 }
 
-var cached_semantics_hash: ?[64]u8 = null;
-
 pub fn semanticsHash() [64]u8 {
-    if (cached_semantics_hash) |h| return h;
-    const h = computeSemanticsHash();
-    cached_semantics_hash = h;
-    return h;
+    return computeSemanticsHash();
 }
 
 fn computeSemanticsHash() [64]u8 {

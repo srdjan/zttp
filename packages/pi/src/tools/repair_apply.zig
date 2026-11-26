@@ -142,6 +142,23 @@ fn applyRedundantBoolCompare(
     return replaceLine(allocator, source, line, replacement);
 }
 
+fn isIdentChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
+}
+
+fn endsWithIdentWord(s: []const u8, word: []const u8) bool {
+    if (!std.mem.endsWith(u8, s, word)) return false;
+    if (s.len == word.len) return true;
+    const prev = s[s.len - word.len - 1];
+    return !isIdentChar(prev) and prev != '.';
+}
+
+fn startsWithIdentWord(s: []const u8, word: []const u8) bool {
+    if (!std.mem.startsWith(u8, s, word)) return false;
+    if (s.len == word.len) return true;
+    return !isIdentChar(s[word.len]);
+}
+
 /// True when the comparison at `op_start` has a boolean literal on exactly one
 /// side, returning the polarity the rewrite needs: `x === true` and
 /// `x !== false` both mean the bare value, the other two mean its negation.
@@ -149,10 +166,10 @@ fn boolComparePolarity(line: []const u8, op_start: usize, is_eq: bool) ?bool {
     const left = std.mem.trimEnd(u8, line[0..op_start], " \t");
     const right = std.mem.trimStart(u8, line[op_start + 3 ..], " \t");
 
-    const left_true = std.mem.endsWith(u8, left, "true");
-    const left_false = std.mem.endsWith(u8, left, "false");
-    const right_true = std.mem.startsWith(u8, right, "true");
-    const right_false = std.mem.startsWith(u8, right, "false");
+    const left_true = endsWithIdentWord(left, "true");
+    const left_false = endsWithIdentWord(left, "false");
+    const right_true = startsWithIdentWord(right, "true");
+    const right_false = startsWithIdentWord(right, "false");
 
     const left_lit = left_true or left_false;
     const right_lit = right_true or right_false;
@@ -215,7 +232,7 @@ fn replaceLine(
     replacement: []const u8,
 ) ![]u8 {
     const offset = lineStartOffset(source, line) orelse return error.InvalidRepairLine;
-    const line_end = std.mem.indexOfScalarPos(u8, source, offset, '\n') orelse source.len;
+    const line_end = std.mem.findScalarPos(u8, source, offset, '\n') orelse source.len;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, source[0..offset]);
@@ -240,7 +257,7 @@ fn insertTemplateBeforeLine(
     template: []const u8,
 ) ![]u8 {
     const offset = lineStartOffset(source, line) orelse return error.InvalidRepairLine;
-    const line_end = std.mem.indexOfScalarPos(u8, source, offset, '\n') orelse source.len;
+    const line_end = std.mem.findScalarPos(u8, source, offset, '\n') orelse source.len;
     const indent = leadingWhitespace(source[offset..line_end]);
     return spliceLine(allocator, source, offset, indent, template);
 }
@@ -323,8 +340,8 @@ test "insert guard intent preserves target indentation" {
         .template = "if (!auth.ok) { return Response.json({ error: auth.error }, { status: 400 }); }",
     });
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "  if (!auth.ok)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "  const data") != null);
+    try testing.expect(std.mem.find(u8, out, "  if (!auth.ok)") != null);
+    try testing.expect(std.mem.find(u8, out, "  const data") != null);
 }
 
 test "add trailing return intent inserts inside the outer scope" {
@@ -340,9 +357,9 @@ test "add trailing return intent inserts inside the outer scope" {
         .template = "return Response.json({ data: data });",
     });
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "  return Response.json") != null);
-    const return_idx = std.mem.indexOf(u8, out, "return Response.json").?;
-    const brace_idx = std.mem.lastIndexOfScalar(u8, out, '}').?;
+    try testing.expect(std.mem.find(u8, out, "  return Response.json") != null);
+    const return_idx = std.mem.find(u8, out, "return Response.json").?;
+    const brace_idx = std.mem.findScalarLast(u8, out, '}').?;
     try testing.expect(return_idx < brace_idx);
 }
 
@@ -360,8 +377,8 @@ test "replace_let_with_const intent rewrites a local let line" {
         .template = "",
     });
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "  const count = 1;") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "let ") == null);
+    try testing.expect(std.mem.find(u8, out, "  const count = 1;") != null);
+    try testing.expect(std.mem.find(u8, out, "let ") == null);
 }
 
 test "replace_compound_assign_with_explicit rewrites a compound assignment" {
@@ -379,8 +396,8 @@ test "replace_compound_assign_with_explicit rewrites a compound assignment" {
         .template = "",
     });
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "  n = n + 1;") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "+=") == null);
+    try testing.expect(std.mem.find(u8, out, "  n = n + 1;") != null);
+    try testing.expect(std.mem.find(u8, out, "+=") == null);
 }
 
 test "replace_compound_assign_with_explicit expands a dotted-identifier target" {
@@ -397,7 +414,7 @@ test "replace_compound_assign_with_explicit expands a dotted-identifier target" 
         .template = "",
     });
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "  state.total = state.total * factor;") != null);
+    try testing.expect(std.mem.find(u8, out, "  state.total = state.total * factor;") != null);
 }
 
 test "replace_compound_assign_with_explicit refuses a call-base target" {
@@ -449,7 +466,7 @@ test "canonicalize_for_of_const intent rewrites a for-of let binding" {
         .template = "",
     });
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "  for (const item of items)") != null);
+    try testing.expect(std.mem.find(u8, out, "  for (const item of items)") != null);
 }
 
 test "replace_arrow_with_function intent rewrites an arrow helper" {
@@ -466,7 +483,7 @@ test "replace_arrow_with_function intent rewrites an arrow helper" {
         .template = "",
     });
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "function parse(x: number): number { return x; }") != null);
+    try testing.expect(std.mem.find(u8, out, "function parse(x: number): number { return x; }") != null);
 }
 
 test "replace_export_arrow_with_function rewrites an exported arrow helper" {
@@ -483,7 +500,7 @@ test "replace_export_arrow_with_function rewrites an exported arrow helper" {
         .template = "",
     });
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "export function load(id: string): Response { return Response.text(id); }") != null);
+    try testing.expect(std.mem.find(u8, out, "export function load(id: string): Response { return Response.text(id); }") != null);
 }
 
 test "canonicalize_capability_key_alias is not dispatched source-only" {
@@ -523,10 +540,10 @@ test "applyIntent lowers drop_redundant_bool_compare to the bare boolean" {
         .template = "",
     });
     defer allocator.free(out);
-    try std.testing.expect(std.mem.indexOf(u8, out, "if (ready) {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "=== true") == null);
+    try std.testing.expect(std.mem.find(u8, out, "if (ready) {") != null);
+    try std.testing.expect(std.mem.find(u8, out, "=== true") == null);
     // Everything outside the rewritten span survives.
-    try std.testing.expect(std.mem.indexOf(u8, out, "req.method === \"GET\"") != null);
+    try std.testing.expect(std.mem.find(u8, out, "req.method === \"GET\"") != null);
 }
 
 test "applyIntent lowers the false form to a negation" {
@@ -546,7 +563,7 @@ test "applyIntent lowers the false form to a negation" {
         .template = "",
     });
     defer allocator.free(out);
-    try std.testing.expect(std.mem.indexOf(u8, out, "if (!ready) {") != null);
+    try std.testing.expect(std.mem.find(u8, out, "if (!ready) {") != null);
 }
 
 test "applyIntent refuses an ambiguous line with two comparisons" {
@@ -569,4 +586,30 @@ test "applyIntent refuses an ambiguous line with two comparisons" {
         .line = 4,
         .template = "",
     }));
+}
+
+test "boolComparePolarity enforces identifier boundaries around true and false" {
+    const eq_is_true = "if (is_true === x)";
+    const op1 = std.mem.find(u8, eq_is_true, "===").?;
+    try std.testing.expectEqual(@as(?bool, null), boolComparePolarity(eq_is_true, op1, true));
+
+    const eq_true_flag = "if (x === trueFlag)";
+    const op2 = std.mem.find(u8, eq_true_flag, "===").?;
+    try std.testing.expectEqual(@as(?bool, null), boolComparePolarity(eq_true_flag, op2, true));
+
+    const neq_false_val = "if (x !== false_val)";
+    const op3 = std.mem.find(u8, neq_false_val, "!==").?;
+    try std.testing.expectEqual(@as(?bool, null), boolComparePolarity(neq_false_val, op3, false));
+
+    const eq_obj_true = "if (obj.true === x)";
+    const op4 = std.mem.find(u8, eq_obj_true, "===").?;
+    try std.testing.expectEqual(@as(?bool, null), boolComparePolarity(eq_obj_true, op4, true));
+
+    const eq_valid = "if (x === true)";
+    const op5 = std.mem.find(u8, eq_valid, "===").?;
+    try std.testing.expectEqual(@as(?bool, true), boolComparePolarity(eq_valid, op5, true));
+
+    const neq_valid = "if (false !== x)";
+    const op6 = std.mem.find(u8, neq_valid, "!==").?;
+    try std.testing.expectEqual(@as(?bool, true), boolComparePolarity(neq_valid, op6, false));
 }

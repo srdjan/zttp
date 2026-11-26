@@ -138,6 +138,7 @@ fn certifyAt(allocator: std.mem.Allocator, source: []const u8, filename: []const
         },
         .artifact = sections,
         .contract_digest = artifact_graph.digestOf(contract_json),
+        .runtime_policy_digest = sections.policy_section_digest,
     });
     errdefer built.deinit();
 
