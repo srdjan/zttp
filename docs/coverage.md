@@ -34,7 +34,7 @@ publishing first-draft, intent, or round-trip measurements still requires the
 named model. Developing and verifying the harness, veto, salvage, repair, and
 hole-loop machinery does not.
 
-Recorded 2026-11-24 over corpus `70fdb6e50e3c`. The replay fails
+Recorded 2026-11-26 over corpus `70fdb6e50e3c`. The replay fails
 when this page drifts from the run, so it is regenerated in the same commit as
 whatever moved it, and `git log docs/coverage.json` is the history.
 
@@ -63,7 +63,7 @@ Untripped: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`,
 
 The row above is one draw. Recordings of the same headline corpus have measured
 different sets. A rule is counted only when the recorded model output makes the
-mistake that trips it. Across the 2 published runs of corpus `70fdb6e50e3c`,
+mistake that trips it. Across the 3 published runs of corpus `70fdb6e50e3c`,
 the tripped set took one shape, the smallest naming 3
 rules and the largest 3.
 
